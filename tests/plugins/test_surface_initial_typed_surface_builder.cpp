@@ -26,6 +26,9 @@
 #include <string>
 #include <vector>
 
+/* Surface builders preserve position, density and support/contact modifiers across the plugin API.
+   The remaining cases exercise typed surface generation on sliced objects through the step pipeline. */
+
 TEST_CASE("Support surface modifier preserves position and density", "[plugins][surface][surface-type]")
 {
     using namespace slic3r_api;
@@ -44,23 +47,6 @@ TEST_CASE("Support surface modifier preserves position and density", "[plugins][
     CHECK(Slic3r::surface_type_to_color_name(surface.surface_type) == "rgb(255,128,0)");
     CHECK(Slic3r::surface_type_to_color_name(Slic3r::stPosTop | Slic3r::stDensSolid | Slic3r::stModSupport) == "rgb(255,128,0)");
     CHECK(Slic3r::surface_type_to_color_name(Slic3r::SurfaceType(-1)) == "rgb(255,0,0)");
-}
-
-TEST_CASE("Branch surface modifier marks tree branch bodies on top of support", "[plugins][surface][surface-type]")
-{
-    using namespace slic3r_api;
-    static_assert(uint16_t(Slic3r::stModBranch) == RAW_SURFACE_TYPE_MOD_BRANCH, "Host and API branch bits agree");
-    constexpr raw_surface_type type = srf_type().internal().sparse().support().branch().raw();
-    CHECK(type == (RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE |
-                   RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_BRANCH));
-    CHECK(surface_type_is_branch(type));
-    CHECK(surface_type_is_support(type));
-    CHECK_FALSE(surface_type_is_branch(srf_type().internal().sparse().support().raw()));
-    CHECK(surface_type_modifiers(type) == (RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_BRANCH));
-    const Slic3r::Surface surface(Slic3r::stPosInternal | Slic3r::stDensSparse | Slic3r::stModSupport | Slic3r::stModBranch, Slic3r::ExPolygon{});
-    CHECK(surface.has_mod_branch());
-    CHECK(Slic3r::surfaceType_to_string(surface.surface_type) == "posInternal||densSparse||modSupport||modBranch");
-    CHECK(Slic3r::surface_type_to_color_name(surface.surface_type) == "rgb(128,0,128)");
 }
 
 TEST_CASE("Contact surface modifier marks the areas of support contact layers", "[plugins][surface][surface-type]")

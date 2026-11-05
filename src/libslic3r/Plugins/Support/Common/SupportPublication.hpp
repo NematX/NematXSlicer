@@ -39,7 +39,7 @@ bool merged_into_base(bool merge, bool base_takes_contact, bool z_has_base, bool
 // the result lives in the storage of surfaces.
 StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering);
 }
-// Publish the slabs as auxiliary layers, grouped by print Z and thickness, with one region-island per extruder and clipped fill surfaces; a branch slab becomes a branch surface of the base extruder, and one interface id per print Z and the thinnest group published first keep the native numbering and order.
+// Publish the slabs as auxiliary layers, grouped by print Z and thickness, with one region-island per extruder and clipped fill surfaces; a branch slab becomes sparse support of the base extruder, and one interface id per print Z and the thinnest group published first keep the native numbering and order.
 // The slabs and storage stay owned by the caller. Rejected writes leave published layers in place and throw silent
 // PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
 // cancellation), otherwise std::runtime_error. context is the calling plugin's borrowed run context, used only after

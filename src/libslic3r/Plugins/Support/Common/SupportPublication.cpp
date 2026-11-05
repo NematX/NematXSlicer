@@ -23,7 +23,7 @@
    keep the exact geometry of the union (published_islands()). Rebuilding slices
    creates islands before region membership is locked. Each island then gets one work region per
    extruder that prints on it, holding dense top or bottom surfaces, or sparse internal support
-   surfaces (base slabs, and branch slabs typed as branch surfaces), each typed by its role. The areas of the contact slabs of a side
+   surfaces (base and branch slabs), each typed by its role. The areas of the contact slabs of a side
    (and every bridging lower area) are marked as contact; the other dense areas are the interfaces of the side. A contact keeps the area it shares with
    an interface, so the total area of a side does not depend on the marking, and a contact merged into the base (no interface layer on its side) is base.
    Publication gives each area one owner: the lower surfaces lose the areas the upper ones print,
@@ -578,7 +578,7 @@ void install_island_surfaces(const plugin_run_context *context, storage_handle *
     add(interface_extruder, bottom_contact_surfaces, srf_type().bottom().solid().support().contact().raw());
     add(interface_extruder, bottom_surfaces, srf_type().bottom().solid().support().raw());
     add(base_extruder, sparse_surfaces, srf_type().internal().sparse().support().raw());
-    add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().branch().raw());
+    add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().raw());
     for (const auto &[extruder, collection] : surfaces) {
         StoredSurfaceCollection stored(storage);
         for (const auto &[expolygons, type] : collection)

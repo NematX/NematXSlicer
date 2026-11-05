@@ -54,8 +54,7 @@ enum SurfaceType  : uint16_t {
     stModOverBridge = 1 << 8,
     /// Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object.
     stModSupport = 1 << 9,
-    /// Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role.
-    stModBranch = 1 << 10,
+    // Bit 10 is reserved; branch bodies use sparse support surfaces.
     /// Contact modifier: the dense areas of a support contact layer, the layer placed against the object (under it for a top surface, resting on it for a
     /// bottom surface): the area touching the object above or below and the margin of that contact, that is the dense area of the contact layer around it.
     /// Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base
@@ -216,8 +215,6 @@ public:
     bool has_mod_overBridge() const;
     // True when the surface belongs to a support auxiliary layer.
     bool has_mod_support() const;
-    // True when the surface is the body of a tree branch.
-    bool has_mod_branch() const;
     // True when the surface is a dense area of a support contact layer.
     bool has_mod_contact() const;
 };

@@ -11,7 +11,7 @@
 
 /* Tree and organic support family run. It skips objects whose style is neither tree nor organic, or that have no demand,
    and generates the branch slabs with generate_tree_support(). Organic objects publish
-   their slabs as branch surfaces; tree objects publish sparse base surfaces. The publication
+   their slabs as sparse support and prefer the sheath algorithm; tree objects prefer legacy sparse. The publication
     (Common/SupportPublication.hpp) creates the auxiliary layers.
     Initialization declares copied role preferences through Common::declare_toolpath_preferences before slicing. */
 

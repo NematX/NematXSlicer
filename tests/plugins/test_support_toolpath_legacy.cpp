@@ -121,11 +121,6 @@ double published_bridge_length(const PrintObject &object)
     return total;
 }
 
-// Deactivate the branch provider for the scope of a test; the destructor restores its activation.
-struct ScopedBranchProviderOff {
-    ScopedBranchProviderOff() { REQUIRE(Orchestrator::instance().set_plugin_active("support.toolpath.branch_sheath", false)); }
-    ~ScopedBranchProviderOff() { Orchestrator::instance().set_plugin_active("support.toolpath.branch_sheath", true); }
-};
 }
 
 // Publish one dense lower surface without interfaces: only the contact modifier selects bridging contact flow.
@@ -248,7 +243,7 @@ TEST_CASE("Native support toolpath providers are active in role order", "[plugin
     REQUIRE(providers.size() == 4);
     const char *ids[] = {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom",
                          "support.toolpath.legacy_top"};
-    const int32_t priorities[] = {0, 50, 100, 200};
+    const int32_t priorities[] = {0, 0, 100, 200};
     for (size_t index = 0; index < 4; ++index) {
         CHECK(providers[index]->get_id() == ids[index]);
         CHECK(providers[index]->get_priority() == priorities[index]);
@@ -842,60 +837,4 @@ TEST_CASE("Native bridging bottom contacts avoid the sparse pattern", "[plugins]
     const double rectilinear = slice_and_measure("rectilinear");
     CHECK(automatic > 0);
     CHECK(automatic == Approx(rectilinear));
-}
-
-// One island holds a plain sparse surface on x in [0, 4] mm and a branch surface on x in [6, 10] mm. The branch role
-// owns the branch surface, so the legacy sparse role must fill only the plain one. The branch provider is kept off, so
-// every published path comes from the legacy sparse role.
-TEST_CASE("Legacy sparse toolpath leaves branch surfaces to the branch role", "[plugins][support-toolpath-legacy]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const ScopedBranchProviderOff branch_off;
-    DynamicPrintConfig config = SG::config("grid", false, 0, false);
-    Print print;
-    Model model;
-    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
-    SG::prefix(print);
-    PrintObject &object = print.object(0);
-    const ExPolygon plain(Polygon({Point(0, 0), Point(scale_i(4.), 0),
-                                   Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))}));
-    const ExPolygon branch(Polygon({Point(scale_i(6.), 0), Point(scale_i(10.), 0),
-                                    Point(scale_i(10.), scale_i(4.)), Point(scale_i(6.), scale_i(4.))}));
-    const ExPolygons subject {ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0),
-                                                 Point(scale_i(10.), scale_i(4.)), Point(0, scale_i(4.))}))};
-    PluginStorage storage;
-    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
-        reinterpret_cast<storage_handle *>(&storage), slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
-        slic3r_api::Object(reinterpret_cast<const object_handle *>(&object)),
-        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
-        scale_i(0.2), scale_i(0.2), scale_i(0.1));
-    REQUIRE(built.created);
-    layer_handle *layer = object_get_auxiliary_layer(reinterpret_cast<const object_handle *>(&object), 0);
-    REQUIRE(plugin_property_get_or_add_data_mutable(
-        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), layer_get_properties_mutable(layer),
-        PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT) != nullptr);
-    layer_region_island_handle *region = layer_island_get_or_create_region_island(
-        layer_get_island_mutable(layer, 0), nullptr, 0, 0);
-    REQUIRE(region != nullptr);
-    slic3r_api::StoredSurfaceCollection surfaces(reinterpret_cast<storage_handle *>(&storage));
-    surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&plain)),
-                    slic3r_api::srf_type().internal().sparse().support().raw());
-    surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&branch)),
-                    slic3r_api::srf_type().internal().sparse().support().branch().raw());
-    REQUIRE(slic3r_api::LayerRegionIsland(region).set_fill_surfaces(&surfaces));
-
-    SG::toolpaths(print);
-
-    size_t paths = 0;
-    for (const Layer &support_layer : object.auxiliary_layers())
-        for (const LayerSliceIsland &island : support_layer.islands())
-            for (const LayerRegionIsland &region_island : island.regions_islands()) {
-                if (!region_island.has_extrusion(LayerRegionIsland::SUPPORT)) continue;
-                for (const ArcPolyline &polyline : region_island.extrusion(LayerRegionIsland::SUPPORT).as_polylines()) {
-                    ++paths;
-                    CHECK(polyline.front().x() <= scale_i(5.));
-                    CHECK(polyline.back().x() <= scale_i(5.));
-                }
-            }
-    CHECK(paths > 0);
 }

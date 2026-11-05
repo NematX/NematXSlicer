@@ -197,20 +197,6 @@ class PythonSurfaceViewTests(unittest.TestCase):
                 views.RAW_SURFACE_TYPE_MOD_OVERBRIDGE)
         self.assertEqual(combined & mask, mask)
 
-    def test_branch_surface_type_builder_and_predicate(self):
-        """Branch membership is a support modifier of its own, composing with density and position."""
-        from slic3r_api import surface_type_is_branch, surface_type_is_support
-
-        views = self.surfaces
-        branch = views.srf_type().internal().sparse().support().branch()
-        self.assertEqual(branch.raw(), views.RAW_SURFACE_TYPE_POS_INTERNAL |
-                         views.RAW_SURFACE_TYPE_DENS_SPARSE | views.RAW_SURFACE_TYPE_MOD_SUPPORT |
-                         views.RAW_SURFACE_TYPE_MOD_BRANCH)
-        self.assertEqual(views.RAW_SURFACE_TYPE_MOD_BRANCH, 1 << 10)
-        self.assertTrue(surface_type_is_branch(branch.raw()))
-        self.assertTrue(surface_type_is_support(branch.raw()))
-        self.assertFalse(surface_type_is_branch(views.srf_type().internal().sparse().support().raw()))
-
     def test_contact_surface_type_builder_and_predicate(self):
         """The contact modifier marks the areas of a support contact layer and composes with support, position and density."""
         from slic3r_api import surface_type_is_contact, surface_type_is_support

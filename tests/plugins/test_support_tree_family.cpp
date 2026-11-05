@@ -482,7 +482,7 @@ TEST_CASE("Tree contacts without interface layers publish the branches under the
     for (const Point &tip : tips)
         CHECK(distance_to_region_mm(tip, contact_area) <= tolerance_mm);
     SG::family(print);
-    const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
+    const SurfaceType branch_type = stModSupport | stPosInternal | stDensSparse;
     const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
     double published_mm2 = 0., typed_mm2 = 0.;
     for (const Layer &layer : object.auxiliary_layers()) {
@@ -1645,8 +1645,8 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
     REQUIRE(overlaps > 0);
 }
 
-// Organic branches are published as branch surfaces, which the branch sheath prints, and tree branches as plain sparse surfaces.
-TEST_CASE("Organic branches publish branch surfaces and tree branches plain sparse surfaces", "[plugins][support-tree-family][publication]")
+// Both organic and tree branch bodies publish the same sparse support type, leaving algorithm selection to the object.
+TEST_CASE("Organic and tree branches publish sparse support surfaces", "[plugins][support-tree-family][publication]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool organic = GENERATE(false, true);
@@ -1657,23 +1657,16 @@ TEST_CASE("Organic branches publish branch surfaces and tree branches plain spar
     SG::prefix(print);
     SG::family(print);
     REQUIRE_FALSE(print.object(0).auxiliary_layers().empty());
-    const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
     const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
-    size_t branch = 0, sparse = 0;
+    size_t sparse = 0;
     for (const Layer &layer : print.object(0).auxiliary_layers())
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces()) {
-                    branch += surface.surface_type == branch_type;
                     sparse += surface.surface_type == sparse_type;
+                    CHECK((uint16_t(surface.surface_type) & (1 << 10)) == 0);
                 }
-    if (organic) {
-        CHECK(branch > 0);
-        CHECK(sparse == 0);
-    } else {
-        CHECK(branch == 0);
-        CHECK(sparse > 0);
-    }
+    CHECK(sparse > 0);
 }
 
 // A print with tree or organic support exports the support paths, and the interface paths only when interface layers are set.
@@ -2682,7 +2675,7 @@ TEST_CASE("Tree interface slabs keep the bridge footprint out of the bridge thre
 // Print::validate rejects a support branch diameter that the support extrusion width cannot print or that is smaller than the
 // tip, for the tree and the organic styles alike (both run the tree family), and accepts sane diameters for both. A tip thinner
 // than the extrusion width is rejected for the tree style only: its sections are sparse-filled Base surfaces, which drop areas
-// narrower than half a spacing, while the organic Branch surfaces print such sections as a deposit or along their medial axis.
+// narrower than half a spacing, while the organic sparse surfaces print such sections as a deposit or along their medial axis.
 TEST_CASE("Print validation checks the support tree diameters for the tree and organic styles", "[plugins][support-tree-family][validate]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -3320,7 +3313,7 @@ namespace {
 struct BedLayerPrint {
     Print print;
     Model model;
-    ExPolygons surfaces, branch_surfaces;
+    ExPolygons surfaces, sparse_surfaces;
     Polylines support_paths;
     BedLayerPrint(bool organic, const char *expansion)
     {
@@ -3331,7 +3324,7 @@ struct BedLayerPrint {
         REQUIRE_NOTHROW(SG::family(print));
         REQUIRE_NOTHROW(SG::toolpaths(print));
         const PrintObject &object = print.object(0);
-        const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
+        const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
         for (const Layer &layer : object.auxiliary_layers()) {
             if (layer.scaled_print_z() > object.layer(0).scaled_print_z())
                 continue;
@@ -3339,8 +3332,8 @@ struct BedLayerPrint {
                 for (const LayerRegionIsland &region : island.regions_islands()) {
                     for (const Surface &surface : region.fill_surfaces()) {
                         surfaces.push_back(surface.expolygon);
-                        if (surface.surface_type == branch_type)
-                            branch_surfaces.push_back(surface.expolygon);
+                        if (surface.surface_type == sparse_type)
+                            sparse_surfaces.push_back(surface.expolygon);
                     }
                     if (!region.has_extrusion(LayerRegionIsland::SUPPORT))
                         continue;
@@ -3351,7 +3344,7 @@ struct BedLayerPrint {
                 }
         }
         surfaces = union_ex(surfaces);
-        branch_surfaces = union_ex(branch_surfaces);
+        sparse_surfaces = union_ex(sparse_surfaces);
     }
 };
 
@@ -3366,8 +3359,8 @@ double length_inside_mm(const Polylines &polylines, const ExPolygons &areas)
 }
 
 // The widened part of the foot is published and printed, in both styles: with an expansion of 3 mm the bed layer publishes more area
-// than with none, the support toolpaths run inside the gained area, they stay out of the first object layer, and for the organic style
-// the Branch surfaces of the bed carry the flange paths, in the gained area too.
+// than with none, the support toolpaths run inside the gained area and stay out of the first object layer.
+// Both styles' sparse support surfaces carry the flange paths, in the gained area too.
 TEST_CASE("Tree widened foot is published and printed", "[plugins][support-tree-family][foot]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -3384,17 +3377,14 @@ TEST_CASE("Tree widened foot is published and printed", "[plugins][support-tree-
     CHECK(wide_mm2 > narrow_mm2 + 1.);
     CHECK(gained_mm > 1.);
     CHECK(inside_object_mm < 0.01);
-    // The flange of the organic style follows the Branch surfaces of the bed layer; the tree style has none.
-    const double branch_mm2 = unscaled(unscaled(area(wide.branch_surfaces)));
-    const double flange_mm = length_inside_mm(wide.support_paths, offset_ex(wide.branch_surfaces, float(scale_d(0.05))));
-    const double gained_branch_mm = length_inside_mm(wide.support_paths, intersection_ex(gained, wide.branch_surfaces));
-    CAPTURE(branch_mm2, flange_mm, gained_branch_mm);
-    if (organic) {
-        CHECK(branch_mm2 > 1.);
-        CHECK(flange_mm > 1.);
-        CHECK(gained_branch_mm > 1.);
-    } else
-        CHECK(branch_mm2 == Approx(0.).margin(1e-9));
+    // The flange follows sparse support on the bed in either style.
+    const double sparse_mm2 = unscaled(unscaled(area(wide.sparse_surfaces)));
+    const double flange_mm = length_inside_mm(wide.support_paths, offset_ex(wide.sparse_surfaces, float(scale_d(0.05))));
+    const double gained_sparse_mm = length_inside_mm(wide.support_paths, intersection_ex(gained, wide.sparse_surfaces));
+    CAPTURE(sparse_mm2, flange_mm, gained_sparse_mm);
+    CHECK(sparse_mm2 > 1.);
+    CHECK(flange_mm > 1.);
+    CHECK(gained_sparse_mm > 1.);
 }
 
 // Hidden benchmark of smooth_organic_branches() on 5000 spheres (1000 branches of 5 nodes), whole call timed. SLIC3R_SMOOTH_THREADS
@@ -5063,7 +5053,7 @@ struct RoofRestPublished {
 
 RoofRestPublished roof_rest_published(const RoofRest &fixture, bool organic)
 {
-    const SurfaceType branch_type = organic ? (stModSupport | stModBranch | stPosInternal | stDensSparse) : (stModSupport | stPosInternal | stDensSparse);
+    const SurfaceType branch_type = stModSupport | stPosInternal | stDensSparse;
     const BoundingBox extents = fixture.roof_extents();
     const Point point = fixture.under_overhang();
     const coord_t beyond_post = extents.min.x() + scale_to_layer_coord(4.);

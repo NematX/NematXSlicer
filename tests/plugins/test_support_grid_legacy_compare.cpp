@@ -1110,7 +1110,6 @@ TEST_CASE("Support interface pattern matches the native contact layers on a proj
             config.set_deserialize_strict({{key, "1"}});
     for (const std::pair<const char *, const char *> &provider : {
         std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
-        {"support_toolpath_branch", "support.toolpath.branch_sheath"},
         {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
         {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
         const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);

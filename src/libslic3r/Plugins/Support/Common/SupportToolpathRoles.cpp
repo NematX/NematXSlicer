@@ -3,7 +3,7 @@
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 
 /* Support generators share preferences for the three automatic roles defined in SupportToolpathRoles.hpp.
-   The branch role stays explicit. Neither helper reads or writes layer geometry.
+   Sheath and legacy sparse share the sparse role. Neither helper reads or writes layer geometry.
    Call graph during generator initialization:
      legacy_toolpath_preferences -> build the three-role list
      declare_toolpath_preferences -> OrchestratorView::register_selector_auto_choice -> host registry */

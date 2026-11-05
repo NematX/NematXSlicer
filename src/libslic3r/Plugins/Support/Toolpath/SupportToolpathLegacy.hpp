@@ -1,7 +1,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* Three providers turn the sparse, bottom and top support surfaces into paths.
-   Each belongs to its own selector group, so the host runs sparse before bottom
-   before top. Provider instances live for the process; all calculation state
+   Legacy sparse shares support_toolpath_sparse with branch_sheath: the object selector chooses one,
+   using group priority as fallback when no family preference matches. Bottom and top have their own
+   groups; execution priorities run sparse before bottom before top. Provider instances live for the process; all calculation state
    lives inside the object callback and may run concurrently for other objects. */
 #ifndef plugins_support_toolpath_legacy_hpp_
 #define plugins_support_toolpath_legacy_hpp_
@@ -29,6 +30,8 @@ private:
     const char *const *dependencies_impl() const noexcept override { return nullptr; }
     // Order sparse, bottom and top providers.
     int32_t priority_impl() const noexcept override { return m_priority; }
+    // Prefer the legacy sparse algorithm as the non-family fallback of its exclusive role.
+    int32_t exclusive_group_priority_impl() const noexcept override;
     // Declare direct settings and settings used by native flows and fillers.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     // Generate this role's paths in the support surface's region island.

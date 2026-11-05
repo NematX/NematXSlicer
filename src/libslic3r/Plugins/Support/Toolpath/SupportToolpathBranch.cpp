@@ -6,6 +6,7 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
 /* The host registers the branch provider as an ordinary built-in plugin. Its settings are the shared support geometry
    and path lists, plus the branch diameter that sets the double-wall threshold. Exceptions from calculation or
@@ -13,6 +14,16 @@
    Registration copies the member's object-scoped selector description into the host. */
 
 namespace slic3r_api::Support::Toolpath {
+// Return fallback rank 10, behind legacy sparse when no family preference matches; no state changes, ownership transfers or failures.
+// int32_t SupportToolpathBranch::exclusive_group_priority_impl() const noexcept;
+// Borrow the run context to generate sparse support paths and finish progress; cancellation and calculation/API failures propagate to PluginBase.
+// void SupportToolpathBranch::run_impl(const plugin_run_context *context) const;
+
+int32_t SupportToolpathBranch::exclusive_group_priority_impl() const noexcept
+{
+    return 10;
+}
+
 // Register the process-lifetime branch instance and copy its object-scoped selector description into the borrowed host;
 // provider ownership stays static, and rejected declarations throw invalid_argument.
 void register_support_toolpath_branch_plugin(orchestrator_handle *orchestrator);
@@ -32,7 +43,6 @@ int32_t SupportToolpathBranch::used_config_keys(raw_used_config_key *keys) const
     return Common::append_used_config_keys(keys, path_count, Common::UsedKeyList{k_branch_keys, std::size(k_branch_keys)});
 }
 
-// Run the branch role with callback-local calculation state and finish its progress; calculation and API errors are reported by PluginBase.
 void SupportToolpathBranch::run_impl(const plugin_run_context *context) const
 {
     throw_if_cancelled(context);
@@ -45,7 +55,8 @@ void register_support_toolpath_branch_plugin(orchestrator_handle *orchestrator)
     static SupportToolpathBranch provider(orchestrator);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = "support_toolpath_branch";
+    definition.exclusive_group = Common::k_sparse_role;
+    definition.auto_value = 1;
     definition.label = definition.exclusive_group;
     definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;

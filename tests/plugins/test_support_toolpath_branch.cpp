@@ -20,7 +20,8 @@
 /* Tree branch sheaths, run through the support toolpath step on synthetic auxiliary layers. Each layer is built from a
    subject area and holds typed surfaces; the step then runs the active providers, and the helpers read the published
    region islands back. The first-layer case compares the branch flange with the legacy base flange of the same surface,
-   and the provider case deactivates one of the two producers at a time. The thin islands print their centreline instead
+   and the selector case runs both algorithms over the same sparse surfaces, including an inactive-provider fallback.
+   The thin islands print their centreline instead
     of a sheath or a stationary deposit when elongated (BranchIslandClass.hpp); their cases check order, flow, volume,
     and the islands that fall back to a deposit. A full tree print checks deposit G-code and the reader's support volume. */
 
@@ -31,15 +32,24 @@ namespace {
 const char *const k_branch_id = "support.toolpath.branch_sheath";
 const char *const k_sparse_id = "support.toolpath.legacy_sparse";
 
+// Return owned grid settings with an explicit sheath sparse selector; no print state changes and configuration failures propagate.
+DynamicPrintConfig branch_config();
+
 // A support surface with its surface type, as published on an auxiliary layer.
 struct TypedArea {
     ExPolygon area;
     raw_surface_type type;
 };
 
-// Plain sparse support surface and branch surface of the first region island.
+// Sparse support surface of the first region island.
 raw_surface_type base_type() { return slic3r_api::srf_type().internal().sparse().support().raw(); }
-raw_surface_type branch_type() { return slic3r_api::srf_type().internal().sparse().support().branch().raw(); }
+
+DynamicPrintConfig branch_config()
+{
+    DynamicPrintConfig config = SG::config();
+    config.set_deserialize_strict("exclusive_group_1350_support_toolpath_sparse_plugin", k_branch_id);
+    return config;
+}
 
 // Deactivate a provider for the scope of a test; the destructor activates it again.
 class ScopedProviderOff {
@@ -247,10 +257,10 @@ TEST_CASE("Branch sheath of a small round branch is one anchored non-reversible 
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const double radius = 1.2;
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(radius, 5., 5.), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(radius, 5., 5.), base_type()}});
 
     const LayerRegionIsland *region = published_region(print.object(0));
     REQUIRE(region != nullptr);
@@ -281,15 +291,15 @@ TEST_CASE("Branch sheath of a small round branch is one anchored non-reversible 
     CHECK(length < sheath_circle + 6.5 * spacing);
 }
 
-// The support flow and its role: the branch paths carry the base support material flow at the layer height, in the
+// The support flow and its role: the sparse support paths carry the base support material flow at the layer height, in the
 // support bucket of the base-tool region island.
 TEST_CASE("Branch sheath paths carry the support material flow and the base tool", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(1.2, 5., 5.), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(1.2, 5., 5.), base_type()}});
 
     const LayerRegionIsland *region = published_region(print.object(0));
     REQUIRE(region != nullptr);
@@ -315,10 +325,10 @@ TEST_CASE("Large branch surfaces print the inner sheath before the outer perimet
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const double radius = 2.5;
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(radius, 5., 5.), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{circle(radius, 5., 5.), base_type()}});
 
     const LayerRegionIsland *region = published_region(print.object(0));
     REQUIRE(region != nullptr);
@@ -345,7 +355,7 @@ TEST_CASE("Large branch surfaces print the inner sheath before the outer perimet
 TEST_CASE("Branch surface with a hole gets one sheath per contour and hole", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    DynamicPrintConfig config = SG::config();
+    DynamicPrintConfig config = branch_config();
     config.set_deserialize_strict({{"support_tree_branch_diameter_double_wall", "0"}});
     Print print;
     slice(print, config);
@@ -355,7 +365,7 @@ TEST_CASE("Branch surface with a hole gets one sheath per contour and hole", "[p
     hole.make_clockwise();
     holed.holes.push_back(hole);
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{holed, branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{holed, base_type()}});
 
     const LayerRegionIsland *region = published_region(print.object(0));
     REQUIRE(region != nullptr);
@@ -380,7 +390,7 @@ TEST_CASE("Branch surface with a hole gets one sheath per contour and hole", "[p
 TEST_CASE("Hole sheath anchor follows its own offset past a miter tip near the outline", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    DynamicPrintConfig config = SG::config();
+    DynamicPrintConfig config = branch_config();
     config.set_deserialize_strict({{"support_tree_branch_diameter_double_wall", "0"}});
     Print print;
     slice(print, config);
@@ -396,7 +406,7 @@ TEST_CASE("Hole sheath anchor follows its own offset past a miter tip near the o
     ExPolygon surface = square(0., 0., 10. * w, 14. * w);
     surface.holes.push_back(hole);
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10. * w, 14. * w), {TypedArea{surface, branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10. * w, 14. * w), {TypedArea{surface, base_type()}});
 
     const LayerRegionIsland *region = published_region(print.object(0));
     REQUIRE(region != nullptr);
@@ -423,10 +433,10 @@ TEST_CASE("First-layer branch surface prints the legacy base flange", "[plugins]
     size_t loops[2] = {0, 0};
     for (const bool branch : {true, false}) {
         Print print;
-        slice(print, SG::config());
+        slice(print, branch ? branch_config() : SG::config());
         PluginStorage storage;
         run_layer(print, storage, scale_i(0.2), square(0., 0., 10., 10.),
-                  {TypedArea{shape, branch ? branch_type() : base_type()}});
+                  {TypedArea{shape, base_type()}});
         const LayerRegionIsland *region = published_region(print.object(0));
         REQUIRE(region != nullptr);
         const ExtrusionEntity &bucket = region->extrusion(LayerRegionIsland::SUPPORT);
@@ -445,44 +455,54 @@ TEST_CASE("First-layer branch surface prints the legacy base flange", "[plugins]
     CHECK(lengths[0] == Approx(lengths[1]).epsilon(1e-6));
 }
 
-// A plain sparse surface and a branch surface on one layer: each algorithm prints its own surface only. Turning one
-// algorithm off removes exactly the surface it owned, which shows that the other one never printed it.
-TEST_CASE("Plain and branch surfaces on one layer print through their own algorithms only", "[plugins][support-toolpath][support-toolpath-branch]")
+// Both sparse areas use the selected algorithm, including fallback from an inactive explicit provider.
+TEST_CASE("The sparse selector chooses which algorithm prints every sparse surface of an object", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const auto run = [](const char *disabled) {
+    const auto run = [](bool sheath, bool disable_sheath) {
         Print print;
-        slice(print, SG::config());
+        slice(print, sheath ? branch_config() : SG::config());
         std::unique_ptr<ScopedProviderOff> off;
-        if (*disabled != '\0')
-            off = std::make_unique<ScopedProviderOff>(disabled);
+        if (disable_sheath)
+            off = std::make_unique<ScopedProviderOff>(k_branch_id);
+        CHECK(Steps::selected_active_plugin_from_group(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH,
+            "support_toolpath_sparse", &print.object(0).config())->get_id() ==
+            (sheath && !disable_sheath ? k_branch_id : k_sparse_id));
         PluginStorage storage;
         run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.),
-                  {TypedArea{square(0.5, 0.5, 4.5, 9.5), base_type()}, TypedArea{circle(1.5, 7.5, 5.), branch_type()}});
-        return count_sides(print.object(0));
+                  {TypedArea{square(0.5, 0.5, 4.5, 9.5), base_type()}, TypedArea{circle(1.5, 7.5, 5.), base_type()}});
+        const Sides sides = count_sides(print.object(0));
+        CHECK(sides.plain > 0);
+        CHECK(sides.branch > 0);
+        CHECK(sides.mixed == 0);
+        double circle_length = 0.;
+        const LayerRegionIsland *region = published_region(print.object(0));
+        REQUIRE(region != nullptr);
+        for (const ArcPolyline &line : region->extrusion(LayerRegionIsland::SUPPORT).as_polylines())
+            if (line.front().x() > scale_i(5.))
+                circle_length += unscaled(line.length());
+        return circle_length;
     };
-    const Sides both = run("");
-    CHECK(both.plain > 0);
-    CHECK(both.branch > 0);
-    CHECK(both.mixed == 0);
-    const Sides without_branch = run(k_branch_id);
-    CHECK(without_branch.plain > 0);
-    CHECK(without_branch.branch == 0);
-    const Sides without_sparse = run(k_sparse_id);
-    CHECK(without_sparse.plain == 0);
-    CHECK(without_sparse.branch > 0);
+    const double sheath_length = run(true, false);
+    const double legacy_length = run(false, false);
+    CHECK(sheath_length != Approx(legacy_length).epsilon(1e-6));
+    CHECK(run(true, true) == Approx(legacy_length).epsilon(1e-6));
 }
 
-// The branch provider is an active support toolpath algorithm of its own role group, between the sparse base and the
-// interfaces, and it declares the settings it reads: the shared support lists and the double-wall branch diameter.
+// The sheath provider shares sparse execution priority but keeps a later fallback rank and declares its settings.
 TEST_CASE("Branch sheath provider has its role group, priority and declared settings", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const Plugin *provider = Orchestrator::instance().get_plugin(k_branch_id);
     REQUIRE(provider != nullptr);
     CHECK(provider->get_step() == STEP_SUPPORT_TOOLPATH);
-    CHECK(provider->get_exclusive_group() == "support_toolpath_branch");
-    CHECK(provider->get_priority() == 50);
+    CHECK(provider->get_exclusive_group() == "support_toolpath_sparse");
+    CHECK(provider->get_priority() == 0);
+    CHECK(provider->get_exclusive_group_priority() == 10);
+    const Plugin *legacy = Orchestrator::instance().get_plugin(k_sparse_id);
+    REQUIRE(legacy != nullptr);
+    CHECK(legacy->get_priority() == 0);
+    CHECK(legacy->get_exclusive_group_priority() == 0);
     const auto declares = [provider](const std::string &key) {
         return std::any_of(provider->get_used_config_keys().begin(), provider->get_used_config_keys().end(),
                            [&key](const Plugin::UsedConfigKey &used) { return used.key == key; });
@@ -547,7 +567,7 @@ struct PrintedLines {
 // strip is thin, elongated and narrower than the support width, so the closing leaves no sheath piece: any line is the centreline.
 PrintedLines printed_lines(double extrusion_width, const char *xy_spacing)
 {
-    DynamicPrintConfig config = SG::config();
+    DynamicPrintConfig config = branch_config();
     if (xy_spacing != nullptr)
         config.set_deserialize_strict({{"support_material_xy_spacing", xy_spacing}});
     Print print;
@@ -558,7 +578,7 @@ PrintedLines printed_lines(double extrusion_width, const char *xy_spacing)
     CHECK(classify(print, strip).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
     CHECK(closing_ex(to_polygons(strip), double(SCALED_EPSILON), double(SCALED_EPSILON) + 0.5 * double(flow.width)).empty());
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{strip, branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{strip, base_type()}});
     PrintedLines result;
     result.height = unscaled(flow.height);
     for (const ExtrusionEntity *child : bucket_children(print.object(0)))
@@ -583,7 +603,7 @@ TEST_CASE("Every island left to the sheath keeps a sheath", "[plugins][support-t
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     for (const char *extrusion_width : {"0", "0.8"}) {
         DYNAMIC_SECTION("support_material_extrusion_width=" << extrusion_width) {
-            DynamicPrintConfig config = SG::config();
+            DynamicPrintConfig config = branch_config();
             config.set_deserialize_strict({{"support_material_extrusion_width", extrusion_width}});
             Print print;
             slice(print, config);
@@ -593,7 +613,7 @@ TEST_CASE("Every island left to the sheath keeps a sheath", "[plugins][support-t
             std::vector<TypedArea> areas;
             for (size_t index = 0; index < shapes.size(); ++index)
                 areas.push_back(TypedArea{moved(shapes[index].second, (double(index % columns) + 0.5) * pitch, (double(index / columns) + 0.5) * pitch),
-                                          branch_type()});
+                                          base_type()});
             PluginStorage storage;
             run_layer(print, storage, scale_i(0.6), square(0., 0., double(columns) * pitch, double(rows) * pitch), areas);
 
@@ -617,14 +637,14 @@ TEST_CASE("A dumbbell with a narrow neck prints two sheaths and nothing in the n
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const double w = branch_width(print);
     const ExPolygons dumbbell = union_ex(ExPolygons{circle(2. * w, 5. - 3.5 * w, 5.), circle(2. * w, 5. + 3.5 * w, 5.),
                                                     square(5. - 4. * w, 5. - 0.45 * w, 5. + 4. * w, 5. + 0.45 * w)});
     REQUIRE(dumbbell.size() == 1);
     CHECK(classify(print, dumbbell.front()).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Sheath);
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{dumbbell.front(), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{dumbbell.front(), base_type()}});
 
     const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
     REQUIRE(children.size() == 2);
@@ -644,14 +664,14 @@ TEST_CASE("A thin island takes the place of its sheath piece or comes after the 
     for (const bool vanishes : {false, true}) {
         DYNAMIC_SECTION("strip " << (vanishes ? "without" : "with") << " a sheath piece") {
             Print print;
-            slice(print, SG::config());
+            slice(print, branch_config());
             const c_flow flow = SG::params(print, print.object(0)).base_flow;
             const double w = unscaled(flow.width), thickness = (vanishes ? 0.9 : 1.3) * w;
             const ExPolygon first = circle(1., 2., 2.), strip = square(4., 5.7, 8., 5.7 + thickness), last = circle(1., 10., 10.);
             CHECK(classify(print, strip).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
             PluginStorage storage;
             run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-                      {TypedArea{first, branch_type()}, TypedArea{strip, branch_type()}, TypedArea{last, branch_type()}});
+                      {TypedArea{first, base_type()}, TypedArea{strip, base_type()}, TypedArea{last, base_type()}});
 
             // The pieces that the closing leaves: the entity replaces one of them, or is added when the strip has none.
             const ExPolygons pieces = closing_ex(to_polygons(ExPolygons{first, strip, last}), double(SCALED_EPSILON),
@@ -691,7 +711,7 @@ TEST_CASE("A thin island cut in two pieces by the closing prints one entity", "[
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     const double w = unscaled(flow.width), side = 0.65 * w, neck = 0.45 * w, y = 6.;
     const ExPolygon first = circle(1., 2., 2.), last = circle(1., 10., 10.);
@@ -702,7 +722,7 @@ TEST_CASE("A thin island cut in two pieces by the closing prints one entity", "[
     CHECK(closing_ex(to_polygons(bar), double(SCALED_EPSILON), closing_distance).size() == 2);
     PluginStorage storage;
     run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-              {TypedArea{first, branch_type()}, TypedArea{bar, branch_type()}, TypedArea{last, branch_type()}});
+              {TypedArea{first, base_type()}, TypedArea{bar, base_type()}, TypedArea{last, base_type()}});
 
     const ExPolygons pieces = closing_ex(to_polygons(ExPolygons{first, bar, last}), double(SCALED_EPSILON), closing_distance);
     CHECK(pieces.size() == 4);
@@ -720,12 +740,12 @@ TEST_CASE("A blob island prints one deposit at its contour centroid", "[plugins]
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const double w = branch_width(print);
     const ExPolygon dot = circle(0.7 * w, 5., 5.);
     CHECK(classify(print, dot).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Blob);
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{dot, branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{dot, base_type()}});
 
     const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
     REQUIRE(children.size() == 1);
@@ -760,7 +780,7 @@ TEST_CASE("A support deposit uses net area and moves off a centroid inside a hol
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     ExPolygon island = square(4., 4., 6., 6.);
     Polygon hole = square(4.6, 4.8, 5.4, 5.3).contour;
@@ -787,7 +807,7 @@ TEST_CASE("A support deposit of a crescent sits on the boundary closest to the c
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     const ExPolygons crescents = diff_ex(Polygons{circle(2., 5., 5.).contour}, Polygons{circle(1.8, 5.5, 5.).contour});
     REQUIRE(crescents.size() == 1);
@@ -821,13 +841,13 @@ TEST_CASE("Blob islands replace their first piece or append after sheaths", "[pl
     for (const bool vanishes : {false, true}) {
         DYNAMIC_SECTION("blob " << (vanishes ? "without" : "with") << " a sheath piece") {
             Print print;
-            slice(print, SG::config());
+            slice(print, branch_config());
             const double w = branch_width(print);
             const ExPolygon first = circle(1., 2., 2.), dot = circle((vanishes ? 0.45 : 0.7) * w, 6., 6.), last = circle(1., 10., 10.);
             CHECK(classify(print, dot).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Blob);
             PluginStorage storage;
             run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-                {TypedArea{first, branch_type()}, TypedArea{dot, branch_type()}, TypedArea{last, branch_type()}});
+                {TypedArea{first, base_type()}, TypedArea{dot, base_type()}, TypedArea{last, base_type()}});
             const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
             REQUIRE(children.size() == 3);
             const size_t a = child_in(children, 1., 1., 3., 3.), b = child_in(children, 9., 9., 11., 11.);
@@ -843,7 +863,7 @@ TEST_CASE("Blob islands replace their first piece or append after sheaths", "[pl
 
 // An organic tree print exports stationary support moves after approach travel. With retraction disabled, positive E-only
 // support moves are exactly deposits; their sum and the reader's whole support volume match the published geometry.
-// Organic slabs carry the branch surface bit; the tree style publishes sparse Base slabs. The 0.8 mm width and equal
+// Organic slabs use sparse support and select sheath through their style preference. The 0.8 mm width and equal
 // tip diameter leave compact thin sections at the sampled layer heights with the default branch diameter.
 TEST_CASE("Tree tips export deposits with conserved support volume", "[plugins][support-branch-blob][deposit][gcode]")
 {
@@ -924,13 +944,13 @@ TEST_CASE("The centreline of a thin strip runs inside it with the width of the s
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     const double w = unscaled(flow.width), height = unscaled(flow.height), nozzle = unscaled(flow.nozzle_diameter);
     const double rounded_ends = height * (1. - 0.25 * PI) * double(flow.spacing_ratio);
     const double strip_width = 0.5;
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{square(3., 5., 7., 5. + strip_width), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 10., 10.), {TypedArea{square(3., 5., 7., 5. + strip_width), base_type()}});
 
     const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
     REQUIRE(children.size() == 1);
@@ -996,7 +1016,7 @@ TEST_CASE("A wide head on a thin strip gets lines between the nozzle and the max
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    slice(print, SG::config());
+    slice(print, branch_config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     const double w = unscaled(flow.width), height = unscaled(flow.height), nozzle = unscaled(flow.nozzle_diameter);
     const double rounded_ends = height * (1. - 0.25 * PI) * double(flow.spacing_ratio);
@@ -1004,7 +1024,7 @@ TEST_CASE("A wide head on a thin strip gets lines between the nozzle and the max
     REQUIRE(island.size() == 1);
     CHECK(classify(print, island.front()).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
     PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.), {TypedArea{island.front(), branch_type()}});
+    run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.), {TypedArea{island.front(), base_type()}});
 
     const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
     REQUIRE(children.size() == 1);

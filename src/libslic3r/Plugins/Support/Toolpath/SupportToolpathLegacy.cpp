@@ -14,6 +14,14 @@
    are reported by PluginBase, rather than escaping the plugin C ABI. */
 
 namespace slic3r_api::Support::Toolpath {
+// Read the fixed role and return fallback rank 0 for sparse or 100 otherwise; no state changes, ownership transfers or failures.
+// int32_t SupportToolpathLegacy::exclusive_group_priority_impl() const noexcept;
+
+int32_t SupportToolpathLegacy::exclusive_group_priority_impl() const noexcept
+{
+    return m_role == SurfaceRole::Sparse ? 0 : 100;
+}
+
 // Register the process-lifetime sparse instance and copy its object-scoped selector description into the borrowed host;
 // provider ownership stays static, and rejected declarations throw invalid_argument.
 void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator);

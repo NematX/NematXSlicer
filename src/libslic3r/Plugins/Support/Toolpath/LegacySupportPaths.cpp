@@ -88,7 +88,7 @@ struct Fragment {
 // Convert a Clipper result into a flat polygon collection, like the native polygon booleans.
 Polys as_polygons(ClipperOperand &&result);
 // Read the fill surfaces of one role in a region island; bridge 1 or 0 keeps only bridge or non-bridge surfaces, contact 1 or 0 only those with or without the
-// contact bit.
+// contact bit. Sparse includes base slabs and branch bodies; the returned rings belong to the supplied storage and API/allocation failures propagate.
 Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1, int contact = -1);
 // Collect one role across the islands of a support layer before any union.
 Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge = -1, int contact = -1);
@@ -147,7 +147,6 @@ Polys as_polygons(ClipperOperand &&result)
     return result.to_polygon_collection();
 }
 
-// Filters borrowed region surfaces by support role and optional bridge bit, copying contour-then-holes rings into caller storage; branch bodies are excluded and allocation failures propagate.
 Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge, int contact)
 {
     Polys result(storage);
@@ -157,8 +156,7 @@ Polys role_polygons(storage_handle *storage, const layer_region_island_handle *r
     for (uint32_t index = 0; index < layer_region_island_count_fill_surface(region); ++index) {
         const surface_handle *surface = layer_region_island_get_fill_surface(region, index);
         const raw_surface_type type = surface_get_type(surface);
-        // Branch bodies belong to the branch role, which no legacy role prints.
-        if ((type & mask) != mask || surface_type_is_branch(type) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge)) ||
+        if ((type & mask) != mask || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge)) ||
             (contact >= 0 && surface_type_is_contact(type) != bool(contact))) continue;
         Common::append_polygons(result, ExPolygon(surface_get_expolygon(surface)));
     }

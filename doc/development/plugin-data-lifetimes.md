@@ -341,7 +341,6 @@ A collection is either temporary in the storage, or embedded in a region-island.
 | `Surface::m_id` | Value getter; construction/copy yields a new ID, move transfers it, copy assignment keeps the destination ID | No C setter; not a persistent identity across copies |
 | `Surface::surface_type` | Chosen at append, read-only getters/flags | No direct C setter on an existing surface |
 | `stModSupport` / `RAW_SURFACE_TYPE_MOD_SUPPORT` | Modifier bit identifying support auxiliary-layer surfaces; combines with position and density for bottom interface, sparse base and top interface | Type remains read-only after publication |
-| `stModBranch` / `RAW_SURFACE_TYPE_MOD_BRANCH` | Modifier bit identifying the body of a tree branch on a support auxiliary layer; combines with support, internal and sparse | Type remains read-only after publication |
 | `stModContact` / `RAW_SURFACE_TYPE_MOD_CONTACT` | Modifier bit identifying the dense areas of a support contact layer (under the object for a top surface, resting on it for a bottom surface): the area that touches the object above or below and the margin of that contact, that is the dense area of the contact layer around it; bridging bottom contacts carry it. A dense support surface without it is an interface; a contact merged into the base is sparse base without it | Type remains read-only after publication |
 | `Surface::expolygon` | Owned geometry; constant C getter | Replacement by publishing new surfaces, not generic geometric editing via MutableSurface |
 | `Surface::m_thickness` | Copied indirectly by the native callback `append_surface_like` | No individual C getter/setter |
@@ -355,6 +354,11 @@ A collection is either temporary in the storage, or embedded in a region-island.
 | `c_surface::expolygon` | Borrowed handle | Still depends on the source surface |
 
 Dense top or bottom support surfaces without the contact modifier are interfaces of their side. On a side without interface layers, interfaces and contacts both use the base settings and bucket; the bit only selects contact handling, such as non-soluble bottom-contact bridging flow. Support packages built against step ABI 1.2 do not mark contacts, so their contact areas are classified as interfaces: they use interface settings when enabled on that side, otherwise base settings and bucket without contact handling.
+
+Sparse support includes base slabs and tree branch bodies; bit 10 is reserved in data-tree ABI 5.0.
+Support-toolpath ABI 2.0 has three roles: sparse, bottom interface and top interface. Each object's
+automatic selector follows its support family's style preference, unless the object chooses an explicit
+provider. `support.toolpath.branch_sheath` is a sparse provider preferred by organic support, not a separate role.
 
 `MutableSurface` currently offers neither a type setter nor mutable geometry. The C++ helper `StoredSurfaceCollection::append_like()` copies type/geometry/plugin properties, but is not equivalent to the native callback, which also copies the hidden fields. `StoredSurface::{m_expolygon,m_type}` is a temporary geometry helper, not a native Surface allocation; its synthetic view has a null ID.
 

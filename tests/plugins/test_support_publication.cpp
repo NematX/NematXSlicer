@@ -7,9 +7,9 @@
 
 /* Publication of hand-typed slabs, without a support family. Each test fills a GeneratedSupport with slabs of chosen
    types, publishes it through Common::publish and reads the auxiliary layers back. A branch slab is published as a
-   branch surface of the base extruder and a base slab as a plain sparse surface. Every area keeps one owner: an
+   sparse surface of the base extruder, just like a base slab. Every area keeps one owner: an
    interface keeps the area it shares with a branch, and a branch keeps the area it shares with a base slab. The last
-   test runs the support toolpath step and checks that the branch sheath prints the branch surface. */
+   test runs the support toolpath step with each sparse algorithm and checks that both slabs print. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -19,10 +19,9 @@ using slic3r_api::Support::Common::GeneratorLayers;
 using slic3r_api::Support::Common::LayerType;
 
 namespace {
-// Provider id of the branch sheath, the algorithm that prints branch surfaces.
+// Provider id of the branch sheath, one of the sparse support algorithms.
 const char *const k_branch_id = "support.toolpath.branch_sheath";
 // Surface types of the three published roles.
-const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
 const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
 const SurfaceType top_type = stModSupport | stPosTop | stDensSolid;
 const SurfaceType bottom_type = stModSupport | stPosBottom | stDensSolid;
@@ -119,15 +118,6 @@ Sides count_sides(const PrintObject &object)
     return sides;
 }
 
-// Deactivate a support toolpath provider for the scope of a test; the destructor activates it again.
-class ScopedProviderOff {
-public:
-    explicit ScopedProviderOff(const char *id) : m_id(id) { REQUIRE(Orchestrator::instance().set_plugin_active(m_id, false)); }
-    ~ScopedProviderOff() { Orchestrator::instance().set_plugin_active(m_id, true); }
-
-private:
-    const char *m_id;
-};
 } // namespace
 
 // Publishes two separated role islands plus an empty slab with counters enabled between joined runs; verifies every
@@ -239,8 +229,8 @@ TEST_CASE("Empty slab publishes nothing and prints nothing", "[plugins][support-
     CHECK(print.object(0).auxiliary_layers().empty());
 }
 
-// A branch slab prints as a branch surface of the base extruder, without the area that the interface above owns.
-TEST_CASE("Branch slab publishes as a branch surface and yields the area an interface covers", "[plugins][support-publication]")
+// A branch slab publishes sparse support on the base extruder, without the area the interface above owns.
+TEST_CASE("Branch slab publishes as a sparse surface and yields the area an interface covers", "[plugins][support-publication]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
@@ -254,8 +244,8 @@ TEST_CASE("Branch slab publishes as a branch surface and yields the area an inte
 
     const PrintObject &object = print.object(0);
     REQUIRE(object.auxiliary_layers().size() == 1);
-    CHECK(same_area(surfaces_of(object, branch_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(2., 2., 4., 6.))}));
-    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 2., 16., 6.))}));
+    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder),
+        ExPolygons{ExPolygon(rect_polygon(2., 2., 4., 6.)), ExPolygon(rect_polygon(12., 2., 16., 6.))}));
     CHECK(same_area(surfaces_of(object, top_type, interface_extruder), ExPolygons{ExPolygon(rect_polygon(4., 2., 8., 6.))}));
 }
 
@@ -286,8 +276,8 @@ TEST_CASE("Contact slabs publish their areas with the contact bit", "[plugins][s
     CHECK(same_area(surfaces_of(object, bottom_type, interface_extruder), ExPolygons{ExPolygon(rect_polygon(6., 12., 8., 16.))}));
     CHECK(same_area(surfaces_of(object, SurfaceType(bottom_type | stModBridge | stModContact), interface_extruder),
                     ExPolygons{ExPolygon(rect_polygon(2., 22., 6., 26.))}));
-    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 2., 16., 6.))}));
-    CHECK(same_area(surfaces_of(object, branch_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 12., 16., 16.))}));
+    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder),
+        ExPolygons{ExPolygon(rect_polygon(12., 2., 16., 6.)), ExPolygon(rect_polygon(12., 12., 16., 16.))}));
     // The base and branch areas, and the dense areas of a side that are not a contact slab, carry no contact bit.
     for (const Layer &layer : object.auxiliary_layers())
         for (const LayerSliceIsland &island : layer.islands())
@@ -349,21 +339,33 @@ TEST_CASE("Base slab yields the area it shares with a branch slab", "[plugins][s
     publish_support(print, support);
 
     const PrintObject &object = print.object(0);
-    CHECK(same_area(surfaces_of(object, branch_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(2., 2., 6., 6.))}));
-    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(6., 2., 10., 6.))}));
+    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(2., 2., 10., 6.))}));
+    size_t surfaces = 0;
+    double area = 0.;
+    for (const Layer &layer : object.auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    CHECK(surface.surface_type == sparse_type);
+                    ++surfaces;
+                    area += surface.expolygon.area();
+                }
+    CHECK(surfaces == 2);
+    CHECK(area == Approx(rect_polygon(2., 2., 10., 6.).area()));
 }
 
-// The branch surface is printed by the branch sheath when the support toolpath step runs: with that provider off it gets no
-// extrusion, while the base square keeps its sparse extrusion.
-TEST_CASE("Published branch surface is printed by the branch sheath", "[plugins][support-publication]")
+// Either sparse algorithm prints both the branch slab and the base slab selected for this object.
+TEST_CASE("Published branch slab is printed by the sparse algorithm the object selects", "[plugins][support-publication]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const auto print_layer = [](bool branch_provider) {
         Print print;
-        slice_cube(print);
-        std::unique_ptr<ScopedProviderOff> off;
-        if (!branch_provider)
-            off = std::make_unique<ScopedProviderOff>(k_branch_id);
+        Model model;
+        DynamicPrintConfig config = SG::config();
+        config.set_deserialize_strict("exclusive_group_1350_support_toolpath_sparse_plugin",
+            branch_provider ? k_branch_id : "support.toolpath.legacy_sparse");
+        Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+        SG::prefix(print);
         PluginStorage storage;
         GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
         add_slab(support, support.base, LayerType::Branch, rect_polygon(2., 2., 6., 6.));
@@ -377,6 +379,7 @@ TEST_CASE("Published branch surface is printed by the branch sheath", "[plugins]
     CHECK(both.base > 0);
     CHECK(both.mixed == 0);
     const Sides without_branch = print_layer(false);
-    CHECK(without_branch.branch == 0);
+    CHECK(without_branch.branch > 0);
     CHECK(without_branch.base > 0);
+    CHECK(without_branch.mixed == 0);
 }

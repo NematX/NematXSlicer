@@ -7,7 +7,7 @@
    Generator layers are temporary slabs: print_z is their top, bottom_z their
    geometric bottom, and height their printable thickness. Contacts meet the
    object, interfaces extend contacts, base slabs form sparse columns, and
-   branch slabs are the bodies of tree branches, printed by the branch sheath.
+   branch slabs are internal slices of tree branch bodies, published as sparse support.
    A deque owns the slabs until generation ends, so vectors may safely point
    into it. Only the final auxiliary layers are published to the object.
 
@@ -28,7 +28,7 @@
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
 namespace slic3r_api::Support::Common {
-// Branch slabs are listed with the base slabs: publication treats them as base-like and prints them as branch surfaces.
+// Branch is an internal slice type listed with base slabs; publication emits sparse support surfaces.
 enum class LayerType { TopContact, BottomContact, TopInterface, BottomInterface, Base, Intermediate, Branch };
 
 struct GeneratorLayer {

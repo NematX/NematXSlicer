@@ -34,6 +34,11 @@ Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming
 `steps/slic3r_step_support_toolpath.h`. Its sized vtable layout is unchanged from 4.0.
 
+Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-toolpath
+2.0 removes the branch role: branch bodies are sparse support, and the sheath algorithm
+shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
+must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
+
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the
 DLL export. Packaging extracts it without loading the library and fails if it

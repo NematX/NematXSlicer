@@ -5,8 +5,8 @@
 #ifndef slic3r_step_support_toolpath_h_
 #define slic3r_step_support_toolpath_h_
 
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 3u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR 2u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 0u
 
 #include "slic3r_step_common.h"
 #include "slic3r_step_infill.h"
@@ -103,21 +103,23 @@ handling, such as non-soluble bottom-contact bridging flow. Algorithms that
 separate contacts from intermediate interfaces read this bit. A package built
 against 1.2 does not mark contacts, so its contact areas are classified as
 interfaces: they use interface settings when enabled on that side, otherwise
-base settings and bucket without contact handling. A tree branch body carries
-RAW_SURFACE_TYPE_MOD_BRANCH on top of support | internal | sparse.
+base settings and bucket without contact handling. Tree branch bodies and base
+slabs both carry support | internal | sparse. Version 2 removes the branch role;
+data-tree version 5 removes its surface modifier.
 
 Toolpath algorithms declare one role through their exclusive group:
-"support_toolpath_sparse", "support_toolpath_branch",
+"support_toolpath_sparse",
 "support_toolpath_bottom_interface", or "support_toolpath_top_interface". When
 several plugins share a role the host generates a selector setting for each
 object, and only the plugin selected for that object runs on it. Selected
-plugins run sequentially by priority (recommended: sparse 0, branch 50, bottom
+plugins run sequentially by priority (recommended: sparse 0, bottom
 interface 100, top interface 200), each on the objects that selected it. A later
 role can read earlier extrusions. setup() of an algorithm receives the number of
 objects it runs on, so its progress counts only those runs.
 
-The branch role prints the surfaces marked RAW_SURFACE_TYPE_MOD_BRANCH and no
-other role does: sparse, bottom and top algorithms skip branch surfaces.
+The sparse role prints both base slabs and branch bodies. Its automatic selector
+uses the active support family's style preference; an explicit object choice
+overrides that preference. Providers in one role share execution priority.
 
 Each algorithm receives the whole object and walks its auxiliary layers,
 islands and region islands to find support surfaces of its role. It may group

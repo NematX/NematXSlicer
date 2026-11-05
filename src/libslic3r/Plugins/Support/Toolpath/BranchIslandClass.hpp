@@ -1,10 +1,10 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
-/* Printing method of a fused branch island: the limits that choose it, and the function that applies them.
+/* Printing method of a fused sparse support island: the limits that choose it, and the function that applies them.
 
    The cross-section of a tree branch is a wide disc near the trunk and a few extrusion widths across near a tip, and
    tips get thinner as the layers go up. A sheath, which walls the outline with a loop half a width inside it, needs
    room: in a part narrower than 1.5 w its two sides overlap each other. Each fused island of a support layer (the
-   branch surfaces of one region island, closed by one epsilon) therefore gets exactly one method, chosen from its
+   internal sparse support surfaces of one region island, including bases and branch bodies, closed by one epsilon) therefore gets exactly one method, chosen from its
    shape, where w is the support extrusion width:
 
        thin part      the island minus its opening by r = 0.75 w, i.e. everything narrower than 1.5 w

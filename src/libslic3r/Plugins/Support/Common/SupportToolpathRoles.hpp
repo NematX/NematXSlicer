@@ -1,7 +1,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* A role groups alternative algorithms for one kind of support line: sparse, bottom interface,
-   top interface or branch. A family is a support generator such as grid or tree.
-   These helpers declare preferences for the three automatic roles; the branch role stays explicit.
+   or top interface. A family is a support generator such as grid or tree.
+   These helpers declare preferences for all three automatic roles, including sheath as a sparse algorithm.
    During family initialization, for example:
      const std::vector<ToolpathPreference> choices = legacy_toolpath_preferences(k_legacy_sparse_id);
      declare_toolpath_preferences(orchestrator, {"grid", "snug"}, choices);

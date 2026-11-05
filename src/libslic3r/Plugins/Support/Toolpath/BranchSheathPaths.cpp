@@ -25,8 +25,8 @@
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 
-/* Tree branch sheaths: the organic base paths of the legacy support, applied to the branch surfaces of each support
-   layer. A branch surface is the cross-section of one tree branch, marked RAW_SURFACE_TYPE_MOD_BRANCH.
+/* Tree branch sheaths: the organic base paths of the legacy support, applied to the sparse surfaces of each support
+   layer. Sparse support includes the cross-sections of tree branches and the base slabs.
 
    A sheath walls one contour or hole of a surface with a loop of extrusion, centred half a width inside the outline.
    Each loop starts with an anchor: a short run on the second perimeter, one width further inside, that joins the loop
@@ -96,10 +96,10 @@ struct SeamFoot {
 
 // Generate the paths of each object island of one support layer and publish them into the island's base-tool region.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer);
-// Append the paths of one region island's branch surfaces to out: the first-layer flange, or the paths of its fused islands.
+// Append the paths of one region island's internal sparse support surfaces (bases and branch bodies) to out: the first-layer flange, or the paths of its fused islands.
 void append_region_paths(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
                          const layer_handle *layer, const layer_region_island_handle *region, MutableExtrusionEntity out);
-// The branch surfaces of one region island, with the support and branch bits set, as one collection.
+// Collect internal sparse support from the borrowed region island into the supplied storage; API/allocation failures propagate.
 StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_region_island_handle *region);
 // The first-layer flange of the surfaces: the base flange recipe of LegacySupportPaths over their closing, appended to out.
 void append_flange(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
@@ -154,7 +154,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     }
 }
 
-// Borrow the region and run inputs, appending storage-owned branch paths to out; empty surfaces add nothing.
+// Borrow the region and run inputs, appending storage-owned sparse support paths to out; empty surfaces add nothing.
 // Stopping propagates silent PluginCancelled (the cause has its message, the step names it, or the runner rethrows the
 // print cancellation); ordinary pattern refusals throw std::runtime_error.
 void append_region_paths(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
@@ -169,7 +169,7 @@ void append_region_paths(const plugin_run_context *context, const run_ctx_suppor
         return;
     }
     const c_flow flow = object.support_flow(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, params.geometry.layer_height, unscaled(height));
-    // The legacy closing of the branch surfaces: a dilation by one epsilon, then a shrink by the epsilon and half a width.
+    // The legacy closing of the sparse surfaces: a dilation by one epsilon, then a shrink by the epsilon and half a width.
     const ClipperContext clipper(storage);
     StoredExPolygonCollection closed = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON),
                                                        -(double(SCALED_EPSILON) + 0.5 * double(flow.width))).to_expolygon_collection();
@@ -208,7 +208,7 @@ void append_region_paths(const plugin_run_context *context, const run_ctx_suppor
 StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_region_island_handle *region)
 {
     StoredExPolygonCollection result(storage);
-    const raw_surface_type mask = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_BRANCH | RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE;
+    const raw_surface_type mask = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE;
     for (uint32_t index = 0; index < layer_region_island_count_fill_surface(region); ++index) {
         const surface_handle *surface = layer_region_island_get_fill_surface(region, index);
         if ((surface_get_type(surface) & mask) == mask)

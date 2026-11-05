@@ -71,12 +71,6 @@ public:
         return srf_type_modifiers(raw_surface_type(m_value | RAW_SURFACE_TYPE_MOD_SUPPORT));
     }
 
-    // Mark a support surface as the body of a tree branch.
-    constexpr srf_type_modifiers branch() const
-    {
-        return srf_type_modifiers(raw_surface_type(m_value | RAW_SURFACE_TYPE_MOD_BRANCH));
-    }
-
     // Mark a support surface as an area of a support contact layer.
     constexpr srf_type_modifiers contact() const
     {
@@ -155,7 +149,6 @@ inline constexpr raw_surface_type k_surface_type_modifier_flags =
     RAW_SURFACE_TYPE_MOD_BRIDGE |
     RAW_SURFACE_TYPE_MOD_OVERBRIDGE |
     RAW_SURFACE_TYPE_MOD_SUPPORT |
-    RAW_SURFACE_TYPE_MOD_BRANCH |
     RAW_SURFACE_TYPE_MOD_CONTACT;
 
 // raw_surface_type is a bitmask. These helpers keep plugins readable and avoid
@@ -261,12 +254,6 @@ constexpr bool surface_type_is_overbridge(raw_surface_type type)
 constexpr bool surface_type_is_support(raw_surface_type type)
 {
     return surface_type_has_flag(type, RAW_SURFACE_TYPE_MOD_SUPPORT);
-}
-
-// Test whether the type marks the body of a tree branch.
-constexpr bool surface_type_is_branch(raw_surface_type type)
-{
-    return surface_type_has_flag(type, RAW_SURFACE_TYPE_MOD_BRANCH);
 }
 
 // Test whether the type marks an area of a support contact layer.

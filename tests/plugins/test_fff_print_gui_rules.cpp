@@ -520,6 +520,15 @@ TEST_CASE("Auto support toolpath selectors keep every provider setting editable"
         {"exclusive_group_1350_support_toolpath_sparse_plugin", SLIC3R_SELECTOR_AUTO_VALUE}});
     const char *const key = "support_tree_branch_diameter_double_wall";
     REQUIRE(config.has(key));
+    bool owned_auto_rule = false;
+    for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
+        if (rule.target_key == key && rule.owner == "support.toolpath.branch_sheath")
+            for (const Orchestrator::PluginGuiRuleClause &clause : rule.clauses)
+                if (clause.condition == RAW_GUI_RULE_CONDITION_STRING_EQUALS &&
+                    clause.condition_key == "exclusive_group_1350_support_toolpath_sparse_plugin" &&
+                    clause.condition_string_value == SLIC3R_SELECTOR_AUTO_VALUE)
+                    owned_auto_rule = true;
+    REQUIRE(owned_auto_rule);
     bool found = false;
     for (const Orchestrator::GuiRuleApplication &application :
          orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1)) {

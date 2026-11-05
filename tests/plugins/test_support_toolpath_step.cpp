@@ -685,8 +685,8 @@ TEST_CASE("Rejected support family preferences fail initialization visibly",
         }) == 0);
 }
 
-// Styles declare automatic preferences; organic's sheath is outside the sparse group, so sparse uses legacy fallback.
-TEST_CASE("Support toolpath auto preferences are declared per style and organic sparse uses the legacy fallback",
+// Each object's style chooses one sparse provider before geometry publication; explicit choices override the family.
+TEST_CASE("Support toolpath selectors default to auto and follow the support style per object",
           "[plugins][support-toolpath][support-toolpath-auto]")
 {
     namespace Common = slic3r_api::Support::Common;
@@ -708,20 +708,15 @@ TEST_CASE("Support toolpath auto preferences are declared per style and organic 
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
     REQUIRE(selected.size() == 4);
     for (size_t index = 0; index < selected.size(); ++index) {
-        CHECK(selected[index].object_indices == std::vector<size_t>{0, 1});
+        CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
+            index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));
         CHECK(selected[index].plugin->get_id() == std::vector<std::string>{Common::k_legacy_sparse_id,
             Common::k_branch_sheath_id, Common::k_legacy_bottom_id, Common::k_legacy_top_id}[index]);
     }
-    REQUIRE(host.set_plugin_active(probes()[0]->id(), true));
-    struct RestoreSparseProbe {
-        Orchestrator &host;
-        // Return the borrowed sparse probe to its inactive state after the explicit-choice check.
-        ~RestoreSparseProbe() { host.set_plugin_active(probes()[0]->id(), false); }
-    } restore_probe {host};
-    model.objects()[0].config.set_deserialize_strict(key, probes()[0]->id());
+    model.objects()[0].config.set_deserialize_strict(key, Common::k_legacy_sparse_id);
     print.apply(model, config);
     CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role,
-          &print.object(0).config())->get_id() == probes()[0]->id());
+          &print.object(0).config())->get_id() == Common::k_legacy_sparse_id);
     for (const char *style : {"grid", "snug", "tree", "organic"}) {
         for (const Common::ToolpathPreference &preference : Common::legacy_toolpath_preferences(
                  std::string_view(style) == "organic" ? Common::k_branch_sheath_id : Common::k_legacy_sparse_id)) {
@@ -733,6 +728,101 @@ TEST_CASE("Support toolpath auto preferences are declared per style and organic 
                 }) == 1);
         }
     }
+}
+
+// Automatic selection assigns organic sparse support only to sheath and grid sparse support only to legacy.
+TEST_CASE("Organic objects print their sparse support with the branch sheath through auto",
+          "[plugins][support-toolpath][support-toolpath-auto]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig config = Test::SupportGrid::config();
+    const std::string key = Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role);
+    config.erase(key);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    model.objects()[0].config.set_deserialize_strict("support_material_style", "organic");
+    print.apply(model, config);
+    const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
+    REQUIRE(selected.size() == 4);
+    for (const Steps::ObjectStepPlugin &entry : selected) {
+        if (entry.plugin->get_id() == Common::k_branch_sheath_id)
+            CHECK(entry.object_indices == std::vector<size_t>{0});
+        else if (entry.plugin->get_id() == Common::k_legacy_sparse_id)
+            CHECK(entry.object_indices == std::vector<size_t>{1});
+        else {
+            CHECK((entry.plugin->get_id() == Common::k_legacy_bottom_id || entry.plugin->get_id() == Common::k_legacy_top_id));
+            CHECK(entry.object_indices == std::vector<size_t>{0, 1});
+        }
+    }
+}
+
+// Every serialized style supplies one active preference for each production role, independent of the GUI's style list.
+TEST_CASE("Every support style prefers one active algorithm for every support toolpath role",
+          "[plugins][support-toolpath][support-toolpath-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &host = Orchestrator::instance();
+    std::vector<std::string> styles = PrintConfigDef::instance().get("support_material_style")->enum_def->values();
+    if (std::find(styles.begin(), styles.end(), "tree") == styles.end()) styles.push_back("tree");
+    std::vector<std::string> roles;
+    for (const Plugin *provider : host.get_active_plugins_for_step(STEP_SUPPORT_TOOLPATH))
+        if (provider->get_id().rfind("test.", 0) != 0 &&
+            std::find(roles.begin(), roles.end(), provider->get_exclusive_group()) == roles.end())
+            roles.push_back(provider->get_exclusive_group());
+    REQUIRE_FALSE(roles.empty());
+    for (const std::string &style : styles)
+        for (const std::string &role : roles) {
+            CAPTURE(style, role);
+            size_t choices = 0;
+            for (const SelectorAutoChoice &choice : host.selector_auto_choices())
+                if (choice.step == STEP_SUPPORT_TOOLPATH && choice.exclusive_group == role &&
+                    choice.condition_key == "support_material_style" && choice.condition_value == style) {
+                    ++choices;
+                    const Plugin *provider = host.get_plugin(choice.provider_id);
+                    REQUIRE(provider != nullptr);
+                    CHECK(host.is_plugin_active(choice.provider_id));
+                    CHECK(provider->get_step() == STEP_SUPPORT_TOOLPATH);
+                    CHECK(provider->get_exclusive_group() == role);
+                }
+            CHECK(choices == 1);
+        }
+}
+
+// Without a matching family the sparse role uses its stable active fallback, not the sheath's organic preference.
+TEST_CASE("Sparse auto selection falls back by group priority when no family choice matches",
+          "[plugins][support-toolpath][support-toolpath-auto]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig config = Test::SupportGrid::config();
+    config.erase("support_material_style");
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role, &config)->get_id() == Common::k_legacy_sparse_id);
+    struct RestoreLegacy {
+        Orchestrator &host;
+        // Restore the borrowed provider after the inactive-fallback check, including assertion failures.
+        ~RestoreLegacy() { host.set_plugin_active(Common::k_legacy_sparse_id, true); }
+    } restore {host};
+    REQUIRE(host.set_plugin_active(Common::k_legacy_sparse_id, false));
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role, &config)->get_id() == Common::k_branch_sheath_id);
+}
+
+// Loading an obsolete selector drops the unknown key without adding an artificial configuration option.
+TEST_CASE("A project with the removed branch selector loads without it", "[plugins][support-toolpath]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::string removed = "exclusive_group_1350_support_toolpath_branch_plugin";
+    std::string key = removed, value = "support.toolpath.branch_sheath";
+    CHECK(PrintConfigDef::instance().get(removed) == nullptr);
+    PrintConfigDef::handle_legacy_pair(key, value);
+    CHECK(key.empty());
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+    REQUIRE_NOTHROW(config.set_deserialize(removed, value, substitutions));
+    CHECK_FALSE(config.has(removed));
 }
 
 // Full processing checks that planning and execution resolve the same automatic providers before support is published.
@@ -750,8 +840,9 @@ TEST_CASE("Auto support toolpath selectors resolve before slicing and complete t
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(
         Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, print);
     REQUIRE(selected.size() == 4);
-    for (const Steps::ObjectStepPlugin &entry : selected)
-        CHECK(entry.object_indices == std::vector<size_t>{0, 1});
+    for (size_t index = 0; index < selected.size(); ++index)
+        CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
+            index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));
     REQUIRE_NOTHROW(print.process());
     REQUIRE_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_SUPPORT_TOOLPATH));
 }
