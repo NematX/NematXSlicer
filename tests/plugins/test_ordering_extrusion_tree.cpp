@@ -16,6 +16,7 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -628,5 +629,194 @@ TEST_CASE("Rotating a composed loop to a seam next to a fragment end keeps its f
         c_point seam = point(10, 10);
         seam.y -= SCALED_EPSILON / 4;
         rotate_square_loop(seam, point(10, 10));
+    }
+}
+
+// Delegated rotations reuse the owned contour while property-only siblings stay fixed.
+TEST_CASE("Prepared seam materialization delegates successive seams without moving empty events",
+          "[plugins][ordering][seam-materialization-preparation]")
+{
+    namespace Geometry = slic3r_api::Ordering::TreeOrderingGeometry;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false));
+    root.child(0).add_property(ExtrusionPropertySpeed(25.f));
+    std::unique_ptr<ExtrusionEntity> nested = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    nested->append_child(std::make_unique<ExtrusionEntity>(false,
+        ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 10000}, {0, 0}})));
+    root.append_child(std::move(nested));
+    const ExtrusionEntity *event = &root.child(0);
+    const ExtrusionEntity *contour = &root.child(1).child(0);
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&root));
+    for (const c_point requested : {c_point{5000, 0}, c_point{10000, 5000}}) {
+        const c_point legal = Geometry::legal_seam_point(view.readonly(), requested, true);
+        CHECK(legal.x == requested.x);
+        CHECK(legal.y == requested.y);
+        Geometry::rotate_loop_to_legal_seam(handle, view, requested, true);
+        CHECK(root.ExtrusionEntity::first_point() == Point(requested.x, requested.y));
+        CHECK(root.ExtrusionEntity::last_point() == Point(requested.x, requested.y));
+        REQUIRE(root.child_count() == 2);
+        REQUIRE(root.child(1).child_count() == 1);
+        CHECK(&root.child(0) == event);
+        CHECK(&root.child(1).child(0) == contour);
+        CHECK(root.child(0).get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 25.f);
+        CHECK(root.can_rotate());
+        CHECK(contour->can_rotate());
+    }
+}
+
+// A composed open child keeps its entry and handles; only direct leaf splits add a closing fragment.
+TEST_CASE("Prepared seam materialization keeps open composites atomic and splits only a direct leaf",
+          "[plugins][ordering][seam-materialization-preparation]")
+{
+    namespace Geometry = slic3r_api::Ordering::TreeOrderingGeometry;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(make_polyline_entity(Points{{0, 0}, {10000, 0}}));
+    std::unique_ptr<ExtrusionEntity> open = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    open->set_can_rotate(false);
+    open->append_child(make_polyline_entity(Points{{10000, 0}, {10000, 10000}}));
+    open->append_child(make_polyline_entity(Points{{10000, 10000}, {0, 10000}}));
+    root.append_child(std::move(open));
+    root.append_child(make_polyline_entity(Points{{0, 10000}, {0, 0}}));
+    root.child(2).add_property(ExtrusionPropertySpeed(37.f));
+    const ExtrusionEntity *atomic = &root.child(1);
+    const ExtrusionEntity *suffix = &root.child(2);
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&root));
+    Geometry::rotate_loop_to_legal_seam(handle, view, c_point{10000, 5000}, true);
+    REQUIRE(root.child_count() == 3);
+    CHECK(&root.child(0) == atomic);
+    CHECK(root.ExtrusionEntity::first_point() == Point(10000, 0));
+    CHECK(atomic->child(0).polyline_ref().front() == Point(10000, 0));
+    CHECK(atomic->child(1).polyline_ref().front() == Point(10000, 10000));
+    Geometry::rotate_loop_to_legal_seam(handle, view, c_point{0, 5000}, true);
+    REQUIRE(root.child_count() == 4);
+    CHECK(&root.child(0) == suffix);
+    CHECK(root.ExtrusionEntity::first_point() == Point(0, 5000));
+    CHECK(root.ExtrusionEntity::last_point() == Point(0, 5000));
+    CHECK(root.is_continuous());
+    CHECK(root.child(0).get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 37.f);
+    CHECK(root.child(3).get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 37.f);
+    CHECK(root.can_rotate());
+    CHECK_FALSE(atomic->can_rotate());
+}
+
+// Invalid requests reject before edits; a valid blocked request retains the existing start.
+TEST_CASE("Prepared seam materialization rejects forbidden requests before mutation",
+          "[plugins][ordering][seam-materialization-preparation]")
+{
+    namespace Geometry = slic3r_api::Ordering::TreeOrderingGeometry;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(make_polyline_entity(Points{{0, 0}, {10000, 0}}));
+    root.append_child(make_polyline_entity(Points{{10000, 0}, {0, 0}}));
+    root.append_child(std::make_unique<ExtrusionEntity>(false));
+    root.child(2).add_property(ExtrusionPropertySpeed(25.f));
+    const ExtrusionEntity *first = &root.child(0);
+    const ExtrusionEntity *event = &root.child(2);
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&root));
+    CHECK_THROWS(Geometry::rotate_loop_to_legal_seam(handle, view, c_point{5000, 0}, false));
+    CHECK_THROWS(Geometry::rotate_loop_to_legal_seam(handle, view, c_point{5000, 5000}, true));
+    Geometry::rotate_loop_to_legal_seam(handle, view, c_point{5000, 0}, true);
+    REQUIRE(root.child_count() == 3);
+    CHECK(&root.child(0) == first);
+    CHECK(&root.child(2) == event);
+    CHECK(root.ExtrusionEntity::first_point() == Point(0, 0));
+    CHECK(root.child(0).polyline_ref().size() == 2);
+    root.set_can_rotate(false);
+    CHECK_THROWS(Geometry::rotate_loop_to_legal_seam(handle, view, c_point{0, 0}, true));
+    CHECK(root.ExtrusionEntity::first_point() == Point(0, 0));
+    CHECK(&root.child(2) == event);
+}
+
+// Compare the announced entry and arc/Z metadata against the native split operation itself.
+TEST_CASE("Prepared seam materialization agrees exactly with oblique and curved native splits",
+          "[plugins][ordering][seam-materialization-preparation]")
+{
+    namespace Geometry = slic3r_api::Ordering::TreeOrderingGeometry;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    ArcPolyline path;
+    Point requested;
+    SECTION("oblique rounding regression") {
+        path = ArcPolyline(Points{{0, 0}, {10000, 20100}, {0, 20100}, {0, 0}});
+        requested = Point(141, 64);
+    }
+    SECTION("arc rounding and endpoint Z") {
+        path.append(Point(10000, 0));
+        path.append(Slic3r::Geometry::ArcWelder::Segment(Point(0, 10000), 10000.f, Slic3r::Geometry::ArcWelder::Orientation::CCW));
+        path.append(Point(0, 0));
+        path.append(Point(10000, 0));
+        requested = Point(6001, 8000);
+    }
+    for (size_t index = 0; index < path.size(); ++index)
+        path.set_z_offset(index, coord_t(100 + index * 300));
+    // A cyclic path has the same stored Z at its closing endpoint.
+    path.set_z_offset(path.size() - 1, path.z_offset(0));
+    for (const bool composed : {false, true}) {
+        CAPTURE(composed);
+        ExtrusionEntity root(false, path);
+        if (composed) {
+            ArcPolyline first;
+            ArcPolyline second;
+            REQUIRE(path.split_at_index(1, first, second));
+            root = ExtrusionEntity(ExtrusionEntity::Children(), false, false, true);
+            root.append_child(std::make_unique<ExtrusionEntity>(false, std::move(first)));
+            root.append_child(std::make_unique<ExtrusionEntity>(false, std::move(second)));
+        }
+        const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(root, requested, true);
+        REQUIRE(plan);
+        const ArcPolyline &source = composed ? root.child(0).polyline_ref() : root.polyline_ref();
+        ArcPolyline before;
+        ArcPolyline after;
+        Point input = plan->split_point;
+        source.split_at(input, before, after);
+        REQUIRE(before.size() >= 2);
+        REQUIRE(after.size() >= 2);
+        CHECK(before.back() == plan->point);
+        CHECK(after.front() == plan->point);
+        slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&root));
+        const c_point desired{requested.x(), requested.y()};
+        const c_point announced = Geometry::legal_seam_point(view.readonly(), desired, true);
+        CHECK(Point(announced.x, announced.y) == plan->point);
+        Geometry::rotate_loop_to_legal_seam(handle, view, desired, true);
+        CHECK(root.ExtrusionEntity::first_point() == plan->point);
+        CHECK(root.ExtrusionEntity::last_point() == plan->point);
+        CHECK(root.is_continuous());
+        const ArcPolyline &suffix = composed ? root.child(0).polyline_ref() : root.polyline_ref();
+        CHECK(suffix.z_offset(0) == after.z_offset(0));
+        CHECK(suffix.get_arc(1).radius == after.get_arc(1).radius);
+        CHECK(suffix.get_arc(1).orientation == after.get_arc(1).orientation);
+        CHECK(root.can_rotate());
+    }
+}
+
+// A rotatable parent cannot split a fixed closed child, with or without empty siblings.
+TEST_CASE("Prepared seam materialization does not bypass a closed local child's permission",
+          "[plugins][ordering][seam-materialization-preparation]")
+{
+    namespace Geometry = slic3r_api::Ordering::TreeOrderingGeometry;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    for (const bool empty_sibling : {false, true}) {
+        CAPTURE(empty_sibling);
+        ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+        root.append_child(std::make_unique<ExtrusionEntity>(false,
+            ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}})));
+        root.child(0).set_can_rotate(false);
+        if (empty_sibling)
+            root.append_child(std::make_unique<ExtrusionEntity>(false));
+        const ExtrusionEntity *contour = &root.child(0);
+        slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&root));
+        Geometry::rotate_loop_to_legal_seam(handle, view, c_point{5000, 0}, true);
+        CHECK(root.ExtrusionEntity::first_point() == Point(0, 0));
+        CHECK(root.child_count() == (empty_sibling ? 2 : 1));
+        CHECK(&root.child(0) == contour);
+        CHECK(root.child(0).polyline_ref().size() == 4);
+        CHECK_FALSE(contour->can_rotate());
+        CHECK(root.can_rotate());
     }
 }

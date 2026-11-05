@@ -47,6 +47,25 @@ void rotate_loop_to_seam(storage_handle *scratch_storage,
                          c_point seam,
                          const plugin_run_context *run_ctx = nullptr);
 
+/* Validate the original provider point, then return a materializable cyclic
+   entry. Ancestor permission is explicit and never inferred from legacy types.
+   Borrow the tree read-only; reject off-contour and forbidden requests by throwing. */
+c_point legal_seam_point(const ExtrusionEntity &loop,
+                         c_point requested,
+                         bool ancestors_allow_seams,
+                         const plugin_run_context *run_ctx = nullptr);
+
+/* Recompute and materialize the legal description immediately before mutation;
+   retain rotation permission for further geometry passes. Scratch storage owns
+   temporary split paths; existing suffix/child handles survive success. The
+   caller excludes concurrent edits. Invalid requests throw before mutation;
+   cancellation and later allocation failures propagate without rollback. */
+void rotate_loop_to_legal_seam(storage_handle *scratch_storage,
+                              MutableExtrusionEntity loop,
+                              c_point requested,
+                              bool ancestors_allow_seams,
+                              const plugin_run_context *run_ctx = nullptr);
+
 /* Remove sorting and reversal permissions from an entity and all descendants. */
 void disable_ordering_flags_recursively(
     MutableExtrusionEntity entity,

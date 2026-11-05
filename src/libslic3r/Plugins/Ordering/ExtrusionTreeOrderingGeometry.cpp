@@ -14,6 +14,7 @@
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 
 namespace slic3r_api { namespace Ordering { namespace TreeOrderingGeometry {
 namespace {
@@ -54,6 +55,11 @@ Representative direct calls:
         |-- projected_point_on_entity() [find the nearest line/arc position]
         |-- rotate_local_loop_to_seam() [rotate a single stored polyline]
         `-- compare child endpoints with split_at's epsilon before splitting
+
+    legal_seam_point() / rotate_loop_to_legal_seam()
+        |-- legal_seam_entry() [validate the request and preview exact split output]
+        `-- follow delegation, then rotate local geometry or direct children
+            `-- split a direct leaf only when no event would be duplicated
 
 Scratch storage owns temporary paths; input trees remain borrowed during each
 call. Cancellation and invalid loop geometry propagate to the ordering provider.
@@ -231,6 +237,80 @@ bool atomic_strand(const ExtrusionEntity &entity)
 {
     const BridgeAtomicStrand *property=entity.get(BridgeAtomicStrand::key);
     return property!=nullptr && property->atomic_orientation!=0;
+}
+
+c_point legal_seam_point(const ExtrusionEntity &loop,
+                         const c_point requested,
+                         const bool ancestors_allow_seams,
+                         const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    if (!loop.valid())
+        throw std::invalid_argument("Seam planning needs a valid extrusion tree.");
+    const Slic3r::ExtrusionEntity *core = reinterpret_cast<const Slic3r::ExtrusionEntity *>(loop.handle());
+    const std::optional<Slic3r::ExtrusionSeamPlan> plan =
+        Slic3r::legal_seam_entry(*core, Slic3r::Point(requested.x, requested.y), ancestors_allow_seams);
+    if (!plan)
+        throw std::runtime_error("The seam request is outside the contour or its rotation permissions.");
+    throw_if_cancelled(run_ctx);
+    return {plan->point.x(), plan->point.y()};
+}
+
+void rotate_loop_to_legal_seam(storage_handle *scratch_storage,
+                              MutableExtrusionEntity loop,
+                              const c_point requested,
+                              const bool ancestors_allow_seams,
+                              const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    if (!loop.valid())
+        throw std::invalid_argument("Seam materialization needs a valid extrusion tree.");
+    const Slic3r::ExtrusionEntity *core = reinterpret_cast<const Slic3r::ExtrusionEntity *>(loop.handle());
+    const std::optional<Slic3r::ExtrusionSeamPlan> plan =
+        Slic3r::legal_seam_entry(*core, Slic3r::Point(requested.x, requested.y), ancestors_allow_seams);
+    if (!plan)
+        throw std::runtime_error("The seam request is outside the contour or its rotation permissions.");
+
+    MutableExtrusionEntity target = loop;
+    for (const size_t index : plan->delegation) {
+        throw_if_cancelled(run_ctx);
+        target = target.child_mutable(uint32_t(index));
+    }
+    const c_point seam{plan->point.x(), plan->point.y()};
+    const c_point split_point{plan->split_point.x(), plan->split_point.y()};
+    using Operation = Slic3r::ExtrusionSeamPlan::Operation;
+    if (plan->operation == Operation::RotateLocal) {
+        rotate_local_loop_to_seam(scratch_storage, target, split_point, run_ctx);
+    } else if (plan->operation != Operation::KeepStart) {
+        std::unique_ptr<StoredExtrusionEntity> closing_piece;
+        if (plan->operation == Operation::SplitChild) {
+            throw_if_cancelled(run_ctx);
+            MutableExtrusionEntity child = target.child_mutable(uint32_t(plan->child_index));
+            const Slic3r::ExtrusionEntity *child_core = reinterpret_cast<const Slic3r::ExtrusionEntity *>(child.handle());
+            if (Slic3r::has_one_shot_extrusion_event(*child_core))
+                throw std::runtime_error("A seam split must not duplicate a one-shot extrusion event.");
+            StoredExtrusionEntity before(scratch_storage, child.readonly());
+            StoredExtrusionEntity after(scratch_storage, child.readonly());
+            if (extrusion_polyline_split_at_point(child.handle(), split_point, before.mutable_handle(), after.mutable_handle()) == 0 ||
+                before.point_count() < 2 || after.point_count() < 2 ||
+                !points_equal(before.local_back(), seam) || !points_equal(after.local_front(), seam))
+                throw std::runtime_error("The seam split did not materialize the planned entry.");
+            throw_if_cancelled(run_ctx);
+            if (extrusion_move_from(child.mutable_handle(), after.mutable_handle()) == 0)
+                throw std::runtime_error("The seam suffix could not retain the source handle.");
+            closing_piece.reset(new StoredExtrusionEntity(std::move(before)));
+        }
+        for (size_t index = 0; index < plan->child_index; ++index) {
+            throw_if_cancelled(run_ctx);
+            if (target.move_child_from(target.child_count(), target, 0) == EXTRUSION_INDEX_INVALID)
+                throw std::runtime_error("The extrusion loop rejected its planned child rotation.");
+        }
+        throw_if_cancelled(run_ctx);
+        if (closing_piece && target.append_child_move(closing_piece->mutable_view()) == EXTRUSION_INDEX_INVALID)
+            throw std::runtime_error("The extrusion loop rejected its planned closing fragment.");
+    }
+    if (!points_equal(loop.front(), seam))
+        throw std::runtime_error("The extrusion loop entry differs from its legal seam plan.");
 }
 
 void reverse_tree(MutableExtrusionEntity entity, const plugin_run_context *run_ctx)

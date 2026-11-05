@@ -22,6 +22,10 @@ with the content; ordered command boundaries forbid rotation of their wrapper.
 
 Canonical-copy tests compare stored geometry and properties recursively, without
 requiring the virtual behavior of legacy path and collection views.
+Seam plans are inspected before any materialization: local paths, nested sole
+contours, open atomic composites and event barriers must offer only legal entries
+without editing geometry, endpoint Z, identities or permissions. Native split
+previews distinguish the rounded input from the exact point they will publish.
 */
 
 #include <catch2/catch.hpp>
@@ -40,6 +44,7 @@ requiring the virtual behavior of legacy path and collection views.
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityOrdering.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 
 namespace {
@@ -271,6 +276,227 @@ TEST_CASE("Seam barriers distinguish geometry from empty property events",
     root.set_can_rotate(false);
     CHECK(can_choose_child_seam(view, view.child(0), true));
     CHECK_FALSE(is_seam_unit(view));
+}
+
+// Planning validates the original request before legalizing it, and never consumes any permission.
+TEST_CASE("Legal seam plans validate local geometry and keep exact membership separate",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    using Operation = ExtrusionSeamPlan::Operation;
+    ExtrusionEntity loop(false, ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}}));
+    const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(loop, Point(5000, 0), true);
+    REQUIRE(plan);
+    CHECK(plan->point == Point(5000, 0));
+    CHECK(plan->operation == Operation::RotateLocal);
+    CHECK(plan->delegation.empty());
+    CHECK(is_directly_legal_seam(loop, Point(5000, 0), true));
+    const std::optional<ExtrusionSeamPlan> near = legal_seam_entry(loop, Point(1, 0), true);
+    REQUIRE(near);
+    CHECK(near->point == Point(0, 0));
+    CHECK(near->operation == Operation::KeepStart);
+    CHECK_FALSE(is_directly_legal_seam(loop, Point(1, 0), true));
+    CHECK_FALSE(legal_seam_entry(loop, Point(5000, -2 * SCALED_EPSILON), true));
+    CHECK_FALSE(legal_seam_entry(loop, Point(5000, 0), false));
+    CHECK(loop.can_rotate());
+    CHECK(loop.polyline_ref().front() == Point(0, 0));
+    CHECK(loop.polyline_ref().size() == 4);
+    loop.set_can_rotate(false);
+    CHECK_FALSE(legal_seam_entry(loop, Point(5000, 0), true));
+    ExtrusionLoop empty;
+    CHECK_FALSE(legal_seam_entry(empty, Point(0, 0), true));
+    ExtrusionEntity positioned(false, ArcPolyline(Points{{123, 456}}));
+    const std::optional<ExtrusionSeamPlan> stationary = legal_seam_entry(positioned, Point(123, 456), true);
+    REQUIRE(stationary);
+    CHECK(stationary->operation == Operation::KeepStart);
+}
+
+// A single closed child can carry the parent's seam without moving property-only siblings or adding fragments.
+TEST_CASE("Legal seam plans delegate only to the sole eligible contour",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    using Operation = ExtrusionSeamPlan::Operation;
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false));
+    root.child(0).add_property(ExtrusionPropertySpeed(25.f));
+    std::unique_ptr<ExtrusionEntity> nested = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    nested->append_child(std::make_unique<ExtrusionEntity>(false,
+        ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}})));
+    root.append_child(std::move(nested));
+    const ExtrusionEntity *event = &root.child(0);
+    const ExtrusionEntity *contour = &root.child(1).child(0);
+    for (const Point requested : {Point(5000, 0), Point(10000, 5000)}) {
+        const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(root, requested, true);
+        REQUIRE(plan);
+        CHECK(plan->point == requested);
+        CHECK(plan->operation == Operation::RotateLocal);
+        CHECK(plan->delegation == (std::vector<size_t>{1, 0}));
+        CHECK(root.child_count() == 2);
+        CHECK(root.child(1).child_count() == 1);
+        CHECK(&root.child(0) == event);
+        CHECK(&root.child(1).child(0) == contour);
+        CHECK(contour->can_rotate());
+    }
+    ExtrusionEntityUPtr copy = root.clone_canonical();
+    const std::optional<ExtrusionSeamPlan> copied = legal_seam_entry(*copy, Point(5000, 0), true);
+    REQUIRE(copied);
+    CHECK(copied->delegation == (std::vector<size_t>{1, 0}));
+    root.child(1).set_can_rotate(false);
+    const std::optional<ExtrusionSeamPlan> protected_child = legal_seam_entry(root, Point(5000, 0), true);
+    REQUIRE(protected_child);
+    CHECK(protected_child->point == Point(0, 0));
+    CHECK(protected_child->operation == Operation::KeepStart);
+    CHECK(protected_child->delegation.empty());
+}
+
+// An interior seam of an open composite is not an interior seam of the parent's cycle.
+TEST_CASE("Legal seam plans keep open composite children atomic",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    using Operation = ExtrusionSeamPlan::Operation;
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}})));
+    std::unique_ptr<ExtrusionEntity> open = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    open->set_can_rotate(false);
+    open->append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{10000, 0}, {10000, 10000}})));
+    open->append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{10000, 10000}, {0, 10000}})));
+    root.append_child(std::move(open));
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 10000}, {0, 0}})));
+    REQUIRE(is_seam_unit(root));
+    const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(root, Point(10000, 5000), true);
+    REQUIRE(plan);
+    CHECK(plan->point == Point(10000, 0));
+    CHECK(plan->operation == Operation::RotateChildren);
+    CHECK(plan->child_index == 1);
+    CHECK(plan->delegation.empty());
+    CHECK_FALSE(is_directly_legal_seam(root, Point(10000, 5000), true));
+    CHECK(is_directly_legal_seam(root, Point(10000, 0), true));
+    const std::optional<ExtrusionSeamPlan> split = legal_seam_entry(root, Point(0, 5000), true);
+    REQUIRE(split);
+    CHECK(split->point == Point(0, 5000));
+    CHECK(split->operation == Operation::SplitChild);
+    CHECK(split->child_index == 2);
+    CHECK(root.child(1).child(0).polyline_ref().front() == Point(10000, 0));
+    CHECK(root.child(1).child(1).polyline_ref().front() == Point(10000, 10000));
+    CHECK_FALSE(legal_seam_entry(root, Point(50000, 50000), true));
+}
+
+// With a barrier no direct child may move, but off-contour requests must still be rejected.
+TEST_CASE("Legal seam plans preserve barriers without accepting arbitrary provider points",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    using Operation = ExtrusionSeamPlan::Operation;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}})));
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{10000, 0}, {0, 0}})));
+    root.child(0).add_property(ExtrusionPropertySpeed(25.f));
+    const std::optional<ExtrusionSeamPlan> free = legal_seam_entry(root, Point(5000, 0), true);
+    REQUIRE(free);
+    CHECK(free->operation == Operation::SplitChild);
+    // Equal-distance forward/back segments select the first stored direct child.
+    CHECK(free->child_index == 0);
+    REQUIRE(Access::get_or_add_property_data_mutable(root.child(0), EXTRUSION_PROPERTY_TYPE_HEATER,
+        sizeof(c_extrusion_property_heater), alignof(c_extrusion_property_heater)) != nullptr);
+    const std::optional<ExtrusionSeamPlan> blocked = legal_seam_entry(root, Point(5000, 0), true);
+    REQUIRE(blocked);
+    CHECK(blocked->operation == Operation::KeepStart);
+    CHECK(blocked->point == Point(0, 0));
+    CHECK_FALSE(legal_seam_entry(root, Point(5000, 5000), true));
+    CHECK_FALSE(is_directly_legal_seam(root, Point(5000, 0), true));
+    CHECK(is_directly_legal_seam(root, Point(0, 0), true));
+    CHECK(root.child_count() == 2);
+    CHECK(Access::has_property(root.child(0), EXTRUSION_PROPERTY_TYPE_HEATER));
+}
+
+// Projection uses native arcs and never linearizes or rewrites endpoint Z offsets.
+TEST_CASE("Legal seam planning keeps arc and Z geometry immutable",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    using Operation = ExtrusionSeamPlan::Operation;
+    ArcPolyline path;
+    path.append(Point(10001, 1));
+    path.append(Geometry::ArcWelder::Segment(Point(1, 10001), 10000.f, Geometry::ArcWelder::Orientation::CCW));
+    path.append(Point(1, 1));
+    path.append(Point(10001, 1));
+    path.set_z_offset(0, 100);
+    path.set_z_offset(1, 900);
+    path.set_z_offset(2, 600);
+    path.set_z_offset(3, 100);
+    ExtrusionEntity loop(false, path);
+    const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(loop, Point(7072, 7072), true);
+    REQUIRE(plan);
+    CHECK(plan->operation == Operation::RotateLocal);
+    CHECK(plan->point == Point(7072, 7072));
+    CHECK(loop.polyline_ref().size() == 4);
+    CHECK(loop.polyline_ref().get_arc(1).radius == 10000.f);
+    CHECK(loop.polyline_ref().get_arc(1).orientation == Geometry::ArcWelder::Orientation::CCW);
+    for (size_t index = 0; index < path.size(); ++index) {
+        CHECK(loop.polyline_ref().get_point(index) == path.get_point(index));
+        CHECK(loop.polyline_ref().z_offset(index) == path.z_offset(index));
+    }
+}
+
+TEST_CASE("Seam descriptions announce the native split output rather than its rounded input",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    const ArcPolyline path(Points{{0, 0}, {10000, 20100}, {0, 20100}, {0, 0}});
+    ExtrusionEntity local(false, path);
+    const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(local, Point(141, 64), true);
+    REQUIRE(plan);
+    REQUIRE(plan->operation == ExtrusionSeamPlan::Operation::RotateLocal);
+    CHECK(plan->split_point == Point(53, 108));
+    CHECK(plan->point == Point(54, 108));
+    ArcPolyline before;
+    ArcPolyline after;
+    Point input = plan->split_point;
+    path.split_at(input, before, after);
+    REQUIRE(before.size() >= 2);
+    REQUIRE(after.size() >= 2);
+    CHECK(before.back() == plan->point);
+    CHECK(after.front() == plan->point);
+    CHECK(local.polyline_ref().front() == Point(0, 0));
+
+    ExtrusionEntity composed(ExtrusionEntity::Children(), false, false, true);
+    composed.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 20100}})));
+    composed.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{10000, 20100}, {0, 20100}, {0, 0}})));
+    const std::optional<ExtrusionSeamPlan> direct = legal_seam_entry(composed, Point(141, 64), true);
+    REQUIRE(direct);
+    CHECK(direct->operation == ExtrusionSeamPlan::Operation::SplitChild);
+    CHECK(direct->child_index == 0);
+    CHECK(direct->point == plan->point);
+    CHECK(direct->split_point == plan->split_point);
+}
+
+TEST_CASE("Seam planning never splits a protected closed local child",
+          "[plugins][extrusion][seam-domain-preparation]")
+{
+    using namespace Slic3r;
+    for (const bool empty_sibling : {false, true}) {
+        CAPTURE(empty_sibling);
+        ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+        std::unique_ptr<ExtrusionEntity> contour = std::make_unique<ExtrusionEntity>(false,
+            ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}}));
+        contour->set_can_rotate(false);
+        root.append_child(std::move(contour));
+        if (empty_sibling)
+            root.append_child(std::make_unique<ExtrusionEntity>(false));
+        ExtrusionEntityUPtr copy = root.clone_canonical();
+        for (const ExtrusionEntity *view : {&root, copy.get()}) {
+            const std::optional<ExtrusionSeamPlan> plan = legal_seam_entry(*view, Point(5000, 0), true);
+            REQUIRE(plan);
+            CHECK(plan->operation == ExtrusionSeamPlan::Operation::KeepStart);
+            CHECK(plan->point == Point(0, 0));
+            CHECK(plan->delegation.empty());
+            CHECK_FALSE(view->child(0).can_rotate());
+            CHECK(view->child(0).polyline_ref().size() == 4);
+        }
+    }
 }
 
 // Copy mixed native and hybrid trees once without changing their source handles or legacy clone behavior.
