@@ -268,10 +268,15 @@ SLIC3R_HOST_API const orchestrator_plugin_handle *orchestrator_find_plugin(
 /*
 Select the active provider from one exclusive group on a step.
 
-When several providers are active, config selects the provider through the
-group's generated enum option. A missing config or selector uses the first
-provider in normal priority order. Returns NULL when the group has no active
-provider or any argument is invalid.
+Only active members of the requested group are candidates. A sole active member
+is returned without reading the stored choice unless the group's selector reads
+that choice even with one active member. When reading a choice, config uses the
+whole-step selector when present, otherwise the group's own option.
+The returned handle stays host-owned. No configuration is changed.
+A missing config uses the group-priority default. An unknown or empty stored
+choice uses the group-priority default, or NULL for a strict selector.
+Returns NULL for an empty group,
+invalid host, step or group, or a strict selector without a matching member.
 */
 SLIC3R_HOST_API const orchestrator_plugin_handle *orchestrator_select_plugin(
     orchestrator_handle *orchestrator,

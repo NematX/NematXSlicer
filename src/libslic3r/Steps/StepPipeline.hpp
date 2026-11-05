@@ -145,9 +145,9 @@ Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
                                            slicing_step_t step,
                                            const ConfigBase *config);
 
-// Select one active provider from a specific plugin-defined exclusive group.
-// This is the service-plugin counterpart of selecting a complete built-in
-// step: unrelated groups registered on the same numeric step are ignored.
+// Select only among active providers in the requested group; return a sole member without reading the stored choice
+// unless the group's selector reads that choice even with one active member.
+// With several members, read the whole-step selector when present, otherwise the group's own option.
 Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
                                           slicing_step_t step,
                                           const std::string &exclusive_group,

@@ -100,7 +100,8 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 // Resolve borrowed active providers/settings through whole-step identities or named-group descriptions, including singleton groups.
 // Returned pointers stay host-owned, settings/print data are unchanged, and allocation failures propagate.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator, slicing_step_t step, const ConfigBase *config);
-// Resolve one enabled member of the borrowed named group through retained descriptions and configuration; absent groups return null.
+// Resolve only active members of the requested group; absent groups return null and a sole member is returned directly.
+// With several members, read the stored choice from the whole-step selector when present, otherwise the group's own option.
 // Providers stay host-owned, settings are unchanged, and allocation failures propagate.
 Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator, slicing_step_t step, const std::string &exclusive_group, const ConfigBase *config);
 // Resolve by serialized enum id because activation can reorder entries; group, configuration and candidates stay borrowed and unchanged.
@@ -850,8 +851,11 @@ Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
     if (group_plugins.empty())
         return nullptr;
 
-    StepExclusiveGroup group = make_plugin_exclusive_group(
-        orchestrator, step, exclusive_group, *group_plugins.front());
+    const std::map<slicing_step_t, StepExclusiveIdentity> &exclusive_steps = get_exclusive_steps();
+    const std::map<slicing_step_t, StepExclusiveIdentity>::const_iterator exclusive_it = exclusive_steps.find(step);
+    StepExclusiveGroup group = exclusive_it != exclusive_steps.end() ?
+        make_exclusive_step_group(orchestrator, step, exclusive_it->second) :
+        make_plugin_exclusive_group(orchestrator, step, exclusive_group, *group_plugins.front());
     group.refresh_storage_pointers();
     return selected_plugin_from_group(orchestrator, group, group_plugins, config);
 }

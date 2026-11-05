@@ -1814,7 +1814,7 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
     }
 }
 
-// Validate an applied model with an explicit built-in firmware selection, and
+// Validate an applied model with a non-default built-in firmware selection, and
 // audit that the SEMM definition targets its exclusive group, not a numeric step.
 TEST_CASE("Print validation accepts active SEMM with a supporting built-in firmware",
           "[plugins][config][gcode][setting-support][integration]")
@@ -1826,14 +1826,14 @@ TEST_CASE("Print validation accepts active SEMM with a supporting built-in firmw
     CHECK(definition->required_plugin_group == "gcode_firmware_plugin");
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("single_extruder_multi_material", "1");
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.klipper");
     Model model;
     Print print;
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
     const Plugin *selected = Steps::selected_active_plugin_from_group(
         Orchestrator::instance(), GCODE_FIRMWARE, "gcode_firmware_plugin", &print.full_print_config());
     REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "gcode.firmware.marlin2");
+    CHECK(selected->get_id() == "gcode.firmware.klipper");
     const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
     INFO(validation.second);
     CHECK(validation.first == PrintBase::PrintValidationError::pveNone);

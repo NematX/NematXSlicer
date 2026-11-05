@@ -1088,6 +1088,55 @@ TEST_CASE("Thumbnail selector traits keep encoder settings independent and read 
     CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr) == first);
 }
 
+// Resolve a stored non-default firmware through the C++ group, C ABI and whole-step paths without changing activations.
+TEST_CASE("Firmware group selection reads the stored whole-step selector",
+          "[plugins][step-pipeline][selector-traits][gcode][firmware-selection]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const Plugin *firmware = host.get_plugin("gcode.firmware.klipper");
+    REQUIRE(firmware != nullptr);
+    REQUIRE(host.is_plugin_active(firmware));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("gcode_firmware_plugin", firmware->get_id());
+    check_selection(host, GCODE_FIRMWARE, "gcode_firmware_plugin", &config, firmware);
+}
+
+// Restrict whole-step choices to a named group's two probes, restoring perimeter activations even when assertions fail.
+TEST_CASE("Named groups on whole-step selectors read the stored choice within their members",
+          "[plugins][step-pipeline][selector-traits][gcode][firmware-selection]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const char *group = "test.perimeter.selector.named";
+    static SingletonSelectorProbe first(handle, STEP_PERIMETER, "test.perimeter.selector.named.first",
+                                        "test.perimeter.selector.named", 0);
+    static SingletonSelectorProbe second(handle, STEP_PERIMETER, "test.perimeter.selector.named.second",
+                                         "test.perimeter.selector.named", 10);
+    for (SingletonSelectorProbe *probe : {&first, &second}) {
+        if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+        REQUIRE(host.set_plugin_active(probe->id(), false));
+    }
+    ThumbnailActivationGuard guard(host, STEP_PERIMETER);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == STEP_PERIMETER)
+            REQUIRE(host.set_plugin_active(plugin, plugin->get_exclusive_group() == group));
+    const std::vector<Plugin *> members = host.get_active_plugins_for_step(STEP_PERIMETER);
+    REQUIRE(members.size() == 2);
+    REQUIRE(Steps::default_provider_from_group(members) == host.get_plugin(first.id()));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("step_perimeter_plugin", new ConfigOptionString(second.id()));
+    const ConfigBase *base_config = &config;
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_PERIMETER, group, &config) == host.get_plugin(second.id()));
+    CHECK(orchestrator_select_plugin(handle, reinterpret_cast<const config_handle *>(base_config), STEP_PERIMETER, group) ==
+          reinterpret_cast<const orchestrator_plugin_handle *>(host.get_plugin(second.id())));
+    config.set_key_value("step_perimeter_plugin", new ConfigOptionString("perimeter.outside.named.group"));
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_PERIMETER, group, &config) == host.get_plugin(first.id()));
+    CHECK(orchestrator_select_plugin(handle, reinterpret_cast<const config_handle *>(base_config), STEP_PERIMETER, group) ==
+          reinterpret_cast<const orchestrator_plugin_handle *>(host.get_plugin(first.id())));
+}
+
 // Read the exact host declaration and construct local metadata without registering options or changing activations.
 // The neutral group on the same service proves that scope, placement and invalidation are group-specific.
 TEST_CASE("Regional seam selector traits are declared by the ordering module",
