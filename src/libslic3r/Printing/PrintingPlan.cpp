@@ -450,10 +450,15 @@ ExtrusionEntity &PrintingScopeEvents::append_after(ExtrusionEntity &&event)
 
 void PrintingScopeEvents::clear()
 {
-    // Clearing content preserves the private roots and their immutable
-    // non-sortable/non-reversible flags for the next step execution.
-    m_before.clear_content();
-    m_after.clear_content();
+    // Retain the fixed sequence representation and the borrowed root identities,
+    // ids and direct properties. A monostate would let the next append recreate
+    // a sortable collection through ensure_children(). Also restore the empty
+    // sequence representation when clearing a valid moved-from scope.
+    for (ExtrusionEntity *root : {&m_before, &m_after}) {
+        root->children().clear();
+        root->set_can_sort_reverse(false, false);
+        root->set_can_rotate(false);
+    }
 }
 
 std::unique_ptr<PrintingPlan> PrintingPlan::clone() const

@@ -38,7 +38,8 @@ struct PrintingPlanIdentity
 /*
 Ordered events executed around the contents of one PrintingPlan scope.
 
-The two roots always exist and remain non-sortable and non-reversible. Callers
+The two roots always exist and remain non-sortable, non-reversible and
+non-rotatable, including after clear and subsequent appends. Callers
 may append complete event trees, but they cannot replace the roots themselves.
 This keeps event ordering stable while allowing every plan, group, layer group,
 and tool group to expose the same before/after contract.
@@ -62,7 +63,8 @@ public:
     ExtrusionEntity &append_after(const ExtrusionEntity &event);
     ExtrusionEntity &append_after(ExtrusionEntity &&event);
 
-    // Rebuilds keep the two fixed sequence roots and remove only their events.
+    // Rebuilds keep the two fixed Children roots, identity and direct properties,
+    // remove only event children and preserve all three disabled permissions.
     void clear();
 
 private:

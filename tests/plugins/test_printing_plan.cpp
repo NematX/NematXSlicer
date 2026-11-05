@@ -1309,6 +1309,112 @@ TEST_CASE("PrintingPlan scopes expose fixed ordered event roots", "[printing][pl
     CHECK(extrusion_flags(printing_scope_events_get_before(printing_plan_get_events(plan_handle))) == 0);
 }
 
+TEST_CASE("Event roots remain fixed across repeated clear append and cloned scope cycles",
+          "[plugins][printing][plan][events][scope-cycle]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups.front().layers.emplace_back();
+    plan.groups.front().layers.front().tool_groups.emplace_back();
+    PrintingScopeEvents *scopes[] = {
+        &plan.events, &plan.groups.front().events,
+        &plan.groups.front().layers.front().events,
+        &plan.groups.front().layers.front().tool_groups.front().events
+    };
+    std::vector<const ExtrusionEntity *> roots;
+    std::vector<size_t> ids;
+    for (PrintingScopeEvents *scope : scopes) {
+        for (const ExtrusionEntity *root : {&scope->before(), &scope->after()}) {
+            roots.push_back(root);
+            ids.push_back(root->get_id());
+            // These owned roots are exposed as const; seed existing direct
+            // state only to prove clear does not erase unrelated properties.
+            const_cast<ExtrusionEntity *>(root)->add_property(ExtrusionPropertySpeed(17.f));
+        }
+    }
+    const auto fixed = [](const ExtrusionEntity &root, size_t count) {
+        CHECK_FALSE(root.is_leaf());
+        CHECK(root.child_count() == count);
+        CHECK_FALSE(root.can_sort());
+        CHECK_FALSE(root.can_reverse());
+        CHECK_FALSE(root.can_rotate());
+    };
+    const auto check_event = [](const ExtrusionEntity &event) {
+        const ExtrusionPropertyCustomGcode *property = event.get_property<ExtrusionPropertyCustomGcode>();
+        REQUIRE(property != nullptr);
+        CHECK(event.custom_gcode_string(*property) == "M117 scope cycle");
+    };
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        CAPTURE(cycle);
+        Steps::StepExtrusionEdition::clear(print);
+        Steps::StepExtrusionEdition::clear(print);
+        size_t root_index = 0;
+        for (PrintingScopeEvents *scope : scopes) {
+            for (const ExtrusionEntity *root : {&scope->before(), &scope->after()}) {
+                CHECK(root == roots.at(root_index));
+                CHECK(root->get_id() == ids.at(root_index++));
+                fixed(*root, 0);
+                REQUIRE(root->get_property<ExtrusionPropertySpeed>() != nullptr);
+                CHECK(root->get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 17.f);
+            }
+            ExtrusionEntity event(false);
+            event.add_property(ExtrusionPropertyCustomGcodeText("M117 scope cycle"));
+            scope->append_before(static_cast<const ExtrusionEntity &>(event));
+            ExtrusionEntity moved_before(event);
+            scope->append_before(std::move(moved_before));
+            CHECK_FALSE(moved_before.has_properties());
+            printing_scope_events_handle *handle = reinterpret_cast<printing_scope_events_handle *>(scope);
+            REQUIRE(printing_scope_events_append_after_clone(handle,
+                reinterpret_cast<const extrusion_entity_handle *>(&event)) != nullptr);
+            ExtrusionEntity moved_after(event);
+            REQUIRE(printing_scope_events_append_after_move(handle,
+                reinterpret_cast<extrusion_entity_handle *>(&moved_after)) != nullptr);
+            CHECK_FALSE(moved_after.has_properties());
+            check_event(event); // Clone append did not consume its source.
+            for (const ExtrusionEntity *root : {&scope->before(), &scope->after()}) {
+                fixed(*root, 2);
+                check_event(root->child(0));
+                check_event(root->child(1));
+            }
+        }
+        std::unique_ptr<PrintingPlan> copy = plan.clone();
+        REQUIRE(copy->groups.size() == 1);
+        REQUIRE(copy->groups.front().layers.size() == 1);
+        REQUIRE(copy->groups.front().layers.front().tool_groups.size() == 1);
+        PrintingScopeEvents *copied[] = {
+            &copy->events, &copy->groups.front().events,
+            &copy->groups.front().layers.front().events,
+            &copy->groups.front().layers.front().tool_groups.front().events
+        };
+        for (size_t index = 0; index < 4; ++index) {
+            PrintingScopeEvents &scope = *copied[index];
+            const ExtrusionEntity *before = &scope.before();
+            const ExtrusionEntity *after = &scope.after();
+            fixed(*before, 2);
+            fixed(*after, 2);
+            CHECK(&before->child(0) != &scopes[index]->before().child(0));
+            check_event(before->child(0));
+            check_event(after->child(1));
+            scope.clear();
+            scope.clear();
+            fixed(scope.before(), 0);
+            fixed(scope.after(), 0);
+            ExtrusionEntity next(false);
+            next.add_property(ExtrusionPropertyCustomGcodeText("M117 scope cycle"));
+            scope.append_before(static_cast<const ExtrusionEntity &>(next));
+            scope.append_after(std::move(next));
+            CHECK(&scope.before() == before);
+            CHECK(&scope.after() == after);
+            fixed(scope.before(), 1);
+            fixed(scope.after(), 1);
+            fixed(scopes[index]->before(), 2); // Clearing the clone is independent.
+            fixed(scopes[index]->after(), 2);
+        }
+    }
+}
+
 TEST_CASE("PrintingPlan deep clone owns independent trees, events and properties",
           "[plugins][printing][plan][clone]")
 {
@@ -1524,6 +1630,14 @@ TEST_CASE("STEP_EXTRUSION_EDIT rebuilds scope events in plugin priority order",
     CHECK(g_first_plan_event_editor.run_count.load() == 2);
     CHECK(g_second_plan_event_editor.run_count.load() == 2);
     CHECK(plan.events.before().child_count() == 2);
+    CHECK_FALSE(plan.events.before().is_leaf());
+    CHECK_FALSE(plan.events.after().is_leaf());
+    CHECK_FALSE(plan.events.before().can_sort());
+    CHECK_FALSE(plan.events.before().can_reverse());
+    CHECK_FALSE(plan.events.before().can_rotate());
+    CHECK_FALSE(plan.events.after().can_sort());
+    CHECK_FALSE(plan.events.after().can_reverse());
+    CHECK_FALSE(plan.events.after().can_rotate());
 }
 
 // The real default builder clones the source support bucket and translates its
