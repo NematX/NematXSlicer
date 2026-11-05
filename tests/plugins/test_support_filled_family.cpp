@@ -1,13 +1,16 @@
+#include <sstream>
+
 #include "polygon_metrics_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
+#include "gcode_test_helpers.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Plugins/Support/Filled/FilledSupportGenerator.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
-/* Filled-family tests inspect temporary slabs and the published auxiliary layers before toolpaths.
+/* Filled-family tests inspect temporary slabs, published auxiliary layers, extrusion shapes and complete G-code.
    The production slicing prefix supplies final island demand; local helpers copy polygons for area comparisons.
-   Tests cover downward projection, contact splitting, object-layer Z, foot expansion and visible refusal. */
+   Tests cover downward projection, contact splitting, object-layer Z, foot expansion, refusal and empty inputs. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -23,6 +26,11 @@ double area_mm2(const Polygons &polygons);
 TriangleMesh two_roofs();
 // Copy the first nonempty demand union and return its layer index, or size_t(-1) with empty demand.
 size_t demand_layer(const PrintObject &object, ExPolygons &demand);
+
+// Millimetre lengths distinguish closed contact rings from open lines and measure the dominant line direction.
+struct PathShape { double closed = 0., open = 0., along[2] = {0., 0.}; };
+// Accumulate borrowed extrusion geometry recursively; loop membership follows parents and no paths are modified.
+void measure_shape(const ExtrusionEntity &entity, bool in_loop, PathShape &shape);
 
 struct Generated {
     PluginStorage storage;
@@ -83,6 +91,22 @@ size_t demand_layer(const PrintObject &object, ExPolygons &demand)
         }
     }
     return size_t(-1);
+}
+
+void measure_shape(const ExtrusionEntity &entity, bool in_loop, PathShape &shape)
+{
+    if (entity.has_polyline()) {
+        const ArcPolyline &line = entity.polyline_ref();
+        const bool closed = in_loop || (line.size() > 2 && line.front() == line.back());
+        (closed ? shape.closed : shape.open) += unscaled(line.length());
+        for (size_t index = 1; index < line.size(); ++index) {
+            const Point delta = line.get_point(index) - line.get_point(index - 1);
+            shape.along[0] += unscaled(double(std::abs(delta.x())));
+            shape.along[1] += unscaled(double(std::abs(delta.y())));
+        }
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        measure_shape(*child, in_loop || entity.is_loop(), shape);
 }
 }
 
@@ -517,4 +541,213 @@ TEST_CASE("Filled support keeps the common zero-interface behavior", "[plugins][
     CHECK(sparse == same_tool);
     CHECK(contact == !same_tool);
     REQUIRE_NOTHROW(SG::toolpaths(print));
+}
+
+// Complete processing must export interface paths and, with an expanded foot, base-support paths as well.
+TEST_CASE("Filled print exports support interface extrusions", "[plugins][support-filled][gcode]")
+{
+    const char *expansion = GENERATE("0", "3");
+    DynamicPrintConfig config = filled_config(expansion);
+    config.set_deserialize_strict({{"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"filament_diameter", "1.75,1.75"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    const boost::filesystem::path path = boost::filesystem::current_path() /
+        boost::filesystem::unique_path("filled-export-%%%%-%%%%.gcode");
+    std::string code;
+    try {
+        if (std::string(expansion) == "0") {
+            SG::prefix(print);
+            const Generated generated(print, print.object(0));
+            Polygons foot;
+            for (const Common::GeneratorLayer *slab : generated.support.base)
+                append(foot, SG::native(slab->polygons));
+            CHECK(area_mm2(foot) < 1e-4);
+        }
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Test::GCode::read_text_file(path);
+    } catch (...) {
+        Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Test::GCode::remove_output_pair(path);
+    REQUIRE(code.find(";TYPE:Support material interface") != std::string::npos);
+    if (std::string(expansion) == "3") {
+        std::istringstream lines(code);
+        std::string line;
+        bool base = false;
+        while (std::getline(lines, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            base = base || line == ";TYPE:Support material";
+        }
+        CHECK(base);
+    }
+}
+
+// Empty demand and first-layer-only demand have no support below them, including direct generation with null context.
+TEST_CASE("Filled support ignores empty and single-layer demand", "[plugins][support-filled]")
+{
+    const bool single_layer = GENERATE(false, true);
+    Print print;
+    Model model;
+    Test::init_print({make_cube(4., 8., single_layer ? 0.2 : 5.)}, print, model, filled_config());
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    if (single_layer) {
+        REQUIRE(object.layer_count() == 1);
+        REQUIRE(object.layer(0).islands().size() == 1);
+        PluginStorage storage;
+        run_ctx_support_demand payload{reinterpret_cast<const print_handle *>(&print),
+                                       reinterpret_cast<const object_handle *>(&object)};
+        plugin_run_context context = {};
+        context.step = STEP_SUPPORT_DEMAND;
+        context.data = &payload;
+        context.plugin_storage = SG::handle(storage);
+        const ExPolygons demand = object.layer(0).lslices();
+        expolygons_copy(support_demand_get_island_mutable(&context,
+            reinterpret_cast<const layer_island_handle *>(&object.layer(0).island(0))),
+            reinterpret_cast<const expolygon_collection_handle *>(&demand));
+    }
+    std::vector<ExPolygons> slices, demands;
+    for (const Layer &layer : object.layers()) {
+        slices.push_back(layer.lslices());
+        ExPolygons demand;
+        for (const LayerSliceIsland &island : layer.islands()) append(demand, island.support_demand());
+        demands.push_back(demand);
+    }
+    if (single_layer) REQUIRE_FALSE(demands.front().empty());
+    else for (const ExPolygons &demand : demands) REQUIRE(demand.empty());
+    const Generated generated(print, object);
+    CHECK(generated.support.slabs.empty());
+    CHECK(generated.support.top.empty());
+    CHECK(generated.support.interfaces.empty());
+    CHECK(generated.support.base.empty());
+    CHECK(generated.support.bottom.empty());
+    REQUIRE_NOTHROW(SG::family(print));
+    CHECK(object.auxiliary_layers().empty());
+    size_t id = 0;
+    for (const Layer &layer : object.layers()) {
+        CHECK(Test::PolygonMetrics::sym_diff_mm2(to_polygons(slices[id]), to_polygons(layer.lslices())) < 1e-4);
+        ExPolygons demand;
+        for (const LayerSliceIsland &island : layer.islands()) append(demand, island.support_demand());
+        CHECK(Test::PolygonMetrics::sym_diff_mm2(to_polygons(demands[id]), to_polygons(demand)) < 1e-4);
+        ++id;
+    }
+}
+
+// Retained concentric contacts use closed rings; rectilinear contacts without loops return to interface surfaces.
+TEST_CASE("Filled contacts keep native patterns through automatic fusion", "[plugins][support-filled]")
+{
+    const bool concentric = GENERATE(false, true);
+    DynamicPrintConfig config = filled_config();
+    config.set_deserialize_strict({{"support_material_top_interface_pattern", concentric ? "concentric" : "rectilinear"},
+        {"support_material_interface_contact_loops", "0"}});
+    Print print;
+    Model model;
+    Test::init_print({two_roofs()}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    std::vector<SG::LayerSurfaceAreas> before;
+    for (const Layer &layer : print.object(0).auxiliary_layers()) before.push_back(SG::layer_surface_areas(layer));
+    SG::toolpaths(print);
+    bool mixed = false, contact_paths = false, interface_paths = false, measured_mixed = false;
+    size_t id = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers()) {
+        const SG::LayerSurfaceAreas after = SG::layer_surface_areas(layer);
+        if (before[id].top_contact > 1.) {
+            if (concentric) CHECK(after.top_contact == Approx(before[id].top_contact).margin(1e-4));
+            else {
+                CHECK(after.top_contact < 1e-4);
+                CHECK(after.top_interface == Approx(before[id].top_interface + before[id].top_contact).margin(1e-4));
+            }
+        }
+        const bool contacts_only = before[id].top_contact > 1. && before[id].top_interface < 1e-4;
+        const bool interfaces_only = before[id].top_interface > 1. && before[id].top_contact < 1e-4 && layer.scaled_bottom_z() > 0;
+        mixed = mixed || (before[id].top_contact > 1. && before[id].top_interface > 1.);
+        if (concentric && before[id].top_contact > 1. && before[id].top_interface > 1.) {
+            PathShape contact_shape, interface_shape;
+            bool contact_region = false, interface_region = false;
+            // The separated roofs occupy separate islands, so each region's typed surfaces identify its path recipe.
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands()) {
+                    bool contact = false, interface = false;
+                    for (const Surface &surface : region.fill_surfaces()) {
+                        if (!surface.has_pos_top()) continue;
+                        if (surface.has_mod_contact()) contact = true;
+                        else interface = true;
+                    }
+                    REQUIRE_FALSE((contact && interface));
+                    if (!contact && !interface) continue;
+                    REQUIRE(region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE));
+                    measure_shape(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), false,
+                        contact ? contact_shape : interface_shape);
+                    contact_region = contact_region || contact;
+                    interface_region = interface_region || interface;
+                }
+            REQUIRE(contact_region);
+            REQUIRE(interface_region);
+            REQUIRE(contact_shape.closed + contact_shape.open > 0.);
+            REQUIRE(interface_shape.closed + interface_shape.open > 0.);
+            CHECK(contact_shape.closed > 0.8 * (contact_shape.closed + contact_shape.open));
+            CHECK(interface_shape.open > 0.8 * (interface_shape.closed + interface_shape.open));
+            measured_mixed = true;
+        }
+        if (contacts_only || interfaces_only) {
+            PathShape shape;
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    if (region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE))
+                        measure_shape(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), false, shape);
+            REQUIRE(shape.closed + shape.open > 0.);
+            if (contacts_only && concentric) CHECK(shape.closed > 0.8 * (shape.closed + shape.open));
+            else CHECK(shape.open > 0.8 * (shape.closed + shape.open));
+            contact_paths = contact_paths || contacts_only;
+            interface_paths = interface_paths || interfaces_only;
+        }
+        ++id;
+    }
+    REQUIRE(mixed);
+    if (concentric) REQUIRE(measured_mixed);
+    REQUIRE(contact_paths);
+    REQUIRE(interface_paths);
+}
+
+// Measure actual line directions for one column and two roofs using the shared interface id, including zero increment.
+TEST_CASE("Filled interfaces follow one angle increment per layer", "[plugins][support-filled]")
+{
+    const bool two = GENERATE(false, true);
+    const bool no_increment = GENERATE(false, true);
+    DynamicPrintConfig config = filled_config();
+    config.set_deserialize_strict({{"support_material_top_interface_pattern", "rectilinear"},
+        {"support_material_interface_contact_loops", "0"}, {"support_material_interface_angle", "90"},
+        {"support_material_interface_angle_increment", no_increment ? "0" : "90"}});
+    Print print;
+    Model model;
+    Test::init_print({two ? two_roofs() : SG::slab()}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    SG::toolpaths(print);
+    size_t parities[2] = {0, 0};
+    size_t expected_id = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers()) {
+        const LayerSupportProperty *property = layer.get_property<LayerSupportProperty>();
+        REQUIRE(property != nullptr);
+        CHECK(property->interface_id == expected_id++);
+        if (layer.scaled_bottom_z() == 0) continue;
+        PathShape shape;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE))
+                    measure_shape(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), false, shape);
+        const double total = shape.along[0] + shape.along[1];
+        REQUIRE(total > 0.);
+        const size_t parity = property->interface_id & 1;
+        ++parities[parity];
+        const size_t axis = no_increment || parity == 0 ? 1 : 0;
+        CHECK(shape.along[axis] > 0.9 * total);
+    }
+    REQUIRE(parities[0] > 0);
+    REQUIRE(parities[1] > 0);
 }
