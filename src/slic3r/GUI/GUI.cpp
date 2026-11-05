@@ -184,8 +184,7 @@ static void add_config_substitutions(const ConfigSubstitutions& conf_substitutio
 			auto idx = def->enum_def->enum_to_index(conf_substitution.new_value->get_int());
 			new_val = idx.has_value() ?
 				wxString("\"") + def->enum_def->value(*idx) + "\"" + " (" +
-					(def->enum_def->has_labels() ? from_u8(def->enum_def->translated_label(*idx)) :
-                        I18N::translate_in_domain(def->enum_def->label(*idx), def->translation_domain, def->untranslated)) + ")" :
+					I18N::enum_display_label(*def, *idx) + ")" :
 				_L("Undefined");
 			break;
 		}

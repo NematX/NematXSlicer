@@ -1234,8 +1234,7 @@ static wxString get_string_value(const OptionKeyIdx &opt_key_id, const DynamicPr
         const std::optional<int> index = enum_definition.enum_to_index(config.option(opt_key)->get_int());
         serialized_str = (option->is_enabled() ? "" : "Disabled:");
         serialized_str += index.has_value() ?
-            (enum_definition.has_labels() ? from_u8(enum_definition.translated_label(*index)) :
-             I18N::translate_in_domain(enum_definition.label(*index), definition.translation_domain, definition.untranslated)) : _L("Undef");
+            I18N::enum_display_label(definition, *index) : _L("Undef");
         break;
     }
     case coPoint: {

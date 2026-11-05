@@ -37,6 +37,8 @@
 #include <wx/intl.h>
 #include <wx/version.h>
 
+#include "libslic3r/Config/ConfigDef.hpp"
+
 namespace Slic3r { namespace GUI { 
 
 namespace I18N {
@@ -51,6 +53,13 @@ namespace I18N {
 	// Translate borrowed UTF-8 text unless its setting requires verbatim display.
 	inline wxString translate_in_domain(const std::string &s, const std::string &domain, bool untranslated = false) {
 		return translate_in_domain(s.c_str(), domain, untranslated);
+	}
+	// Requires an enum option with def.enum_def set; defined labels return their stored translation, or the label itself if none is stored.
+	// Otherwise return the value text translated in the option's translation domain, or as written when def.untranslated is set.
+	inline wxString enum_display_label(const ConfigOptionDef &def, size_t index) {
+		const ConfigOptionEnumDef &enum_def = *def.enum_def;
+		return enum_def.has_labels() ? wxString::FromUTF8(enum_def.translated_label(index).c_str()) :
+			translate_in_domain(enum_def.label(index), def.translation_domain, def.untranslated);
 	}
 	inline wxString translate_in_domain(const char *s, const char *plural, unsigned int n, const std::string &domain) {
 		return domain.empty() ? wxGetTranslation(wxString(s, wxConvUTF8), wxString(plural, wxConvUTF8), n) :
