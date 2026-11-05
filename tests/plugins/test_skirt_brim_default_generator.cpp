@@ -1,6 +1,8 @@
 #include <catch2/catch.hpp>
 
 #include <initializer_list>
+#include <chrono>
+#include <iostream>
 #include <functional>
 #include <fstream>
 #include <sstream>
@@ -961,6 +963,241 @@ TEST_CASE("Object local skirt includes brim without draft shield or distance fla
             for (const Layer &layer : prepared.print.auxiliary_object()->auxiliary_layers())
                 if (LayerAdhesionProperty::layer_is_normal_skirt(layer)) ++skirts;
             CHECK(skirts == 1);
+        }
+    }
+}
+
+// Keep safe local skirts and warn instead of publishing skirts that enclose global brim or cross another object.
+TEST_CASE("Object local skirts reject foreign first layer geometry", "[plugins][brim][skirt-brim][skirt-global-placement]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const std::string &mode : {std::string("global"), std::string("single-global"), std::string("close"), std::string("normal")}) {
+    CAPTURE(mode);
+    Orchestrator::instance().consume_plugin_messages();
+    const bool global = mode == "global" || mode == "single-global";
+    const size_t object_count = mode == "single-global" ? 1 : 2;
+    DynamicPrintConfig config = brim_test_config(mode != "close", mode == "normal");
+    config.set_deserialize_strict({{"complete_objects", "1"}, {"complete_objects_one_skirt", "0"},
+        {"parallel_objects_step", "0"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "1"},
+        {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"}, {"draft_shield", "disabled"},
+        {"brim_skirt_trim", "0"}, {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"},
+        {"first_layer_size_compensation", "0"}});
+    PreparedBrimPrint prepared;
+    std::vector<TriangleMesh> meshes(object_count, Test::mesh(Test::TestMesh::cube_20x20x20));
+    Test::init_print(std::move(meshes), prepared.print, prepared.model, config);
+    REQUIRE(prepared.model.objects().size() == object_count);
+    prepared.model.objects()[0].name = "local-skirt-cube-A";
+    prepared.model.objects()[0].instances.front()->set_offset(Vec3d(40., 50., 0.));
+    if (object_count == 2) {
+        prepared.model.objects()[1].name = "local-skirt-cube-B";
+        prepared.model.objects()[1].instances.front()->set_offset(mode == "close" ? Vec3d(61., 50., 0.) : Vec3d(100., 70., 0.));
+    }
+    prepared.print.apply(prepared.model, config);
+    prepared.print.process();
+    std::vector<Orchestrator::PluginMessage> warnings;
+    for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages())
+        if (message.level == Orchestrator::PluginMessageLevel::Warning &&
+            message.message.find("Local skirt omitted") != std::string::npos) warnings.push_back(message);
+    CHECK(warnings.size() == (mode == "normal" ? 0 : 1));
+    for (const Orchestrator::PluginMessage &warning : warnings) {
+        CHECK(warning.message.find("instance 1") != std::string::npos);
+        CHECK(warning.message.find("local-skirt-cube-A") != std::string::npos);
+        if (object_count == 2) CHECK(warning.message.find("local-skirt-cube-B") != std::string::npos);
+        CHECK(warning.message.find(global ? "global first-layer geometry" : "another object or instance") != std::string::npos);
+    }
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    const ScopeGuard remove_output([&output]() { Test::GCode::remove_output_pair(output); });
+    Steps::StepPipeline::run_gcode(Orchestrator::instance(), prepared.print, output.string());
+    REQUIRE(prepared.print.objects().size() == object_count);
+    REQUIRE(prepared.print.auxiliary_object() != nullptr);
+    size_t global_brim_layers = 0;
+    for (const Layer &layer : prepared.print.auxiliary_object()->auxiliary_layers())
+        if (LayerAdhesionProperty::layer_is_brim(layer)) ++global_brim_layers;
+    Polygons brim_coverage;
+    collect_diagnostic_brim_coverage(prepared.print.brim(), brim_coverage);
+    CHECK(global_brim_layers == (global ? 1 : 0));
+    CHECK(brim_coverage.empty() == !global);
+    REQUIRE(prepared.print.printing_plan() != nullptr);
+    const Printing::PrintingPlan &plan = *prepared.print.printing_plan();
+    for (size_t index = 0; index < object_count; ++index) {
+        CAPTURE(index, global_brim_layers);
+        const PrintObject &object = prepared.print.object(index);
+        std::set<const LayerRegionIsland *> sources;
+        for (const Layer &layer : object.auxiliary_layers())
+            if (LayerAdhesionProperty::layer_is_normal_skirt(layer))
+                for (const LayerSliceIsland &island : layer.islands())
+                    for (const LayerRegionIsland &region : island.regions_islands()) sources.insert(&region);
+        if (mode != "normal") {
+            CHECK(sources.empty());
+        } else {
+            REQUIRE_FALSE(sources.empty());
+        }
+        BoundingBox actual, expected;
+        size_t count = 0;
+        for (const ExPolygon &slice : object.layer(0).lslices()) expected.merge(slice.contour.points);
+        expected.translate(object.instances().front().shift);
+        expected.offset(scale_i(4.));
+        // Source layers distinguish the local skirt from the shared brim and the object extrusion.
+        for (const Printing::PrintingGroup &group : plan.groups)
+            for (const Printing::PrintingLayerGroup &layer : group.layers)
+                for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                    for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                        if (sources.count(extrusion.region_island) == 0) continue;
+                        ++count;
+                        Polygons coverage;
+                        collect_diagnostic_brim_coverage(*extrusion.root, coverage);
+                        for (const Polygon &polygon : coverage) actual.merge(polygon.points);
+                    }
+        if (mode != "normal") {
+            CHECK(count == 0);
+            continue;
+        }
+        REQUIRE(count > 0);
+        REQUIRE(actual.defined);
+        CAPTURE(unscaled(actual.min.x()), unscaled(actual.max.x()), unscaled(actual.min.y()), unscaled(actual.max.y()));
+        CHECK(std::abs(unscaled(actual.min.x() - expected.min.x())) < 1.);
+        CHECK(std::abs(unscaled(actual.max.x() - expected.max.x())) < 1.);
+        CHECK(std::abs(unscaled(actual.min.y() - expected.min.y())) < 1.);
+        CHECK(std::abs(unscaled(actual.max.y() - expected.max.y())) < 1.);
+    }
+    }
+}
+
+// Reject only the conflicting copies of a shared object and publish the surviving skirt with its instance owner.
+TEST_CASE("Local skirt rejection is per physical instance", "[plugins][brim][skirt-brim][skirt-local-instances]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    Orchestrator::instance().consume_plugin_messages();
+    DynamicPrintConfig config = skirt_test_config(1, 0, true);
+    config.set_deserialize_strict({{"skirt_distance", "1"}, {"brim_skirt_trim", "0"}});
+    PreparedBrimPrint prepared;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+    ModelObject &model = prepared.model.objects().front();
+    model.name = "three-copies";
+    model.instances.front()->set_offset(Vec3d(40., 50., 0.));
+    model.add_instance(*model.instances.front())->set_offset(Vec3d(61., 50., 0.));
+    model.add_instance(*model.instances.front())->set_offset(Vec3d(120., 50., 0.));
+    prepared.print.apply(prepared.model, config);
+    prepared.print.process();
+    size_t warnings = 0;
+    for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages()) {
+        if (message.level != Orchestrator::PluginMessageLevel::Warning ||
+            message.message.find("Local skirt omitted") == std::string::npos) continue;
+        ++warnings;
+        CHECK(message.message.find("three-copies") != std::string::npos);
+        CHECK(message.message.find("instance 1") != std::string::npos);
+        CHECK(message.message.find("instance 2") != std::string::npos);
+        CHECK(message.message.find("instance 3") == std::string::npos);
+    }
+    CHECK(warnings == 1);
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    const ScopeGuard remove_output([&output]() { Test::GCode::remove_output_pair(output); });
+    Steps::StepPipeline::run_gcode(Orchestrator::instance(), prepared.print, output.string());
+    const PrintObject &object = prepared.print.object(0);
+    std::set<const LayerRegionIsland *> sources;
+    size_t skirts = 0;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        if (!LayerAdhesionProperty::layer_is_normal_skirt(layer)) continue;
+        ++skirts;
+        const LayerInstanceProperty *owner = layer.get_property<LayerInstanceProperty>();
+        REQUIRE(owner != nullptr);
+        CHECK(owner->object_instance_idx == 2);
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) sources.insert(&region);
+    }
+    CHECK(skirts == 1);
+    REQUIRE(prepared.print.printing_plan() != nullptr);
+    const Printing::PrintingPlan &plan = *prepared.print.printing_plan();
+    size_t paths = 0;
+    for (const Printing::PrintingGroup &group : plan.groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers)
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                    if (sources.count(extrusion.region_island) == 0) continue;
+                    ++paths;
+                    REQUIRE(extrusion.printing_catalog_id < plan.object_instances.size());
+                    CHECK(plan.object_instances[extrusion.printing_catalog_id].object_instance_idx == 2);
+                }
+    CHECK(paths == 1);
+}
+
+// Compare local and shared envelopes on a stepped object so upper slices and draft-shield brim rules agree.
+TEST_CASE("Local skirt preserves configured height and draft shield brim rules", "[plugins][brim][skirt-brim][skirt-local-height]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const std::string &shield : {std::string("disabled"), std::string("limited"), std::string("enabled")}) {
+        CAPTURE(shield);
+        std::vector<Polygons> coverage;
+        for (const bool local : {true, false}) {
+            DynamicPrintConfig config = skirt_test_config(1, 0, local);
+            config.set_deserialize_strict({{"skirt_height", "4"}, {"skirt_distance", "1"},
+                {"draft_shield", shield}, {"brim_width", shield == "disabled" ? "0" : "6"}, {"brim_per_object", "1"},
+                {"skirt_distance_from_brim", "0"}, {"brim_skirt_trim", "0"},
+                {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"},
+                {"first_layer_size_compensation", "0"}});
+            TriangleMesh foot = Test::mesh(Test::TestMesh::cube_20x20x20);
+            foot.scale(Vec3f(.5f, .5f, .02f));
+            TriangleMesh top = Test::mesh(Test::TestMesh::cube_20x20x20);
+            top.scale(Vec3f(1.f, 1.f, .02f));
+            top.translate(Vec3f(-5.f, -5.f, .3f));
+            foot.merge(top);
+            PreparedBrimPrint prepared;
+            Test::init_print({foot}, prepared.print, prepared.model, config);
+            prepared.model.objects().front().instances.front()->set_offset(Vec3d(40., 50., 0.));
+            prepared.print.apply(prepared.model, config);
+            run_prepared_print_until_skirt_brim(prepared, false);
+            const PrintObject &object = prepared.print.object(0);
+            REQUIRE(object.layer_count() >= 3);
+            BoundingBox first, upper;
+            for (const ExPolygon &slice : object.layer(0).lslices()) first.merge(slice.contour.points);
+            for (const ExPolygon &slice : object.layer(2).lslices()) upper.merge(slice.contour.points);
+            REQUIRE(upper.size().x() > first.size().x());
+            Polygons paths;
+            collect_diagnostic_brim_coverage(local ? object.skirt() : prepared.print.skirt(), paths);
+            if (!local)
+                for (Polygon &path : paths) path.translate(-object.instances().front().shift);
+            REQUIRE_FALSE(paths.empty());
+            coverage.push_back(std::move(paths));
+        }
+        // Shared generation for one instance retains the same height and brim rules, with only its placement removed.
+        CHECK(diff_ex(coverage[0], coverage[1]).empty());
+        CHECK(diff_ex(coverage[1], coverage[0]).empty());
+    }
+}
+
+// Time only the adhesion step on well-separated copies with a shared local brim; slicing and checks are outside timing.
+TEST_CASE("Local skirt many copy timing", "[.][skirt-local-cost]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    const ScopedActivePlugins active({STANDARD_LAYER_HEIGHT_GENERATOR, SLICE_VOLUME, DEFAULT_BRIM_GENERATOR, DEFAULT_SKIRT_GENERATOR});
+    for (const size_t copies : {size_t(25), size_t(100)}) {
+        DynamicPrintConfig config = skirt_test_config(1, 0, true);
+        config.set_deserialize_strict({{"brim_width", "3"}, {"brim_per_object", "1"}, {"skirt_distance", "1"},
+            {"brim_skirt_trim", "0"}});
+        TriangleMesh mesh = Test::mesh(Test::TestMesh::cube_20x20x20);
+        mesh.scale(Vec3f(1.f, 1.f, .02f));
+        PreparedBrimPrint prepared;
+        Test::init_print({mesh}, prepared.print, prepared.model, config);
+        ModelObject &object = prepared.model.objects().front();
+        object.instances.front()->set_offset(Vec3d(20., 20., 0.));
+        for (size_t index = 1; index < copies; ++index)
+            object.add_instance(*object.instances.front())->set_offset(Vec3d(20. + 40. * (index % 10), 20. + 40. * (index / 10), 0.));
+        prepared.print.apply(prepared.model, config);
+        Steps::StepLayerHeightGeneration::run_step(Orchestrator::instance(), prepared.print);
+        Steps::StepSlicing::run_step(Orchestrator::instance(), prepared.print);
+        for (size_t round = 0; round < 1; ++round) {
+            Steps::StepSkirtBrim::clear(prepared.print);
+            const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+            Steps::StepSkirtBrim::run_step(Orchestrator::instance(), prepared.print);
+            const std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+            REQUIRE(prepared.print.object(0).instances().size() == copies);
+            REQUIRE_FALSE(prepared.print.object(0).skirt().empty());
+            std::cout << "SKIRT_LOCAL_COST," << copies << ',' << round << ','
+                      << std::chrono::duration<double, std::milli>(end - start).count() << std::endl;
         }
     }
 }

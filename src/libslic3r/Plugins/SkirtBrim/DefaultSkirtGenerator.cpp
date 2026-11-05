@@ -12,6 +12,7 @@
 #include <iterator>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "libslic3r/Api/plugin/cpp/SkirtBrimStepViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Layer.hpp"
 
 /*
 Default skirt generator
@@ -46,15 +48,21 @@ skirt's behavior. This plugin creates extrusion trees and auxiliary layers,
 but does not generate final machine G-code or perform general extrusion
 ordering.
 
+Local skirt hulls use the configured height range and the selected instance's geometry. Their filled
+outer boundaries, including deposited width, must not overlap foreign first-layer
+geometry; rejected instances produce plugin warnings instead of auxiliary layers.
+STEP_WIPETOWER runs after STEP_SKIRT_BRIM, so its generated paths are not yet available.
+
 Operation notes:
 - validate the STEP_SKIRT_BRIM context and read print settings
 - return when no skirt, skirt-brim, or draft-shield work is requested
 - choose per-object generation when complete-object mode requires it
 - otherwise collect all print objects for one shared envelope
-- collect object, support, and optional brim points
+- collect object, support, and attributable brim points
 - build the convex-hull offset loops
 - resolve first-layer flow and distribute loops across extruders
 - keep normal and first-layer-only loops in print order
+- local_skirt_conflict(): reject local loops around foreign first-layer geometry
 - publish_object_skirt() or publish_print_skirt()
 - create tagged auxiliary layers through the common helper
 
@@ -145,6 +153,22 @@ struct SkirtOutput
     }
 };
 
+// A placed area and its box let distant pairs skip polygon intersections.
+struct SkirtArea
+{
+    Slic3r::ExPolygons polygons;
+    Slic3r::BoundingBox box;
+};
+
+// Cache each physical copy's filled skirt envelope, deposited skirt, slices and attributable auxiliary geometry.
+struct LocalSkirtGeometry
+{
+    SkirtArea envelope;
+    SkirtArea skirt;
+    SkirtArea body;
+    SkirtArea auxiliary;
+};
+
 // Return true when config values request any skirt-like output.
 bool has_skirt_work(const Config &print_config);
 
@@ -168,20 +192,22 @@ void append_points_from_extrusion(std::vector<c_point> &points, const ExtrusionE
 
 bool append_points_from_print_brim_auxiliary_layers(std::vector<c_point> &points, const Print &print);
 
-// Collect borrowed local object/support contours without instance-specific brim, widening the common hull when configured; append owned points and propagate geometry/allocation failures.
+// Append borrowed object and attributable support contours up to the requested height in object coordinates; instance-specific brim is added separately, output points belong to the caller and geometry/allocation failures propagate.
 void collect_object_local_hull_points(std::vector<c_point> &object_points,
                                       storage_handle *storage,
                                       const SkirtBrimStep &step,
                                       const Print &print,
                                       const Object &object,
-                                      coord_t skirt_height_z);
+                                      coord_t skirt_height_z,
+                                      std::optional<uint32_t> instance_idx = std::nullopt);
 
-// Build a storage-owned skirt hull from borrowed common contours and separately validated brim placements; local mode keeps its origin pattern while plateau mode projects each owner once, propagating invalid-owner/geometry failures.
+// Build a storage-owned hull over the configured height range in plate coordinates or one selected instance's local coordinates; borrowed layers stay unchanged and invalid-owner/geometry/allocation failures propagate.
 StoredPolygon collect_print_hull(storage_handle *storage,
                                  const SkirtBrimStep &step,
                                  const Print &print,
                                  const std::vector<Object> &objects,
-                                 bool object_local);
+                                 bool object_local,
+                                 uint32_t instance_idx = 0);
 
 // Build one skirt loop entity from an offset polygon and flow.
 StoredExtrusionEntity make_skirt_loop(storage_handle *storage,
@@ -194,7 +220,32 @@ SkirtOutput make_skirt(storage_handle *storage,
                        const SkirtBrimStep &step,
                        const Print &print,
                        const std::vector<Object> &objects,
-                       bool object_local);
+                        bool object_local,
+                        uint32_t instance_idx = 0);
+
+// Return a conflict reason, or empty for this pass: null eligible checks global geometry and other instances' slices/brim/support.
+// With eligible, check only those other instances' skirts accepted by the first pass.
+std::string local_skirt_conflict(const std::vector<std::vector<LocalSkirtGeometry>> &geometry,
+                                const SkirtArea &global, uint32_t object_idx, uint32_t instance_idx,
+                                const std::vector<std::vector<bool>> *eligible = nullptr);
+
+// Project slices and auxiliary layers once and cache both filled envelopes and deposited skirt coverage.
+std::vector<std::vector<LocalSkirtGeometry>> prepare_local_skirt_geometry(
+    const Print &print, const std::vector<std::vector<SkirtOutput>> &outputs, SkirtArea &global);
+
+// Collect the deposited width of normal and first-layer-only skirt loops without filling their holes.
+Slic3r::ExPolygons local_skirt_coverage(const SkirtOutput &output);
+
+// Place and merge owned polygons, optionally fill their holes, and compute the resulting box.
+SkirtArea make_skirt_area(Slic3r::ExPolygons polygons, c_point shift = {}, bool fill_holes = false);
+
+// Test cached polygons only when their defined boxes overlap.
+bool skirt_envelope_overlaps(const SkirtArea &envelope, const SkirtArea &other);
+
+// Publish one skirt tree, optionally limited to a physical instance, using its actual deposited coverage.
+bool publish_skirt_tree(storage_handle *storage, orchestrator_handle *orchestrator, const Print &print,
+                        const Object &object, const Layer &reference_layer, StoredExtrusionEntity &extrusion,
+                        raw_layer_adhesion_flag flags, std::optional<uint32_t> owner_instance = std::nullopt);
 
 // Publish print-owned or object-owned skirt results as tagged auxiliary layers.
 void publish_print_skirt(storage_handle *storage,
@@ -202,13 +253,15 @@ void publish_print_skirt(storage_handle *storage,
                          const Print &print,
                          const std::vector<Object> &objects,
                          SkirtOutput &output);
+// Publish local skirt trees, optionally limited to one physical instance.
 void publish_object_skirt(storage_handle *storage,
                           orchestrator_handle *orchestrator,
                           const Print &print,
                           const Object &object,
-                          SkirtOutput &output);
+                          SkirtOutput &output,
+                          std::optional<uint32_t> owner_instance = std::nullopt);
 
-// Generate the correct global/per-object branch for one print.
+// Generate shared skirts or validate local candidates; report rejected objects and instances in one warning.
 void generate_default_skirt(const plugin_run_context *run_ctx, orchestrator_handle *orchestrator);
 
 bool has_skirt_work(const Config &print_config)
@@ -382,7 +435,8 @@ void collect_object_local_hull_points(std::vector<c_point> &object_points,
                                       const SkirtBrimStep &step,
                                       const Print &print,
                                       const Object &object,
-                                      const coord_t skirt_height_z)
+                                      const coord_t skirt_height_z,
+                                      const std::optional<uint32_t> instance_idx)
 {
     /*
     The skirt hull is based on visible outer contours only. Holes are ignored:
@@ -405,6 +459,9 @@ void collect_object_local_hull_points(std::vector<c_point> &object_points,
     for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
         const Layer support_layer = object.auxiliary_layer(layer_idx);
         if (support_layer.properties().get(LayerSupportProperty::key) == nullptr)
+            continue;
+        const std::optional<uint32_t> owner = layer_instance_owner(support_layer);
+        if (owner && instance_idx && *owner != *instance_idx)
             continue;
         if (support_layer.print_z() > skirt_height_z)
             break;
@@ -439,7 +496,8 @@ StoredPolygon collect_print_hull(storage_handle *storage,
                                  const SkirtBrimStep &step,
                                  const Print &print,
                                  const std::vector<Object> &objects,
-                                 const bool object_local)
+                                 const bool object_local,
+                                 const uint32_t selected_instance)
 {
     const Config print_config = print.config();
     coord_t skirt_height_z = 0;
@@ -456,7 +514,8 @@ StoredPolygon collect_print_hull(storage_handle *storage,
     std::vector<c_point> points;
     for (Object object : objects) {
         std::vector<c_point> object_points;
-        collect_object_local_hull_points(object_points, storage, step, print, object, skirt_height_z);
+        collect_object_local_hull_points(object_points, storage, step, print, object, skirt_height_z,
+                                         object_local ? std::optional<uint32_t>(selected_instance) : std::nullopt);
 
         /*
         Slices are object-local. A print-level skirt must cover every object
@@ -486,8 +545,15 @@ StoredPolygon collect_print_hull(storage_handle *storage,
                     const Layer brim_layer = object.auxiliary_layer(layer_idx);
                     if (!layer_is_brim(brim_layer))
                         continue;
+                    if (object_local) {
+                        const std::optional<uint32_t> owner = layer_instance_owner(brim_layer);
+                        if (owner && *owner != selected_instance) continue;
+                        bool found = false;
+                        append_points_from_brim_layer(points, brim_layer, found);
+                        continue;
+                    }
                     for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, brim_layer)) {
-                        if (projection.first != instance_idx)
+                        if (projection.first != (object_local ? selected_instance : instance_idx))
                             continue;
                         std::vector<c_point> local;
                         bool found = false;
@@ -504,7 +570,7 @@ StoredPolygon collect_print_hull(storage_handle *storage,
         }
     }
 
-    if (print_config.get("draft_shield").get_int() == 0 || print_config.get("skirt_distance_from_brim").get_bool()) {
+    if (!object_local && (print_config.get("draft_shield").get_int() == 0 || print_config.get("skirt_distance_from_brim").get_bool())) {
         append_points_from_print_brim_auxiliary_layers(points, print);
     }
 
@@ -546,11 +612,12 @@ SkirtOutput make_skirt(storage_handle *storage,
                        const SkirtBrimStep &step,
                        const Print &print,
                        const std::vector<Object> &objects,
-                       const bool object_local)
+                        const bool object_local,
+                        const uint32_t instance_idx)
 {
     SkirtOutput output(storage);
     const Config print_config = print.config();
-    StoredPolygon convex_hull_polygon = collect_print_hull(storage, step, print, objects, object_local);
+    StoredPolygon convex_hull_polygon = collect_print_hull(storage, step, print, objects, object_local, instance_idx);
     if (convex_hull_polygon.size() < 3)
         return output;
 
@@ -686,7 +753,8 @@ bool publish_skirt_tree(storage_handle *storage,
                         const Object &object,
                         const Layer &reference_layer,
                         StoredExtrusionEntity &extrusion,
-                        raw_layer_adhesion_flag flags)
+                        raw_layer_adhesion_flag flags,
+                        std::optional<uint32_t> owner_instance)
 {
     if (extrusion.empty())
         return true;
@@ -705,7 +773,7 @@ bool publish_skirt_tree(storage_handle *storage,
                                                          reference_layer.slice_z(),
                                                          RAW_LAYER_ADHESION_KIND_SKIRT,
                                                          flags,
-                                                         extrusion.mutable_view());
+                                                          extrusion.mutable_view(), owner_instance);
 }
 
 Layer first_print_layer_or_throw(const std::vector<Object> &objects)
@@ -740,13 +808,14 @@ void publish_object_skirt(storage_handle *storage,
                           orchestrator_handle *orchestrator,
                           const Print &print,
                           const Object &object,
-                          SkirtOutput &output)
+                          SkirtOutput &output,
+                          std::optional<uint32_t> owner_instance)
 {
     if (object.layer_count() == 0)
         return;
 
     const Layer reference_layer = object.layer(0);
-    if (!publish_skirt_tree(storage, orchestrator, print, object, reference_layer, output.skirt, 0))
+    if (!publish_skirt_tree(storage, orchestrator, print, object, reference_layer, output.skirt, 0, owner_instance))
         throw std::runtime_error("Default skirt generator could not publish object skirt.");
     if (!publish_skirt_tree(storage,
                             orchestrator,
@@ -754,8 +823,112 @@ void publish_object_skirt(storage_handle *storage,
                             object,
                             reference_layer,
                             output.first_layer,
-                            RAW_LAYER_ADHESION_FLAG_FIRST_LAYER_ONLY))
+                            RAW_LAYER_ADHESION_FLAG_FIRST_LAYER_ONLY, owner_instance))
         throw std::runtime_error("Default skirt generator could not publish object first-layer skirt.");
+}
+
+Slic3r::ExPolygons local_skirt_coverage(const SkirtOutput &output)
+{
+    Slic3r::Polygons coverage;
+    for (const StoredExtrusionEntity *tree : {&output.skirt, &output.first_layer}) {
+        const Slic3r::ExtrusionEntity *native =
+            reinterpret_cast<const Slic3r::ExtrusionEntity *>(tree->readonly().handle());
+        if (native == nullptr || native->empty()) continue;
+        Slic3r::Polygons part = native->polygons_covered_by_width(float(SCALED_EPSILON));
+        coverage.insert(coverage.end(), std::make_move_iterator(part.begin()), std::make_move_iterator(part.end()));
+    }
+    return Slic3r::union_ex(coverage);
+}
+
+SkirtArea make_skirt_area(Slic3r::ExPolygons polygons, const c_point shift, const bool fill_holes)
+{
+    for (Slic3r::ExPolygon &area : polygons) {
+        area.translate(shift.x, shift.y);
+        if (fill_holes) area.holes.clear();
+    }
+    SkirtArea out;
+    out.polygons = Slic3r::union_ex(polygons);
+    for (const Slic3r::ExPolygon &area : out.polygons) out.box.merge(area.contour.points);
+    return out;
+}
+
+bool skirt_envelope_overlaps(const SkirtArea &envelope, const SkirtArea &other)
+{
+    return envelope.box.defined && other.box.defined && envelope.box.overlap(other.box) &&
+        !Slic3r::intersection_ex(envelope.polygons, other.polygons).empty();
+}
+
+std::vector<std::vector<LocalSkirtGeometry>> prepare_local_skirt_geometry(
+    const Print &print, const std::vector<std::vector<SkirtOutput>> &outputs, SkirtArea &global)
+{
+    std::vector<std::vector<LocalSkirtGeometry>> geometry(print.object_count());
+    // Global auxiliary geometry has no real-instance owner, even when it surrounds only this object.
+    Slic3r::ExPolygons global_polygons;
+    const Object auxiliary = print.auxiliary_object();
+    for (uint32_t idx = 0; idx < auxiliary.auxiliary_layer_count(); ++idx) {
+        const Layer layer = auxiliary.auxiliary_layer(idx);
+        if (!layer_is_brim(layer) && layer.print_z() > get_min_first_layer_height(print)) continue;
+        const Slic3r::Layer *native = reinterpret_cast<const Slic3r::Layer *>(layer.handle());
+        global_polygons.insert(global_polygons.end(), native->lslices().begin(), native->lslices().end());
+    }
+    global = make_skirt_area(std::move(global_polygons), {}, true);
+
+    for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+        const Object object = print.object(object_idx);
+        geometry[object_idx].resize(object.instance_count());
+        if (object.layer_count() == 0) continue;
+        const Slic3r::Layer *first = reinterpret_cast<const Slic3r::Layer *>(object.layer(0).handle());
+        for (uint32_t copy = 0; copy < object.instance_count(); ++copy) {
+            const c_point placement = object.instance_shift(copy);
+            LocalSkirtGeometry &cached = geometry[object_idx][copy];
+            cached.body = make_skirt_area(first->lslices(), placement);
+            cached.skirt = make_skirt_area(local_skirt_coverage(outputs[object_idx][copy]), placement);
+            cached.envelope = make_skirt_area(cached.skirt.polygons, {}, true);
+        }
+        // Enumerate a common layer's K projections once, not again inside each of the K copy comparisons.
+        for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx) {
+            const Layer layer = object.auxiliary_layer(idx);
+            if (layer.print_z() > object.layer(0).print_z()) continue;
+            if (!layer_is_brim(layer) && layer.properties().get(LayerSupportProperty::key) == nullptr) continue;
+            const Slic3r::Layer *native = reinterpret_cast<const Slic3r::Layer *>(layer.handle());
+            for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, layer)) {
+                Slic3r::ExPolygons placed = native->lslices();
+                for (Slic3r::ExPolygon &area : placed) area.translate(projection.second.x, projection.second.y);
+                Slic3r::ExPolygons &destination = geometry[object_idx][projection.first].auxiliary.polygons;
+                destination.insert(destination.end(), std::make_move_iterator(placed.begin()), std::make_move_iterator(placed.end()));
+            }
+        }
+        for (LocalSkirtGeometry &cached : geometry[object_idx])
+            cached.auxiliary = make_skirt_area(std::move(cached.auxiliary.polygons));
+    }
+    return geometry;
+}
+
+std::string local_skirt_conflict(const std::vector<std::vector<LocalSkirtGeometry>> &geometry,
+                                const SkirtArea &global, const uint32_t object_idx, const uint32_t instance_idx,
+                                const std::vector<std::vector<bool>> *eligible)
+{
+    const SkirtArea &envelope = geometry[object_idx][instance_idx].envelope;
+    if (!envelope.box.defined) return {};
+    if (eligible == nullptr && skirt_envelope_overlaps(envelope, global))
+        return "intersects or is nested with global first-layer geometry";
+    for (uint32_t other_idx = 0; other_idx < geometry.size(); ++other_idx) {
+        for (uint32_t copy = 0; copy < geometry[other_idx].size(); ++copy) {
+            if (other_idx == object_idx && copy == instance_idx) continue;
+            const LocalSkirtGeometry &other = geometry[other_idx][copy];
+            if (eligible == nullptr) {
+                if (skirt_envelope_overlaps(envelope, other.body))
+                    return "crosses or encloses another object or instance";
+                if (skirt_envelope_overlaps(envelope, other.auxiliary))
+                    return "crosses or encloses another instance's brim or support";
+                continue;
+            }
+            // Skirts already rejected by object geometry will never be printed and cannot block another skirt.
+            if ((*eligible)[other_idx][copy] && skirt_envelope_overlaps(envelope, other.skirt))
+                return "crosses or encloses another instance's skirt";
+        }
+    }
+    return {};
 }
 
 void generate_default_skirt(const plugin_run_context *run_ctx, orchestrator_handle *orchestrator)
@@ -773,13 +946,54 @@ void generate_default_skirt(const plugin_run_context *run_ctx, orchestrator_hand
     storage_handle *storage = run_ctx->plugin_storage;
     if (print_config.get("complete_objects").get_bool() &&
         !print_config.get("complete_objects_one_skirt").get_bool()) {
+        std::vector<std::vector<SkirtOutput>> outputs(print.object_count());
         for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
             throw_if_cancelled(run_ctx);
             const Object object = print.object(object_idx);
-            SkirtOutput output = make_skirt(storage, step, print, std::vector<Object>{ object }, true);
-            throw_if_cancelled(run_ctx);
-            publish_object_skirt(storage, orchestrator, print, object, output);
-            throw_if_cancelled(run_ctx);
+            for (uint32_t instance = 0; instance < object.instance_count(); ++instance)
+                outputs[object_idx].push_back(make_skirt(storage, step, print, std::vector<Object>{ object }, true, instance));
+        }
+        // Record all decisions before publication; newly published skirts must not alter later decisions.
+        SkirtArea global;
+        const std::vector<std::vector<LocalSkirtGeometry>> geometry = prepare_local_skirt_geometry(print, outputs, global);
+        std::vector<std::vector<bool>> accepted(print.object_count());
+        std::vector<std::vector<std::string>> reasons(print.object_count());
+        for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx)
+            for (uint32_t instance = 0; instance < print.object(object_idx).instance_count(); ++instance) {
+                throw_if_cancelled(run_ctx);
+                reasons[object_idx].push_back(local_skirt_conflict(geometry, global, object_idx, instance));
+                accepted[object_idx].push_back(reasons[object_idx].back().empty());
+            }
+        const std::vector<std::vector<bool>> eligible = accepted;
+        std::string warnings;
+        for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+            const Object object = print.object(object_idx);
+            for (uint32_t instance = 0; instance < object.instance_count(); ++instance) {
+                throw_if_cancelled(run_ctx);
+                const std::string reason = reasons[object_idx][instance].empty() ?
+                    local_skirt_conflict(geometry, global, object_idx, instance, &eligible) : reasons[object_idx][instance];
+                accepted[object_idx][instance] = reason.empty();
+                if (!reason.empty()) {
+                    warnings += "\n'" + object.name() + "', instance " +
+                        std::to_string(instance + 1) + ": " + reason + ".";
+                }
+            }
+        }
+        if (!warnings.empty()) {
+            const std::string message = "Local skirt omitted:" + warnings;
+            report_warning(run_ctx, message.c_str());
+        }
+        for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+            const Object object = print.object(object_idx);
+            bool common = std::all_of(accepted[object_idx].begin(), accepted[object_idx].end(), [](bool value) { return value; });
+            for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx)
+                common = common && !layer_instance_owner(object.auxiliary_layer(idx));
+            for (uint32_t instance = 0; instance < object.instance_count(); ++instance) {
+                if (!accepted[object_idx][instance]) continue;
+                publish_object_skirt(storage, orchestrator, print, object, outputs[object_idx][instance],
+                                     common ? std::nullopt : std::optional<uint32_t>(instance));
+                if (common) break;
+            }
         }
         return;
     }
