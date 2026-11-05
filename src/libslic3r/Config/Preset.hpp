@@ -5,6 +5,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
@@ -17,6 +18,21 @@
 
 #include "PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
+
+/*
+Preset is one saved profile plus its identity and compatibility state. A
+PresetCollection loads profiles of one category, keeps an edited copy of the
+selected profile and resolves selection/compatibility against the other categories.
+Load or import first, choose profiles, then compose the configuration used by Print.
+Unknown text preservation below is a separate persistence path, not another way
+to add live typed options to the slicing configuration.
+
+Preset owns one profile's settings and identity. Collections load and select these profiles.
+Validate retained JSON before loading. preserve_unknown_* helpers save unrecognized text separately.
+print_custom_setting_for_origin() extracts the print or printer group when splitting a project.
+merge_print_custom_settings() combines those groups when building the full configuration.
+Known profile metadata remains separate from these retained values.
+*/
 
 namespace Slic3r {
 
@@ -32,6 +48,12 @@ enum ConfigFileType
 };
 
 extern ConfigFileType guess_config_file_type(const boost::property_tree::ptree &tree);
+
+// Build an external profile name from file_name and original_name.
+// A prefix before " (" is treated as a source filename if it equals file_name
+// or ends in a recognized source extension. Keep other parenthesized text.
+// index is the collision number. Zero adds no suffix number.
+std::string external_preset_name(const std::string &file_name, const std::string &original_name, size_t index);
 
 class VendorProfile
 {
@@ -267,8 +289,10 @@ public:
     static const std::string&               suffix_modified();
     static std::string                      remove_suffix_modified(const std::string& name);
     static void                             normalize(DynamicPrintConfig &config);
-    // Report configuration fields, which are misplaced into a wrong group, remove them from the config.
-    static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config);
+    // Remove keys absent from default_config and return their names as comma-separated text.
+    // Optionally capture their serialized values, but only when local, project and G-code saves all allow them.
+    static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config,
+                                                               ConfigSubstitutions *preserved_substitutions = nullptr);
     
     //for emplace_back
 protected:
@@ -284,7 +308,26 @@ protected:
     friend class        _BBS_3MF_Importer;
 };
 
+// Save captured FFF text in the print/printer group or the filament JSON field for preset_type.
+// Values already stored there take precedence. These values are not active slicing options.
+void preserve_unknown_preset_settings(DynamicPrintConfig &config, Preset::Type preset_type, const ConfigSubstitutions &substitutions);
+// Infer groups for unknown project keys from their name prefixes; keep explicitly stored groups.
+// Split filament values only when their count matches the extruder count. Otherwise keep the whole text.
+void preserve_unknown_project_settings(DynamicPrintConfig &config, const ConfigSubstitutions &substitutions);
+// Check the JSON structure and string values of retained settings without changing config.
+// Invalid data raises ConfigurationError. The meaning of unknown settings is not checked.
+void validate_preset_custom_settings(const DynamicPrintConfig &config);
+// Extract the JSON group named by origin (print or printer) without changing config.
+// Return an empty string when the group is absent. Invalid stored JSON raises ConfigurationError.
+std::string print_custom_setting_for_origin(const DynamicPrintConfig &config, const char *origin);
+// Combine stored print/printer JSON groups without changing either source or the profile metadata.
+// Printer config wins on a shared value. Return an empty string when both stored objects are empty.
+std::string merge_print_custom_settings(const DynamicPrintConfig &print_config, const DynamicPrintConfig &printer_config);
+
 bool is_compatible_with_print  (const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_print, const PresetWithVendorProfile &active_printer);
+// Build extra variables for compatibility expressions: printer name, extruder count and milling-tool count.
+// This is not a full printer configuration.
+DynamicPrintConfig compatibility_context(const Preset &printer);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer);
 
@@ -588,6 +631,12 @@ protected:
     // After copying a collection with the default operators above, call this function
     // to adjust Profile::vendor pointers.
     void            update_vendor_ptrs_after_copy(const VendorMap &vendors);
+
+    // Copy named profiles and their parent chains. Resolve old names to their current profiles.
+    // Also retain defaults, the selected profile and the first visible profile for selection fallbacks.
+    // Preserve source order plus the selected profile's edited/saved copies.
+    // Keep only maps pointing to retained names. The owner must rebind vendor pointers after copying.
+    void            assign_subset(const PresetCollection &source, const std::set<std::string> &names);
 
     // Select a preset, if it exists. If it does not exist, select an invalid (-1) index.
     // This is a temporary state, which shall be fixed immediately by the following step.
@@ -1029,6 +1078,11 @@ private:
     const Preset* first_compatible()                                        { return m_extr_filaments[this->first_compatible_idx()].preset; }
 
     const std::string& get_preset_name_by_alias(const std::string& alias) const;
+
+    // Copy the printer and place extruder_id's values at position zero for compatibility expressions.
+    // Keep default_filament_profile unchanged: it describes the whole printer.
+    // For single_extruder_multi_material, leave the original values for every material position.
+    static Preset printer_for_extruder(const Preset &printer, size_t extruder_id);
 
     size_t  update_compatible_internal(const PresetWithVendorProfile& active_printer, const PresetWithVendorProfile* active_print, PresetSelectCompatibleType unselect_if_incompatible);
 
