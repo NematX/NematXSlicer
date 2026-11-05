@@ -32,7 +32,11 @@ using SG::prepare_legacy_inputs;
 
 namespace {
 // Slice and compare native/family support for one model, configuration and optional pattern variant.
+// The print owns native layers and retains detached plugin layers locally; report I/O and generation failures fail the test.
 void compare(int model_id, const char *style, bool soluble, int interfaces, bool same_tool, const char *variant);
+// Report both borrowed layer collections after checks, temporarily swapping them into the object and restoring ownership on failure.
+void record_layer_comparison(const std::string &section, PrintObject &object, LayerUPtrs &plugin_layers,
+                             const std::vector<SG::LayerSurfaceAreas> &published);
 // Run one model through every style, contact-distance and interface-count combination.
 void run_comparison(int model_id, bool same_tool = false);
 // Check published geometry and contact spacing independently of the native comparison; on_object false
@@ -347,6 +351,9 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
         REQUIRE(object.auxiliary_layers().empty());
         const ObjectFingerprint prefix_fingerprint = object_fingerprint(object);
         SG::family(print);
+        std::vector<SG::LayerSurfaceAreas> published;
+        if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr)
+            for (const Layer &layer : object.auxiliary_layers()) published.push_back(SG::layer_surface_areas(layer));
         const SG::Generated generated_support(print, object);
         check_family(object, generated_support.support, SG::params(print, object), model_id,
                      variant == nullptr || strcmp(variant, "buildplate_only") != 0);
@@ -489,6 +496,12 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
         }
         // Report the largest measured deviation only when this section fails.
         INFO("largest deviations: slice=" << maximum_difference << " length=" << maximum_length_difference << " volume=" << maximum_volume_difference);
+        if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr) {
+            std::ostringstream section;
+            section << "grid model=" << model_id << " style=" << style << " soluble=" << soluble << " interfaces=" << interfaces
+                    << " same_tool=" << same_tool << " variant=" << (variant != nullptr ? variant : "") << " object=0";
+            record_layer_comparison(section.str(), object, plugin_layers, published);
+        }
         if (write_table) {
             std::ostringstream section;
             section << "model=" << model_id << " style=" << style << " soluble=" << soluble << " interfaces=" << interfaces
@@ -500,6 +513,23 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
                               plugin_hash);
         }
     }
+}
+
+void record_layer_comparison(const std::string &section, PrintObject &object, LayerUPtrs &plugin_layers,
+                             const std::vector<SG::LayerSurfaceAreas> &published)
+{
+    if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") == nullptr) return;
+    SG::record_layer_report(section + " native", object,
+        std::vector<SG::LayerSurfaceAreas>(object.auxiliary_layers().size()), "", false);
+    // Expose retained plugin layers without changing their lifetime or native layer ownership.
+    struct LayerSwap {
+        LayerUPtrs &current, &saved;
+        // Return the two layer collections to their original owners.
+        ~LayerSwap() { current.swap(saved); }
+    };
+    object.mutable_auxiliary_layers().swap(plugin_layers);
+    const LayerSwap restore{object.mutable_auxiliary_layers(), plugin_layers};
+    SG::record_layer_report(section + " plugin", object, published, "");
 }
 
 // Run one model through every style, contact-distance and interface-count combination.
@@ -919,6 +949,11 @@ struct InterfaceComparison {
 std::vector<InterfaceComparison> check_interface_patterns_of(Print &print, const std::string &label)
 {
     SG::family(print);
+    std::vector<std::vector<SG::LayerSurfaceAreas>> published(print.objects().size());
+    if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr)
+        for (size_t index = 0; index < print.objects().size(); ++index)
+            for (const Layer &layer : print.object(index).auxiliary_layers())
+                published[index].push_back(SG::layer_surface_areas(layer));
     SG::toolpaths(print);
     std::vector<InterfaceComparison> comparisons;
     for (size_t object_idx = 0; object_idx < print.objects().size(); ++object_idx) {
@@ -932,6 +967,8 @@ std::vector<InterfaceComparison> check_interface_patterns_of(Print &print, const
         const InterfaceReport legacy_report = report_interface_layers(object.auxiliary_layers(), "legacy", plugin_report.sides_by_z());
         compare_interface_reports(plugin_report, legacy_report, label + " object " + std::to_string(object_idx));
         REQUIRE_FALSE(plugin_report.by_z.empty());
+        record_layer_comparison("grid pattern=" + label + " object=" + std::to_string(object_idx), object,
+                                plugin_layers, published[object_idx]);
         comparisons.push_back(InterfaceComparison{plugin_report, legacy_report});
     }
     return comparisons;
@@ -1042,6 +1079,9 @@ TEST_CASE("Grid legacy comparison: interface pattern follows the native contact 
         Test::init_print({mesh}, print, model, config);
         SG::prefix(print);
         SG::family(print);
+        std::vector<SG::LayerSurfaceAreas> published;
+        if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr)
+            for (const Layer &layer : print.object(0).auxiliary_layers()) published.push_back(SG::layer_surface_areas(layer));
         SG::toolpaths(print);
         PrintObject &object = print.object(0);
         const InterfaceReport plugin = report_interface_layers(object.auxiliary_layers(), "plugin");
@@ -1078,6 +1118,7 @@ TEST_CASE("Grid legacy comparison: interface pattern follows the native contact 
         SG::native_slabs(object, generator, native_slabs);
         const InterfaceReport legacy = report_interface_layers(object.auxiliary_layers(), "legacy", plugin.sides_by_z());
         compare_interface_reports(plugin, legacy, "model 5 distinct top and bottom patterns");
+        record_layer_comparison("grid pattern=model 5 distinct top and bottom patterns object=0", object, plugin_layers, published);
     }
 }
 

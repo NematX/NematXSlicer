@@ -2,11 +2,20 @@
    legacy support can be called before auxiliary layers are frozen. Small box
    assemblies share vertices only through merged meshes, and remain one print
    object. Path measurement sums geometric line volume and the explicit volume of stationary deposits, before the
-   extrusion multiplier. Helpers do not change process-wide plugin activation. */
+   extrusion multiplier. Helpers do not change process-wide plugin activation.
+   For a layer report, save layer_surface_areas(layer) after family generation,
+   then call record_layer_report("case plugin", object, published, "") after path checks.
+   Reports append only when SLIC3R_SUPPORT_LAYER_TABLE names a file. */
 #ifndef support_grid_test_helpers_hpp_
 #define support_grid_test_helpers_hpp_
 #include <catch2/catch.hpp>
 #include <map>
+#include <cmath>
+#include <tuple>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <locale>
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -215,6 +224,114 @@ inline PathMeasures measure_layer(const Layer &layer)
             for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
                 if (region.has_extrusion(bucket)) measure_paths(region.extrusion(bucket), region.extruder_id(), result);
     return result;
+}
+
+// Areas in mm2 of published support surfaces, separated by side and contact marking.
+struct LayerSurfaceAreas {
+    double top_contact = 0, top_interface = 0, bottom_contact = 0, bottom_interface = 0, sparse = 0;
+};
+
+// Flow keys store tool, role, height and volume per length; the last two values are rounded to millionths before grouping.
+using FlowMeasures = std::map<std::tuple<extruder_index_t, uint16_t, int64_t, int64_t>, PathMeasure>;
+
+// Resolve inherited flow and group geometric leaves by rounded height and flow without changing the borrowed extrusion tree.
+inline void measure_flow_paths(const ExtrusionEntity &entity, extruder_index_t extruder, FlowMeasures &result,
+                               const ExtrusionAttributes *attributes = nullptr)
+{
+    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
+    if (entity.has_polyline()) {
+        REQUIRE(attributes != nullptr);
+        PathMeasure &measure = result[{extruder, uint16_t(attributes->role),
+            std::llround(attributes->height * 1000000.), std::llround(attributes->mm3_per_mm * 1000000.)}];
+        const double length = unscaled(entity.polyline_ref().length());
+        measure.length += length;
+        const ExtrusionPropertySpecialCommand *command = entity.get_property<ExtrusionPropertySpecialCommand>();
+        measure.volume += command != nullptr && command->code == C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT ?
+            command->extra_data : length * attributes->mm3_per_mm;
+        ++measure.count;
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children()) measure_flow_paths(*child, extruder, result, attributes);
+}
+
+// Remove only contact marking when comparing surface side membership.
+inline SurfaceType without_contact(SurfaceType type)
+{
+    return SurfaceType(uint16_t(type) & uint16_t(~uint16_t(stModContact)));
+}
+
+// Sum borrowed support surfaces into disjoint area categories without changing the layer.
+inline LayerSurfaceAreas layer_surface_areas(const Layer &layer)
+{
+    LayerSurfaceAreas result;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const Surface &surface : region.fill_surfaces()) {
+                const SurfaceType type = without_contact(surface.surface_type);
+                if ((type & stModSupport) == 0) continue;
+                const double mm2 = unscaled(unscaled(surface.expolygon.area()));
+                const bool contact = (surface.surface_type & stModContact) != 0;
+                const SurfaceType sparse = stModSupport | stPosInternal | stDensSparse;
+                if ((type & sparse) == sparse && !contact) result.sparse += mm2;
+                else if ((type & (stPosTop | stDensSolid)) == (stPosTop | stDensSolid))
+                    (contact ? result.top_contact : result.top_interface) += mm2;
+                else if ((type & (stPosBottom | stDensSolid)) == (stPosBottom | stDensSolid))
+                    (contact ? result.bottom_contact : result.bottom_interface) += mm2;
+            }
+    return result;
+}
+
+// Append ordered surface areas and path metrics only when the report environment variable is set; I/O failures fail the test.
+// Published holds one entry per auxiliary layer in auxiliary_layers() order, captured after the family and before toolpaths.
+// Typed areas are one set per layer: each category uses its configured extruder, while path metrics retain the actual extruder.
+// Native generators have no typed surfaces; typed_areas=false writes na for these fields, but still measures their footprint and paths.
+inline void record_layer_report(const std::string &section, const PrintObject &object,
+                               const std::vector<LayerSurfaceAreas> &published, const std::string &extra, bool typed_areas = true)
+{
+    const char *path = std::getenv("SLIC3R_SUPPORT_LAYER_TABLE");
+    if (path == nullptr || path[0] == 0) return;
+    std::ofstream out(path, std::ios::app);
+    INFO("support layer table " << path);
+    REQUIRE(out.is_open());
+    out.imbue(std::locale::classic());
+    out << std::fixed << std::setprecision(6);
+    REQUIRE(published.size() == object.auxiliary_layers().size());
+    size_t index = 0;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        const LayerSurfaceAreas &before = published[index++];
+        const LayerSurfaceAreas after = layer_surface_areas(layer);
+        out << section << " z=" << layer.scaled_print_z() << " h=" << layer.scaled_height();
+        if (typed_areas)
+            out << " top_c=" << before.top_contact << " top_i=" << before.top_interface
+                << " bottom_c=" << before.bottom_contact << " bottom_i=" << before.bottom_interface
+                << " sparse=" << before.sparse << " post_top_c=" << after.top_contact
+                << " post_bottom_c=" << after.bottom_contact;
+        else
+            out << " top_c=na top_i=na bottom_c=na bottom_i=na sparse=na post_top_c=na post_bottom_c=na";
+        out << " footprint=" << unscaled(unscaled(area(union_ex(layer.lslices())))) << " paths=";
+        bool first = true;
+        for (const auto &[key, metric] : measure_layer(layer)) {
+            if (!first) out << ';';
+            first = false;
+            out << key.first << '/' << key.second << ':' << metric.count << ':' << metric.length << ':' << metric.volume;
+        }
+        FlowMeasures flows;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
+                    if (region.has_extrusion(bucket)) measure_flow_paths(region.extrusion(bucket), region.extruder_id(), flows);
+        out << " flows=";
+        first = true;
+        for (const auto &[key, metric] : flows) {
+            if (!first) out << ';';
+            first = false;
+            out << std::get<0>(key) << '/' << std::get<1>(key) << '/' << double(std::get<2>(key)) / 1000000.
+                << '/' << double(std::get<3>(key)) / 1000000. << ':' << metric.count << ':' << metric.length << ':' << metric.volume;
+        }
+        if (!extra.empty()) out << ' ' << extra;
+        out << '\n';
+    }
+    out.flush();
+    REQUIRE(out.good());
 }
 
 // Resolve nearest attributes while copying polylines into test-owned paths; missing flow on a geometric leaf fails the comparison instead of dropping geometry.
