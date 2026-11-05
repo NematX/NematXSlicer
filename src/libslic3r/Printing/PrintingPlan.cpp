@@ -306,15 +306,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
                                               const std::vector<ExtrusionRole> &roles);
 
 /*
-Translate every geometric point stored in an extrusion tree.
-
-The source extrusion tree stays untouched. This operates only on the cloned
-tree that belongs to the PrintingPlan. Empty placeholders keep their sentinel
-position unchanged to avoid overflowing the special NOT_A_POINT value.
-*/
-void translate_extrusion_tree(ExtrusionEntity &entity, const Point &shift);
-
-/*
 Sort the layer groups by increasing print Z after all objects have contributed.
 
 The builder discovers layers object-by-object. Sorting at the end makes the
@@ -1329,7 +1320,7 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
     */
     bool has_printable_root = false;
     for (const ExtrusionRole role : roles)
-        if (region_island.has_extrusion(role) && !region_island.extrusion(role).empty()) {
+        if (region_island.has_extrusion(role)) {
             has_printable_root = true;
             break;
         }
@@ -1342,8 +1333,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
             continue;
 
         const ExtrusionEntityCollection &source_root = region_island.extrusion(role);
-        if (source_root.empty())
-            continue;
 
         /*
         Each role bucket becomes its own PrintingExtrusion. Keeping role buckets
@@ -1353,7 +1342,7 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
         PrintingExtrusion extrusion(region_island, role, source_root);
         assert(extrusion.root != nullptr);
         if (extrusion.root != nullptr)
-            translate_extrusion_tree(*extrusion.root, instance.shift);
+            extrusion.root->translate(instance.shift);
         extrusion.printing_catalog_id = printing_catalog_id;
         tool_group.extrusions.push_back(std::move(extrusion));
     }
@@ -1365,37 +1354,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
     tool group.
     */
     append_region_island_once(tool_group, region_island);
-}
-
-void translate_extrusion_tree(ExtrusionEntity &entity, const Point &shift)
-{
-    if (shift == Point(0, 0))
-        return;
-
-    /*
-    ExtrusionNop is not a path, but it may carry a position used by sequencing
-    code. Move that position when it is real; leave NOT_A_POINT untouched because
-    it is a sentinel, not a coordinate.
-    */
-    if (ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(&entity)) {
-        if (nop->position != ExtrusionNop::NOT_A_POINT)
-            nop->position += shift;
-        return;
-    }
-
-    /*
-    Leaf extrusion paths store their geometry in ArcPolyline. Collections do not
-    have their own points, so they fall through to the recursive child walk.
-    */
-    if (ArcPolyline *polyline = entity.polyline_or_null()) {
-        polyline->translate(shift);
-        return;
-    }
-
-    if (!entity.is_leaf())
-        for (ExtrusionEntityUPtr &child : entity.children())
-            if (child)
-                translate_extrusion_tree(*child, shift);
 }
 
 void sort_layer_groups_by_print_z(PrintingGroup &group)

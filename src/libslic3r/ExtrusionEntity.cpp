@@ -317,6 +317,24 @@ ArcPolyline* ExtrusionEntity::polyline_or_null()
     return std::get_if<ArcPolyline>(&m_content);
 }
 
+void ExtrusionEntity::translate(const Point &shift)
+{
+    if (shift == Point(0, 0))
+        return;
+    // A positioned command may also own a path or children: move its position and its content.
+    if (ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(this))
+        if (nop->position != ExtrusionNop::NOT_A_POINT)
+            nop->position += shift;
+    if (ArcPolyline *polyline = this->polyline_or_null()) {
+        polyline->translate(shift);
+        return;
+    }
+    const ExtrusionEntity &view = *this;
+    for (const ExtrusionEntityUPtr &child : view.children())
+        if (child)
+            child->translate(shift);
+}
+
 const ArcPolyline& ExtrusionEntity::polyline_ref() const
 {
     const ArcPolyline *polyline = this->polyline_or_null();

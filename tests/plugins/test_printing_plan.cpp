@@ -29,6 +29,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
@@ -1575,6 +1576,130 @@ TEST_CASE("Default plan builder clones and instance-shifts stationary deposits",
     CHECK(clone.get_property<ExtrusionPropertySpecialCommand>()->command_code() == ExtrusionPropertySpecialCommand::Code::DEPOSIT);
     CHECK(clone.get_property<ExtrusionPropertySpecialCommand>()->extra_data == Approx(0.4));
     CHECK(clone.get_property<ExtrusionAttributes>()->mm3_per_mm == Approx(0.08));
+}
+
+TEST_CASE("Source buckets retain stored hybrid command geometry independently of virtual emptiness",
+          "[plugins][printing][plan][source-presence][tree-transform]")
+{
+    for (const bool local : {false, true}) {
+        for (const bool canonical : {false, true}) {
+            CAPTURE(local, canonical);
+            LayerRegionIsland source({}, 0);
+            std::unique_ptr<ExtrusionNop> command = std::make_unique<ExtrusionNop>();
+            command->position = Point(1200, 3400);
+            command->add_property(ExtrusionPropertyCustomGcodeText("M117 retained source command"));
+            const ArcPolyline path(Points{{0, 0}, {10000, 0}});
+            if (local)
+                command->set_polyline(path);
+            else
+                command->append_child(std::make_unique<ExtrusionEntity>(false, path));
+            REQUIRE(command->empty()); // Legacy Nop behavior itself is not changed.
+            REQUIRE_FALSE(command->ExtrusionEntity::empty());
+            ExtrusionEntityUPtr stored = canonical ? command->clone_canonical() : std::move(command);
+            const ExtrusionEntity *identity = stored.get();
+            ExtrusionEntityCollection &bucket = source.mutable_extrusion(LayerRegionIsland::SUPPORT);
+            bucket.append(std::move(stored));
+            const ExtrusionEntityCollection *bucket_identity = &bucket;
+            const auto *handle = reinterpret_cast<const layer_region_island_handle *>(&source);
+            CHECK(source.has_extrusions());
+            CHECK(source.has_extrusion(LayerRegionIsland::SUPPORT));
+            CHECK(layer_region_island_has_extrusions(handle) != 0);
+            CHECK(layer_region_island_has_extrusion(handle, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL) != 0);
+            CHECK(layer_region_island_get_extrusion(handle, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL) ==
+                  reinterpret_cast<const extrusion_entity_handle *>(bucket_identity));
+            // A genuinely empty bucket must not keep an empty tool visit alive.
+            source.mutable_extrusion(LayerRegionIsland::INFILLS);
+            CHECK_FALSE(source.has_extrusion(LayerRegionIsland::INFILLS));
+            source.remove_empty_extrusions();
+            REQUIRE(source.has_extrusion(LayerRegionIsland::SUPPORT));
+            CHECK(&source.extrusion(LayerRegionIsland::SUPPORT) == bucket_identity);
+            CHECK(&source.extrusion(LayerRegionIsland::SUPPORT).child(0) == identity);
+            REQUIRE(identity->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(identity->custom_gcode_string(*identity->get_property<ExtrusionPropertyCustomGcode>()) ==
+                  "M117 retained source command");
+            auto *nop = dynamic_cast<const ExtrusionNop *>(identity);
+            REQUIRE(nop != nullptr);
+            CHECK(nop->position == Point(1200, 3400));
+        }
+    }
+    LayerRegionIsland commands_only({}, 0);
+    commands_only.mutable_extrusion(LayerRegionIsland::SUPPORT).append(std::make_unique<ExtrusionNop>());
+    CHECK_FALSE(commands_only.has_extrusion(LayerRegionIsland::SUPPORT));
+    CHECK_FALSE(commands_only.has_extrusions());
+}
+
+TEST_CASE("Default plan builder shifts Nop positions and their stored geometry together",
+          "[plugins][printing][plan][step-ordering][tree-transform]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool positioned : {false, true}) {
+        CAPTURE(positioned);
+        Model model;
+        Print print;
+        Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+        PluginStorage storage;
+        const ExPolygons subject{rectangle_expolygon(0., 0., 20., 20.)};
+        const slic3r_api::Object object(reinterpret_cast<const object_handle *>(&print.object(0)));
+        const c_point raw_shift = object.instance_shift(0);
+        const Point shift(raw_shift.x, raw_shift.y);
+        REQUIRE(shift != Point(0, 0));
+        const auto result = slic3r_api::build_auxiliary_layer_regions_from_subject(
+            reinterpret_cast<storage_handle *>(&storage), print_view(print), object, expolygons_view(subject),
+            scale_i(0.2), scale_i(0.4), scale_i(0.3));
+        REQUIRE(result.created);
+        layer_region_island_handle *island = layer_island_get_or_create_region_island(
+            const_cast<layer_island_handle *>(result.layer.island(0).handle()), nullptr, 0, 0);
+        REQUIRE(island != nullptr);
+        ExtrusionEntityCollection *root = reinterpret_cast<ExtrusionEntityCollection *>(
+            layer_region_island_get_mutable_extrusion(island, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL));
+        REQUIRE(root != nullptr);
+        std::unique_ptr<ExtrusionNop> command = std::make_unique<ExtrusionNop>();
+        command->position = positioned ? Point::new_scale(1.25, 2.5) : ExtrusionNop::NOT_A_POINT;
+        command->set_role(ExtrusionRole::SupportMaterial);
+        command->set_can_rotate(false);
+        command->add_property(ExtrusionPropertyCustomGcodeText("M117 instance-local command"));
+        ArcPolyline arc;
+        arc.append(Point::new_scale(2, 0));
+        arc.append(Geometry::ArcWelder::Segment(Point::new_scale(0, 2), float(scale_i(2)), Geometry::ArcWelder::Orientation::CCW));
+        arc.set_z_offset(0, 100);
+        arc.set_z_offset(1, 900);
+        std::unique_ptr<ExtrusionEntity> geometry = std::make_unique<ExtrusionEntity>(false, arc);
+        geometry->add_property(ExtrusionAttributes(ExtrusionRole::SupportMaterial, ExtrusionFlow(0.08, 0.4f, 0.2f)));
+        geometry->add_property(ExtrusionPropertySpeed(20.f));
+        command->append_child(std::move(geometry));
+        command->set_can_sort_reverse(false, false);
+        const ExtrusionNop *source = command.get();
+        const Point original_position = source->position;
+        root->append(std::move(command));
+        Steps::StepExtrusionOrdering::clear(print);
+        Steps::StepExtrusionOrdering::prepare(print);
+        Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+        REQUIRE(print.printing_plan() != nullptr);
+        REQUIRE(print.printing_plan()->groups.size() == 1);
+        const PrintingGroup &group = print.printing_plan()->groups.front();
+        REQUIRE(group.layers.size() == 1);
+        REQUIRE(group.layers.front().tool_groups.size() == 1);
+        const std::vector<PrintingExtrusion> &extrusions = group.layers.front().tool_groups.front().extrusions;
+        REQUIRE(extrusions.size() == 1);
+        REQUIRE(extrusions.front().root->child_count() == 1);
+        const ExtrusionNop *copy = dynamic_cast<const ExtrusionNop *>(&extrusions.front().root->child(0));
+        REQUIRE(copy != nullptr);
+        CHECK(copy != source);
+        CHECK(copy->position == (positioned ? original_position + shift : ExtrusionNop::NOT_A_POINT));
+        CHECK(copy->role() == ExtrusionRole::SupportMaterial);
+        REQUIRE(copy->child_count() == 1);
+        const ArcPolyline &translated = copy->child(0).polyline_ref();
+        CHECK(translated.front() == arc.front() + shift);
+        CHECK(translated.back() == arc.back() + shift);
+        CHECK(translated.get_arc(1).radius == arc.get_arc(1).radius);
+        CHECK(translated.z_offset(0) == 100);
+        CHECK(translated.z_offset(1) == 900);
+        REQUIRE(copy->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+        CHECK(copy->custom_gcode_string(*copy->get_property<ExtrusionPropertyCustomGcode>()) == "M117 instance-local command");
+        CHECK(source->position == original_position);
+        CHECK(source->child(0).polyline_ref().front() == arc.front());
+        CHECK(source->child(0).polyline_ref().back() == arc.back());
+    }
 }
 
 TEST_CASE("STEP_ORDERING runs default plugin chain on a shared PrintingPlan", "[printing][plan][step-ordering]")

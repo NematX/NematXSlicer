@@ -36,6 +36,7 @@ previews distinguish the rounded input from the exact point they will publish.
 #include <memory>
 #include <string>
 #include <typeinfo>
+#include <stdexcept>
 
 #include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
@@ -497,6 +498,113 @@ TEST_CASE("Seam planning never splits a protected closed local child",
             CHECK(view->child(0).polyline_ref().size() == 4);
         }
     }
+}
+
+// Compare legacy and canonical positioned commands without stopping at their dynamic type.
+TEST_CASE("Tree translation preserves positioned commands and translates their stored descendants",
+          "[plugins][extrusion][tree-transform]")
+{
+    using namespace Slic3r;
+    const Point shift(1234, -5678);
+    for (const bool positioned : {false, true}) {
+        CAPTURE(positioned);
+        ExtrusionNop source;
+        source.position = positioned ? Point(7000, 8000) : ExtrusionNop::NOT_A_POINT;
+        source.set_role(ExtrusionRole::SupportMaterial);
+        source.set_can_rotate(false);
+        source.add_property(ExtrusionPropertyCustomGcodeText("M117 translated command"));
+        ArcPolyline arc;
+        arc.append(Point(10000, 0));
+        arc.append(Geometry::ArcWelder::Segment(Point(0, 10000), 10000.f, Geometry::ArcWelder::Orientation::CCW));
+        arc.set_z_offset(0, 100);
+        arc.set_z_offset(1, 900);
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::SupportMaterial}, false);
+        path->set_polyline(arc);
+        path->set_can_rotate(true);
+        source.append_child(std::move(path));
+        source.append_child(std::make_unique<ExtrusionEntity>(false));
+        ExtrusionEntityUPtr legacy(source.clone());
+        ExtrusionEntityUPtr canonical = source.clone_canonical();
+        for (ExtrusionEntity *copy : {legacy.get(), canonical.get()}) {
+            const ExtrusionEntity *child = &copy->child(0);
+            const size_t id = copy->get_id();
+            copy->translate(shift);
+            ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(copy);
+            REQUIRE(nop != nullptr);
+            CHECK(nop->position == (positioned ? source.position + shift : ExtrusionNop::NOT_A_POINT));
+            CHECK(nop->role() == ExtrusionRole::SupportMaterial);
+            CHECK(copy->get_id() == id);
+            CHECK(copy->can_sort() == source.can_sort());
+            CHECK(copy->can_reverse() == source.can_reverse());
+            CHECK_FALSE(copy->can_rotate());
+            CHECK(copy->child(0).can_rotate());
+            REQUIRE(copy->child_count() == 2);
+            CHECK(&copy->child(0) == child);
+            const ArcPolyline &translated = child->polyline_ref();
+            CHECK(translated.front() == arc.front() + shift);
+            CHECK(translated.back() == arc.back() + shift);
+            CHECK(translated.get_arc(1).radius == arc.get_arc(1).radius);
+            CHECK(translated.get_arc(1).orientation == arc.get_arc(1).orientation);
+            CHECK(translated.z_offset(0) == 100);
+            CHECK(translated.z_offset(1) == 900);
+            REQUIRE(copy->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(copy->custom_gcode_string(*copy->get_property<ExtrusionPropertyCustomGcode>()) == "M117 translated command");
+        }
+        CHECK(source.position == (positioned ? Point(7000, 8000) : ExtrusionNop::NOT_A_POINT));
+        CHECK(source.child(0).polyline_ref().front() == arc.front());
+        CHECK(source.child(0).polyline_ref().back() == arc.back());
+
+        // The same positioned command may carry local content instead of
+        // children. In particular, it must not be translated twice or wrapped.
+        ExtrusionNop local;
+        local.position = source.position;
+        local.set_role(ExtrusionRole::SupportMaterial);
+        local.set_polyline(arc);
+        local.set_can_sort_reverse(false, false);
+        local.set_can_rotate(false);
+        local.add_property(ExtrusionPropertyCustomGcodeText("M117 local command"));
+        ExtrusionEntityUPtr local_legacy(local.clone());
+        ExtrusionEntityUPtr local_canonical = local.clone_canonical();
+        for (ExtrusionEntity *copy : {local_legacy.get(), local_canonical.get()}) {
+            const size_t id = copy->get_id();
+            copy->translate(shift);
+            const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(copy);
+            REQUIRE(nop != nullptr);
+            CHECK(nop->position == (positioned ? local.position + shift : ExtrusionNop::NOT_A_POINT));
+            CHECK(nop->role() == local.role());
+            CHECK(copy->get_id() == id);
+            CHECK(copy->child_count() == 0);
+            CHECK_FALSE(copy->can_sort());
+            CHECK_FALSE(copy->can_reverse());
+            CHECK_FALSE(copy->can_rotate());
+            const ArcPolyline &translated = copy->polyline_ref();
+            CHECK(translated.size() == arc.size());
+            CHECK(translated.front() == arc.front() + shift);
+            CHECK(translated.back() == arc.back() + shift);
+            CHECK(translated.get_arc(1).radius == arc.get_arc(1).radius);
+            CHECK(translated.get_arc(1).orientation == arc.get_arc(1).orientation);
+            CHECK(translated.z_offset(0) == arc.z_offset(0));
+            CHECK(translated.z_offset(1) == arc.z_offset(1));
+            REQUIRE(copy->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(copy->custom_gcode_string(*copy->get_property<ExtrusionPropertyCustomGcode>()) == "M117 local command");
+        }
+        CHECK(local.position == source.position);
+        CHECK(local.polyline_ref().front() == arc.front());
+        CHECK(local.polyline_ref().back() == arc.back());
+    }
+}
+
+TEST_CASE("Tree translation leaves positioned commands and geometry unchanged for a zero shift",
+          "[plugins][extrusion][tree-transform]")
+{
+    using namespace Slic3r;
+    ExtrusionNop root;
+    root.position = Point(1000, 2000);
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}})));
+    root.translate(Point(0, 0));
+    CHECK(root.position == Point(1000, 2000));
+    CHECK(root.child(0).polyline_ref().front() == Point(0, 0));
+    CHECK(root.child(0).polyline_ref().back() == Point(10000, 0));
 }
 
 // Copy mixed native and hybrid trees once without changing their source handles or legacy clone behavior.

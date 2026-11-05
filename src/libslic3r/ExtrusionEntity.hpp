@@ -172,6 +172,10 @@ public:
     // Check stored child order for exact XY continuity, ignoring geometrically empty children.
     bool is_continuous() const;
 
+    // Move the stored geometry of this tree, and the position of a positioned command, by shift.
+    // Each point moves once; handles, properties, arcs, Z offsets and permissions are kept.
+    void translate(const Point &shift);
+
     const ArcPolyline* polyline_or_null() const;
     ArcPolyline* polyline_or_null();
     const ArcPolyline& polyline_ref() const;
