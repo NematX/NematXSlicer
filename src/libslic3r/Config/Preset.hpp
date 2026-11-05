@@ -49,6 +49,12 @@ enum ConfigFileType
 
 extern ConfigFileType guess_config_file_type(const boost::property_tree::ptree &tree);
 
+// Build an external profile name from file_name and original_name.
+// A prefix before " (" is treated as a source filename if it equals file_name
+// or ends in a recognized source extension. Keep other parenthesized text.
+// index is the collision number. Zero adds no suffix number.
+std::string external_preset_name(const std::string &file_name, const std::string &original_name, size_t index);
+
 class VendorProfile
 {
 public:

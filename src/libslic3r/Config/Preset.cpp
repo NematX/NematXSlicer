@@ -28,6 +28,7 @@
 
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <regex>
 #include <stdexcept>
@@ -70,10 +71,13 @@ A combined project configuration loses the source profile of unknown keys.
 Key prefixes suggest a print, printer or filament group. Explicitly stored JSON
 takes precedence over that guess. Composition later combines the saved groups.
 
+External names use the source filename without repeatedly nesting file prefixes.
+
 Operation notes:
 - Validate stored JSON, normalize settings, then remove misplaced keys
 - preserve_unknown_preset_settings: retain permitted text under its profile type
 - preserve_unknown_project_settings: infer groups from combined project keys
+- external_preset_name: build a file-derived name with a collision number
 
 Representative direct calls (branches are not a timeline):
 
@@ -92,6 +96,10 @@ Representative direct calls (branches are not a timeline):
         |-- parse_print_custom_setting()
         |-- captured.dump()
         `-- parse_filament_custom_setting()
+
+    external_preset_name()
+        |-- external_preset_base()
+        `-- std::to_string()
 */
 
 using boost::property_tree::ptree;
@@ -906,6 +914,38 @@ void PresetCollection::load_presets(
         throw Slic3r::RuntimeError(errors_cummulative);
 }
 
+namespace {
+
+const std::array<const char *, 9> external_source_extensions {
+    ".3mf", ".amf", ".zip", ".ini", ".gcode", ".gco", ".g", ".ngc", ".bgcode"};
+
+// Find a prefix before " (" equal to file_name or ending in a recognized source extension.
+// Return the first match. Otherwise keep original_name unchanged; no provenance is stored.
+std::string external_preset_base(const std::string &file_name, const std::string &original_name);
+
+std::string external_preset_base(const std::string &file_name, const std::string &original_name)
+{
+    if (original_name == file_name)
+        return original_name;
+    for (size_t pos = original_name.find(" ("); pos != std::string::npos; pos = original_name.find(" (", pos + 1)) {
+        const std::string prefix = original_name.substr(0, pos);
+        if (prefix == file_name || std::any_of(external_source_extensions.begin(), external_source_extensions.end(),
+                [&prefix](const char *extension) { return boost::iends_with(prefix, extension); }))
+            return prefix;
+    }
+    return original_name;
+}
+
+} // namespace
+
+std::string external_preset_name(const std::string &file_name, const std::string &original_name, size_t index)
+{
+    const std::string base = original_name.empty() ? std::string() : external_preset_base(file_name, original_name);
+    if (base.empty() || base == file_name)
+        return index == 0 ? file_name : file_name + " (" + std::to_string(index) + ")";
+    return file_name + " (" + base + (index == 0 ? std::string() : "-" + std::to_string(index)) + ")";
+}
+
 // Load a preset from an already parsed config file, insert it into the sorted sequence of presets
 // and select it, losing previous modifications.
 Preset& PresetCollection::load_preset(const std::string &path, const std::string &name, const DynamicPrintConfig &config, bool select)
@@ -1030,17 +1070,7 @@ ExternalPreset PresetCollection::load_external_preset(
     // The external preset does not match an internal preset, load the external preset.
     std::string new_name;
     for (size_t idx = 0;; ++ idx) {
-        std::string suffix;
-        if (original_name.empty()) {
-            if (idx > 0)
-                suffix = " (" + std::to_string(idx) + ")";
-        } else {
-            if (idx == 0)
-                suffix = " (" + original_name + ")";
-            else
-                suffix = " (" + original_name + "-" + std::to_string(idx) + ")";
-        }
-        new_name = name + suffix;
+        new_name = external_preset_name(name, original_name, idx);
         it = this->find_preset_internal(new_name);
         if (it == m_presets.end() || it->name != new_name)
             // Unique profile name. Insert a new profile.
