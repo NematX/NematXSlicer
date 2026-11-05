@@ -72,12 +72,15 @@ Key prefixes suggest a print, printer or filament group. Explicitly stored JSON
 takes precedence over that guess. Composition later combines the saved groups.
 
 External names use the source filename without repeatedly nesting file prefixes.
+Reduced collections keep requested profiles, their parents and selection fallbacks.
 
 Operation notes:
 - Validate stored JSON, normalize settings, then remove misplaced keys
 - preserve_unknown_preset_settings: retain permitted text under its profile type
 - preserve_unknown_project_settings: infer groups from combined project keys
 - external_preset_name: build a file-derived name with a collision number
+- PresetCollection::assign_subset: copy the profiles needed for selection
+- compatibility_context / printer_for_extruder: prepare compatibility variables
 
 Representative direct calls (branches are not a timeline):
 
@@ -754,20 +757,26 @@ bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const Pre
             compatible_printers->get_values().end();
 }
 
-bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer)
+DynamicPrintConfig compatibility_context(const Preset &printer)
 {
     DynamicPrintConfig config;
-    config.set_key_value("printer_preset", new ConfigOptionString(active_printer.preset.name));
-    const ConfigOption *opt = active_printer.preset.config.option("nozzle_diameter");
+    config.set_key_value("printer_preset", new ConfigOptionString(printer.name));
+    const ConfigOption *opt = printer.config.option("nozzle_diameter");
     if (opt) {
         config.set_key_value("num_extruders", new ConfigOptionInt((int)static_cast<const ConfigOptionFloats*>(opt)->size()));
         config.set_key_value("extruders_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
     }
-    opt = active_printer.preset.config.option("milling_diameter");
+    opt = printer.config.option("milling_diameter");
     if (opt) {
         config.set_key_value("num_milling", new ConfigOptionInt((int)static_cast<const ConfigOptionFloats*>(opt)->size()));
         config.set_key_value("milling_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
     }
+    return config;
+}
+
+bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer)
+{
+    DynamicPrintConfig config = compatibility_context(active_printer.preset);
     return is_compatible_with_printer(preset, active_printer, &config);
 }
 
@@ -1407,18 +1416,7 @@ void PresetCollection::set_default_suppressed(bool default_suppressed)
 
 size_t PresetCollection::update_compatible_internal(const PresetWithVendorProfile &active_printer, const PresetWithVendorProfile *active_print, PresetSelectCompatibleType unselect_if_incompatible)
 {
-    DynamicPrintConfig config;
-    config.set_key_value("printer_preset", new ConfigOptionString(active_printer.preset.name));
-    const ConfigOption *opt = active_printer.preset.config.option("nozzle_diameter");
-    if (opt) {
-        config.set_key_value("num_extruders", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-        config.set_key_value("extruders_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-    }
-    opt = active_printer.preset.config.option("milling_diameter");
-    if (opt) {
-        config.set_key_value("num_milling", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-        config.set_key_value("milling_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-    }
+    DynamicPrintConfig config = compatibility_context(active_printer.preset);
     bool some_compatible = false;
     std::vector<size_t> indices_of_template_presets;
     if(m_idx_selected < m_num_default_presets && unselect_if_incompatible != PresetSelectCompatibleType::Never)
@@ -1649,14 +1647,73 @@ std::vector<std::string> PresetCollection::merge_presets(PresetCollection &&othe
 
 void PresetCollection::update_vendor_ptrs_after_copy(const VendorMap &new_vendors)
 {
-    for (Preset &preset : m_presets)
+    const auto rebind = [&new_vendors](Preset &preset) {
         if (preset.vendor != nullptr) {
             assert(! preset.is_default && ! preset.is_external);
             // Re-assign a pointer to the vendor structure in the new PresetBundle.
-            auto it = new_vendors.find(preset.vendor->id);
+            const VendorMap::const_iterator it = new_vendors.find(preset.vendor->id);
             assert(it != new_vendors.end());
             preset.vendor = &it->second;
         }
+    };
+    for (Preset &preset : m_presets)
+        rebind(preset);
+    rebind(m_edited_preset);
+    rebind(m_saved_preset);
+}
+
+void PresetCollection::assign_subset(const PresetCollection &source, const std::set<std::string> &names)
+{
+    std::set<std::string> kept;
+    // Retain every parent, including user profiles. A name already visited also stops an inheritance loop.
+    const auto keep = [&source, &kept](const Preset *preset) {
+        while (preset != nullptr && kept.insert(preset->name).second)
+            preset = source.get_preset_parent(*preset);
+    };
+    for (const std::string &name : names) {
+        const Preset *preset = source.find_preset(name, false, false);
+        if (preset == nullptr) {
+            const std::deque<Preset>::const_iterator renamed = source.find_preset_renamed(name);
+            if (renamed != source.m_presets.end())
+                preset = &*renamed;
+        }
+        keep(preset);
+    }
+    // Selection can consult the selected profile or the first visible profile as a fallback.
+    // Keep both even when neither name was requested.
+    if (source.m_idx_selected < source.m_presets.size() && source.m_idx_selected >= source.m_num_default_presets)
+        keep(&source.m_presets[source.m_idx_selected]);
+    if (const size_t first_visible = source.first_visible_idx(); first_visible >= source.m_num_default_presets)
+        keep(&source.m_presets[first_visible]);
+    m_type = source.m_type;
+    m_default_suppressed = source.m_default_suppressed;
+    m_num_default_presets = source.m_num_default_presets;
+    m_dir_path = source.m_dir_path;
+    m_map_alias_to_profile_name.clear();
+    for (const std::pair<std::string, std::string> &alias : source.m_map_alias_to_profile_name)
+        if (kept.count(alias.second) != 0)
+            m_map_alias_to_profile_name.push_back(alias);
+    m_map_system_profile_renamed.clear();
+    for (const std::pair<const std::string, std::string> &renamed : source.m_map_system_profile_renamed)
+        if (kept.count(renamed.second) != 0)
+            m_map_system_profile_renamed.insert(renamed);
+    m_presets.clear();
+    for (size_t index = 0; index < source.m_presets.size(); ++index)
+        if (index < source.m_num_default_presets || kept.count(source.m_presets[index].name) != 0)
+            m_presets.push_back(source.m_presets[index]);
+    m_idx_selected = 0;
+    m_edited_preset = m_presets.front();
+    m_saved_preset = m_presets.front();
+    if (source.m_idx_selected < source.m_presets.size()) {
+        const std::string &selected = source.m_presets[source.m_idx_selected].name;
+        for (size_t index = 0; index < m_presets.size(); ++index)
+            if (m_presets[index].name == selected) {
+                m_idx_selected = index;
+                m_edited_preset = source.m_edited_preset;
+                m_saved_preset = source.m_saved_preset;
+                break;
+            }
+    }
 }
 
 void PresetCollection::update_map_alias_to_profile_name()
@@ -2421,35 +2478,28 @@ bool ExtruderFilaments::select_filament(const std::string &name_w_suffix, bool f
     return false;
 }
 
-size_t ExtruderFilaments::update_compatible_internal(const PresetWithVendorProfile  &active_printer,
-                                                     const PresetWithVendorProfile  *active_print,
-                                                     PresetSelectCompatibleType      unselect_if_incompatible)
+Preset ExtruderFilaments::printer_for_extruder(const Preset &printer, size_t extruder_id)
 {
-    DynamicPrintConfig config;
-    config.set_key_value("printer_preset", new ConfigOptionString(active_printer.preset.name));
-    const ConfigOption* opt = active_printer.preset.config.option("nozzle_diameter");
-    if (opt) {
-        config.set_key_value("num_extruders", new ConfigOptionInt((int)static_cast<const ConfigOptionFloats*>(opt)->size()));
-        config.set_key_value("extruders_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-    }
-    opt = active_printer.preset.config.option("milling_diameter");
-    if (opt) {
-        config.set_key_value("num_milling", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-        config.set_key_value("milling_count", new ConfigOptionInt((int) static_cast<const ConfigOptionFloats *>(opt)->size()));
-    }
-
-    // Adjust printer preset config to the first extruder from m_extruder_id 
-    Preset printer_preset_adjusted = active_printer.preset;
-    if (m_extruder_id > 0 && !printer_preset_adjusted.config.opt_bool("single_extruder_multi_material")) {
+    Preset printer_preset_adjusted = printer;
+    if (extruder_id > 0 && !printer_preset_adjusted.config.opt_bool("single_extruder_multi_material")) {
         DynamicPrintConfig& active_printer_config = printer_preset_adjusted.config;
         for (const std::string& key : PrintConfigDef::instance().extruder_option_keys()) {
             if (key == "default_filament_profile")
                 continue;// Ignore this field, because this parameter is not related to the extruder but to whole printer.
-            auto* opt = active_printer_config.option(key, false);
+            ConfigOption *opt = active_printer_config.option(key, false);
             if (opt != nullptr && opt->is_vector())
-                static_cast<ConfigOptionVectorBase*>(opt)->set_at(*opt, 0, m_extruder_id);
+                static_cast<ConfigOptionVectorBase*>(opt)->set_at(*opt, 0, extruder_id);
         }
     }
+    return printer_preset_adjusted;
+}
+
+size_t ExtruderFilaments::update_compatible_internal(const PresetWithVendorProfile &active_printer,
+                                                    const PresetWithVendorProfile *active_print,
+                                                    PresetSelectCompatibleType unselect_if_incompatible)
+{
+    DynamicPrintConfig config = compatibility_context(active_printer.preset);
+    const Preset printer_preset_adjusted = printer_for_extruder(active_printer.preset, m_extruder_id);
     PresetWithVendorProfile active_printer_adjusted(printer_preset_adjusted, active_printer.vendor);
 
     std::vector<size_t> indices_of_template_presets;

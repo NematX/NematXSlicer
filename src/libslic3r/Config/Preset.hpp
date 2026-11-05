@@ -325,6 +325,9 @@ std::string print_custom_setting_for_origin(const DynamicPrintConfig &config, co
 std::string merge_print_custom_settings(const DynamicPrintConfig &print_config, const DynamicPrintConfig &printer_config);
 
 bool is_compatible_with_print  (const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_print, const PresetWithVendorProfile &active_printer);
+// Build extra variables for compatibility expressions: printer name, extruder count and milling-tool count.
+// This is not a full printer configuration.
+DynamicPrintConfig compatibility_context(const Preset &printer);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer);
 
@@ -628,6 +631,12 @@ protected:
     // After copying a collection with the default operators above, call this function
     // to adjust Profile::vendor pointers.
     void            update_vendor_ptrs_after_copy(const VendorMap &vendors);
+
+    // Copy named profiles and their parent chains. Resolve old names to their current profiles.
+    // Also retain defaults, the selected profile and the first visible profile for selection fallbacks.
+    // Preserve source order plus the selected profile's edited/saved copies.
+    // Keep only maps pointing to retained names. The owner must rebind vendor pointers after copying.
+    void            assign_subset(const PresetCollection &source, const std::set<std::string> &names);
 
     // Select a preset, if it exists. If it does not exist, select an invalid (-1) index.
     // This is a temporary state, which shall be fixed immediately by the following step.
@@ -1069,6 +1078,11 @@ private:
     const Preset* first_compatible()                                        { return m_extr_filaments[this->first_compatible_idx()].preset; }
 
     const std::string& get_preset_name_by_alias(const std::string& alias) const;
+
+    // Copy the printer and place extruder_id's values at position zero for compatibility expressions.
+    // Keep default_filament_profile unchanged: it describes the whole printer.
+    // For single_extruder_multi_material, leave the original values for every material position.
+    static Preset printer_for_extruder(const Preset &printer, size_t extruder_id);
 
     size_t  update_compatible_internal(const PresetWithVendorProfile& active_printer, const PresetWithVendorProfile* active_print, PresetSelectCompatibleType unselect_if_incompatible);
 

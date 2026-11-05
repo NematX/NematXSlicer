@@ -30,8 +30,19 @@ After selecting profiles, full_config() builds their combined settings.
 For project files, project_profile_sections() supplies separate INI sections
 holding each selected profile's known metadata, such as inheritance.
 
+To work on a reduced FFF catalog, collect names in PresetSubset and call subset().
+Select the profiles on that copy, rebuild extruders_filaments with
+update_multi_material_filament_presets(), then use full_config().
+The copy keeps the profiles needed for selection. It does not reproduce SLA
+or physical-printer selections; those collections remain at their defaults.
+
 Construct a bundle, load the required profiles, then use its selected presets to compose full_config(). For project
 saving, obtain project_profile_sections() as well so loading can restore metadata absent from the flat configuration.
+
+When building a reduced bundle, keep the returned copy alive for as long as any
+borrowed profile or vendor pointer into it is used. Rebuild its filament slots
+after selection before composing the effective FFF configuration; copying a
+catalogue alone does not select a new multi-material combination.
 */
 
 
@@ -188,6 +199,23 @@ public:
     // preset if the current print or filament preset is not compatible.
     void                        update_compatible(PresetSelectCompatibleType select_other_print_if_incompatible, PresetSelectCompatibleType select_other_filament_if_incompatible);
     void                        update_compatible(PresetSelectCompatibleType select_other_if_incompatible) { this->update_compatible(select_other_if_incompatible, select_other_if_incompatible); }
+
+    // Names of print, filament and printer profiles to request when copying a reduced FFF catalog.
+    struct PresetSubset {
+        std::set<std::string> prints;
+        std::set<std::string> filaments;
+        std::set<std::string> printers;
+    };
+    // Copy requested FFF profiles, resolved old names and parent chains into an independent bundle.
+    // Also keep selection fallbacks, the required vendor records and project settings.
+    // SLA and physical-printer collections remain at their defaults.
+    // Select FFF profiles on the copy, then rebuild extruders_filaments before composing its configuration.
+    PresetBundle subset(const PresetSubset &names) const;
+    // Return filament names compatible with at least one extruder. Exclude default profiles.
+    // Reuse ExtruderFilaments::update_compatible() to filter template profiles like the GUI.
+    // printer and optional print come from this catalog, or copies preserving its vendor identity.
+    // Do not change the catalog's flags, selected profiles or edited values.
+    std::set<std::string> compatible_filament_names(const Preset &printer, const Preset *print) const;
 
     // Set the is_visible flag for printer vendors, printer models and printer variants
     // based on the user configuration.

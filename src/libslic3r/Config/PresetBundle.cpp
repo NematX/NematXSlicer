@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <fstream>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_set>
@@ -46,6 +47,11 @@ a copy of the matching profile's configuration before creating that profile.
 Unrecognized text uses separate JSON groups named print or printer.
 Import extracts each group. full_config() combines them.
 
+Headless callers can copy a reduced bundle containing only profiles needed for selection.
+The copy owns its vendor records. Its profile pointers must refer to those copied records.
+
+subset: copy required FFF profiles and their vendor records
+
 Operation notes:
 - load_system_presets_from
 - Sort vendor INI filenames, load each bundle, then merge profiles and update name maps
@@ -53,6 +59,7 @@ Operation notes:
 - Validate retained JSON, load profiles and apply known profile metadata
 - full_config / full_fff_config
 - Combine selected settings and retained print/printer JSON
+- compatible_filament_names: collect compatible names without modifying the source catalog
 
 Representative direct calls (branches are not a timeline):
 
@@ -205,6 +212,51 @@ PresetBundle& PresetBundle::operator=(const PresetBundle &rhs)
     printers     .update_vendor_ptrs_after_copy(this->vendors);
 
     return *this;
+}
+
+PresetBundle PresetBundle::subset(const PresetSubset &names) const
+{
+    PresetBundle reduced;
+    reduced.fff_prints.assign_subset(fff_prints, names.prints);
+    reduced.filaments.assign_subset(filaments, names.filaments);
+    reduced.printers.assign_subset(printers, names.printers);
+    reduced.project_config = project_config;
+    // Copy the required vendor records. Stored profiles and their edited/saved copies must point to these copies.
+    PresetCollection *collections[] = {&reduced.fff_prints, &reduced.filaments, &reduced.printers};
+    for (const PresetCollection *collection : collections)
+        for (const Preset &preset : collection->get_presets())
+            if (preset.vendor != nullptr)
+                reduced.vendors.emplace(preset.vendor->id, *preset.vendor);
+    for (PresetCollection *collection : collections)
+        collection->update_vendor_ptrs_after_copy(reduced.vendors);
+    return reduced;
+}
+
+std::set<std::string> PresetBundle::compatible_filament_names(const Preset &printer, const Preset *print) const
+{
+    const PresetWithVendorProfile active_printer = this->printers.get_preset_with_vendor_profile(printer);
+    std::optional<PresetWithVendorProfile> active_print;
+    if (print != nullptr)
+        active_print.emplace(this->fff_prints.get_preset_with_vendor_profile(*print));
+    const ConfigOptionFloats *nozzles = printer.config.option<ConfigOptionFloats>("nozzle_diameter");
+    const size_t extruders = nozzles == nullptr ? 1 : std::max<size_t>(1, nozzles->size());
+    // The temporary ExtruderFilaments object owns the evaluated flags. It only reads this source collection.
+    PresetCollection *collection = const_cast<PresetCollection *>(&this->filaments);
+    std::set<std::string> names;
+    std::vector<DynamicPrintConfig> evaluated;
+    for (size_t extruder = 0; extruder < extruders; ++extruder) {
+        const DynamicPrintConfig view = ExtruderFilaments::printer_for_extruder(printer, extruder).config;
+        // Identical printer values give the same compatibility result; evaluate each distinct view once.
+        if (std::any_of(evaluated.begin(), evaluated.end(), [&view](const DynamicPrintConfig &other) { return other.equals(view); }))
+            continue;
+        evaluated.push_back(view);
+        ExtruderFilaments slot(collection, extruder);
+        slot.update_compatible(active_printer, active_print ? &*active_print : nullptr, PresetSelectCompatibleType::Never);
+        for (const Filament &filament : slot())
+            if (filament.is_compatible && !filament.preset->is_default)
+                names.insert(filament.preset->name);
+    }
+    return names;
 }
 
 void PresetBundle::reset(bool delete_files)
