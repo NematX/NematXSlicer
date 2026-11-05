@@ -226,14 +226,13 @@ ExtrusionEntityUPtr make_path(const Point &start,
         reversible, ArcPolyline(Points{start, end}));
 }
 
-/* Build a sortable root containing the supplied open paths in source order. */
-std::unique_ptr<ExtrusionEntityCollection> make_sortable_root(
+/* Build a canonical sortable plan root with the supplied paths in source order. */
+ExtrusionEntityUPtr make_sortable_root(
     std::initializer_list<std::pair<Point, Point>> paths)
 {
-    std::unique_ptr<ExtrusionEntityCollection> root =
-        std::make_unique<ExtrusionEntityCollection>(true, true);
+    ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), true, true, false);
     for (const std::pair<Point, Point> &path : paths)
-        root->append(make_path(path.first, path.second));
+        root->append_child(make_path(path.first, path.second));
     return root;
 }
 
@@ -424,7 +423,7 @@ TEST_CASE("Extrusion-tree ordering falls back to origin and removes empty metada
             {Point(100, 0), Point(110, 0)},
             {Point(1, 0), Point(2, 0)}}));
     append_extrusion(
-        tool, std::make_unique<ExtrusionEntityCollection>(true, true));
+        tool, std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), true, true, false));
 
     PrintingExtrusion &ordered = group.layers[1].tool_groups[0].extrusions[0];
     PrintingExtrusion &empty = group.layers[1].tool_groups[0].extrusions[1];
@@ -717,6 +716,90 @@ TEST_CASE("Seam consumers pass a declared linear STL export catalogue",
             if (line.extruding(state) && line.dist_XY(state) > 0.) ++deposited_moves;
         });
         CHECK(deposited_moves > 0);
+    }
+}
+
+// Classification follows effective geometry attributes, not a legacy role summary.
+TEST_CASE("Source perimeter validation agrees before and after canonical copies",
+          "[plugins][ordering][precondition][consumer-qualification]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool canonical : {false, true}) {
+        for (const bool metadata : {false, true}) {
+            for (const std::string form : {"loop-travel", "parent-attributes", "child-override"}) {
+                CAPTURE(canonical, metadata, form);
+                PerimeterSourceFixture fixture;
+                ExtrusionEntityUPtr root;
+                if (form == "loop-travel") {
+                    std::unique_ptr<ExtrusionLoop> loop = std::make_unique<ExtrusionLoop>();
+                    ExtrusionPath travel(ExtrusionAttributes{ExtrusionRole::Travel}, false);
+                    travel.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
+                    ExtrusionPath perimeter(ExtrusionAttributes{ExtrusionRole::ExternalPerimeter}, false);
+                    perimeter.set_polyline(ArcPolyline(Points{{10000, 0}, {10000, 10000}, {0, 0}}));
+                    loop->append_child(std::make_unique<ExtrusionPath>(travel));
+                    loop->append_child(std::make_unique<ExtrusionPath>(perimeter));
+                    root = std::move(loop);
+                } else {
+                    std::unique_ptr<ExtrusionEntityCollection> collection = std::make_unique<ExtrusionEntityCollection>(false, false);
+                    collection->add_property(ExtrusionAttributes{form == "parent-attributes" ?
+                        ExtrusionRole::ExternalPerimeter : ExtrusionRole::InternalInfill});
+                    ExtrusionEntityUPtr leaf = make_polyline_entity(Points{{0, 0}, {10000, 0}, {0, 10000}, {0, 0}});
+                    if (form == "child-override")
+                        leaf->add_property(ExtrusionAttributes{ExtrusionRole::ExternalPerimeter});
+                    collection->append_child(std::move(leaf));
+                    root = std::move(collection);
+                }
+                if (metadata) add_loop_property(*root, true);
+                REQUIRE(root->ExtrusionEntity::is_loop());
+                if (canonical) root = root->clone_canonical();
+                publish_perimeter_tree(fixture, std::move(root));
+                std::string error;
+                CHECK(Steps::StepExtrusionOrdering::validate_pre(fixture.print(), &error) == metadata);
+                if (!metadata) {
+                    CHECK(error.find("missing direct ExtrusionPropertyLoopRole") != std::string::npos);
+                    CHECK(error.find("perimeters.root.child[0]") != std::string::npos);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Source validation applies exact closure and loop metadata to every stored representation",
+          "[plugins][ordering][precondition][consumer-qualification]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool canonical = GENERATE(false, true);
+    {
+        CAPTURE(canonical);
+        SECTION("closed multipath needs the same perimeter metadata as a generic contour") {
+            PerimeterSourceFixture fixture;
+            ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+            path.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {0, 10000}, {0, 0}}));
+            ExtrusionEntityUPtr tree = std::make_unique<ExtrusionMultiPath>(path);
+            if (canonical) tree = tree->clone_canonical();
+            publish_perimeter_tree(fixture, std::move(tree));
+            require_precondition_failure(fixture.print(), "missing direct ExtrusionPropertyLoopRole",
+                "perimeters.root.child[0]");
+        }
+        SECTION("epsilon-close legacy Loop cannot assert exact stored closure") {
+            PerimeterSourceFixture fixture;
+            std::unique_ptr<ExtrusionLoop> loop = std::make_unique<ExtrusionLoop>();
+            std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+            path->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {0, 10000}, {1, 0}}));
+            loop->append_child(std::move(path));
+            // The default legacy Loop omits its property; explicitly publish
+            // the LOOP claim whose inconsistency this test must diagnose.
+            add_loop_property(*loop, true);
+            REQUIRE(loop->get_property<ExtrusionPropertyLoopRole>() != nullptr);
+            REQUIRE((loop->get_property<ExtrusionPropertyLoopRole>()->perimeter_flags &
+                     C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0);
+            REQUIRE(loop->is_loop());
+            REQUIRE_FALSE(loop->ExtrusionEntity::is_loop());
+            ExtrusionEntityUPtr tree = canonical ? loop->clone_canonical() : ExtrusionEntityUPtr(loop.release());
+            publish_perimeter_tree(fixture, std::move(tree));
+            require_precondition_failure(fixture.print(), "C_EXTRUSION_PERIMETER_FLAG_LOOP but is_loop() is false",
+                "perimeters.root.child[0]");
+        }
     }
 }
 

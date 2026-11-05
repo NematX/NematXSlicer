@@ -47,8 +47,8 @@
    joins and ignores empty geometry, not event ordering semantics. Borrowed
    endpoint references remain valid only until the owning content changes.
 
-   clone_canonical() returns an independent owned tree of base nodes, retaining
-   positioned ExtrusionNop commands as the only type with extra position state.
+   clone_canonical() returns an independent owned tree of base nodes. Commands
+   are represented by properties and need no local polyline or legacy position.
    It copies permissions, identities and properties without entering legacy views:
        ExtrusionEntityUPtr independent = source.clone_canonical();
    The source is unchanged, and allocation failures publish no partial result.
@@ -230,7 +230,7 @@ public:
     void set_can_rotate(bool enabled) { m_can_rotate = enabled; }
     void set_can_sort_reverse(bool can_sort, bool can_reverse);
     virtual ExtrusionEntity* clone() const { return new ExtrusionEntity(*this); }
-    // Deep-copy stored content into exact base nodes, except exact Nop nodes retaining role and position.
+    // Deep-copy stored content into exact base nodes; commands use properties and no local polyline.
     // The source is unchanged; allocation failures propagate before any copy is published.
     ExtrusionEntityUPtr clone_canonical() const;
     // Create a new object, initialize it with this object using the move semantics.
@@ -287,9 +287,6 @@ bool simplify_extrusion_tree(ExtrusionEntity &root);
 // only cary an ExtrusionProperty
 class ExtrusionNop : public ExtrusionEntity
 {
-    friend class ExtrusionEntity;
-    // Retain the positioned command state while adopting independently copied base content.
-    ExtrusionNop(const ExtrusionNop &source, Content &&content);
     ExtrusionRole m_role = ExtrusionRole::None;
 public:
     static Point NOT_A_POINT;

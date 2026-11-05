@@ -11,6 +11,22 @@
 
 #include "Orchestrator.hpp"
 
+/* Expose owned extrusion storage through opaque C handles. Handles borrow nodes
+   from PluginStorage or a parent tree. Creating or cloning registers ownership
+   with the storage; inserting transfers new ownership to the parent. Copies
+   prepare canonical base-node content before publication, including aliasing
+   source/destination calls. Generic moves keep legacy child representations and
+   handles, independently of the PrintingPlan's canonical acquisition boundary.
+   Allocation errors propagate to the host's guarded plugin runner. No function
+   retains a borrowed source handle after returning; callers exclude mutation
+   concurrent with these calls.
+
+       extrusion_clone() -> clone_canonical() -> PluginStorage::store()
+       extrusion_copy_from() -> clone_canonical() -> replace destination content
+       extrusion_insert_child_copy() -> clone_canonical() -> parent insert_child()
+       extrusion_move_from() -> move existing stored content, not canonicalize it
+*/
+
 namespace Slic3r {
 
 static ExtrusionEntity *to_extrusion(extrusion_entity_handle *me)
@@ -59,7 +75,7 @@ extrusion_entity_handle *extrusion_clone(storage_handle *storage, const extrusio
         return nullptr;
 
     Slic3r::PluginStorage *plugin_storage = Slic3r::to_storage(storage);
-    std::unique_ptr<Slic3r::ExtrusionEntity> clone(Slic3r::to_extrusion(src)->clone());
+    std::unique_ptr<Slic3r::ExtrusionEntity> clone = Slic3r::to_extrusion(src)->clone_canonical();
     return Slic3r::to_handle(plugin_storage->store(std::move(clone)));
 }
 
@@ -67,7 +83,9 @@ int32_t extrusion_copy_from(extrusion_entity_handle *dst, const extrusion_entity
 {
     if (dst == nullptr || src == nullptr)
         return 0;
-    *Slic3r::to_extrusion(dst) = *Slic3r::to_extrusion(src);
+    // Prepare before replacement: src may be dst or belong to its owned subtree.
+    Slic3r::ExtrusionEntityUPtr prepared = Slic3r::to_extrusion(src)->clone_canonical();
+    *Slic3r::to_extrusion(dst) = std::move(*prepared);
     return 1;
 }
 
@@ -197,7 +215,7 @@ uint32_t extrusion_insert_child_copy(extrusion_entity_handle *parent, uint32_t i
     if (!Slic3r::may_insert_children(*parent_entity) || idx > parent_entity->child_count())
         return EXTRUSION_INDEX_INVALID;
 
-    parent_entity->insert_child(idx, std::unique_ptr<Slic3r::ExtrusionEntity>(Slic3r::to_extrusion(child)->clone()));
+    parent_entity->insert_child(idx, Slic3r::to_extrusion(child)->clone_canonical());
     return idx;
 }
 

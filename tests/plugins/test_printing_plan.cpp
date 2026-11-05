@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,8 @@
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanValidation.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
@@ -1783,8 +1786,13 @@ TEST_CASE("Source buckets retain stored hybrid command geometry independently of
             CHECK(identity->custom_gcode_string(*identity->get_property<ExtrusionPropertyCustomGcode>()) ==
                   "M117 retained source command");
             auto *nop = dynamic_cast<const ExtrusionNop *>(identity);
-            REQUIRE(nop != nullptr);
-            CHECK(nop->position == Point(1200, 3400));
+            if (canonical) {
+                CHECK(nop == nullptr);
+                CHECK(typeid(*identity) == typeid(ExtrusionEntity));
+            } else {
+                REQUIRE(nop != nullptr);
+                CHECK(nop->position == Point(1200, 3400));
+            }
         }
     }
     LayerRegionIsland commands_only({}, 0);
@@ -1793,7 +1801,7 @@ TEST_CASE("Source buckets retain stored hybrid command geometry independently of
     CHECK_FALSE(commands_only.has_extrusions());
 }
 
-TEST_CASE("Default plan builder shifts Nop positions and their stored geometry together",
+TEST_CASE("Default plan builder publishes generic command properties and shifted stored geometry",
           "[plugins][printing][plan][step-ordering][tree-transform]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1821,6 +1829,7 @@ TEST_CASE("Default plan builder shifts Nop positions and their stored geometry t
         std::unique_ptr<ExtrusionNop> command = std::make_unique<ExtrusionNop>();
         command->position = positioned ? Point::new_scale(1.25, 2.5) : ExtrusionNop::NOT_A_POINT;
         command->set_role(ExtrusionRole::SupportMaterial);
+        command->add_property(ExtrusionAttributes{ExtrusionRole::SupportMaterial});
         command->set_can_rotate(false);
         command->add_property(ExtrusionPropertyCustomGcodeText("M117 instance-local command"));
         ArcPolyline arc;
@@ -1847,11 +1856,12 @@ TEST_CASE("Default plan builder shifts Nop positions and their stored geometry t
         const std::vector<PrintingExtrusion> &extrusions = group.layers.front().tool_groups.front().extrusions;
         REQUIRE(extrusions.size() == 1);
         REQUIRE(extrusions.front().root->child_count() == 1);
-        const ExtrusionNop *copy = dynamic_cast<const ExtrusionNop *>(&extrusions.front().root->child(0));
-        REQUIRE(copy != nullptr);
+        const ExtrusionEntity *copy = &extrusions.front().root->child(0);
+        REQUIRE(typeid(*copy) == typeid(ExtrusionEntity));
         CHECK(copy != source);
-        CHECK(copy->position == (positioned ? original_position + shift : ExtrusionNop::NOT_A_POINT));
-        CHECK(copy->role() == ExtrusionRole::SupportMaterial);
+        CHECK(dynamic_cast<const ExtrusionNop *>(copy) == nullptr);
+        REQUIRE(copy->get_property<ExtrusionAttributes>() != nullptr);
+        CHECK(copy->get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::SupportMaterial);
         REQUIRE(copy->child_count() == 1);
         const ArcPolyline &translated = copy->child(0).polyline_ref();
         CHECK(translated.front() == arc.front() + shift);
@@ -1896,7 +1906,7 @@ TEST_CASE("STEP_ORDERING locks unvisited trees and all event scopes only at its 
         source->append(test_path({Point(300, 0), Point(310, 0)}));
         const ExtrusionEntityUPtr original = source->clone_canonical();
         tool.extrusions.emplace_back();
-        tool.extrusions.back().root.reset(source->clone());
+        tool.extrusions.back().root = source->clone_canonical();
         auto key = slic3r_api::entry_point_property_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
         slic3r_api::EntryPointProperty &entry = key.get_or_add(slic3r_api::MutableExtrusionEntity(
             reinterpret_cast<extrusion_entity_handle *>(tool.extrusions.back().root.get())));
@@ -1984,21 +1994,21 @@ TEST_CASE("Ordering providers reverse authorized composed units with fixed paths
     for (const char *engine : {"native", "ordering.extrusion_tree.default", "ordering.extrusion_tree.advanced",
                                "ordering.extrusion_tree.xy_serpentine"}) {
         CAPTURE(engine);
-        std::unique_ptr<ExtrusionEntityCollection> unit = test_root(false, true);
+        ExtrusionEntityUPtr unit = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, true, false);
         unit->set_can_rotate(false);
         ExtrusionEntityUPtr before = std::make_unique<ExtrusionEntity>(false);
         before->add_property(ExtrusionPropertyCustomGcodeText("M117 unit before"));
         const ExtrusionEntity *before_handle = before.get();
-        unit->append(std::move(before));
-        unit->append(test_path({Point(100, 0), Point(50, 0)}, false));
-        unit->append(test_path({Point(50, 0), Point(10, 0)}, false));
+        unit->append_child(std::move(before));
+        unit->append_child(test_path({Point(100, 0), Point(50, 0)}, false)->clone_canonical());
+        unit->append_child(test_path({Point(50, 0), Point(10, 0)}, false)->clone_canonical());
         ExtrusionEntityUPtr after = std::make_unique<ExtrusionEntity>(false);
         after->add_property(ExtrusionPropertyCustomGcodeText("M117 unit after"));
         const ExtrusionEntity *after_handle = after.get();
-        unit->append(std::move(after));
-        std::unique_ptr<ExtrusionEntityCollection> outer = test_root(true, true);
+        unit->append_child(std::move(after));
+        ExtrusionEntityUPtr outer = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), true, true, false);
         const ExtrusionEntity *unit_handle = unit.get();
-        outer->append(std::move(unit));
+        outer->append_child(std::move(unit));
         if (std::string(engine) == "native") {
             order_extrusion_tree(*outer, Point(0, 0));
         } else {
@@ -2016,7 +2026,7 @@ TEST_CASE("Ordering providers reverse authorized composed units with fixed paths
             entry.entry = {0, 0};
             entry.exit = {10, 0};
             Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
-            outer.reset(static_cast<ExtrusionEntityCollection *>(tool.extrusions[0].root.release()));
+            outer = std::move(tool.extrusions[0].root);
         }
         REQUIRE(outer->child_count() == 1);
         const ExtrusionEntity &actual = outer->child(0);
@@ -2120,6 +2130,129 @@ TEST_CASE("STEP_ORDERING post validation diagnoses remaining permissions at exac
             CHECK(Steps::StepExtrusionOrdering::validate_post(print, &error));
         }
     }
+}
+
+TEST_CASE("Plan ingress and scope clones publish canonical nodes with owned command data",
+          "[plugins][printing][plan][canonical-ingress]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto make_source = [] {
+        std::unique_ptr<ExtrusionEntityCollection> source = std::make_unique<ExtrusionEntityCollection>(false, true);
+        source->add_property(ExtrusionPropertyCustomGcodeText("M117 canonical root"));
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+        path->set_polyline(ArcPolyline(Points{{100, 0}, {200, 0}}));
+        source->append(std::move(path));
+        return source;
+    };
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    slic3r_api::PrintingPlan view(reinterpret_cast<printing_plan_handle *>(&plan));
+    (void)view.append_group().append_layer_group(1000).append_tool_group(0);
+    PrintingGroup &group = plan.groups[0];
+    PrintingLayerGroup &layer = group.layers[0];
+    PrintingToolGroup &tool = layer.tool_groups[0];
+    for (PrintingScopeEvents *events : {&plan.events, &group.events, &layer.events, &tool.events}) {
+        const_cast<ExtrusionEntity &>(events->before()).add_property(ExtrusionPropertyCustomGcodeText("M117 root scope data"));
+        std::unique_ptr<ExtrusionEntityCollection> source = make_source();
+        const ExtrusionEntity *source_child = &source->child(0);
+        const extrusion_entity_handle *source_handle = reinterpret_cast<const extrusion_entity_handle *>(source.get());
+        printing_scope_events_handle *scope = reinterpret_cast<printing_scope_events_handle *>(events);
+        const extrusion_entity_handle *cloned = printing_scope_events_append_before_clone(scope, source_handle);
+        REQUIRE(cloned != nullptr);
+        CHECK(CanonicalExtrusion::is_tree(*reinterpret_cast<const ExtrusionEntity *>(cloned)));
+        CHECK(&source->child(0) == source_child);
+        CHECK(typeid(source->child(0)) == typeid(ExtrusionPath));
+        const extrusion_entity_handle *moved = printing_scope_events_append_after_move(
+            scope, reinterpret_cast<extrusion_entity_handle *>(source.get()));
+        REQUIRE(moved != nullptr);
+        CHECK(CanonicalExtrusion::is_tree(*reinterpret_cast<const ExtrusionEntity *>(moved)));
+        CHECK(source->ExtrusionEntity::empty());
+        CHECK_FALSE(source->has_properties());
+        CHECK_FALSE(events->before().can_sort());
+        CHECK_FALSE(events->before().can_reverse());
+        CHECK_FALSE(events->before().can_rotate());
+    }
+    std::unique_ptr<ExtrusionEntityCollection> source = make_source();
+    printing_plan_handle *raw_plan = reinterpret_cast<printing_plan_handle *>(&plan);
+    printing_tool_group_handle *raw_tool = reinterpret_cast<printing_tool_group_handle *>(&tool);
+    REQUIRE(printing_tool_group_append_extrusion_clone(raw_plan, raw_tool, nullptr, RAW_EXTRUSION_ROLE_PERIMETER,
+        reinterpret_cast<const extrusion_entity_handle *>(source.get()), UINT32_MAX) != nullptr);
+    CHECK(CanonicalExtrusion::is_tree(*tool.extrusions[0].root));
+    ExtrusionEntityUPtr conforming = source->clone_canonical();
+    const ExtrusionEntity *child = &conforming->child(0);
+    CHECK(printing_tool_group_append_extrusion_move(raw_plan, raw_tool, nullptr, RAW_EXTRUSION_ROLE_PERIMETER,
+        reinterpret_cast<extrusion_entity_handle *>(conforming.get()), 0) == nullptr);
+    CHECK(&conforming->child(0) == child);
+    CHECK(conforming->has_properties());
+    REQUIRE(printing_tool_group_append_extrusion_move(raw_plan, raw_tool, nullptr, RAW_EXTRUSION_ROLE_PERIMETER,
+        reinterpret_cast<extrusion_entity_handle *>(conforming.get()), UINT32_MAX) != nullptr);
+    CHECK(&tool.extrusions[1].root->child(0) == child);
+    CHECK(conforming->ExtrusionEntity::empty());
+    CHECK_FALSE(conforming->has_properties());
+    std::string error;
+    CHECK(validate_canonical_plan(plan, &error));
+    std::unique_ptr<PrintingPlan> copy = plan.clone();
+    CHECK(validate_canonical_plan(*copy, &error));
+    const PrintingScopeEvents *copy_scopes[] = {&copy->events, &copy->groups[0].events,
+        &copy->groups[0].layers[0].events, &copy->groups[0].layers[0].tool_groups[0].events};
+    for (const PrintingScopeEvents *events : copy_scopes) {
+        REQUIRE(events->before().get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+        CHECK(events->before().custom_gcode_string(*events->before().get_property<ExtrusionPropertyCustomGcode>()) == "M117 root scope data");
+        REQUIRE(events->after().child_count() == 1);
+        CHECK(events->after().child(0).custom_gcode_string(*events->after().child(0).get_property<ExtrusionPropertyCustomGcode>()) == "M117 canonical root");
+    }
+    for (const bool move : {false, true}) {
+        for (const bool descendant : {false, true}) {
+            CAPTURE(move, descendant);
+            tool.extrusions[0].root = source->clone_canonical();
+            ExtrusionEntity *input = descendant ? &tool.extrusions[0].root->child(0) : tool.extrusions[0].root.get();
+            const Point first = input->ExtrusionEntity::first_point();
+            const Point last = input->ExtrusionEntity::last_point();
+            const uint64_t id = input->get_id();
+            printing_extrusion_handle *target = reinterpret_cast<printing_extrusion_handle *>(&tool.extrusions[0]);
+            const int32_t ok = move ? printing_extrusion_set_root_move(target, reinterpret_cast<extrusion_entity_handle *>(input)) :
+                printing_extrusion_set_root_clone(target, reinterpret_cast<const extrusion_entity_handle *>(input));
+            REQUIRE(ok != 0);
+            CHECK(CanonicalExtrusion::is_tree(*tool.extrusions[0].root));
+            CHECK(tool.extrusions[0].root->get_id() == id);
+            CHECK(tool.extrusions[0].root->first_point() == first);
+            CHECK(tool.extrusions[0].root->last_point() == last);
+        }
+    }
+    // A source edit cannot change any copied root or its separately owned text.
+    plan.events.clear();
+    const_cast<ExtrusionEntity &>(plan.events.before()).remove_property<ExtrusionPropertyCustomGcode>();
+    CHECK(copy->events.before().custom_gcode_string(*copy->events.before().get_property<ExtrusionPropertyCustomGcode>()) == "M117 root scope data");
+}
+
+TEST_CASE("Canonical boundary validation diagnoses legacy and null nodes without repairing them",
+          "[plugins][printing][plan][canonical-ingress]")
+{
+    PrintingPlan plan;
+    plan.groups.emplace_back();
+    plan.groups[0].layers.emplace_back();
+    plan.groups[0].layers[0].tool_groups.emplace_back();
+    PrintingToolGroup &tool = plan.groups[0].layers[0].tool_groups[0];
+    tool.extrusions.emplace_back();
+    tool.extrusions[0].root = std::make_unique<ExtrusionEntityCollection>();
+    const ExtrusionEntity *identity = tool.extrusions[0].root.get();
+    std::string error;
+    CHECK_FALSE(validate_canonical_plan(plan, &error));
+    CHECK(error.find("group[0].layer[0].tool[0].extrusion[0].root") != std::string::npos);
+    CHECK(error.find("legacy extrusion type") != std::string::npos);
+    CHECK(tool.extrusions[0].root.get() == identity);
+    tool.extrusions[0].root = tool.extrusions[0].root->clone_canonical();
+    CHECK(validate_canonical_plan(plan, &error));
+    tool.extrusions[0].root->children().emplace_back(nullptr);
+    CHECK_FALSE(validate_canonical_plan(plan, &error));
+    CHECK(error.find(".root.child[0]") != std::string::npos);
+    CHECK(error.find("null owned extrusion child") != std::string::npos);
+    tool.extrusions[0].root->children().clear();
+    ExtrusionEntity &event = plan.events.append_before(ExtrusionEntity(false));
+    event.append_child(std::make_unique<ExtrusionLoop>());
+    CHECK_FALSE(validate_canonical_plan(plan, &error));
+    CHECK(error.find("plan.events.before.child[0].child[0]") != std::string::npos);
+    CHECK(typeid(event.child(0)) == typeid(ExtrusionLoop));
 }
 
 TEST_CASE("STEP_ORDERING runs default plugin chain on a shared PrintingPlan", "[printing][plan][step-ordering]")

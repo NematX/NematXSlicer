@@ -43,6 +43,8 @@ non-rotatable, including after clear and subsequent appends. Callers
 may append complete event trees, but they cannot replace the roots themselves.
 This keeps event ordering stable while allowing every plan, group, layer group,
 and tool group to expose the same before/after contract.
+Appends acquire canonical children. clone() copies root properties and their
+owned resources into independent fixed roots, preserving descendant identities.
 */
 class PrintingScopeEvents
 {
@@ -66,6 +68,10 @@ public:
     // Rebuilds keep the two fixed Children roots, identity and direct properties,
     // remove only event children and preserve all three disabled permissions.
     void clear();
+
+    // Copy properties and canonical children into independent fixed event roots.
+    // Root identities are new; owned command data and child IDs are preserved.
+    PrintingScopeEvents clone() const;
 
 private:
     ExtrusionEntity m_before;

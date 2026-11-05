@@ -3,7 +3,9 @@
    tests build compact plans through the real transition, retraction and unretraction-wipe
    plugins: the tower content is a hand-built tower path, the tool history is exercised with
    repeated tool visits, and the speed ceiling is resolved from the print defaults or from a
-   sliced object region. One export test checks the Marlin 2 sequence around a tool change. */
+   sliced object region. Generated fixture paths are copied into canonical nodes
+   when they enter the plan, matching the production stage boundary. One export
+   test checks the Marlin 2 sequence around a tool change. */
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -172,17 +174,17 @@ void build_plan(Print &print, const std::vector<extruder_index_t> &tools,
                 append_loop(*root, x, tower_length_mm, ExtrusionRole::WipeTower, 0.1);
             else
                 append_path(*root, x, x + tower_length_mm, ExtrusionRole::WipeTower, 0.1);
-            extrusion.root = std::move(root);
+            extrusion.root = root->clone_canonical();
             extrusion.sregion_island_role = ExtrusionRole::WipeTower;
             extrusion.printing_catalog_id = catalog_id;
             visit.extrusions.push_back(std::move(extrusion));
             x += tower_length_mm + 1.;
         }
         PrintingExtrusion perimeter;
-        perimeter.root = std::make_unique<ExtrusionPath>(
+        perimeter.root = ExtrusionPath(
             ArcPolyline(Points{Point::new_scale(x, 0.), Point::new_scale(x + 5., 0.)}),
             ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)),
-            nullptr, true);
+            nullptr, true).clone_canonical();
         perimeter.sregion_island_role = ExtrusionRole::Perimeter;
         visit.extrusions.push_back(std::move(perimeter));
         x += 6.;

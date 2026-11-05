@@ -182,7 +182,7 @@ TEST_CASE("Stationary deposits keep separate scopes through the transition chain
     deposit->add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
     PrintingExtrusion middle;
-    middle.root = std::move(deposit);
+    middle.root = CanonicalExtrusion::acquire(*deposit);
     middle.sregion_island_role = ExtrusionRole::SupportMaterial;
     tool.extrusions.insert(tool.extrusions.begin() + 1, std::move(middle));
     ExtrusionEntity *ignored = nullptr;
@@ -190,9 +190,9 @@ TEST_CASE("Stationary deposits keep separate scopes through the transition chain
         std::unique_ptr<ExtrusionPath> point = make_print_path(12.0, 13.0);
         point->polyline() = ArcPolyline();
         point->polyline().append(Point(scale_i(100.0), 0));
-        ignored = point.get();
         PrintingExtrusion event;
-        event.root = std::move(point);
+        event.root = CanonicalExtrusion::acquire(*point);
+        ignored = event.root.get();
         tool.extrusions.insert(tool.extrusions.begin() + 1, std::move(event));
     }
 
@@ -255,10 +255,11 @@ TEST_CASE("Travel snapping moves a stationary deposit without creating a segment
     prepare_lift_print(print, model, "0", "0", "0");
     PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
         .layers.front().tool_groups.front();
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(*tool.extrusions[1].root);
-    deposit.polyline() = ArcPolyline();
-    deposit.polyline().append(Point(scale_i(10.0) + SCALED_EPSILON / 3, 0));
-    deposit.polyline().set_z_offset(0, SCALED_EPSILON / 3);
+    ExtrusionEntity &deposit = *tool.extrusions[1].root;
+    REQUIRE(deposit.has_polyline());
+    deposit.polyline_ref() = ArcPolyline();
+    deposit.polyline_ref().append(Point(scale_i(10.0) + SCALED_EPSILON / 3, 0));
+    deposit.polyline_ref().set_z_offset(0, SCALED_EPSILON / 3);
     deposit.add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
     deposit.get_or_add_property<ExtrusionPropertyModifier>().enforce_retraction = true;

@@ -43,6 +43,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
@@ -858,6 +859,49 @@ TEST_CASE("Wipe post-validation rejects malformed synthetic provenance and root 
     std::string error;
     CHECK_FALSE(Steps::StepGenerateWipeTower::validate_post(print, &error));
     CHECK(error.find("group[0].layer[0].tool[1].extrusion[0]") != std::string::npos);
+}
+
+TEST_CASE("Wipe provenance validation reads stored roles independently of legacy projections",
+          "[plugins][wipe-tower][consumer-qualification]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool canonical : {false, true}) {
+        for (const bool nop_role : {false, true}) {
+            CAPTURE(canonical, nop_role);
+            Print print;
+            Printing::PrintingPlan &plan = print.mutable_printing_plan();
+            plan.groups.emplace_back();
+            plan.groups[0].layers.emplace_back();
+            plan.groups[0].layers[0].tool_groups.emplace_back();
+            Printing::PrintingToolGroup &tool = plan.groups[0].layers[0].tool_groups[0];
+            tool.extrusions.emplace_back();
+            Printing::PrintingExtrusion &extrusion = tool.extrusions[0];
+            extrusion.sregion_island_role = ExtrusionRole::Perimeter;
+            ExtrusionEntityUPtr root;
+            if (nop_role) {
+                std::unique_ptr<ExtrusionNop> nop = std::make_unique<ExtrusionNop>();
+                nop->set_role(ExtrusionRole::Perimeter); // The private legacy field is not process state.
+                nop->add_property(ExtrusionAttributes{ExtrusionRole::WipeTowerWipe});
+                root = std::move(nop);
+            } else {
+                std::unique_ptr<ExtrusionEntityCollection> collection = std::make_unique<ExtrusionEntityCollection>(false, false);
+                collection->add_property(ExtrusionAttributes{ExtrusionRole::WipeTowerWipe});
+                ExtrusionEntityUPtr child = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}}));
+                collection->append_child(std::move(child));
+                root = std::move(collection);
+            }
+            root->set_can_sort_reverse(false, false);
+            extrusion.root = canonical ? root->clone_canonical() : std::move(root);
+            std::string error;
+            CHECK_FALSE(Steps::StepGenerateWipeTower::validate_post(print, &error));
+            CHECK(error.find("group[0].layer[0].tool[0].extrusion[0]") != std::string::npos);
+            CHECK(error.find("valid synthetic catalog entry") != std::string::npos);
+            extrusion.printing_catalog_id = plan.add_synthetic_object_instance("stored role", Polygon(Points{
+                Point(0, 0), Point(10000, 0), Point(10000, 10000), Point(0, 10000)}));
+            CHECK(Steps::StepGenerateWipeTower::validate_post(print, &error));
+            CHECK(error.empty());
+        }
+    }
 }
 
 // Borrow inserted maintenance and a source extrusion, checking synthetic classification before/after a real-owner corruption; missing real region data must still throw with no source ownership fabricated.

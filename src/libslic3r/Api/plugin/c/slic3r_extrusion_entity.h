@@ -80,7 +80,8 @@ child collections. A sortable entity is never reported as continuous.
 /* Create an empty extrusion entity owned by storage. Release it with storage_free(). */
 SLIC3R_HOST_API extrusion_entity_handle *extrusion_create_empty(storage_handle *storage);
 
-/* Create a deep copy of src, including rotation permission, owned by storage. Release it with storage_free(). */
+/* Create a canonical deep copy of stored geometry and command properties,
+   including rotation permission and owned data. Release it with storage_free(). */
 SLIC3R_HOST_API extrusion_entity_handle *extrusion_clone(storage_handle *storage, const extrusion_entity_handle *src);
 
 /*
@@ -88,6 +89,7 @@ Replace dst with a deep copy of src.
 
 dst keeps its handle identity, but its content, properties, flags, children and
 stored data are replaced. Rotation permission is copied from src as well.
+Copied descendants use generic nodes. Source aliases are copied before replacement.
 */
 SLIC3R_HOST_API int32_t extrusion_copy_from(extrusion_entity_handle *dst, const extrusion_entity_handle *src);
 

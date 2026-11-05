@@ -15,11 +15,21 @@
 #include "Config/ConfigDef.hpp"
 #include "Config/ConfigOption.hpp"
 #include "Config/ConfigSnapshotSerialization.hpp"
+#include "Api/internal/ExtrusionPropertyAccess.hpp"
 
 /*
 Extrusion visitors walk host entity trees and produce diagnostic text or geometry
 measurements. The printer decodes known property payloads into named fields,
 including stationary-volume special commands, without changing the source tree.
+SimplifyVisitor edits exclusively owned source geometry using stored polylines
+and inherited attributes. Short-path pruning is disabled across command scopes
+and process properties, but remains active for pure generated geometry.
+
+    SimplifyVisitor::traverse()
+        |-- inspect descendants for state that must survive pruning
+        `-- simplify_entity()
+            |-- simplify a local stored polyline using inherited attributes
+            `-- recurse through children and merge only local-polyline neighbours
 */
 namespace Slic3r {
 
@@ -576,6 +586,30 @@ void SimplifyVisitor::simplify(ExtrusionEntity &entity, coordf_t tolerance, ArcF
 
 void SimplifyVisitor::traverse(ExtrusionEntity &entity)
 {
+    // Keep the geometry-only pruning policy, but never delete state or merge across an empty
+    // phase, a positioned command or an unknown/process property. Classification
+    // metadata alone does not change that old pure-geometry pruning policy.
+    const auto protects_state = [](const auto &self, const ExtrusionEntity &node) -> bool {
+        if (node.ExtrusionEntity::empty())
+            return true;
+        for (size_t i = 0; i < ApiInternal::ExtrusionPropertyAccess::property_count(node); ++i) {
+            const extrusion_property_type type = ApiInternal::ExtrusionPropertyAccess::property_type_at(node, i);
+            if (type != EXTRUSION_PROPERTY_TYPE_ATTRIBUTES && type != EXTRUSION_PROPERTY_TYPE_PERIMETER &&
+                type != EXTRUSION_PROPERTY_TYPE_INFILL)
+                return true;
+        }
+        for (const ExtrusionEntityUPtr &child : node.children())
+            if (child && self(self, *child))
+                return true;
+        return false;
+    };
+    struct RestoreThreshold {
+        coord_t &threshold;
+        coord_t previous;
+        ~RestoreThreshold() { threshold = previous; }
+    } restore{m_min_path_size, m_min_path_size};
+    if (m_min_path_size > 0 && protects_state(protects_state, entity))
+        m_min_path_size = 0;
     m_last_deleted = false;
     this->simplify_entity(entity);
 }
@@ -584,11 +618,11 @@ void SimplifyVisitor::simplify_entity(ExtrusionEntity& entity) {
     const ExtrusionAttributes *entity_attributes = entity.get_property<ExtrusionAttributes>();
     const ExtrusionAttributes *attributes        = entity_attributes != nullptr ? entity_attributes : m_current_attributes;
     if (ArcPolyline *polyline = entity.polyline_or_null()) {
-        assert(entity_attributes != nullptr);
+        assert(attributes != nullptr);
         if (attributes == nullptr)
             return;
 
-        if (m_min_path_size > 0 && entity.length() < m_min_path_size) {
+        if (m_min_path_size > 0 && polyline->length() < m_min_path_size) {
             m_last_deleted = true;
             return;
         }
@@ -630,7 +664,7 @@ void SimplifyVisitor::simplify_entity(ExtrusionEntity& entity) {
 
     if (entity.is_leaf())
         return;
-    if (m_ignore_holes && entity.is_loop()) {
+    if (m_ignore_holes && entity.ExtrusionEntity::is_loop()) {
         const ExtrusionPropertyLoopRole *loop_role_property = entity.get_property<ExtrusionPropertyLoopRole>();
         ExtrusionLoopRole loop_role = loop_role_property == nullptr ? elrDefault : loop_role_property->perimeter_role();
         if ((loop_role & elrHole) != 0)
@@ -655,24 +689,24 @@ void SimplifyVisitor::simplify_entity(ExtrusionEntity& entity) {
             if (i > 0) {
                 ArcPolyline *path = child->polyline_or_null();
                 ArcPolyline *path_previous = children[i - 1]->polyline_or_null();
+                if (path == nullptr || path_previous == nullptr) {
+                    m_last_deleted = false;
+                    break;
+                }
                 assert(path != nullptr);
                 assert(path_previous != nullptr);
-                if (path == nullptr || path_previous == nullptr) {
-                    m_current_attributes = old_current_attributes;
-                    return;
-                }
                 path_previous->append(*path);
                 children.erase(children.begin() + i);
                 --i;
             } else if (i + 1 < children.size()) {
                 ArcPolyline *path = child->polyline_or_null();
                 ArcPolyline *path_next = children[i + 1]->polyline_or_null();
+                if (path == nullptr || path_next == nullptr) {
+                    m_last_deleted = false;
+                    break;
+                }
                 assert(path != nullptr);
                 assert(path_next != nullptr);
-                if (path == nullptr || path_next == nullptr) {
-                    m_current_attributes = old_current_attributes;
-                    return;
-                }
                 path->append(*path_next);
                 children.erase(children.begin() + i + 1);
             } else {

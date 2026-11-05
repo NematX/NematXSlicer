@@ -160,12 +160,12 @@ std::string snapshot(const ExtrusionEntity &entity)
     std::string text = std::string(entity.is_loop() ? "L" : "") + (entity.can_sort() ? "S" : "") +
                        (entity.can_reverse() ? "R" : "") + "{";
     if (entity.is_leaf()) {
-        const ExtrusionPath *path = dynamic_cast<const ExtrusionPath *>(&entity);
+        const ArcPolyline *path = entity.polyline_or_null();
         REQUIRE(path != nullptr);
         std::vector<std::pair<coord_t, coord_t>> points;
-        for (size_t index = 0; index < path->polyline().size(); ++index)
-            points.emplace_back(path->polyline().get_point(index).x(), path->polyline().get_point(index).y());
-        const ExtrusionAttributes *attributes = path->get_property<ExtrusionAttributes>();
+        for (size_t index = 0; index < path->size(); ++index)
+            points.emplace_back(path->get_point(index).x(), path->get_point(index).y());
+        const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
         REQUIRE(attributes != nullptr);
         return text + leaf_text(points, int32_t(attributes->role), attributes->mm3_per_mm, attributes->width,
                                 attributes->height) + "}";

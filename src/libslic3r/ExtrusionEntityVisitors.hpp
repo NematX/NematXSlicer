@@ -259,6 +259,8 @@ class SimplifyVisitor {
     // when an entity is too small, this is set to true do the collection that is higher in the stack can merge & delete.
     coord_t                           m_min_path_size = 0;
     bool                              m_last_deleted = false;
+    // Simplify stored geometry using effective inherited attributes; unprotected
+    // tiny geometry may merge or disappear, invalidating its borrowed handles.
     void simplify_entity(ExtrusionEntity &entity);
 public:
     SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, bool ignore_holes, const ConfigOptionFloatOrPercent *arc_fitting_tolearance)
@@ -269,6 +271,8 @@ public:
     {}
 
     static void simplify(ExtrusionEntity &entity, coordf_t tolerance, ArcFittingType with_fitting_arc, double fitting_arc_tolerance);
+    // Simplify a tree while keeping command/property scopes and their handles.
+    // Pure geometry retains tiny-path pruning; the configured threshold is restored on exit.
     void traverse(ExtrusionEntity &entity);
     bool is_valid() { return !m_last_deleted; }
 };

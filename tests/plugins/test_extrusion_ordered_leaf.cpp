@@ -22,6 +22,9 @@ with the content; ordered command boundaries forbid rotation of their wrapper.
 
 Canonical-copy tests compare stored geometry and properties recursively, without
 requiring the virtual behavior of legacy path and collection views.
+SDK copies are alias-safe and canonical; generic SDK moves remain distinct from
+fresh plan acquisitions. Command state is checked through properties and owned
+resources rather than legacy Nop position or role fields.
 Full-unit reversal probes compare native and SDK operations on fixed descendants,
 command phases and arc/Z paths, then reverse again to check exact restoration.
 Seam plans are inspected before any materialization: local paths, nested sole
@@ -41,6 +44,7 @@ previews distinguish the rounded input from the exact point they will publish.
 #include <stdexcept>
 
 #include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -48,6 +52,12 @@ previews distinguish the rounded input from the exact point they will publish.
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityOrdering.hpp"
 #include "libslic3r/ExtrusionSeamPlanning.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
+#include "libslic3r/ExtrusionSourcePublication.hpp"
+#include "libslic3r/NativeAdhesionLayerHelpers.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/ExtrusionEntityVisitors.hpp"
+#include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 
@@ -79,14 +89,7 @@ void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::E
     using namespace Slic3r;
     using Access = ApiInternal::ExtrusionPropertyAccess;
     CHECK(&source != &copy);
-    if (const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(&source)) {
-        REQUIRE(typeid(copy) == typeid(ExtrusionNop));
-        const ExtrusionNop &copied_nop = static_cast<const ExtrusionNop &>(copy);
-        CHECK(copied_nop.position == nop->position);
-        CHECK(copied_nop.role() == nop->role());
-    } else {
-        CHECK(typeid(copy) == typeid(ExtrusionEntity));
-    }
+    REQUIRE(typeid(copy) == typeid(ExtrusionEntity));
     CHECK(copy.get_id() == source.get_id());
     CHECK(copy.can_sort() == source.can_sort());
     CHECK(copy.can_reverse() == source.can_reverse());
@@ -122,6 +125,290 @@ void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::E
 }
 
 } // namespace
+
+TEST_CASE("Source publication retains property scopes for legacy and canonical transport roots",
+          "[plugins][extrusion][consumer-qualification][canonical-ingress]")
+{
+    using namespace Slic3r;
+    for (const bool canonical : {false, true}) {
+        CAPTURE(canonical);
+        std::unique_ptr<ExtrusionEntityCollection> native = std::make_unique<ExtrusionEntityCollection>(false, true);
+        native->add_property(ExtrusionPropertyCustomGcodeText("M117 source scope"));
+        native->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+        path->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
+        native->append(std::move(path));
+        ExtrusionEntityUPtr source = canonical ? native->clone_canonical() : ExtrusionEntityUPtr(native.release());
+        const ExtrusionEntityUPtr before = source->clone_canonical();
+        ExtrusionEntityCollection copied;
+        Slic3r::detail::append_adhesion_extrusion_copy(copied, *source);
+        REQUIRE(copied.child_count() == 1);
+        const ExtrusionEntityUPtr copy = copied.child(0).clone_canonical();
+        check_canonical_copy(*before, *copy);
+        CHECK(source->has_properties());
+        ExtrusionEntity destination(ExtrusionEntity::Children(), false, false, false);
+        append_source_extrusions(destination, *source);
+        REQUIRE(destination.child_count() == 1);
+        const ExtrusionEntityUPtr moved = destination.child(0).clone_canonical();
+        check_canonical_copy(*before, *moved);
+        CHECK(source->ExtrusionEntity::empty());
+        CHECK_FALSE(source->has_properties());
+        const ExtrusionPropertyCustomGcode *text = destination.child(0).get_property<ExtrusionPropertyCustomGcode>();
+        REQUIRE(text != nullptr);
+        CHECK(destination.child(0).custom_gcode_string(*text) == "M117 source scope");
+    }
+    ExtrusionEntity command(false);
+    command.add_property(ExtrusionPropertyCustomGcodeText("M117 geometry-less command"));
+    ExtrusionEntityCollection copied;
+    Slic3r::detail::append_adhesion_extrusion_copy(copied, command);
+    CHECK(copied.child_count() == 1);
+    ExtrusionEntity moved(ExtrusionEntity::Children(), false, false, false);
+    append_source_extrusions(moved, command);
+    REQUIRE(moved.child_count() == 1);
+    CHECK(moved.child(0).is_nop());
+    CHECK(moved.child(0).has_properties());
+    CHECK_FALSE(command.has_properties());
+}
+
+TEST_CASE("SDK copies publish canonical content and prepare aliases before replacement",
+          "[plugins][extrusion][canonical-ingress]")
+{
+    using namespace Slic3r;
+    const auto make_source = [] {
+        std::unique_ptr<ExtrusionEntityCollection> root = std::make_unique<ExtrusionEntityCollection>(false, true);
+        root->add_property(ExtrusionPropertyCustomGcodeText("M117 copied root"));
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+        path->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
+        path->set_can_rotate(false);
+        root->append(std::move(path));
+        ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+        event->add_property(ExtrusionPropertyCustomGcodeText("M117 copied event"));
+        root->append(std::move(event));
+        root->set_can_rotate(false);
+        return root;
+    };
+    PluginStorage storage;
+    std::unique_ptr<ExtrusionEntityCollection> source = make_source();
+    const ExtrusionEntity *source_child = &source->child(0);
+    extrusion_entity_handle *cloned = extrusion_clone(reinterpret_cast<storage_handle *>(&storage), entity_handle(*source));
+    REQUIRE(cloned != nullptr);
+    const ExtrusionEntity &copy = *reinterpret_cast<const ExtrusionEntity *>(cloned);
+    CHECK(CanonicalExtrusion::is_tree(copy));
+    check_canonical_copy(*source, copy);
+    CHECK(&source->child(0) == source_child);
+    CHECK(typeid(source->child(0)) == typeid(ExtrusionPath));
+    REQUIRE(copy.get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+    CHECK(copy.custom_gcode_string(*copy.get_property<ExtrusionPropertyCustomGcode>()) == "M117 copied root");
+    ExtrusionEntity parent(ExtrusionEntity::Children(), false, false, false);
+    parent.append_child(std::make_unique<ExtrusionEntity>(false));
+    const ExtrusionEntity *sibling = &parent.child(0);
+    REQUIRE(extrusion_insert_child_copy(entity_handle(parent), 1, entity_handle(*source)) == 1);
+    CHECK(&parent.child(0) == sibling);
+    CHECK(CanonicalExtrusion::is_tree(parent.child(1)));
+    check_canonical_copy(*source, parent.child(1));
+    CHECK(extrusion_insert_child_copy(entity_handle(parent), 99, entity_handle(*source)) == EXTRUSION_INDEX_INVALID);
+    CHECK(parent.child_count() == 2);
+    for (const int alias : {0, 1, 2}) {
+        CAPTURE(alias);
+        std::unique_ptr<ExtrusionEntityCollection> owner = make_source();
+        ExtrusionEntity *target = alias == 2 ? &owner->child(0) : owner.get();
+        const ExtrusionEntity *input = alias == 1 ? &owner->child(0) : owner.get();
+        const ExtrusionEntityUPtr expected = input->clone_canonical();
+        const ExtrusionEntity *stable = target;
+        REQUIRE(extrusion_copy_from(entity_handle(*target), reinterpret_cast<const extrusion_entity_handle *>(input)) != 0);
+        CHECK(target == stable);
+        const ExtrusionEntityUPtr actual = target->clone_canonical();
+        check_canonical_copy(*expected, *actual);
+        for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(*target).children())
+            if (child) CHECK(CanonicalExtrusion::is_tree(*child));
+        CHECK(extrusion_copy_from(entity_handle(*target), nullptr) == 0);
+        const ExtrusionEntityUPtr after_rejection = target->clone_canonical();
+        check_canonical_copy(*expected, *after_rejection);
+    }
+}
+
+TEST_CASE("Generic SDK moves keep legacy children and their handles outside plan acquisition",
+          "[plugins][extrusion][canonical-ingress]")
+{
+    using namespace Slic3r;
+    ExtrusionEntity source(ExtrusionEntity::Children(), false, true, true);
+    std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+    path->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
+    const ExtrusionEntity *identity = path.get();
+    source.append_child(std::move(path));
+    ExtrusionEntity target(false);
+    REQUIRE(extrusion_move_from(entity_handle(target), entity_handle(source)) != 0);
+    REQUIRE(target.child_count() == 1);
+    CHECK(&target.child(0) == identity);
+    CHECK(typeid(target.child(0)) == typeid(ExtrusionPath));
+    CHECK(source.ExtrusionEntity::empty());
+    CHECK_FALSE(CanonicalExtrusion::is_tree(target));
+}
+
+TEST_CASE("Fresh canonical acquisitions preserve command properties resources and base child handles",
+          "[plugins][extrusion][canonical-copy][canonical-transfer]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const bool nop_root : {false, true}) {
+        for (const bool legacy_child : {false, true}) {
+            CAPTURE(nop_root, legacy_child);
+            ExtrusionEntityUPtr source;
+            if (nop_root) {
+                std::unique_ptr<ExtrusionNop> nop = std::make_unique<ExtrusionNop>();
+                nop->position = Point(1234, 5678);
+                nop->set_role(ExtrusionRole::WipeTowerWipe);
+                source = std::move(nop);
+            } else source = std::make_unique<ExtrusionEntity>(true);
+            ExtrusionEntityUPtr child;
+            if (legacy_child) child = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter});
+            else child = std::make_unique<ExtrusionEntity>(true);
+            child->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
+            const ExtrusionEntity *child_handle = child.get();
+            source->append_child(std::move(child));
+            source->set_can_sort_reverse(false, true);
+            source->set_can_rotate(false);
+            source->add_property(ExtrusionPropertyCustomGcodeText("M117 owned transfer"));
+            source->add_property(ExtrusionAttributes{ExtrusionRole::SupportMaterial});
+            const std::array<uint64_t, 4> resource{{11, 22, 33, 44}};
+            const uint32_t detached = Access::store_data_aligned(*source, resource.data(), sizeof(resource), 64);
+            REQUIRE(detached != EXTRUSION_DATA_ID_INVALID);
+            const ExtrusionEntityUPtr before = source->clone_canonical();
+            ExtrusionEntityUPtr acquired = CanonicalExtrusion::acquire(*source);
+            REQUIRE(acquired != nullptr);
+            CHECK(CanonicalExtrusion::is_tree(*acquired));
+            check_canonical_copy(*before, *acquired);
+            CHECK((&acquired->child(0) == child_handle) == (!legacy_child && !nop_root));
+            CHECK(source->ExtrusionEntity::empty());
+            CHECK_FALSE(source->has_properties());
+            CHECK(Access::stored_data(*source, detached, nullptr) == nullptr);
+            REQUIRE(typeid(*acquired) == typeid(ExtrusionEntity));
+            REQUIRE(acquired->get_property<ExtrusionAttributes>() != nullptr);
+            CHECK(acquired->get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::SupportMaterial);
+            uint32_t size = 0;
+            const void *data = Access::stored_data(*acquired, detached, &size);
+            REQUIRE(data != nullptr);
+            CHECK(size == sizeof(resource));
+            CHECK(reinterpret_cast<uintptr_t>(data) % 64 == 0);
+            CHECK(std::memcmp(data, resource.data(), sizeof(resource)) == 0);
+            source.reset();
+            REQUIRE(acquired->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(acquired->custom_gcode_string(*acquired->get_property<ExtrusionPropertyCustomGcode>()) == "M117 owned transfer");
+        }
+    }
+}
+
+TEST_CASE("Source simplification measures stored paths and never prunes command scopes",
+          "[plugins][extrusion][consumer-qualification]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    const ConfigOptionFloatOrPercent tolerance(0.01, false);
+    for (const bool canonical : {false, true}) {
+        for (const bool positioned : {false, true}) {
+            CAPTURE(canonical, positioned);
+            std::unique_ptr<ExtrusionNop> nop = std::make_unique<ExtrusionNop>(ExtrusionPropertyCustomGcodeText("M117 keep short scope"));
+            if (positioned) nop->position = Point(11, 22);
+            nop->set_role(ExtrusionRole::SupportMaterial);
+            ArcPolyline arc;
+            arc.append(Point(10000, 0));
+            arc.append(Geometry::ArcWelder::Segment(Point(0, 10000), 10000.f, Geometry::ArcWelder::Orientation::CCW));
+            arc.set_z_offset(0, 10);
+            arc.set_z_offset(1, 20);
+            nop->set_polyline(arc);
+            nop->add_property(ExtrusionAttributes{ExtrusionRole::SupportMaterial, ExtrusionFlow(0.08, 0.4f, 0.2f)});
+            ExtrusionEntity root(ExtrusionEntity::Children(), true, true, false);
+            root.append_child(std::move(nop));
+            ExtrusionEntityUPtr tree = canonical ? root.clone_canonical() : ExtrusionEntityUPtr(root.clone());
+            const ExtrusionEntityUPtr before = tree->clone_canonical();
+            const ExtrusionEntity *handle = &tree->child(0);
+            SimplifyVisitor visitor(SCALED_EPSILON, ArcFittingType::Disabled, false, &tolerance, 1000000);
+            visitor.traverse(*tree);
+            REQUIRE(tree->child_count() == 1);
+            CHECK(&tree->child(0) == handle);
+            ExtrusionEntityUPtr after = tree->clone_canonical();
+            check_canonical_copy(*before, *after);
+        }
+    }
+    for (const bool unknown : {false, true}) {
+        CAPTURE(unknown);
+        ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+        root.add_property(ExtrusionAttributes{ExtrusionRole::Perimeter, ExtrusionFlow(0.08, 0.4f, 0.2f)});
+        root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {1000, 0}})));
+        ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+        if (unknown) {
+            uint64_t *data = static_cast<uint64_t *>(Access::get_or_add_property_data_mutable(
+                *event, extrusion_property_type(0x7fff0102), sizeof(uint64_t), alignof(uint64_t)));
+            REQUIRE(data != nullptr);
+            *data = 0x123456789;
+        } else event->add_property(ExtrusionPropertyCustomGcodeText("M117 middle phase"));
+        root.append_child(std::move(event));
+        root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{1000, 0}, {2000, 0}})));
+        const ExtrusionEntityUPtr before = root.clone_canonical();
+        const ExtrusionEntity *middle = &root.child(1);
+        SimplifyVisitor visitor(SCALED_EPSILON, ArcFittingType::Disabled, false, &tolerance, 10000);
+        visitor.traverse(root);
+        REQUIRE(root.child_count() == 3);
+        CHECK(&root.child(1) == middle);
+        CHECK(visitor.is_valid());
+        ExtrusionEntityUPtr after = root.clone_canonical();
+        check_canonical_copy(*before, *after);
+    }
+    for (const bool script : {false, true}) {
+        CAPTURE(script);
+        ExtrusionEntity stateful(ExtrusionEntity::Children(), true, true, false);
+        ExtrusionEntityUPtr path = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {1000, 0}}));
+        path->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+        if (script) path->add_property(ExtrusionPropertyCustomGcodeText("M117 nonempty state"));
+        else {
+            uint64_t *data = static_cast<uint64_t *>(Access::get_or_add_property_data_mutable(
+                *path, extrusion_property_type(0x7fff0103), sizeof(uint64_t), alignof(uint64_t)));
+            REQUIRE(data != nullptr);
+            *data = 12345;
+        }
+        stateful.append_child(std::move(path));
+        const ExtrusionEntityUPtr before = stateful.clone_canonical();
+        SimplifyVisitor same_visitor(SCALED_EPSILON, ArcFittingType::Disabled, false, &tolerance, 10000);
+        same_visitor.traverse(stateful);
+        ExtrusionEntityUPtr after = stateful.clone_canonical();
+        check_canonical_copy(*before, *after);
+        if (script) CHECK(stateful.child(0).custom_gcode_string(
+            *stateful.child(0).get_property<ExtrusionPropertyCustomGcode>()) == "M117 nonempty state");
+        ExtrusionEntity next_pure(ExtrusionEntity::Children(), true, true, false);
+        ExtrusionEntityUPtr small = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {1000, 0}}));
+        small->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+        next_pure.append_child(std::move(small));
+        same_visitor.traverse(next_pure);
+        CHECK(next_pure.child_count() == 0);
+    }
+    // The historical small-path policy remains active for pure generated geometry.
+    ExtrusionEntity pure(ExtrusionEntity::Children(), true, true, false);
+    ExtrusionEntityUPtr short_path = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {1000, 0}}));
+    short_path->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    pure.append_child(std::move(short_path));
+    SimplifyVisitor visitor(SCALED_EPSILON, ArcFittingType::Disabled, false, &tolerance, 10000);
+    visitor.traverse(pure);
+    CHECK(pure.child_count() == 0);
+
+    // A composite geometric neighbour is not a command and cannot be merged
+    // through a local-polyline API. Keep the small leaf instead of propagating
+    // its deletion marker to an ancestor that would discard the whole contour.
+    ExtrusionEntity outer(ExtrusionEntity::Children(), true, true, false);
+    ExtrusionEntityUPtr sequence = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    ExtrusionEntityUPtr short_first = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {1000, 0}}));
+    short_first->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    sequence->append_child(std::move(short_first));
+    ExtrusionEntityUPtr composite = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+    ExtrusionEntityUPtr long_last = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{1000, 0}, {20000, 0}}));
+    long_last->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    composite->append_child(std::move(long_last));
+    sequence->append_child(std::move(composite));
+    outer.append_child(std::move(sequence));
+    const ExtrusionEntityUPtr before_composite = outer.clone_canonical();
+    visitor.traverse(outer);
+    const ExtrusionEntityUPtr after_composite = outer.clone_canonical();
+    check_canonical_copy(*before_composite, *after_composite);
+}
 
 // Root permission authorizes the whole unit, including fixed descendants and commands.
 TEST_CASE("Reversing an authorized unit reverses every stored node without command exceptions",
@@ -629,6 +916,7 @@ TEST_CASE("Tree translation preserves positioned commands and translates their s
         ExtrusionNop source;
         source.position = positioned ? Point(7000, 8000) : ExtrusionNop::NOT_A_POINT;
         source.set_role(ExtrusionRole::SupportMaterial);
+        source.add_property(ExtrusionAttributes{ExtrusionRole::SupportMaterial});
         source.set_can_rotate(false);
         source.add_property(ExtrusionPropertyCustomGcodeText("M117 translated command"));
         ArcPolyline arc;
@@ -648,9 +936,16 @@ TEST_CASE("Tree translation preserves positioned commands and translates their s
             const size_t id = copy->get_id();
             copy->translate(shift);
             ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(copy);
-            REQUIRE(nop != nullptr);
-            CHECK(nop->position == (positioned ? source.position + shift : ExtrusionNop::NOT_A_POINT));
-            CHECK(nop->role() == ExtrusionRole::SupportMaterial);
+            if (copy == legacy.get()) {
+                REQUIRE(nop != nullptr);
+                CHECK(nop->position == (positioned ? source.position + shift : ExtrusionNop::NOT_A_POINT));
+                CHECK(nop->role() == ExtrusionRole::SupportMaterial);
+            } else {
+                CHECK(nop == nullptr);
+                REQUIRE(typeid(*copy) == typeid(ExtrusionEntity));
+                REQUIRE(copy->get_property<ExtrusionAttributes>() != nullptr);
+                CHECK(copy->get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::SupportMaterial);
+            }
             CHECK(copy->get_id() == id);
             CHECK(copy->can_sort() == source.can_sort());
             CHECK(copy->can_reverse() == source.can_reverse());
@@ -677,6 +972,7 @@ TEST_CASE("Tree translation preserves positioned commands and translates their s
         ExtrusionNop local;
         local.position = source.position;
         local.set_role(ExtrusionRole::SupportMaterial);
+        local.add_property(ExtrusionAttributes{ExtrusionRole::SupportMaterial});
         local.set_polyline(arc);
         local.set_can_sort_reverse(false, false);
         local.set_can_rotate(false);
@@ -687,9 +983,16 @@ TEST_CASE("Tree translation preserves positioned commands and translates their s
             const size_t id = copy->get_id();
             copy->translate(shift);
             const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(copy);
-            REQUIRE(nop != nullptr);
-            CHECK(nop->position == (positioned ? local.position + shift : ExtrusionNop::NOT_A_POINT));
-            CHECK(nop->role() == local.role());
+            if (copy == local_legacy.get()) {
+                REQUIRE(nop != nullptr);
+                CHECK(nop->position == (positioned ? local.position + shift : ExtrusionNop::NOT_A_POINT));
+                CHECK(nop->role() == local.role());
+            } else {
+                CHECK(nop == nullptr);
+                REQUIRE(typeid(*copy) == typeid(ExtrusionEntity));
+                REQUIRE(copy->get_property<ExtrusionAttributes>() != nullptr);
+                CHECK(copy->get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::SupportMaterial);
+            }
             CHECK(copy->get_id() == id);
             CHECK(copy->child_count() == 0);
             CHECK_FALSE(copy->can_sort());
@@ -838,8 +1141,8 @@ TEST_CASE("Canonical extrusion copies own unknown properties scripts and aligned
     CHECK(Access::store_data_aligned(*copy, expected.data(), sizeof(expected), 64) == next_id);
 }
 
-// Keep positioned commands as exact Nop nodes, including their sentinel and any accepted base children.
-TEST_CASE("Canonical Nop copies retain command state and normalize their children",
+// Legacy C++ copies remain outside the canonical model; SDK command copies use properties only.
+TEST_CASE("Legacy Nop copies keep private state without reintroducing it into canonical commands",
           "[plugins][extrusion][canonical-copy]")
 {
     using namespace Slic3r;
@@ -854,8 +1157,9 @@ TEST_CASE("Canonical Nop copies retain command state and normalize their childre
             child->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}}));
             source.append_child(std::move(child));
             source.add_property(ExtrusionPropertyCustomGcodeText("M117 Nop command"));
-            ExtrusionEntityUPtr copy = source.clone_canonical();
-            check_canonical_copy(source, *copy);
+            ExtrusionEntityUPtr canonical = source.clone_canonical();
+            check_canonical_copy(source, *canonical);
+            ExtrusionEntityUPtr copy(source.clone());
             REQUIRE(typeid(*copy) == typeid(ExtrusionNop));
             ExtrusionNop &nop = static_cast<ExtrusionNop &>(*copy);
             CHECK(nop.first_point() == source.position);

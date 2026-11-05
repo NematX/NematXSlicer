@@ -12,6 +12,8 @@ after, while the target owns Unretract in before. Physical tool selection is
 tested separately through CreateToolChange because it belongs to the target
 PrintingToolGroup rather than to a compact scope. Plan-terminal retraction is
 checked separately because it belongs to STEP_EXTRUSION_EDIT.
+Fixture replacements acquire canonical nodes when they enter the plan, before
+the production stage validates them; plugin execution never repairs these trees.
 */
 
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
@@ -43,10 +45,10 @@ PrintingExtrusion &target_extrusion(Print &print)
         .tool_groups.front().extrusions.back();
 }
 
-/* Replace only the target tree while keeping its plan ownership unchanged. */
+/* Acquire a canonical target tree while keeping its plan ownership unchanged. */
 void replace_target_root(Print &print, std::unique_ptr<ExtrusionEntity> root)
 {
-    target_extrusion(print).root = std::move(root);
+    target_extrusion(print).root = CanonicalExtrusion::acquire(*root);
 }
 
 /* Build an outer inherited-role parent and an inner fixed scope candidate. */
@@ -486,7 +488,7 @@ TEST_CASE("Layer-change retraction reserves phases for contiguous geometry",
     PrintingExtrusion moved = std::move(
         group.layers.front().tool_groups.front().extrusions.back());
     group.layers.front().tool_groups.front().extrusions.pop_back();
-    moved.root = make_print_path(10.0, 20.0);
+    moved.root = make_print_path(10.0, 20.0)->clone_canonical();
     group.layers.emplace_back();
     group.layers.back().print_z = scale_i(0.2);
     group.layers.back().tool_groups.emplace_back();

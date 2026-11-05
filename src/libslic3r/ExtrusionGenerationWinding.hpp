@@ -53,8 +53,7 @@ inline void collect_points(const ExtrusionEntity &entity, Points &out)
 // Reversible units bypass these barriers and reverse their complete command phases.
 inline bool has_barrier(const ExtrusionEntity &entity)
 {
-    if (dynamic_cast<const ExtrusionNop *>(&entity) != nullptr ||
-        has_one_shot_extrusion_event(entity) ||
+    if (has_one_shot_extrusion_event(entity) ||
         (entity.ExtrusionEntity::empty() && entity.has_properties()))
         return true;
     for (const ExtrusionEntityUPtr &child : entity.children())
@@ -136,8 +135,8 @@ inline GenerationWindingResult normalize_generation_winding(ExtrusionEntity &ent
     }
     // A one-shot on the target itself stays at the same closed-contour entry.
     // Only strict descendants can change execution phase under child reversal;
-    // a positioned Nop target still requires a separate command-state contract.
-    bool barrier = dynamic_cast<const ExtrusionNop *>(target) != nullptr;
+    // command state is represented by properties, not by a legacy node type.
+    bool barrier = false;
     const ExtrusionEntity &view = *target;
     for (const ExtrusionEntityUPtr &child : view.children())
         if (child && GenerationWindingDetail::has_barrier(*child)) {

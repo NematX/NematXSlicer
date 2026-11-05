@@ -129,26 +129,11 @@ namespace detail {
 inline void append_adhesion_extrusion_copy(ExtrusionEntityCollection &dst,
                                            const ExtrusionEntity &src)
 {
-    if (src.is_nop())
+    if (src.is_nop() && !src.has_properties())
         return;
 
-    if (const ExtrusionEntityCollection *collection = dynamic_cast<const ExtrusionEntityCollection *>(&src)) {
-        /*
-        Legacy callers used to receive direct m_brim/m_skirt collections. A
-        plain transport collection is flattened by one level to preserve that
-        observable shape. A property-bearing collection stays whole because its
-        children inherit metadata from it.
-        */
-        if (collection->has_properties()) {
-            dst.append(src);
-            return;
-        }
-        for (const ExtrusionEntity *child : collection->entities())
-            dst.append(*child);
-        return;
-    }
-
-    if (src.is_leaf()) {
+    // Root properties apply to the complete subtree for both native and SDK output.
+    if (src.is_leaf() || src.has_properties()) {
         dst.append(src);
         return;
     }

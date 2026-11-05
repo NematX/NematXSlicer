@@ -110,10 +110,19 @@ TEST_CASE("Custom G-code mode follows the engine rule", "[custom_gcode]")
         CHECK(mode.extruder == 1);
     }
 
-    // Same fallback region zero: the object-level extruder does not reach it either.
+    // Region zero inherits the object's settings, so an identical part override
+    // does not introduce a second extruder.
     SECTION("an object and its part on the same other extruder") {
         object->config.set_key_value("extruder", new ConfigOptionInt(2));
         volume->config.set_key_value("extruder", new ConfigOptionInt(2));
+        const CustomGCodeMode mode = current_custom_gcode_mode(scene, triple);
+        CHECK(mode.mode == CustomGCode::MultiAsSingle);
+        CHECK(mode.extruder == 2);
+    }
+
+    SECTION("an object and its part on different other extruders") {
+        object->config.set_key_value("extruder", new ConfigOptionInt(2));
+        volume->config.set_key_value("extruder", new ConfigOptionInt(3));
         CHECK(current_custom_gcode_mode(scene, triple).mode == CustomGCode::MultiExtruder);
     }
 

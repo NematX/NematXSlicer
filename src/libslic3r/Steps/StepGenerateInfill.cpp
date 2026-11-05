@@ -4,6 +4,7 @@
 ///|/
 
 #include "StepGenerateInfill.hpp"
+#include "libslic3r/ExtrusionSourcePublication.hpp"
 
 #include <atomic>
 #include <cassert>
@@ -423,36 +424,6 @@ ExtrusionRole bucket_role_from_raw(raw_extrusion_role role)
     return LayerRegionIsland::INFILLS;
 }
 
-void append_extrusion_children(ExtrusionEntityCollection &dst, ExtrusionEntity &src)
-{
-    if (src.is_nop())
-        return;
-
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&src)) {
-        // A collection with direct properties is a semantic subtree root. For
-        // example, STEP_INFILL stores the source Surface id there and expects
-        // every generated child to inherit it. Flatten only plain transport
-        // collections that do not carry metadata of their own.
-        if (collection->has_properties()) {
-            dst.append(std::move(src));
-            return;
-        }
-        dst.append_move_from(*collection);
-        return;
-    }
-
-    if (src.is_leaf()) {
-        dst.append(std::move(src));
-        return;
-    }
-
-    ExtrusionEntity::Children &children = src.children();
-    while (!children.empty()) {
-        dst.append(std::move(children.front()));
-        children.erase(children.begin());
-    }
-}
-
 // Stage moved source children before changing the region island. Destination paths remain unchanged on failure;
 // staging can partially consume the caller-owned source. A pending plugin stop refuses publication; this callback
 // has no print handle, so the generator and runner handle print cancellation. Any C++ failure is recorded through
@@ -475,7 +446,7 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
             return 0;
 
         ExtrusionEntityCollection prepared;
-        append_extrusion_children(prepared, *extrusion);
+        append_source_extrusions(prepared, *extrusion);
         region_island->remove_empty_extrusions();
         if (prepared.child_count() == 0)
             return 1;

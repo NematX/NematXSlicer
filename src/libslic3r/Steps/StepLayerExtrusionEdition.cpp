@@ -9,10 +9,28 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanValidation.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Thread.hpp"
+
+/* Run layer-editing plugins on the Print's owned, ordered PrintingPlan. Each
+   plugin finishes all its layer groups before the next plugin starts. Numeric
+   locations, not borrowed child pointers, survive across plugin calls. setup()
+   prepares shared data; each run may mutate only its assigned layer group.
+   Debug boundary checks diagnose legacy or null owned nodes without repairing
+   them. Plugin errors and cancellation propagate through the normal host runner.
+
+       run_step()
+           |-- validate_pre() [canonical plan storage in Debug]
+           |-- collect_layer_run_locations()
+           |-- run_plugin() [one complete pass per selected provider]
+           |   |-- make_layer_run_context()
+           |   `-- plugin setup/setup_run/run with StepRunner error guards
+           `-- validate_post() [canonical output in Debug]
+*/
 
 namespace Slic3r::Steps::StepLayerExtrusionEdition {
 
@@ -134,15 +152,23 @@ void prepare(Print &) {}
 
 bool validate_pre(const Print &print, std::string *error)
 {
-    if (print.printing_plan() != nullptr)
+    if (print.printing_plan() != nullptr) {
+#ifndef NDEBUG
+        return Printing::validate_canonical_plan(*print.printing_plan(), error);
+#endif
         return true;
+    }
     if (error != nullptr)
         *error = "STEP_LAYER_EXTRUSION_EDIT requires the PrintingPlan produced by STEP_ORDERING.";
     return false;
 }
 
-bool validate_post(const Print &, std::string *)
+bool validate_post(const Print &print, std::string *error)
 {
+#ifndef NDEBUG
+    if (print.printing_plan() != nullptr)
+        return Printing::validate_canonical_plan(*print.printing_plan(), error);
+#endif
     return true;
 }
 
@@ -151,6 +177,12 @@ void run_step(Orchestrator &orchestrator, Print &print)
     const Printing::PrintingPlan *existing_plan = print.printing_plan();
     if (existing_plan == nullptr)
         return;
+
+#ifndef NDEBUG
+    std::string validation_error;
+    if (!validate_pre(print, &validation_error))
+        throw RuntimeError("STEP_LAYER_EXTRUSION_EDIT pre-validation failed: " + validation_error);
+#endif
 
     Printing::PrintingPlan &plan = print.mutable_printing_plan();
     const std::vector<LayerRunLocation> locations = collect_layer_run_locations(plan);
@@ -166,6 +198,10 @@ void run_step(Orchestrator &orchestrator, Print &print)
         run_plugin(orchestrator, print, plan, *plugin, locations);
         print.pipeline_progress().complete_plugin(STEP_LAYER_EXTRUSION_EDIT, plugin->get_id());
     }
+#ifndef NDEBUG
+    if (!validate_post(print, &validation_error))
+        throw RuntimeError("STEP_LAYER_EXTRUSION_EDIT post-validation failed: " + validation_error);
+#endif
 }
 
 } // namespace Slic3r::Steps::StepLayerExtrusionEdition

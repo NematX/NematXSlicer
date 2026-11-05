@@ -1,4 +1,5 @@
 #include "gcode_test_helpers.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 
 #include <catch2/catch.hpp>
 
@@ -156,7 +157,7 @@ void append_path_extrusion(Printing::PrintingToolGroup &tool_group,
                            std::unique_ptr<ExtrusionEntity> root)
 {
     Printing::PrintingExtrusion extrusion;
-    extrusion.root = std::move(root);
+    extrusion.root = root ? CanonicalExtrusion::acquire(*root) : nullptr;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
     tool_group.extrusions.push_back(std::move(extrusion));
 }

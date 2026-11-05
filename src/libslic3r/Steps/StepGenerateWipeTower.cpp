@@ -77,8 +77,9 @@ int32_t call_wipe_plugin(const run_ctx_generate_wipe_tower *ctx, uint32_t index,
 // Recursively inspect role modifiers without mutating or retaining any entity.
 bool has_wipe_role(const ExtrusionEntity &entity)
 {
-    if (entity.role().is_wipetower())
-        return true;
+    if (const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>())
+        if (attributes->extrusion_role().is_wipetower())
+            return true;
     for (size_t idx = 0; idx < entity.child_count(); ++idx)
         if (has_wipe_role(entity.child(idx)))
             return true;

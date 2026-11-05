@@ -21,6 +21,7 @@
     reports any remaining permission with its storage path. clear() releases this
     step's results before recomputation. The Print owns the plan throughout;
     finalization changes no geometry, properties, identities or ownership.
+    Debug validation also rejects legacy node types at the canonical plan boundary.
 
    Representative direct calls:
 
@@ -65,6 +66,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanValidation.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
 namespace Slic3r::Steps::StepExtrusionOrdering {
@@ -238,15 +240,21 @@ validate_pre -> validate_layer_perimeters -> validate_perimeter_entity.
 Keep the declarations and definitions in that order so the outer source-layer
 walk is visible before the recursive tree details.
 */
+/* Validate every perimeter root stored by one source layer. */
 bool validate_layer_perimeters(const Layer &layer,
                                const std::string &layer_path,
                                std::string *error);
+/* Validate one perimeter tree in storage order, retaining inherited process attributes. */
 bool validate_perimeter_entity(const ExtrusionEntity &entity,
                                const std::string &path,
                                std::string *error,
-                               bool inherited_loop_property);
+                               bool inherited_loop_property,
+                               const ExtrusionAttributes *inherited_attributes = nullptr);
 
-/* Validate every perimeter root stored by one source layer. */
+// Inspect effective attributes on stored geometry: Travel and a parent's legacy
+// role summary must not hide a perimeter child or discard inherited attributes.
+bool has_ordinary_perimeter_geometry(const ExtrusionEntity &entity, const ExtrusionAttributes *inherited);
+
 bool validate_layer_perimeters(const Layer &layer,
                                const std::string &layer_path,
                                std::string *error)
@@ -272,24 +280,27 @@ bool validate_layer_perimeters(const Layer &layer,
     return true;
 }
 
-/* Validate one perimeter tree using the same depth-first order as its source storage. */
 bool validate_perimeter_entity(const ExtrusionEntity &entity,
                                const std::string &path,
                                std::string *error,
-                               const bool inherited_loop_property)
+                               const bool inherited_loop_property,
+                               const ExtrusionAttributes *inherited_attributes)
 {
+    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    if (attributes == nullptr)
+        attributes = inherited_attributes;
     const ExtrusionPropertyLoopRole *property =
         entity.get_property<ExtrusionPropertyLoopRole>();
     if (property != nullptr &&
         (property->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0 &&
-        !entity.is_loop())
+        !entity.ExtrusionEntity::is_loop())
         return validation_failure(
             error, path,
             "entity has C_EXTRUSION_PERIMETER_FLAG_LOOP but is_loop() is false");
 
     bool has_direct_loop_child = false;
     for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
-        if (entity.child(child_idx).is_loop()) {
+        if (entity.child(child_idx).ExtrusionEntity::is_loop()) {
             has_direct_loop_child = true;
             break;
         }
@@ -297,11 +308,8 @@ bool validate_perimeter_entity(const ExtrusionEntity &entity,
     // A loop that directly owns another loop is a structural container. Only
     // terminal ordinary-perimeter loops need their own perimeter property;
     // thin-wall loops share the PERIMETERS bucket but carry a different role.
-    const ExtrusionRole role = entity.role();
-    const bool is_ordinary_perimeter =
-        role.has(ExtrusionRoleModifier::ERM_Perimeter) &&
-        !role.has(ExtrusionRoleModifier::ERM_Thin);
-    if (entity.is_loop() && !has_direct_loop_child && is_ordinary_perimeter) {
+    const bool is_ordinary_perimeter = has_ordinary_perimeter_geometry(entity, attributes);
+    if (entity.ExtrusionEntity::is_loop() && !has_direct_loop_child && is_ordinary_perimeter) {
         if (property == nullptr && !inherited_loop_property)
             return validation_failure(
                 error, path,
@@ -319,14 +327,31 @@ bool validate_perimeter_entity(const ExtrusionEntity &entity,
         (property->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0;
     const bool child_inherits_loop_property =
         inherited_loop_property ||
-        (entity.is_loop() && is_ordinary_perimeter && has_valid_loop_property);
+        (entity.ExtrusionEntity::is_loop() && is_ordinary_perimeter && has_valid_loop_property);
     for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
         const std::string child_path = path + ".child[" + std::to_string(child_idx) + "]";
         if (!validate_perimeter_entity(
-                entity.child(child_idx), child_path, error, child_inherits_loop_property))
+                entity.child(child_idx), child_path, error, child_inherits_loop_property, attributes))
             return false;
     }
     return true;
+}
+
+bool has_ordinary_perimeter_geometry(const ExtrusionEntity &entity, const ExtrusionAttributes *inherited)
+{
+    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    if (attributes == nullptr)
+        attributes = inherited;
+    if (const ArcPolyline *path = entity.polyline_or_null()) {
+        if (path->empty() || attributes == nullptr)
+            return false;
+        const ExtrusionRole role = attributes->extrusion_role();
+        return role.has(ExtrusionRoleModifier::ERM_Perimeter) && !role.has(ExtrusionRoleModifier::ERM_Thin);
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (child && has_ordinary_perimeter_geometry(*child, attributes))
+            return true;
+    return false;
 }
 
 /* Describe the catalog state used by an extrusion in a diagnostic. */
@@ -394,6 +419,10 @@ bool validate_post(const Print &print, std::string *error)
     const Printing::PrintingPlan *plan = print.printing_plan();
     if (plan == nullptr)
         return validation_failure(error, "plan", "the PrintingPlan is missing");
+#ifndef NDEBUG
+    if (!Printing::validate_canonical_plan(*plan, error))
+        return false;
+#endif
     if (!validate_locked_events(plan->events, "plan", error))
         return false;
 

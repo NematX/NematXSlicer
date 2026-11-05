@@ -16,6 +16,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
@@ -30,6 +31,8 @@ These tests build the final ordered plan directly. That keeps the scenarios
 focused on the boundary-state contract: the producer must scan once in plan
 order, while every parallel run may write only the properties of its assigned
 layer-group.
+Fixture trees acquire canonical storage when they enter the plan, before the
+stage validates them. Identity assertions borrow the published root thereafter.
 */
 
 namespace {
@@ -164,11 +167,11 @@ std::unique_ptr<ExtrusionPath> make_path(const Point &start,
         polyline, ExtrusionAttributes(role, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true);
 }
 
-/* Add one owned extrusion root to the ordered tool section. */
+/* Acquire canonical fixture content and add it to the ordered tool section. */
 void append_extrusion(PrintingToolGroup &tool, std::unique_ptr<ExtrusionEntity> root)
 {
     PrintingExtrusion extrusion;
-    extrusion.root = std::move(root);
+    extrusion.root = CanonicalExtrusion::acquire(*root);
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
     tool.extrusions.push_back(std::move(extrusion));
 }
@@ -269,8 +272,8 @@ TEST_CASE("Layer entry state follows geometry tools empty layers and groups",
         std::make_unique<ExtrusionEntityCollection>(false, false);
     root->add_property(ExtrusionPropertyZOffset(scale_i(0.04)));
     root->append(std::move(nested));
-    ExtrusionEntity *first_root_address = root.get();
     append_extrusion(first_layer.tool_groups.back(), std::move(root));
+    ExtrusionEntity *first_root_address = first_layer.tool_groups.back().extrusions.back().root.get();
 
     // A fully empty layer carries position and tool unchanged.
     first_group.layers.emplace_back();

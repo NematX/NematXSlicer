@@ -4,6 +4,7 @@
 ///|/
 
 #include "PrintingPlan.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -313,17 +314,6 @@ final plan match the normal by-layer printing order.
 */
 void sort_layer_groups_by_print_z(PrintingGroup &group);
 
-/* Copy each already-ordered event child into a fixed scope root. Appending by
-   const reference deep-clones extrusion properties and owned script data. */
-void copy_scope_events(const PrintingScopeEvents &source,
-                       PrintingScopeEvents &destination)
-{
-    for (size_t event_idx = 0; event_idx < source.before().child_count(); ++event_idx)
-        destination.append_before(source.before().child(event_idx));
-    for (size_t event_idx = 0; event_idx < source.after().child_count(); ++event_idx)
-        destination.append_after(source.after().child(event_idx));
-}
-
 } // namespace
 
 // Create two fixed event sequences; empty geometry never grants permission to rotate execution boundaries.
@@ -424,28 +414,32 @@ ExtrusionEntity &PrintingScopeEvents::append_before(const ExtrusionEntity &event
 {
     // Cloning lets the caller keep its source tree while the scope owns an
     // independent event at the end of the fixed before sequence.
-    return m_before.append_child(event);
+    m_before.children().reserve(m_before.child_count() + 1);
+    return m_before.append_child(event.clone_canonical());
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_before(ExtrusionEntity &&event)
 {
     // Moving transfers the prepared event content into the scope without
     // changing the identity or ordering contract of the before root.
-    return m_before.append_child(std::move(event));
+    m_before.children().reserve(m_before.child_count() + 1);
+    return m_before.append_child(CanonicalExtrusion::acquire(event));
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_after(const ExtrusionEntity &event)
 {
     // After events use the same ownership and stable insertion order as the
     // before sequence so every PrintingPlan scope follows one contract.
-    return m_after.append_child(event);
+    m_after.children().reserve(m_after.child_count() + 1);
+    return m_after.append_child(event.clone_canonical());
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_after(ExtrusionEntity &&event)
 {
     // The moved-from source remains valid but empty, matching the extrusion
     // tree move semantics already exposed by the plugin API.
-    return m_after.append_child(std::move(event));
+    m_after.children().reserve(m_after.child_count() + 1);
+    return m_after.append_child(CanonicalExtrusion::acquire(event));
 }
 
 void PrintingScopeEvents::clear()
@@ -470,7 +464,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
 
     copy->properties = properties;
     copy->object_instances = object_instances;
-    copy_scope_events(events, copy->events);
+    copy->events = events.clone();
     copy->groups.reserve(groups.size());
 
     for (const PrintingGroup &source_group : groups) {
@@ -478,7 +472,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
         group_copy.plan_identity = copy_identity;
         group_copy.properties = source_group.properties;
         group_copy.printing_catalog_ids = source_group.printing_catalog_ids;
-        copy_scope_events(source_group.events, group_copy.events);
+        group_copy.events = source_group.events.clone();
         group_copy.layers.reserve(source_group.layers.size());
 
         for (const PrintingLayerGroup &source_layer : source_group.layers) {
@@ -487,7 +481,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
             layer_copy.properties = source_layer.properties;
             layer_copy.print_z = source_layer.print_z;
             layer_copy.layers = source_layer.layers;
-            copy_scope_events(source_layer.events, layer_copy.events);
+            layer_copy.events = source_layer.events.clone();
             layer_copy.tool_groups.reserve(source_layer.tool_groups.size());
 
             for (const PrintingToolGroup &source_tool : source_layer.tool_groups) {
@@ -496,7 +490,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
                 tool_copy.properties = source_tool.properties;
                 tool_copy.extruder_id = source_tool.extruder_id;
                 tool_copy.region_islands = source_tool.region_islands;
-                copy_scope_events(source_tool.events, tool_copy.events);
+                tool_copy.events = source_tool.events.clone();
                 tool_copy.extrusions.reserve(source_tool.extrusions.size());
 
                 for (const PrintingExtrusion &source_extrusion : source_tool.extrusions) {
@@ -505,7 +499,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
                     extrusion_copy.sregion_island_role = source_extrusion.sregion_island_role;
                     extrusion_copy.printing_catalog_id = source_extrusion.printing_catalog_id;
                     if (source_extrusion.root != nullptr)
-                        extrusion_copy.root.reset(source_extrusion.root->clone());
+                        extrusion_copy.root = source_extrusion.root->clone_canonical();
                     tool_copy.extrusions.emplace_back(std::move(extrusion_copy));
                 }
                 layer_copy.tool_groups.emplace_back(std::move(tool_copy));
@@ -522,8 +516,22 @@ PrintingExtrusion::PrintingExtrusion(const LayerRegionIsland &source,
                                      const ExtrusionEntity &source_root)
     : region_island(&source)
     , sregion_island_role(extrusion_role)
-    , root(ExtrusionEntityUPtr(source_root.clone()))
+    , root(source_root.clone_canonical())
 {
+}
+
+PrintingScopeEvents PrintingScopeEvents::clone() const
+{
+    PrintingScopeEvents copy;
+    static_cast<ExtrusionPropertyContainer &>(copy.m_before) = m_before;
+    static_cast<ExtrusionPropertyContainer &>(copy.m_after) = m_after;
+    copy.m_before.children().reserve(m_before.child_count());
+    copy.m_after.children().reserve(m_after.child_count());
+    for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(m_before).children())
+        copy.m_before.children().emplace_back(child ? child->clone_canonical() : nullptr);
+    for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(m_after).children())
+        copy.m_after.children().emplace_back(child ? child->clone_canonical() : nullptr);
+    return copy;
 }
 
 void order_printing_tool_groups(PrintingGroup &printing_group, const extruder_index_t first_extruder)

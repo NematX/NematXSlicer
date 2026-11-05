@@ -100,6 +100,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
@@ -513,10 +514,10 @@ std::unique_ptr<ExtrusionEntity> speed_validation_path(
         true));
     if (speed)
         path->add_property(ExtrusionPropertySpeed(*speed));
-    return path;
+    return path->clone_canonical();
 }
 
-/* Append one independently owned validation root to a tool group. */
+/* Acquire one canonical validation root, retaining an explicit missing-root probe. */
 PrintingExtrusion &append_speed_validation_extrusion(
     PrintingToolGroup &tool_group,
     std::unique_ptr<ExtrusionEntity> root,
@@ -526,7 +527,7 @@ PrintingExtrusion &append_speed_validation_extrusion(
     PrintingExtrusion extrusion;
     extrusion.region_island = region_island;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
-    extrusion.root = std::move(root);
+    extrusion.root = root ? CanonicalExtrusion::acquire(*root) : nullptr;
     extrusion.printing_catalog_id = printing_catalog_id;
     tool_group.extrusions.push_back(std::move(extrusion));
     return tool_group.extrusions.back();
@@ -630,7 +631,7 @@ TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode d
     Print print;
     configure_standard_firmware(print);
     auto &tool = append_speed_validation_tool_group(print, scale_i(0.2), 0);
-    auto root = std::make_unique<ExtrusionNop>();
+    ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(false);
     auto &fan = root->get_or_add_property<ExtrusionPropertyFan>();
     // This fan-only event belongs to no model instance in the compact plan.
     append_speed_validation_extrusion(tool, std::move(root), nullptr, UINT32_MAX);
@@ -665,6 +666,27 @@ TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode d
     CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     fan.clear();
     CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+}
+
+// A malformed owned child is diagnosed before any firmware output or unsafe traversal.
+TEST_CASE("STEP_GCODE diagnoses null owned children without repairing the tree",
+          "[plugins][gcode][validation][canonical-ingress]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    PrintingToolGroup &tool = append_speed_validation_tool_group(print);
+    ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, false);
+    root->append_child(speed_validation_path(22.f));
+    root->children().emplace_back(nullptr);
+    PrintingExtrusion &extrusion = append_speed_validation_extrusion(tool, std::move(root));
+    const ExtrusionEntity *identity = extrusion.root.get();
+    std::string error;
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    CHECK(error.find("extrusions[0].root.children[1]") != std::string::npos);
+    CHECK(error.find("null owned extrusion child") != std::string::npos);
+    CHECK(extrusion.root.get() == identity);
+    REQUIRE(extrusion.root->child_count() == 2);
+    CHECK(extrusion.root->children()[1] == nullptr);
 }
 
 TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
@@ -2570,8 +2592,8 @@ TEST_CASE("Active writer preserves a finalized legal seam after rotation is cons
     REQUIRE(path->ExtrusionEntity::first_point() == chosen);
     // Simulate the final pass's consumption, not a new exemption in the writer.
     path->set_can_rotate(false);
-    const ExtrusionEntity *root = path.get();
     append_path_extrusion(layer.tool_groups.front(), std::move(path));
+    const ExtrusionEntity *root = layer.tool_groups.front().extrusions.back().root.get();
     const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
     INFO(output);
     CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:5"});
@@ -2607,10 +2629,10 @@ TEST_CASE("Active writer does not recut a closed fixed MultiPath or its canonica
         fixed->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
         std::unique_ptr<ExtrusionEntity> root = canonical ? fixed->clone_canonical() :
                                                           std::unique_ptr<ExtrusionEntity>(std::move(fixed));
-        const ExtrusionEntity *before = root.get();
-        REQUIRE_FALSE(before->can_rotate());
-        REQUIRE(before->child(0).can_rotate());
+        REQUIRE_FALSE(root->can_rotate());
+        REQUIRE(root->child(0).can_rotate());
         append_path_extrusion(layer.tool_groups.front(), std::move(root));
+        const ExtrusionEntity *before = layer.tool_groups.front().extrusions.back().root.get();
         const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
         INFO(output);
         CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:9"});

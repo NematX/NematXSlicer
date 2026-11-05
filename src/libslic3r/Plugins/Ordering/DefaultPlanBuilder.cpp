@@ -44,7 +44,7 @@ namespace {
 DefaultPlanBuilder is the first plugin in the ordering chain.
 
 It creates the mutable PrintingPlan from the read-only Print through plugin
-views, with a private translation bridge for transitional Nop state. The source
+views, with a private bridge for translating stored geometry. The source
 data tree stays untouched: each printable role
 bucket from a LayerRegionIsland is cloned into the plan, and the clone is shifted
 for the object instance it belongs to. Later ordering plugins can reorder those
@@ -252,9 +252,9 @@ bool append_print_auxiliary_group(
     const plugin_run_context *run_ctx);
 
 /*
-Translate stored geometry and transitional positioned commands in the owned
-clone. The public ABI does not expose Nop.position; this built-in uses a private
-core bridge shared with the native builder, without changing that ABI.
+Translate stored geometry in the owned canonical clone through the core bridge
+shared with the native builder. Commands without a polyline retain the implicit
+current position; the source tree and public ABI remain unchanged.
 */
 void translate_extrusion_tree(
     MutableExtrusionEntity entity,
@@ -642,9 +642,8 @@ void translate_extrusion_tree(
     throw_if_cancelled(run_ctx);
     if (!entity.valid())
         return;
-    // Private built-in bridge: the public ABI does not expose Nop.position.
-    // Translate it together with stored geometry, without manufacturing a
-    // point/deposit or changing the source tree through the public SDK.
+    // Translate the owned geometry without manufacturing points for commands
+    // or changing the source tree through the public SDK.
     Slic3r::ExtrusionEntity *core = reinterpret_cast<Slic3r::ExtrusionEntity *>(entity.mutable_handle());
     core->translate(Slic3r::Point(shift.x, shift.y));
 }

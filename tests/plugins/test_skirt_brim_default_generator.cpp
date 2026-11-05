@@ -1935,10 +1935,12 @@ TEST_CASE("Generation winding reports fragmented event contours without moving o
     positioned.set_polyline(stored_winding_geometry(*winding_arc_loop()));
     const ArcPolyline before = positioned.polyline_ref();
     const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(positioned, true);
-    CHECK(result.reversed_contours == 0);
-    CHECK(result.deferred_contours == 1);
+    CHECK(result.reversed_contours == 1);
+    CHECK(result.deferred_contours == 0);
     CHECK(positioned.position == Point(1234, 5678));
-    check_winding_geometry(positioned.polyline_ref(), before);
+    ArcPolyline expected = before;
+    expected.reverse();
+    check_winding_geometry(positioned.polyline_ref(), expected);
     ExtrusionEntity open(false, ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}}));
     const ArcPolyline unchanged = open.polyline_ref();
     const ExtrusionTreeTransforms::GenerationWindingResult no_loop = ExtrusionTreeTransforms::normalize_generation_winding(open, true);

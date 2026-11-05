@@ -4,6 +4,7 @@
 ///|/
 
 #include "StepGeneratePerimeter.hpp"
+#include "libslic3r/ExtrusionSourcePublication.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -446,53 +447,6 @@ uint32_t requested_perimeter_count(const LayerRegionSetCPtrs &regions)
     return count <= 0 ? 0 : uint32_t(count);
 }
 
-void append_extrusion_children(ExtrusionEntityCollection &dst, ExtrusionEntity &src)
-{
-    // Move a plugin-produced subtree into a legacy collection bucket. Nop
-    // entities are ignored, collections donate their children, and leaves are
-    // appended as single printable entities.
-    if (src.is_nop())
-        return;
-
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&src)) {
-        dst.append_move_from(*collection);
-        return;
-    }
-
-    if (src.is_leaf()) {
-        dst.append(std::move(src));
-        return;
-    }
-
-    ExtrusionEntity::Children &children = src.children();
-    while (!children.empty()) {
-        dst.append(std::move(children.front()));
-        children.erase(children.begin());
-    }
-}
-
-void append_extrusion_children(ExtrusionEntity &dst, ExtrusionEntity &src)
-{
-    // Same transfer as above, but for a generic ExtrusionEntity parent. A leaf
-    // cannot donate children, so clone_move() transfers its payload into a new
-    // owned child and then clears the source shell.
-    if (src.is_nop())
-        return;
-
-    if (src.is_leaf()) {
-        dst.append_child(ExtrusionEntityUPtr(src.clone_move()));
-        src.clear_content();
-        src.clear_properties();
-        return;
-    }
-
-    ExtrusionEntity::Children &children = src.children();
-    while (!children.empty()) {
-        dst.append_child(std::move(children.front()));
-        children.erase(children.begin());
-    }
-}
-
 void collect_extrusions(PerimeterTreeNode &node, ExtrusionEntityCollection &out)
 {
     // Keep the extrusion publication shaped like the generation tree. Each
@@ -502,11 +456,11 @@ void collect_extrusions(PerimeterTreeNode &node, ExtrusionEntityCollection &out)
     // instead of receiving a flat list of unrelated loops.
     std::unique_ptr<ExtrusionEntity> group =
         std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, true, false);
-    append_extrusion_children(*group, node.extrusions);
+    append_source_extrusions(*group, node.extrusions);
     for (std::unique_ptr<PerimeterTreeNode> &child : node.children) {
         ExtrusionEntityCollection child_group;
         collect_extrusions(*child, child_group);
-        append_extrusion_children(*group, child_group);
+        append_source_extrusions(*group, child_group);
     }
 
     if (!group->is_leaf() && group->child_count() > 0)
@@ -1178,7 +1132,7 @@ int32_t set_region_island_extrusion_callback(layer_region_island_handle *region_
         // published bucket. Exceptions during conversion leave output intact.
         ExtrusionEntityCollection prepared;
         if (extrusion_handle != nullptr)
-            append_extrusion_children(prepared, *to_extrusion(extrusion_handle));
+            append_source_extrusions(prepared, *to_extrusion(extrusion_handle));
 
         ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role_from_raw(role));
         dst.swap(prepared);

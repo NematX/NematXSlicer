@@ -1761,46 +1761,6 @@ struct ExtrusionDirectionSetter : public ExtrusionVisitor {
     }
 };
 
-void append_extrusion_children_to_collection(ExtrusionEntityCollection &dst, ExtrusionEntity &src)
-{
-    if (src.is_nop())
-        return;
-
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&src)) {
-        /*
-        The plugin root is a temporary transport object. Clone its children
-        into the persistent Print tree, then clear the transport root. This is
-        a little more conservative than moving unique_ptrs across the API
-        boundary and keeps all long-lived adhesion extrusion owned by Print.
-        If the collection has properties, it is a semantic subtree and must
-        stay whole so descendants inherit them.
-        */
-        if (collection->has_properties()) {
-            dst.append(src);
-            src.clear_content();
-            src.clear_properties();
-            return;
-        }
-        for (const ExtrusionEntity *child : collection->entities())
-            dst.append(*child);
-        collection->clear();
-        return;
-    }
-
-    if (src.is_leaf()) {
-        dst.append(src);
-        src.clear_content();
-        src.clear_properties();
-        return;
-    }
-
-    ExtrusionEntity::Children &children = src.children();
-    for (const ExtrusionEntityUPtr &child : children)
-        dst.append(*child);
-    src.clear_content();
-    src.clear_properties();
-}
-
 void ApiInternal::PrintAccess::clear_brim(Print &print)
 {
     PrintObject *auxiliary_object = const_cast<PrintObject *>(print.auxiliary_object());

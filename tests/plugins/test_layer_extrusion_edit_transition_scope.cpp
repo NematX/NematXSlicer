@@ -11,6 +11,7 @@ These tests exercise both the private named-scope helper and the production
 provider through the real parallel STEP_LAYER_EXTRUSION_EDIT host. Small plans
 make scope ownership, boundary pairing and conditional child layouts visible
 without depending on later retraction, wipe or travel providers.
+Fixture trees acquire canonical storage on entry to the plan, before validation.
 */
 
 #include <catch2/catch.hpp>
@@ -28,6 +29,7 @@ without depending on later retraction, wipe or travel providers.
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingEntityPropertyTraversal.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
@@ -95,7 +97,7 @@ ExtrusionEntityUPtr make_parent(ExtrusionEntityUPtrs children,
                                bool sortable = false,
                                bool reversible = false);
 
-/* Append one independently owned extrusion tree to a final tool visit. */
+/* Acquire a canonical extrusion tree and append it to a final tool visit. */
 PrintingExtrusion &append_extrusion(PrintingToolGroup &tool,
                                     ExtrusionEntityUPtr root,
                                     uint32_t printing_catalog_id = PRINTING_OBJECT_INSTANCE_ID_NONE);
@@ -167,7 +169,7 @@ PrintingExtrusion &append_extrusion(PrintingToolGroup &tool,
                                     const uint32_t printing_catalog_id)
 {
     PrintingExtrusion extrusion;
-    extrusion.root = std::move(root);
+    extrusion.root = CanonicalExtrusion::acquire(*root);
     extrusion.printing_catalog_id = printing_catalog_id;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
     tool.extrusions.push_back(std::move(extrusion));

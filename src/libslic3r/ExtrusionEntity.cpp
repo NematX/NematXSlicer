@@ -57,12 +57,13 @@
         is_loop() -> is_continuous() [require nonempty XY closure]
 
    Canonical copies duplicate each node's content and owned properties once,
-   without calling legacy views or polymorphic clones. Positioned Nop commands
-   retain their separate position and role; other copied nodes use the base type.
+   without calling legacy views or polymorphic clones. Every copied node uses the
+   base type; active command state and role are properties. Legacy Nop position
+   and role fields are not part of the canonical command representation.
 
        clone_canonical()
            |-- copy a local ArcPolyline, or recursively copy owned children
-           `-- construct a base node or positioned Nop with copied properties
+           `-- construct a base node with copied properties and owned resources
 */
 
 namespace Slic3r {
@@ -256,9 +257,6 @@ ExtrusionEntityUPtr ExtrusionEntity::clone_canonical() const
         content = std::move(copied);
     }
 
-    // Nop stores a command position and role outside the base content variant.
-    if (const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(this))
-        return ExtrusionEntityUPtr(new ExtrusionNop(*nop, std::move(content)));
     return ExtrusionEntityUPtr(new ExtrusionEntity(*this, std::move(content)));
 }
 
@@ -269,13 +267,6 @@ ExtrusionEntity::ExtrusionEntity(const ExtrusionEntity &source, Content &&conten
     , m_content(std::move(content))
     , m_can_sort(source.m_can_sort)
     , m_can_rotate(source.m_can_rotate)
-{
-}
-
-ExtrusionNop::ExtrusionNop(const ExtrusionNop &source, Content &&content)
-    : ExtrusionEntity(source, std::move(content))
-    , m_role(source.m_role)
-    , position(source.position)
 {
 }
 
