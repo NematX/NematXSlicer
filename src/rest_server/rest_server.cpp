@@ -15,6 +15,7 @@
 #include "engine.hpp"
 #include "file_names.hpp"
 #include "multipart_upload.hpp"
+#include "placement.hpp"
 #include "profiles.hpp"
 #include "progress.hpp"
 #include "scene_edit.hpp"
@@ -40,6 +41,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -1714,6 +1716,421 @@ std::optional<HttpResponse> read_scene_edit_body(HttpRequest &request, std::init
 HttpResponse scene_edit_error(const SceneEditError &error, const std::string &request_id)
 {
     return make_error_response(error.status(), error.code(), error.what(), request_id);
+}
+
+// Parse an empty body as the route defaults, or validate a closed JSON object.
+bool parse_placement_body(
+    HttpRequest &request,
+    std::initializer_list<const char *> allowed,
+    nlohmann::json &body,
+    HttpResponse &error,
+    const std::string &request_id)
+{
+    if (request.body.empty()) {
+        body = nlohmann::json::object();
+        return true;
+    }
+    if (!parse_request_json(request, error, request_id))
+        return false;
+    if (request.json_body == nullptr || !request.json_body->is_object()) {
+        error = make_error_response(400, "invalid_request", "The body must be a JSON object.", request_id);
+        return false;
+    }
+    body = *request.json_body;
+    for (nlohmann::json::const_iterator item = body.begin(); item != body.end(); ++item)
+        if (std::find_if(allowed.begin(), allowed.end(), [&item](const char *field) {
+                return item.key() == field;
+            }) == allowed.end()) {
+            error = make_error_response(400, "invalid_request", "Unknown field: " + item.key(), request_id);
+            return false;
+        }
+    return true;
+}
+
+// Parse optional instance IDs before session state checks so malformed bodies stay 400 during slicing.
+bool parse_instance_ids(
+    const nlohmann::json &body,
+    std::vector<std::string> &ids,
+    HttpResponse &error,
+    const std::string &request_id)
+{
+    if (!body.contains("ids"))
+        return true;
+    if (!body.at("ids").is_array()) {
+        error = make_error_response(400, "invalid_request", "ids must be an array of entity IDs.", request_id);
+        return false;
+    }
+    for (const nlohmann::json &id : body.at("ids")) {
+        if (!id.is_string()) {
+            error = make_error_response(400, "invalid_request", "Every ID must be a string.", request_id);
+            return false;
+        }
+        ids.push_back(id.get<std::string>());
+    }
+    return true;
+}
+
+// Parse request-only arrangement values; the sequential clearance is checked after the session snapshot.
+bool parse_arrange_request(
+    const nlohmann::json &body,
+    ArrangeRequest &arrange,
+    HttpResponse &error,
+    const std::string &request_id)
+{
+    if (body.contains("distance")) {
+        if (!body.at("distance").is_number()) {
+            error = make_error_response(400, "invalid_request", "distance must be a number.", request_id);
+            return false;
+        }
+        arrange.distance = body.at("distance").get<double>();
+        if (!std::isfinite(*arrange.distance) || *arrange.distance < 0. ||
+            *arrange.distance > maximum_arrange_distance_mm()) {
+            error = make_error_response(422, "invalid_arrange", "distance must be finite, non-negative, and within the engine coordinate range.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("distance_from_bed")) {
+        if (!body.at("distance_from_bed").is_number()) {
+            error = make_error_response(400, "invalid_request", "distance_from_bed must be a number.", request_id);
+            return false;
+        }
+        arrange.distance_from_bed = body.at("distance_from_bed").get<double>();
+        if (!std::isfinite(arrange.distance_from_bed) || arrange.distance_from_bed < 0. ||
+            arrange.distance_from_bed > maximum_arrange_distance_mm()) {
+            error = make_error_response(422, "invalid_arrange", "distance_from_bed must be finite, non-negative, and within the engine coordinate range.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("rotations")) {
+        if (!body.at("rotations").is_boolean()) {
+            error = make_error_response(400, "invalid_request", "rotations must be a boolean.", request_id);
+            return false;
+        }
+        arrange.rotations = body.at("rotations").get<bool>();
+    }
+    if (body.contains("alignment")) {
+        if (!body.at("alignment").is_string()) {
+            error = make_error_response(400, "invalid_request", "alignment must be a string.", request_id);
+            return false;
+        }
+        const std::string value = body.at("alignment").get<std::string>();
+        if (value == "center") arrange.alignment = arr2::ArrangeSettingsView::xlpCenter;
+        else if (value == "rear_left") arrange.alignment = arr2::ArrangeSettingsView::xlpRearLeft;
+        else if (value == "front_left") arrange.alignment = arr2::ArrangeSettingsView::xlpFrontLeft;
+        else if (value == "front_right") arrange.alignment = arr2::ArrangeSettingsView::xlpFrontRight;
+        else if (value == "rear_right") arrange.alignment = arr2::ArrangeSettingsView::xlpRearRight;
+        else if (value == "random") arrange.alignment = arr2::ArrangeSettingsView::xlpRandom;
+        else {
+            error = make_error_response(422, "invalid_arrange", "alignment is not supported.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("geometry")) {
+        if (!body.at("geometry").is_string()) {
+            error = make_error_response(400, "invalid_request", "geometry must be a string.", request_id);
+            return false;
+        }
+        const std::string value = body.at("geometry").get<std::string>();
+        if (value == "convex") arrange.geometry = arr2::ArrangeSettingsView::ghConvex;
+        else if (value == "balanced") arrange.geometry = arr2::ArrangeSettingsView::ghBalanced;
+        else if (value == "advanced") arrange.geometry = arr2::ArrangeSettingsView::ghAdvanced;
+        else {
+            error = make_error_response(422, "invalid_arrange", "geometry is not supported.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("strategy")) {
+        if (!body.at("strategy").is_string()) {
+            error = make_error_response(400, "invalid_request", "strategy must be a string.", request_id);
+            return false;
+        }
+        const std::string value = body.at("strategy").get<std::string>();
+        if (value == "auto") arrange.strategy = arr2::ArrangeSettingsView::asAuto;
+        else if (value == "pull_to_center") arrange.strategy = arr2::ArrangeSettingsView::asPullToCenter;
+        else {
+            error = make_error_response(422, "invalid_arrange", "strategy is not supported.", request_id);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Parse request-only orientation values before acquiring the session mutation token.
+bool parse_orient_request(
+    const nlohmann::json &body,
+    OrientRequest &orient,
+    HttpResponse &error,
+    const std::string &request_id)
+{
+    if (body.contains("min_area")) {
+        if (!body.at("min_area").is_boolean()) {
+            error = make_error_response(400, "invalid_request", "min_area must be a boolean.", request_id);
+            return false;
+        }
+        orient.min_area = body.at("min_area").get<bool>();
+    }
+    if (body.contains("overhang_angle")) {
+        if (!body.at("overhang_angle").is_number()) {
+            error = make_error_response(400, "invalid_request", "overhang_angle must be a number.", request_id);
+            return false;
+        }
+        orient.overhang_angle = body.at("overhang_angle").get<double>();
+    }
+    if (!std::isfinite(orient.overhang_angle) || orient.overhang_angle < 45. || orient.overhang_angle > 90.) {
+        error = make_error_response(422, "invalid_orient", "overhang_angle must be between 45 and 90 degrees.", request_id);
+        return false;
+    }
+    return true;
+}
+
+// Resolve objects and instances against one revision and collect the corresponding REST IDs.
+std::optional<HttpResponse> resolve_instance_targets(
+    SessionContext &session,
+    const Model &scene,
+    SessionContext::MutationToken token,
+    const std::vector<std::string> &entity_ids,
+    const std::string &invalid_code,
+    const std::string &request_id,
+    InstanceTargets &targets,
+    std::vector<EntityBinding> &bindings)
+{
+    std::set<std::uint64_t> selected;
+    for (const std::string &entity_id : entity_ids) {
+        const std::optional<EntityReference> entity = session.resolve_entity(entity_id);
+        if (session.snapshot().revision != token.revision)
+            return make_error_response(409, "session_changed", "The scene changed while placement targets were resolved.", request_id);
+        if (!entity)
+            return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+        if (entity->kind == EntityKind::instance) {
+            selected.insert(entity->engine_id);
+        } else if (entity->kind == EntityKind::object) {
+            for (const ModelObject *object : scene.object_ptrs())
+                if (static_cast<std::uint64_t>(object->id().id) == entity->engine_id)
+                    for (const ModelInstance *instance : object->instances)
+                        selected.insert(static_cast<std::uint64_t>(instance->id().id));
+        } else {
+            return make_error_response(422, invalid_code, "Only objects and instances can be placed.", request_id);
+        }
+    }
+    if (session.snapshot().revision != token.revision)
+        return make_error_response(409, "session_changed", "The scene changed while placement targets were resolved.", request_id);
+
+    targets.assign(selected.begin(), selected.end());
+    const bool all_instances = entity_ids.empty();
+    for (const ModelObject &object : scene.objects())
+        for (const ModelInstance *instance : object.instances) {
+            const std::uint64_t instance_id = static_cast<std::uint64_t>(instance->id().id);
+            if (all_instances || selected.find(instance_id) != selected.end())
+                bindings.push_back({EntityKind::instance, instance_id});
+        }
+    return std::nullopt;
+}
+
+// Serialize the engine transform in the REST contract's stable row-major order.
+nlohmann::json placement_matrix_json(const Transform3d &matrix)
+{
+    nlohmann::json result = nlohmann::json::array();
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column) {
+            const double value = matrix.matrix()(row, column);
+            if (!std::isfinite(value))
+                throw std::logic_error("The placement result contains a non-finite transform.");
+            result.push_back(value);
+        }
+    return result;
+}
+
+// Apply arrangement on the import pool and publish only an actually changed candidate.
+std::optional<HttpResponse> handle_arrange(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    nlohmann::json body;
+    HttpResponse parse_error;
+    if (!parse_placement_body(request, {"ids", "distance", "distance_from_bed", "rotations", "alignment", "geometry", "strategy"},
+            body, parse_error, request_id))
+        return parse_error;
+    ArrangeRequest arrange;
+    std::vector<std::string> requested_ids;
+    if (!parse_instance_ids(body, requested_ids, parse_error, request_id) ||
+        !parse_arrange_request(body, arrange, parse_error, request_id))
+        return parse_error;
+
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (current->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to arrange.", request_id);
+
+    InstanceTargets targets;
+    std::vector<EntityBinding> bindings;
+    if (std::optional<HttpResponse> error = resolve_instance_targets(
+            *session, *current->scene, *mutation, requested_ids, "invalid_arrange", request_id, targets, bindings))
+        return error;
+    const double minimum_distance = minimum_arrange_distance(current->configuration);
+    const double effective_distance = arrange.distance.value_or(default_arrange_distance(current->configuration));
+    if (!std::isfinite(effective_distance) || effective_distance < minimum_distance ||
+        effective_distance > maximum_arrange_distance_mm())
+        return make_error_response(422, "invalid_arrange", "distance is outside the safe range for this configuration.", request_id);
+    const std::optional<std::vector<std::string>> rest_ids = session->entity_ids(mutation.value(), bindings);
+    if (!rest_ids)
+        return make_error_response(409, "session_changed", "The scene changed while placement targets were resolved.", request_id);
+    std::map<std::uint64_t, std::string> rest_id_by_engine;
+    for (std::size_t index = 0; index < bindings.size(); ++index)
+        rest_id_by_engine.emplace(bindings[index].engine_id, rest_ids->at(index));
+
+    asio::post(services.imports, [session, token = *mutation, data = *current, targets = std::move(targets),
+        arrange, bindings = std::move(bindings), rest_id_by_engine = std::move(rest_id_by_engine), request_id,
+        respond, observer = services.import_observer]() mutable {
+        const HttpResponse response = [&]() -> HttpResponse {
+            try {
+                if (observer)
+                    observer();
+                if (!session->data_snapshot())
+                    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                SessionData candidate = std::move(data);
+                candidate.scene = std::make_shared<Model>(*candidate.scene);
+                const ArrangeOutcome outcome = arrange_instances(*candidate.scene, candidate.configuration, targets, arrange);
+                nlohmann::json instances = nlohmann::json::array();
+                for (const ArrangedInstance &instance : outcome.instances) {
+                    const std::map<std::uint64_t, std::string>::const_iterator rest_id =
+                        rest_id_by_engine.find(instance.instance_id);
+                    if (rest_id == rest_id_by_engine.end())
+                        throw std::logic_error("The placement result contains an unbound instance ID.");
+                    nlohmann::json bed = instance.bed ? nlohmann::json(*instance.bed) : nlohmann::json(nullptr);
+                    instances.push_back({{"id", rest_id->second}, {"bed", std::move(bed)}});
+                }
+                if (!session->data_snapshot())
+                    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                if (outcome.changed) {
+                    if (!session->commit_mutation(token, std::move(candidate), true, SessionRegistry::Clock::now())) {
+                        if (!session->data_snapshot())
+                            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                        return make_error_response(409, "session_changed", "The scene changed while arrangement was running.", request_id);
+                    }
+                } else if (!session->entity_ids(token, bindings)) {
+                    return make_error_response(409, "session_changed", "The scene changed while arrangement was running.", request_id);
+                }
+                return HttpResponse::json(200, nlohmann::json{{"instances", std::move(instances)}});
+            } catch (const SceneEditError &error) {
+                return scene_edit_error(error, request_id);
+            } catch (const std::exception &) {
+                return make_error_response(500, "internal_error", "The server could not arrange the scene.", request_id);
+            } catch (...) {
+                return make_error_response(500, "internal_error", "The server could not arrange the scene.", request_id);
+            }
+        }();
+        respond(response);
+    });
+    return std::nullopt;
+}
+
+// Apply automatic orientation on the import pool and return matrices from the committed candidate.
+std::optional<HttpResponse> handle_orient(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    nlohmann::json body;
+    HttpResponse parse_error;
+    if (!parse_placement_body(request, {"ids", "min_area", "overhang_angle"}, body, parse_error, request_id))
+        return parse_error;
+    OrientRequest orient;
+    std::vector<std::string> requested_ids;
+    if (!parse_instance_ids(body, requested_ids, parse_error, request_id) ||
+        !parse_orient_request(body, orient, parse_error, request_id))
+        return parse_error;
+
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (current->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to orient.", request_id);
+
+    InstanceTargets targets;
+    std::vector<EntityBinding> bindings;
+    if (std::optional<HttpResponse> error = resolve_instance_targets(
+            *session, *current->scene, *mutation, requested_ids, "invalid_orient", request_id, targets, bindings))
+        return error;
+    const std::optional<std::vector<std::string>> rest_ids = session->entity_ids(mutation.value(), bindings);
+    if (!rest_ids)
+        return make_error_response(409, "session_changed", "The scene changed while placement targets were resolved.", request_id);
+    std::map<std::uint64_t, std::string> rest_id_by_engine;
+    for (std::size_t index = 0; index < bindings.size(); ++index)
+        rest_id_by_engine.emplace(bindings[index].engine_id, rest_ids->at(index));
+
+    asio::post(services.imports, [session, token = *mutation, data = *current, targets = std::move(targets),
+        orient, bindings = std::move(bindings), rest_id_by_engine = std::move(rest_id_by_engine), request_id,
+        respond, observer = services.import_observer]() mutable {
+        const HttpResponse response = [&]() -> HttpResponse {
+            try {
+                if (observer)
+                    observer();
+                if (!session->data_snapshot())
+                    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                SessionData candidate = std::move(data);
+                candidate.scene = std::make_shared<Model>(*candidate.scene);
+                const OrientOutcome outcome = orient_instances(*candidate.scene, targets, orient);
+                nlohmann::json instances = nlohmann::json::array();
+                for (const OrientedInstance &instance : outcome.instances) {
+                    const std::map<std::uint64_t, std::string>::const_iterator rest_id =
+                        rest_id_by_engine.find(instance.instance_id);
+                    if (rest_id == rest_id_by_engine.end())
+                        throw std::logic_error("The orientation result contains an unbound instance ID.");
+                    instances.push_back({{"id", rest_id->second}, {"matrix", placement_matrix_json(instance.matrix)}});
+                }
+                if (!session->data_snapshot())
+                    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                if (outcome.changed) {
+                    if (!session->commit_mutation(token, std::move(candidate), true, SessionRegistry::Clock::now())) {
+                        if (!session->data_snapshot())
+                            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                        return make_error_response(409, "session_changed", "The scene changed while orientation was running.", request_id);
+                    }
+                } else if (!session->entity_ids(token, bindings)) {
+                    return make_error_response(409, "session_changed", "The scene changed while orientation was running.", request_id);
+                }
+                return HttpResponse::json(200, nlohmann::json{{"instances", std::move(instances)}});
+            } catch (const SceneEditError &error) {
+                return scene_edit_error(error, request_id);
+            } catch (const std::exception &) {
+                return make_error_response(500, "internal_error", "The server could not orient the scene.", request_id);
+            } catch (...) {
+                return make_error_response(500, "internal_error", "The server could not orient the scene.", request_id);
+            }
+        }();
+        respond(response);
+    });
+    return std::nullopt;
 }
 
 // Parse the open-ended settings object before session-busy checks so malformed
@@ -3522,6 +3939,10 @@ std::optional<HttpResponse> dispatch_request(
             return handle_clear_platter(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "list_objects")
             return handle_list_objects(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "arrange")
+            return handle_arrange(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "orient")
+            return handle_orient(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "transform")
             return handle_transform(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "set_part_type")

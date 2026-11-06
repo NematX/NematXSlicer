@@ -145,6 +145,8 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/add_model` | Upload an STL, OBJ, or 3MF |
 | `POST` | `/session/{session_id}/load_project` | Upload a 3MF project |
 | `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, instances, and layer ranges |
+| `POST` | `/session/{session_id}/arrange` | Optional JSON placement settings and object/instance IDs |
+| `POST` | `/session/{session_id}/orient` | Optional JSON orientation settings and object/instance IDs |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
@@ -1400,6 +1402,57 @@ reject a request body with `400 invalid_request`; valid writes during slicing
 return `409 session_busy`, and a concurrent revision change returns
 `409 session_changed`.
 
+### 5.18. Arrange and orient (1.1)
+
+Both placement routes accept an empty body or a JSON object containing only the
+listed fields. Distances are in millimeters. `ids`, when present, is an array of
+object or instance IDs; an object selects all its instances. Missing or empty
+`ids` selects the whole platter for arrangement and every printable instance
+for orientation. Explicitly selected instances are used even if marked
+non-printable. Unknown IDs return `404 entity_not_found`; part and layer-range
+IDs return `422 invalid_arrange` or `422 invalid_orient`.
+
+- `POST .../arrange` accepts optional `distance`, `distance_from_bed`,
+  `rotations`, `alignment`, `geometry`, and `strategy`. The distance defaults to
+  `duplicate_distance` plus the sequential-printing nozzle clearance, or 6 mm
+  when `duplicate_distance` is zero. `distance` must be finite and at least the
+  clearance when sequential printing is enabled; otherwise its minimum is 0.
+  `distance_from_bed` must be finite and non-negative. Both distances must also
+  fit safely in the engine's scaled-coordinate representation; a finite value
+  outside that representable range returns `422 invalid_arrange`.
+  `alignment` is one of `center`, `rear_left`, `front_left`, `front_right`,
+  `rear_right`, or `random`; `geometry` is `convex`, `balanced`, or `advanced`;
+  `strategy` is `auto` or `pull_to_center`. Alignment affects XL printers only.
+  Rotations default to `false`.
+- Brim and skirt widths from the session configuration are kept clear of the
+  bed edge: each placed item stays at least the larger of `distance_from_bed`
+  and the skirt plus brim extent from the edge. When the skirt is measured from
+  the brim (`skirt_distance_from_brim`, the default), the engine counts the
+  brim twice in that margin, even without a skirt, as in the GUI. `distance` is
+  the gap between object outlines, as in the GUI; neighbouring brims may merge.
+  A wipe tower is not taken into account. Items that do not fit the physical
+  bed may be placed on virtual beds; virtual beds are outside the printable
+  area. An item too large for a bed is left in place with a `null` bed index.
+- The response is `{"instances":[{"id":"instance-id","bed":0}]}`. Bed 0 is
+  the physical bed, positive values identify virtual beds, and `null` means the
+  instance could not be placed. Instance matrices are read back through
+  `list_objects`.
+- `POST .../orient` accepts optional `min_area` (default `true`) and
+  `overhang_angle` (default 60; finite and between 45 and 90 degrees). It
+  minimizes support area when `min_area` is true and volume otherwise. It
+  optimizes each selected instance from its own transformed mesh and lays each
+  oriented instance on the bed (its own lowest point at Z = 0); other instances
+  of the same object are not moved. It does not arrange the instances afterwards.
+  The response is `{"instances":[{"id":"instance-id","matrix":[16 numbers]}]}`
+  with row-major matrices.
+- A real placement change commits one new session revision and invalidates
+  current G-code. If every transform is unchanged, the route still returns 200
+  but does not commit. Both routes return `409 session_busy` during slicing and
+  `409 session_changed` if another mutation wins while the job is running.
+  Malformed or unknown fields return `400`; unsupported values return
+  `422 invalid_arrange` or `422 invalid_orient`; an uninitialized engine returns
+  `503 engine_not_initialized`.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1494,6 +1547,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 11 | `rest_e2e_tests`: `E5 expiration shutdown and restart`; `rest_slice_tests`: `REST slice keeps registry work busy and restarts TTL at completion` |
 | 1.1 scene editing | `rest_models_tests`: `REST list_objects reports part types paintings and cut objects`, `REST set_part_type changes types atomically and keeps unchanged types uncommitted`, `REST rename validates names and invalidates G-code only for objects`, `REST delete_entity removes entities and keeps the retained part ID`, `REST add_part checks the target before upload and imports a part`, `REST add_shape creates default and sized shapes`, `REST split and merge replace scene entities in one commit`, `REST scene edits are refused while slicing and on concurrent changes`, `REST negative volumes and support enforcers change the sliced result` |
 | 1.1 entity settings and ranges | `rest_models_tests`: `Entity setting scopes follow the GUI lists and plugin containers`, `Entity settings write atomically and remove overrides`, `Layer ranges validate bounds overlaps and nozzle height limits`, `REST list_settings publishes entity setting scopes`, `REST entity settings read and write objects parts and layer ranges`, `REST layer ranges are entities with IDs that follow their bounds`, `REST entity setting edits are refused while slicing and on concurrent changes`, `REST entity settings change the sliced result`, `REST entity settings and layer ranges survive save_project and load_project` |
+| 1.1 arrangement and orientation | `rest_models_tests`: `Arrange defaults follow the GUI distance rules`, `Arrange separates instances and keeps unselected ones fixed`, `Arrange reports virtual beds and unplaced instances`, `Orient rotates each instance from its own mesh`; `rest_placement_tests`: `REST arrange validates parameters and targets`, `REST arrange moves instances onto the bed and reports their beds`, `REST orient validates parameters and rotates instances onto the bed`, `REST arrange and orient are refused while slicing and on concurrent changes` |
 
 ## 8. Decisions
 
@@ -1538,6 +1592,9 @@ platform validation responsibility, not an in-process TLS implementation.
 - Viewer `metadata.objects` contains engine instance labels (for example
   `cube_stl id:0 copy 0`), not a separately reconstructed object-name list.
   Engine speed is duplicated in the two viewer speed fields in V1.
+- Arrangement and orientation jobs use the import pool and are not cancellable;
+  graceful shutdown waits for the active operation to finish. Arrangement
+  ignores the wipe tower, and virtual beds are outside the printable area.
 - Native TLS, browser CORS and remote administration are not provided. Operators
   must supply encrypted remote transport and validate their actual proxies.
 - Linux/macOS packaging/services, actual proxies, visual GUI startup with future

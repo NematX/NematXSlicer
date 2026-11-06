@@ -50,6 +50,8 @@ add_library(slic3r_rest STATIC
     file_names.hpp
     multipart_upload.cpp
     multipart_upload.hpp
+    placement.cpp
+    placement.hpp
     profiles.cpp
     profiles.hpp
     progress.cpp
