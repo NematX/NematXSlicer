@@ -5,6 +5,7 @@
 
 #include "rest_main_internal.hpp"
 #include "rest_server_fixture.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <csignal>
 #include <iostream>
@@ -44,10 +45,10 @@ struct Capture {
 struct PreviousSignals {
     using Handler = void (*)(int);
     Handler interrupt, terminate;
-    explicit PreviousSignals(Handler handler)
 #ifdef _WIN32
     Handler console_break;
 #endif
+    explicit PreviousSignals(Handler handler)
         : interrupt(std::signal(SIGINT, handler)), terminate(std::signal(SIGTERM, handler))
     {
 #ifdef _WIN32
@@ -58,10 +59,10 @@ struct PreviousSignals {
     {
         std::signal(SIGINT, interrupt);
         std::signal(SIGTERM, terminate);
-    }
 #ifdef _WIN32
         std::signal(SIGBREAK, console_break);
 #endif
+    }
 };
 
 volatile std::sig_atomic_t observed_signal = 0;
@@ -137,18 +138,6 @@ TEST_CASE("REST launch account errors emit no document", "[rest_launch]")
     }
 }
 
-TEST_CASE("REST launch help options and resource-default precedence", "[rest_launch]")
-{
-    Capture capture;
-    Arguments help({"test", "--help"});
-    REQUIRE(rest_server_main(help.count(), help.pointers.data()) == 0);
-    CHECK(capture.out.str().find("--config") != std::string::npos);
-    CHECK(capture.out.str().find("Usage: test [options]") != std::string::npos);
-    RestLaunchDefaults host_defaults;
-    host_defaults.invocation = "host --rest-server";
-    REQUIRE(rest_server_main(help.count(), help.pointers.data(), host_defaults) == 0);
-    CHECK(capture.out.str().find("Usage: host --rest-server [options]") != std::string::npos);
-    Arguments host_error({"test", "--unknown"});
 TEST_CASE("REST Windows console input refuses unsupported keys without hashing a truncated password", "[rest_launch]")
 {
     for (const std::vector<int> &keys : std::vector<std::vector<int>>{
@@ -255,6 +244,18 @@ TEST_CASE("REST password stdin reads one line without echo and refuses consoles 
     }
 }
 
+TEST_CASE("REST launch help options and resource-default precedence", "[rest_launch]")
+{
+    Capture capture;
+    Arguments help({"test", "--help"});
+    REQUIRE(rest_server_main(help.count(), help.pointers.data()) == 0);
+    CHECK(capture.out.str().find("--config") != std::string::npos);
+    CHECK(capture.out.str().find("Usage: test [options]") != std::string::npos);
+    RestLaunchDefaults host_defaults;
+    host_defaults.invocation = "host --rest-server";
+    REQUIRE(rest_server_main(help.count(), help.pointers.data(), host_defaults) == 0);
+    CHECK(capture.out.str().find("Usage: host --rest-server [options]") != std::string::npos);
+    Arguments host_error({"test", "--unknown"});
     CHECK(rest_server_main(host_error.count(), host_error.pointers.data(), host_defaults) == 1);
     CHECK(capture.err.str().find("host --rest-server: unknown option") != std::string::npos);
     for (const std::vector<std::string> &values : std::vector<std::vector<std::string>>{
@@ -287,8 +288,8 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
     // The engine owns these paths for the process lifetime and cannot be reset.
     // Retain the root across all launches and any test-case reentry.
     static TempDirectory root;
-    ServerConfig config = make_valid_config(root.path());
     Capture lifecycle;
+    ServerConfig config = make_valid_config(root.path());
     config.resource_directory = SLIC3R_REST_RESOURCE_DIRECTORY;
     const std::filesystem::path work = root.path() / std::filesystem::u8path(u8"travail-é");
     const std::filesystem::path config_file = root.path() / "server.json";
@@ -324,17 +325,16 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
         REQUIRE(started);
         CHECK(std::signal(SIGINT, prior_signal) == prior_signal);
         CHECK(std::signal(SIGTERM, prior_signal) == prior_signal);
-        observed_signal = 0;
 #ifdef _WIN32
         CHECK(std::signal(SIGBREAK, prior_signal) == prior_signal);
 #endif
+        observed_signal = 0;
         REQUIRE(std::raise(SIGINT) == 0);
         CHECK(observed_signal == SIGINT);
         // The Windows CRT resets a delivered handler to SIG_DFL; rearm the test
         // handler before the next launch captures the surrounding process state.
         std::signal(SIGINT, prior_signal);
     }
-    REQUIRE(std::filesystem::is_directory(work / "engine_data"));
     // The same process-global engine paths also serve an IPv6 listener.
     nlohmann::json ipv6_document = document;
     ipv6_document["listen"]["address"] = "::1";
@@ -344,10 +344,11 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
         REQUIRE(std::raise(SIGTERM) == 0);
     }) == 0);
     CHECK(lifecycle.out.str().find("listening on [::1]:") != std::string::npos);
-    for (const std::filesystem::directory_entry &entry : std::filesystem::recursive_directory_iterator(work)) {
+    REQUIRE(std::filesystem::is_directory(work / "engine_data"));
     CHECK(lifecycle.out.str().find("listening on 127.0.0.1:") != std::string::npos);
     CHECK(lifecycle.out.str().find("stopping\nstopped\n") != std::string::npos);
     CHECK(lifecycle.out.str().find("secret") == std::string::npos);
+    for (const std::filesystem::directory_entry &entry : std::filesystem::recursive_directory_iterator(work)) {
         const std::string name = entry.path().filename().string();
         CHECK(name.rfind("rest-upload-", 0) != 0);
         CHECK(name.rfind("rest-export-", 0) != 0);

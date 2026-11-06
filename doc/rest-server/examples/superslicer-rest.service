@@ -1,0 +1,19 @@
+# Adapt executable/config paths and create the dedicated user first.
+[Unit]
+Description=SuperSlicer REST
+After=network.target
+
+[Service]
+Type=simple
+User=superslicer-rest
+Group=superslicer-rest
+WorkingDirectory=/var/lib/superslicer-rest
+ExecStart=/opt/superslicer/bin/superslicer-rest --config /etc/superslicer-rest/server.json
+Restart=on-failure
+KillSignal=SIGTERM
+TimeoutStopSec=300
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -35,6 +35,22 @@ endif ()
 set_property(TARGET rest_launch_tests PROPERTY FOLDER "tests")
 add_test(rest_launch_tests rest_launch_tests ${CATCH_EXTRA_ARGS})
 
+add_executable(rest_deployment_tests rest_deployment_tests.cpp)
+target_compile_definitions(rest_deployment_tests PRIVATE
+    SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)"
+    SLIC3R_REST_SOURCE_DIRECTORY=R"\(${CMAKE_SOURCE_DIR}\)")
+target_link_libraries(rest_deployment_tests test_common slic3r_rest slic3r_rest_engine boost_libs)
+if (WIN32)
+    target_compile_definitions(rest_deployment_tests PRIVATE _WIN32_WINNT=0x0601)
+    prusaslicer_copy_dlls(rest_deployment_tests)
+endif ()
+set_property(TARGET rest_deployment_tests PROPERTY FOLDER "tests")
+add_test(rest_deployment_tests rest_deployment_tests ${CATCH_EXTRA_ARGS})
+set_tests_properties(rest_deployment_tests PROPERTIES TIMEOUT 600)
+add_test(NAME rest_standalone_password_stdin COMMAND ${CMAKE_COMMAND}
+    -DEXECUTABLE=$<TARGET_FILE:slic3r_rest_password> -P ${CMAKE_CURRENT_SOURCE_DIR}/check_password_stdin.cmake)
+set_tests_properties(rest_standalone_password_stdin PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
+
 add_executable(rest_profiles_tests
     rest_profiles_tests.cpp
 )
@@ -223,5 +239,9 @@ if (TARGET Slic3r)
         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_password_usage.cmake)
     set_tests_properties(rest_launcher_help PROPERTIES TIMEOUT 600)
     set_tests_properties(rest_app_password_usage PROPERTIES TIMEOUT 600)
+    add_test(NAME rest_app_password_stdin COMMAND ${CMAKE_COMMAND}
+        -DEXECUTABLE=$<TARGET_FILE:${_rest_console_target}> -DMODE=--rest-hash-password
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_password_stdin.cmake)
+    set_tests_properties(rest_app_password_stdin PROPERTIES TIMEOUT 600 LABELS rest_app RUN_SERIAL TRUE)
     set_tests_properties(rest_launcher_help rest_app_help rest_app_password_usage PROPERTIES LABELS rest_app)
 endif ()

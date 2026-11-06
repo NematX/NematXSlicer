@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Adapt paths and account; launchd passes argv directly, not through a shell. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.superslicer.rest</string>
+  <key>ProgramArguments</key><array>
+    <string>/Applications/SuperSlicer.app/Contents/MacOS/superslicer-rest</string>
+    <string>--config</string><string>/usr/local/etc/superslicer-rest/server.json</string>
+  </array>
+  <key>WorkingDirectory</key><string>/usr/local/var/superslicer-rest</string>
+  <key>UserName</key><string>superslicer-rest</string>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>StandardOutPath</key><string>/usr/local/var/superslicer-rest/stdout.log</string>
+  <key>StandardErrorPath</key><string>/usr/local/var/superslicer-rest/stderr.log</string>
+  <key>ExitTimeOut</key><integer>300</integer>
+</dict></plist>

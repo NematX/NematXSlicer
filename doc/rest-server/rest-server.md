@@ -1,7 +1,7 @@
 # Specification — SuperSlicer REST Server
 
 **Status:** proposed JSON contract, pending validation\
-**Version:** 0.73
+**Version:** 0.74
 
 ## 1. Objective
 
@@ -540,7 +540,9 @@ closing boundary is an ignored epilogue.
 Model parsing runs on a dedicated pool of `limits.import_threads` threads
 (default 2) without blocking other requests. `timeouts.request_seconds` is one
 deadline for a complete JSON request, and an idle timeout between reads for an
-upload. An error sent before upload completion (`401`, `404`, `409`, `413`,
+upload. File downloads (`save_project`, `get_gcode`) also use an idle write
+timeout, rearmed whenever a write advances; active transfers may last longer
+than `request_seconds`. An error sent before upload completion (`401`, `404`, `409`, `413`,
 `422`, etc.) is followed by bounded draining of the remaining body (1 MiB or 2 s)
 before closing, so the client receives the response. An engine-unreadable file
 produces `422 invalid_model`; other internal errors produce `500 internal_error`
@@ -1232,7 +1234,7 @@ application command name (`SLIC3R_APP_CMD`).
   `--resources-dir PATH`, `--profiles-dir PATH`, `--work-dir PATH`,
   `--accounts-file PATH`, and `--help`. Command-line slicing actions and GUI
   options cannot be combined with it. The process runs until `SIGINT`/`SIGTERM`
-  (Ctrl+C), then cancels running slices and stops cleanly.
+  (Ctrl+C), or Windows `SIGBREAK` (Ctrl+Break), then cancels running slices and stops cleanly.
   `--rest-server` and `--rest-hash-password` must be the first argument after the
   program name. All arguments and JSON path strings are UTF-8 on every platform.
   Exit codes are `0` for help or normal shutdown and `1` for invalid options,
@@ -1258,11 +1260,33 @@ application command name (`SLIC3R_APP_CMD`).
   executables share one implementation.
   Standalone default paths remain relative to the current working directory.
 
+### Deployment behavior
+
+See [deployment.md](deployment.md) for configuration, accounts, flat profiles,
+service/proxy examples and the installed smoke workflow. JSON configuration rejects
+unknown keys at every level. File response writes use `request_seconds` as an idle
+deadline, rearmed only when bytes advance; total download duration is not bounded
+by that value. Buffered JSON responses retain a whole-write deadline.
+
+On startup stdout reports `listening on ADDRESS:PORT` after binding; IPv6 literals
+are bracketed (`listening on [::1]:8080`). Normal
+shutdown reports `stopping`, then `stopped` after joining workers. Windows also
+accepts `SIGBREAK` (Ctrl+Break). Lifecycle lines contain no credentials.
+
+The account tool accepts `--password-stdin` in either option order, with each option
+appearing once. It reads one redirected UTF-8 line without transcoding and refuses console stdin, preventing
+an echoed interactive password. No prompt/plaintext is emitted in this mode; the
+same accounts document and exit codes apply. Without the flag, no-echo interactive
+input remains unchanged on POSIX. Windows interactive input supports printable
+ASCII only and rejects unsupported characters without emitting an account;
+non-ASCII passwords must use UTF-8 `--password-stdin`. A username beginning with
+`--` is rejected rather than consuming another option as a name.
+
 ### Launch verification targets
 
 `rest_launch_tests` runs in its own process because launches finalize the engine
 singleton, while `rest_server_tests` also verifies the uninitialized-engine state.
-Build both test targets for launch and transport coverage. The three executable
+Build both test targets for launch and transport coverage. The four executable
 application checks have the CTest label `rest_app` and require `Slic3r` plus the
 Windows REST/console launchers (or the application binary and REST link on Unix).
 For standalone-only builds, exclude them with

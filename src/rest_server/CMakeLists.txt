@@ -138,7 +138,7 @@ set_property(TARGET slic3r_rest_server PROPERTY FOLDER "rest_server")
 
 if (WIN32)
     prusaslicer_copy_dlls(slic3r_rest_server)
-    install(TARGETS slic3r_rest_server slic3r_rest_password RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+    install(TARGETS slic3r_rest_server slic3r_rest_password RUNTIME DESTINATION ".")
 else ()
     install(TARGETS slic3r_rest_server slic3r_rest_password RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif ()

@@ -1,0 +1,9 @@
+{
+  "listen": { "address": "127.0.0.1", "port": 8080 },
+  "paths": { "resources": "resources", "profiles": "profiles", "work": "work", "accounts": "accounts.json" },
+  "limits": { "max_request_body_bytes": 16777216, "max_upload_bytes": 268435456, "max_header_bytes": 16384,
+    "max_connections": 64, "max_instances_per_object": 1000, "import_threads": 2, "slice_threads": 2 },
+  "timeouts": { "request_seconds": 30 },
+  "auth": { "token_ttl_seconds": 86400, "login_window_seconds": 60, "max_login_attempts": 5 },
+  "sessions": { "expiration_seconds": 86400 }
+}

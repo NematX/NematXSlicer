@@ -195,12 +195,13 @@ if (SLIC3R_BUILD_REST_SERVER)
     add_subdirectory(rest_server)
     target_compile_definitions(Slic3r PRIVATE SLIC3R_REST_SERVER_MODE)
     target_link_libraries(Slic3r PRIVATE slic3r_rest slic3r_rest_engine)
-    if (WIN32)
-        prusaslicer_copy_dlls(Slic3r)
-        # Both the application DLL and standalone server need these core runtimes.
-        install(FILES "$<TARGET_FILE_DIR:Slic3r>/libgmp-10.dll"
-            "$<TARGET_FILE_DIR:Slic3r>/libmpfr-4.dll" DESTINATION "${CMAKE_INSTALL_PREFIX}")
-    endif ()
+endif ()
+
+if (WIN32)
+    prusaslicer_copy_dlls(Slic3r)
+    # Core slicing requires these runtimes even when REST is disabled.
+    install(FILES "$<TARGET_FILE_DIR:Slic3r>/libgmp-10.dll"
+        "$<TARGET_FILE_DIR:Slic3r>/libmpfr-4.dll" DESTINATION ".")
 endif ()
 
 if (APPLE)
@@ -382,13 +383,13 @@ endif ()
 
 # Slic3r binary install target
 if (WIN32)
-    install(TARGETS Slic3r RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+    install(TARGETS Slic3r RUNTIME DESTINATION ".")
     if (SLIC3R_GUI)
-        install(TARGETS Slic3r_app_gui RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+        install(TARGETS Slic3r_app_gui RUNTIME DESTINATION ".")
     endif ()
-    install(TARGETS Slic3r_app_console RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+    install(TARGETS Slic3r_app_console RUNTIME DESTINATION ".")
     if (SLIC3R_BUILD_REST_SERVER)
-        install(TARGETS Slic3r_app_rest RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+        install(TARGETS Slic3r_app_rest RUNTIME DESTINATION ".")
     endif ()
 else ()
     install(TARGETS Slic3r RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
