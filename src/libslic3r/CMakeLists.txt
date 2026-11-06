@@ -56,6 +56,8 @@ set(SLIC3R_SOURCES
 	Api/host/GCodeThumbnailRenderer.hpp
 	Api/host/ClipperShapes.cpp
 	Api/host/ClipperShapes.hpp
+	Api/host/InfillBridgeFlow.cpp
+	Api/host/InfillBridgeFlow.hpp
 	Api/host/Orchestrator.cpp
 	Api/host/Orchestrator.hpp
 	Api/host/Plugin.cpp
@@ -94,6 +96,7 @@ set(SLIC3R_SOURCES
 	Api/internal/LayerRegionAccess.hpp
 	Api/internal/PrintAccess.hpp
 	Api/internal/PrintObjectAccess.hpp
+	Api/plugin/c/slic3r_bridge.h
 	Api/plugin/c/slic3r_bridge_detector.h
 	Api/plugin/c/slic3r_clipper.h
 	Api/plugin/c/slic3r_config.h
@@ -170,6 +173,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/GuiRuleHelpers.hpp
 	Api/plugin/cpp/PluginPropertyKey.hpp
 	Api/plugin/cpp/PolygonOps.hpp
+	Api/plugin/cpp/properties/BridgeProperties.hpp
 	Api/plugin/cpp/properties/DataTreeProperties.hpp
 	Api/plugin/cpp/properties/ExtrusionProperties.hpp
 	Api/plugin/cpp/properties/PrintingExtrusionScopeProperty.hpp

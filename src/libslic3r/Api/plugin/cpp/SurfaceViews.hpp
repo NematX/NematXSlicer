@@ -288,6 +288,9 @@ public:
         return m_handle != nullptr ? surface_get_id(m_handle) : surface.id;
     }
 
+    // Return the host angle in radians, or -1 for a value-only surface; zero is valid.
+    double bridge_angle() const { return m_handle == nullptr ? -1. : surface_get_bridge_angle(m_handle); }
+
     bool has_flag(raw_surface_type flag) const {
         return m_handle != nullptr ? surface_get_flag(m_handle, flag) != 0 : surface_type_has_flag(surface.type, flag);
     }
@@ -479,6 +482,16 @@ public:
     uint32_t size() const { return surface_collection_size(handle()); }
     bool empty() const { return size() == 0; }
     void clear() { surface_collection_clear(mutable_handle()); }
+    // Normalize a nonnegative finite angle modulo PI using this collection's storage;
+    // return false without mutation if the host rejects ownership, index or angle.
+    bool set_bridge_angle(uint32_t idx, double angle) {
+        return surface_collection_set_bridge_angle(storage(), mutable_handle(), idx, angle) != 0;
+    }
+    // Reclassify an owned surface while retaining its geometry and all metadata;
+    // return false unchanged when ownership, index or the type bits are invalid.
+    bool set_type(uint32_t idx, raw_surface_type type) {
+        return surface_collection_set_type(storage(), mutable_handle(), idx, type) != 0;
+    }
     MutableSurface mutable_at(uint32_t idx) const {
         assert(idx < size());
         return MutableSurface(surface_collection_at_mutable(mutable_handle(), idx),

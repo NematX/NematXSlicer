@@ -1,4 +1,21 @@
-"""Offline ABI packaging checks, independent of the platform DLL loader."""
+"""Check plugin ABI declarations and packaging without loading a native DLL.
+
+Fixtures generate ctypes declarations and ABI catalogues from the real public
+headers, then inspect callback signatures, constants, dependency requirements
+and package manifests. Temporary package files belong to each fixture. These
+checks do not establish that an external plugin library can be loaded or sliced.
+
+Representative direct calls in the generated mesh-query declaration test:
+
+    test_mesh_query_plain_types_callbacks_and_diagnostics_are_generated()
+        |-- generator.generate()
+        |-- exec() [evaluate generated Python declarations only]
+        `-- generator.generate_abi_catalog()
+
+The generated callbacks are exercised with controlled Python functions; their
+execution is not a call into the native host. Header-requirement tests also check
+that surface edits and flow wrappers declare their data-tree dependency.
+"""
 import importlib.util
 import json
 from pathlib import Path
@@ -478,16 +495,17 @@ class AbiPackagingTests(unittest.TestCase):
             self.assertIn(seam_header, bindings.methods["place_seam"])
 
     def test_auxiliary_fill_surface_mutator_abi(self):
-        """The auxiliary mutator (data tree 4.1), the object flows (4.2) and their millimeter variants (4.3) declare the data-tree header."""
+        """Surface writes and object flow bindings declare the current data-tree API."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 0])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 1])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
-                             "object_get_support_flow_mm", "object_get_region_flow_mm"):
+                             "object_get_support_flow_mm", "object_get_region_flow_mm",
+                             "surface_collection_set_type", "surface_collection_set_bridge_angle"):
                 self.assertIn("slic3r_data_tree.h", catalog.c_functions[function])
             bindings = self.analyzer.build_binding_index(ROOT / "src/libslic3r/Api/plugin/python", catalog)
-            for method in ("set_fill_surfaces", "support_flow", "region_flow", "support_flow_mm", "region_flow_mm"):
+            for method in ("set_fill_surfaces", "support_flow", "region_flow", "support_flow_mm", "region_flow_mm", "set_type", "set_bridge_angle"):
                 self.assertIn("slic3r_data_tree.h", bindings.methods[method])
 
     def _write_catalog(self, root):

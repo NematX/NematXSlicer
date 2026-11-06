@@ -2,6 +2,7 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/InfillBridgeFlow.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Api/internal/LayerIslandAccess.hpp"
@@ -32,6 +34,45 @@
 #include "libslic3r/Surface.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
+
+/*
+Expose the FFF print's sliced data to plugins through the C data-tree API.
+Opaque handles identify native objects; they do not transfer ownership or expose
+the C++ layout. Print owns objects, objects own layers, and layers own their
+regions, islands, surfaces and generated extrusion trees.
+
+Query functions resolve a borrowed handle and return a value or another borrowed
+view. Keep the owning node alive and reacquire descendants after rebuilding or
+replacing a collection. Mutable access is limited by the current slicing step's
+capabilities; receiving a mutable handle does not grant unrestricted live editing.
+
+Some operations build or edit temporary surface collections owned by plugin
+storage. Type and bridge-angle setters act on that scratch data, with the supplied
+storage owner checked before mutation. Publication callbacks then copy or move
+the prepared result into the live tree at the permitted processing boundary.
+Bridge metadata and native-flow queries let plugins describe prepared surfaces
+without guessing the host's surface flags or flow calculation.
+
+Scratch setters keep ownership unchanged, validate arguments and contain failures
+before returning through C. Null, range and phase rules are documented with their functions
+in slic3r_data_tree.h; callers must not infer success from a borrowed pointer's
+existence alone. No lock here makes concurrent edits of one collection safe.
+
+Representative direct calls (branches are not a timeline):
+
+    object_get_layer()
+        |-- Slic3r::to_object()
+        |-- layer_count()
+        `-- layer()
+
+    layer_region_island_set_fill_surfaces()
+        |-- Slic3r::to_layer_region_island()
+        |-- island->regions()
+        |-- region->layer()
+        |-- layer->object()
+        |-- object->auxiliary_layers()
+        `-- Slic3r::data_tree_editable()
+*/
 
 namespace Slic3r {
 
@@ -413,9 +454,89 @@ uint64_t surface_get_id(const surface_handle *me)
     return me == nullptr ? 0u : Slic3r::to_surface(me)->id();
 }
 
+double surface_get_bridge_angle(const surface_handle *me)
+{
+    return me == nullptr ? -1. : Slic3r::to_surface(me)->bridge_angle;
+}
+
+int32_t surface_collection_set_bridge_angle(storage_handle *storage, surface_collection_handle *me,
+                                           uint32_t idx, double angle)
+{
+    if (storage == nullptr || me == nullptr || !std::isfinite(angle) || angle < 0.)
+        return 0;
+    try {
+        if (!reinterpret_cast<Slic3r::PluginStorage *>(storage)->contains(me) || idx >= surface_collection_size(me))
+            return 0;
+        Slic3r::to_surface_collection(me)->at(idx).bridge_angle = std::fmod(angle, PI);
+        return 1;
+    } catch (...) { return 0; }
+}
+
+int32_t surface_collection_set_type(storage_handle *storage, surface_collection_handle *me,
+                                  uint32_t idx, raw_surface_type type)
+{
+    const raw_surface_type positions = RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_POS_BOTTOM |
+        RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_POS_PERIMETER;
+    const raw_surface_type densities = RAW_SURFACE_TYPE_DENS_SOLID | RAW_SURFACE_TYPE_DENS_SPARSE | RAW_SURFACE_TYPE_DENS_VOID;
+    const raw_surface_type modifiers = RAW_SURFACE_TYPE_MOD_BRIDGE | RAW_SURFACE_TYPE_MOD_OVERBRIDGE |
+        RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_CONTACT;
+    const raw_surface_type position = type & positions, density = type & densities;
+    if (storage == nullptr || me == nullptr || position == 0 || (position & (position - 1)) != 0 ||
+        density == 0 || (density & (density - 1)) != 0 || (type & ~(positions | densities | modifiers)) != 0)
+        return 0;
+    try {
+        if (!reinterpret_cast<Slic3r::PluginStorage *>(storage)->contains(me) || idx >= surface_collection_size(me))
+            return 0;
+        Slic3r::to_surface_collection(me)->at(idx).surface_type = static_cast<Slic3r::SurfaceType>(type);
+        return 1;
+    } catch (...) { return 0; }
+}
+
+int32_t surface_metadata_compatible_for_bridge(const surface_handle *a, const surface_handle *b)
+{
+    if (a == nullptr || b == nullptr)
+        return 0;
+    const Slic3r::Surface &x = *Slic3r::to_surface(a), &y = *Slic3r::to_surface(b);
+    return x.surface_type == y.surface_type && x.scaled_thickness() == y.scaled_thickness() &&
+        x.thickness_layers == y.thickness_layers && x.extra_perimeters == y.extra_perimeters &&
+        x.maxNbSolidLayersOnTop == y.maxNbSolidLayersOnTop && x.priority == y.priority &&
+        (x.bridge_angle < 0. || y.bridge_angle < 0. || std::abs(std::remainder(x.bridge_angle-y.bridge_angle, PI)) <= 1e-9) &&
+        x.properties_equal(y);
+}
+
 int32_t surface_get_flag(const surface_handle *me, raw_surface_type flag)
 {
     return me != nullptr && (surface_get_type(me) & flag) != 0;
+}
+
+c_flow_mm layer_region_get_infill_bridge_flow_mm(const layer_region_handle *me, raw_extrusion_role role)
+{
+    if (me == nullptr)
+        return {};
+    try {
+        const Slic3r::LayerRegion &region = *Slic3r::to_layer_region(me);
+        return Slic3r::to_c_flow_mm(Slic3r::infill_bridge_flow(*region.layer(), region, Slic3r::to_flow_role(role)));
+    } catch (...) { return {}; }
+}
+
+c_flow layer_region_get_infill_bridge_flow(const layer_region_handle *me, raw_extrusion_role role)
+{
+    if (me == nullptr)
+        return {};
+    try {
+        const Slic3r::LayerRegion &region = *Slic3r::to_layer_region(me);
+        return Slic3r::to_c_flow(Slic3r::infill_bridge_flow(*region.layer(), region, Slic3r::to_flow_role(role)));
+    } catch (...) { return {}; }
+}
+
+extruder_index_t layer_region_get_role_extruder(const layer_region_handle *me, raw_extrusion_role role)
+{
+    if (me == nullptr)
+        return EXTRUDER_ID_UNKNOWN;
+    try {
+        const Slic3r::LayerRegion &region = *Slic3r::to_layer_region(me);
+        return extruder_index_t(region.region().extruder(Slic3r::to_flow_role(role), *region.layer()->object()) - 1);
+    } catch (...) { return EXTRUDER_ID_UNKNOWN; }
 }
 
 const plugin_property_container_handle *surface_get_properties(const surface_handle *me)

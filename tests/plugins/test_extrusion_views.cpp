@@ -14,11 +14,25 @@
 Extrusion view helpers
 ======================
 
-These tests cover the mutable polyline API on extrusion entities, in particular
+These tests cover nullable entity views and the mutable polyline API, in particular
 set_polyline() which transfers points from another API polyline view without
 building a temporary std::vector<c_point>.
 Stationary deposits retain their command, attributes and position through cloning;
 the command distinguishes them from other one-point leaves without changing the ABI payload.
+
+Nullable checks cover default construction, moves and release. Their valid()/bool
+queries must not call handle(), which asserts when a view is empty. These cases
+inspect view/ownership behavior without running a slicing pipeline. Geometry is
+owned by PluginStorage; borrowed views must not survive that storage or replacement
+of their underlying tree.
+
+Representative helper calls:
+
+    polyline_mm()
+        `-- point_mm() [millimetres to scaled integer coordinates]
+
+    points_mm()
+        `-- point_mm()
 */
 
 using namespace Slic3r;
@@ -64,6 +78,31 @@ bool same_points(const std::vector<c_point> &lhs, const std::vector<c_point> &rh
 }
 
 } // namespace
+
+TEST_CASE("Extrusion view validity accepts absent and released handles", "[plugins][extrusion][views]")
+{
+    const slic3r_api::ExtrusionEntity absent;
+    const slic3r_api::MutableExtrusionEntity absent_mutable;
+    CHECK_FALSE(absent.valid());
+    CHECK_FALSE(static_cast<bool>(absent));
+    CHECK_FALSE(absent_mutable.valid());
+    CHECK_FALSE(static_cast<bool>(absent_mutable));
+
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    slic3r_api::StoredExtrusionEntity source(storage);
+    REQUIRE(source.valid());
+    CHECK(static_cast<bool>(source));
+    CHECK(static_cast<bool>(source.readonly()));
+    CHECK(static_cast<bool>(source.mutable_view()));
+    slic3r_api::StoredExtrusionEntity moved(std::move(source));
+    CHECK_FALSE(source.valid());
+    CHECK_FALSE(static_cast<bool>(source));
+    CHECK(static_cast<bool>(moved));
+    REQUIRE(moved.free_from_storage());
+    CHECK_FALSE(moved.valid());
+    CHECK_FALSE(static_cast<bool>(moved));
+}
 
 TEST_CASE("Deposit views preserve one-point position and volume", "[plugins][extrusion][views][deposit]")
 {

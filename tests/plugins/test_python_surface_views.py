@@ -1,9 +1,26 @@
-"""Behavior tests for the high-level Python Surface wrappers."""
+"""Test Python surface ownership, type edits and canonical bridge angles.
+
+The fake host invalidates element addresses on structural changes and records
+collection ownership. StoredSurfaceCollection forwards scratch capabilities
+and metadata writes; read-only views cannot modify their source collections.
+
+Selected direct calls in the angle test:
+
+    test_bridge_angle_is_canonical_and_only_scratch_exposes_the_setter()
+        |-- StoredSurfaceCollection.append()
+        |-- Surface.bridge_angle()
+        `-- StoredSurfaceCollection.set_bridge_angle()
+
+The stored collection supplies the storage capability to the fake host. The
+read-only element can query its angle but exposes no setter. These tests check
+wrapper transport and controlled fake ownership, not native geometry execution.
+"""
 
 import copy
 import ctypes
 import importlib
 import importlib.util
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -46,8 +63,9 @@ class ReallocatingSurfaceHost:
         return self._next_handle
 
     def storage_new_surface_collection(self, _storage):
+        # Retain the owner id so the angle test can reject a foreign storage capability.
         handle = self._new_handle()
-        self.collections[handle] = {"items": [], "handles": []}
+        self.collections[handle] = {"items": [], "handles": [], "storage": self._int(_storage)}
         return handle
 
     def surface_collection_size(self, collection):
@@ -110,6 +128,29 @@ class ReallocatingSurfaceHost:
 
     def surface_get_type(self, surface):
         return self._surface(surface)["type"]
+
+    def surface_get_bridge_angle(self, surface):
+        """Read fake metadata without changing element handles; absent means -1."""
+        return self._surface(surface).get("bridge_angle", -1.0)
+
+    def surface_collection_set_bridge_angle(self, storage, collection, index, angle):
+        """Model ownership and modulo-pi writes for the tests' nonnegative indices."""
+        record = self.collections[self._int(collection)]
+        if record["storage"] != self._int(storage) or index >= len(record["items"]) or not math.isfinite(angle) or angle < 0:
+            return 0
+        record["items"][index]["bridge_angle"] = angle % math.pi
+        return 1
+
+    def surface_collection_set_type(self, storage, collection, index, surface_type):
+        """Reclassify owned fake metadata while leaving geometry/properties intact."""
+        record = self.collections[self._int(collection)]
+        position, density = surface_type & 15, surface_type & 112
+        if (record["storage"] != self._int(storage) or index >= len(record["items"])
+                or not position or position & (position - 1) or not density or density & (density - 1)
+                or surface_type & ~(15 | 112 | 128 | 256 | 512 | 2048)):
+            return 0
+        record["items"][index]["type"] = surface_type
+        return 1
 
     def surface_get_properties(self, surface):
         return self._surface(surface)["property_handle"]
@@ -178,6 +219,44 @@ class PythonSurfaceViewTests(unittest.TestCase):
         appended = host._surface(collection.back().c_handle())
         self.assertEqual(appended["type"], 17)
         self.assertEqual(appended["properties"], {42: b"metadata"})
+        collection.free_from_storage()
+
+    def test_bridge_angle_is_canonical_and_only_scratch_exposes_the_setter(self):
+        """Check undefined/zero angles, normalization and the owned-only write API."""
+        host = ReallocatingSurfaceHost()
+        api = type("Api", (), {"host": host})()
+        collection = self.surfaces.StoredSurfaceCollection(api, 1)
+        collection.append(self.geometry.ExPolygon(api, 900), 17)
+        surface = collection.front()
+        self.assertEqual(surface.bridge_angle(), -1.0)
+        self.assertFalse(hasattr(surface, "set_bridge_angle"))
+        self.assertTrue(collection.set_bridge_angle(0, 0.0))
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertTrue(collection.set_bridge_angle(0, math.pi))
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertFalse(collection.set_bridge_angle(0, -1.0))
+        self.assertFalse(collection.set_bridge_angle(0, math.nan))
+        collection.free_from_storage()
+
+    def test_owned_type_edit_preserves_geometry_angle_and_properties(self):
+        """The wrapper forwards the storage capability, index and complete type bits."""
+        host = ReallocatingSurfaceHost()
+        api = type("Api", (), {"host": host})()
+        collection = self.surfaces.StoredSurfaceCollection(api, 1)
+        collection.append(self.geometry.ExPolygon(api, 900), 20)
+        surface = collection.front()
+        host._surface(surface.c_handle())["properties"][42] = b"metadata"
+        collection.set_bridge_angle(0, 0.0)
+        area = host._surface(surface.c_handle())["area"]
+        self.assertFalse(hasattr(surface, "set_type"))
+        self.assertTrue(collection.set_type(0, 20 | 128))
+        self.assertEqual(surface.type(), 20 | 128)
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertEqual(host._surface(surface.c_handle())["area"], area)
+        self.assertEqual(host._surface(surface.c_handle())["properties"], {42: b"metadata"})
+        self.assertFalse(collection.set_type(0, 21))
+        self.assertFalse(collection.set_type(1, 20))
+        self.assertFalse(host.surface_collection_set_type(2, collection.c_handle(), 0, 20))
         collection.free_from_storage()
 
     def test_support_surface_type_builder_and_predicate(self):

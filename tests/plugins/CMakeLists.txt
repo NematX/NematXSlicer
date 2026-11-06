@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     test_lightning_pattern.cpp
     test_auxiliary_layer_helpers.cpp
     test_bridge_detector_cancellation.cpp
+    test_bridge_ordering.cpp
     mesh_queries_c_fixture.c
     plugin_api_headers_c_fixture.c
     support_pattern_c_fixture.c

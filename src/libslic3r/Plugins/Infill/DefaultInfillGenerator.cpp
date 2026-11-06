@@ -18,6 +18,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 #include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
+#include "libslic3r/Api/host/InfillBridgeFlow.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
@@ -58,29 +59,24 @@ append_region_island_extrusion() and a STEP_POST_INFILL plugin later turns the
 area and the recipe into a flow correction. Gap fill is not generated here; it
 is deliberately left for the post-infill step.
 
-The normal call flow is:
+Representative direct calls, not loop nesting or a timeline:
 
     DefaultInfillGenerator::setup_run_impl()
-    `-- walk object.layers()
-        `-- walk layer.islands()
-            `-- walk island.regions_islands()
-                `-- walk region_island.fill_surfaces()
-                    |-- skip empty or void surfaces
-                    |-- make_surface_recipe(...)
-                    |   |-- resolve surface settings and no-overlap areas
-                    |   |-- resolve_pattern_id()
-                    |   `-- modify_surface_recipe() when provided
-                    |-- skip invalid pattern or density
-                    `-- append to the group sharing the same raw parameters
-    `-- report_pattern_assignments() per pattern
-        `-- publish the progress total
+        |-- make_surface_recipe()
+        |   |-- resolve_pattern_id() [host callback]
+        |   `-- modify_surface_recipe() [optional host callback]
+        |-- params_key() [group equal effective recipes]
+        `-- report_pattern_assignments() [host callback]
 
     DefaultInfillGenerator::run_impl()
-    `-- replay m_object_caches[object]
-        |-- generate_pattern() per surface
-        |-- attach ExtrusionPropertyInfill::source_surface_id
-        |-- attach ExtrusionPropertyInfill::area_to_fill_mm2 when requested
-        `-- append_region_island_extrusion()
+        |-- make_surface_recipe() [only for an uncached direct run]
+        `-- generate_surface_from_recipe()
+            |-- generate_pattern() [host callback]
+            `-- append_region_island_extrusion() [host callback]
+
+Discovery visits layers, islands, region groups and surfaces, skipping empty,
+void or invalid recipes. It accumulates progress totals and reports each pattern.
+Normal execution reuses that cache; an uncached direct run rebuilds recipes.
 
 The generator works through the public step context and callbacks. It reads
 the existing print data but leaves ownership and direct publication of the
@@ -409,28 +405,6 @@ Slic3r::InfillConnection connection_for_surface(const Slic3r::Surface &surface,
     return region_config.infill_connection.value;
 }
 
-Slic3r::Flow bridge_flow_for_surface(const Slic3r::Layer &layer,
-                                     const Slic3r::LayerRegion &region,
-                                     Slic3r::FlowRole extrusion_role,
-                                     const Slic3r::PrintRegionConfig &region_config)
-{
-    const float nozzle_diameter =
-        layer.object()->print()->config().nozzle_diameter.get_at(
-            region.region().extruder(extrusion_role, *layer.object()) - 1);
-    double diameter = 0.;
-    if (region_config.bridge_type == Slic3r::BridgeType::btFromFlow) {
-        const Slic3r::Flow reference_flow = region.flow(Slic3r::frSolidInfill);
-        diameter = std::sqrt(4. * reference_flow.mm3_per_mm() / PI);
-    } else if (region_config.bridge_type == Slic3r::BridgeType::btFromHeight) {
-        diameter = layer.unscaled_height();
-    } else {
-        diameter = nozzle_diameter;
-    }
-    return Slic3r::Flow::bridging_flow(
-        float(diameter * std::sqrt(region_config.bridge_flow_ratio.get_effective_value(1))),
-        nozzle_diameter);
-}
-
 Slic3r::Flow normal_flow_for_surface(const Slic3r::Layer &layer,
                                      const Slic3r::LayerRegion &region,
                                      Slic3r::FlowRole extrusion_role,
@@ -487,7 +461,7 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
     const Slic3r::FlowRole extrusion_role = flow_role_for_surface(surface);
     const std::string pattern_id = pattern_for_surface(surface, bridge, region_config);
     const Slic3r::Flow flow = bridge ?
-        bridge_flow_for_surface(layer, region, extrusion_role, region_config) :
+        Slic3r::infill_bridge_flow(layer, region, extrusion_role) :
         normal_flow_for_surface(layer, region, extrusion_role, surface);
 
     SurfaceInfillRecipe recipe;

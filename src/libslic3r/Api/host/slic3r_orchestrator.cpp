@@ -14,6 +14,7 @@
 #include <boost/filesystem/path.hpp>
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/slic3r_bridge.h"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
@@ -48,15 +49,19 @@
    attributing a package failure. Initialization callbacks return stored error
    identifiers rather than invoking a separate failure-reporting function.
 
-   Call graph:
-     orchestrator_register_plugin
-       Orchestrator::register_plugin
-     orchestrator_register_exclusive_group
-       Orchestrator::record_exclusive_group_declaration
-     orchestrator_execute_plugin
-       Orchestrator::execute_plugin
-     orchestrator_send_log
-       application Boost.Log */
+   Representative direct calls:
+
+       orchestrator_register_plugin()
+           `-- Orchestrator::register_plugin()
+
+       orchestrator_register_exclusive_group()
+           `-- Orchestrator::record_exclusive_group_declaration()
+
+       orchestrator_execute_plugin()
+           `-- Orchestrator::execute_plugin()
+
+   orchestrator_send_log() uses the application's Boost.Log logger; logging is
+   separate from the plugin registration and execution call roots above. */
 
 extern "C" {
 // Check registered ids, including disabled plugins, without changing ownership or activation; invalid input or failure returns zero.
@@ -117,6 +122,10 @@ const std::vector<GenericPropertyInfo> &builtin_property_infos()
         { SLIC3R_PROPERTY_TYPE_LAYER_SUPPORT,             "slic3r.layer.support",             sizeof(c_layer_support_property),             alignof(c_layer_support_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_BRIM,                "slic3r.layer.brim",                sizeof(c_layer_brim_property),                alignof(c_layer_brim_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_ADHESION,            "slic3r.layer.adhesion",            sizeof(c_layer_adhesion_property),            alignof(c_layer_adhesion_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_SURFACE, "bridge_preparation.surface.v1", sizeof(c_bridge_surface_property), alignof(c_bridge_surface_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME, "bridge_preparation.volume.v1", sizeof(c_bridge_volume_property), alignof(c_bridge_volume_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND, "bridge_preparation.atomic_strand.v1", sizeof(c_bridge_strand_property), alignof(c_bridge_strand_property) },
+        { SLIC3R_PROPERTY_TYPE_SUPPORT_PIPELINE, "support.pipeline_state.v1", sizeof(c_support_pipeline_property), alignof(c_support_pipeline_property) },
     };
     return infos;
 }

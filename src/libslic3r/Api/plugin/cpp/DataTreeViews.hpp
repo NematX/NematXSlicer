@@ -299,6 +299,12 @@ public:
 
     c_flow flow(raw_extrusion_role role) const { return layer_region_get_flow(handle(), role); }
     c_flow bridging_flow(raw_extrusion_role role) const { return layer_region_get_bridging_flow(handle(), role); }
+    // Read the generator's bridge dimensions in mm before coordinate quantization.
+    c_flow_mm infill_bridge_flow_mm(raw_extrusion_role role) const { return layer_region_get_infill_bridge_flow_mm(handle(), role); }
+    // Read native area and the recipe's scaled dimensions, including layer-grid height.
+    c_flow infill_bridge_flow(raw_extrusion_role role) const { return layer_region_get_infill_bridge_flow(handle(), role); }
+    // Return a role's zero-based tool index, or EXTRUDER_ID_UNKNOWN on resolution failure.
+    extruder_index_t role_extruder(raw_extrusion_role role) const { return layer_region_get_role_extruder(handle(), role); }
 
     ExPolygonCollection slices() const { return ExPolygonCollection(layer_region_get_slices(handle())); }
 
