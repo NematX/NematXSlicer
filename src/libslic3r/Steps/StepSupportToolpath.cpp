@@ -6,17 +6,22 @@
 #include "StepSupportToolpath.hpp"
 
 #include <optional>
+#include <set>
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 #include "InfillPatternService.hpp"
 #include "SupportPatternCallbacks.hpp"
 #include "StepPipeline.hpp"
 #include "StepRunner.hpp"
 
-/* Each object selects one algorithm per exclusive role group through its own
+/* Turn the calculated support areas into extrusion paths for printing.
+
+   Each object selects one algorithm per exclusive role group through its own
    configuration. The dispatcher runs the selected algorithms by priority, each
    on the objects that selected it. Each callback processes one object's support
    surfaces and adds extrusions through the data tree. The dispatcher does not
@@ -27,6 +32,23 @@
    callbacks. One InfillPatternService is built before the first algorithm runs
    and shared by every object run, which may be concurrent: the service is
    read-only after construction (see InfillPatternService.hpp).
+
+   run_step() first derives required role groups from published support
+   surfaces. After each selected provider returns successfully, it records that
+   provider's group. Material completion requires the matching surface family
+   and every required group, unless no material is expected.
+
+   Selected direct calls:
+
+       run_step()
+           |-- selected_plugins_per_object()
+           |-- Detail::run_object_step_plugin() [joins each provider's object runs]
+           `-- Detail::validate_or_report() [before and after dispatch]
+
+   The providers call PatternCallbacks through payload function pointers, not
+   directly from run_step().
+   clear() resets that completion flag, not geometry; a Slicing replay destroys
+   the auxiliary support paths. Empty results may still be complete.
 
    Errors: the callbacks are called through the C ABI, also by Python
    algorithms through ctypes, which cannot catch a C++ exception, so they catch
@@ -104,8 +126,12 @@ size_t count_auxiliary_surfaces(const Print &print)
 
 } // namespace
 
-// Nothing to clear: the extrusions live in the support auxiliary layers, which a Slicing replay destroys.
-void clear(Print &) {}
+void clear(Print &print)
+{
+    for (PrintObject &object : print.objects())
+        if (slic3r_api::SupportPipelineInfo *state = object.get_property<slic3r_api::SupportPipelineInfo>())
+            state->material_generated = 0;
+}
 
 // Nothing to prepare: the algorithms read the surfaces left by the support families.
 void prepare(Print &) {}
@@ -137,7 +163,23 @@ void run_step(Orchestrator &orchestrator, Print &print)
     // Without an active algorithm the runner never builds a payload; the null
     // check keeps the factory safe even if that selection rule changes.
     HostContext host_context { patterns.has_value() ? &*patterns : nullptr, orchestrator };
-    for (const ObjectStepPlugin &entry : selected_plugins_per_object(orchestrator, STEP_SUPPORT_TOOLPATH, print)) {
+    const std::vector<ObjectStepPlugin> selected = selected_plugins_per_object(orchestrator, STEP_SUPPORT_TOOLPATH, print);
+    // Derive required producers from published surface roles, not from whether
+    // any paths happen to exist before the toolpath step runs.
+    std::vector<std::set<std::string>> required(print.objects().size()), provided(print.objects().size());
+    for (size_t idx = 0; idx < print.objects().size(); ++idx)
+        for (const Layer &layer : print.object(idx).auxiliary_layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const Surface &surface : region.fill_surfaces()) {
+                        using namespace slic3r_api::Support::Common;
+                        if (!surface.has_mod_support())
+                            continue;
+                        const bool contact = (surface.surface_type & stModContact) != 0;
+                        required[idx].insert(surface.has_pos_top() ? (contact ? k_top_contact_role : k_top_interface_role) :
+                            surface.has_pos_bottom() ? (contact ? k_bottom_contact_role : k_bottom_interface_role) : k_sparse_role);
+                    }
+    for (const ObjectStepPlugin &entry : selected) {
         Detail::run_object_step_plugin(orchestrator,
                                        print,
                                        STEP_SUPPORT_TOOLPATH,
@@ -155,8 +197,27 @@ void run_step(Orchestrator &orchestrator, Print &print)
             return context;
         });
         print.pipeline_progress().complete_plugin(STEP_SUPPORT_TOOLPATH, entry.plugin->get_id());
+        // Only a joined, successful provider contributes its exclusive role group.
+        for (const size_t idx : entry.object_indices)
+            provided[idx].insert(entry.plugin->get_exclusive_group());
     }
     Detail::validate_or_report(validate_post, print, "Support-toolpath post-step validation");
+    // Empty paths are complete only after the matching family and required roles
+    // finish. When no material is expected, no producer is required.
+    for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+        PrintObject &object = print.object(idx);
+        const bool complete = std::includes(provided[idx].begin(), provided[idx].end(), required[idx].begin(), required[idx].end());
+        // Forced layers and local requests still require material when the
+        // general support_material switch is off.
+        bool expected = object.config().support_material.value || object.config().raft_layers.value > 0 ||
+            object.config().support_material_enforce_layers.value > 0 || !required[idx].empty();
+        if (!expected)
+            for (const Layer &layer : object.layers())
+                for (const LayerSliceIsland &island : layer.islands())
+                    expected = expected || !island.support_demand().empty();
+        slic3r_api::SupportPipelineInfo &state=object.get_or_add_property<slic3r_api::SupportPipelineInfo>();
+        state.material_generated = !expected || (complete && state.surfaces_generated);
+    }
 }
 
 } // namespace Slic3r::Steps::StepSupportToolpath

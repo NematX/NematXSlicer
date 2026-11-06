@@ -25,16 +25,24 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 #include "InfillPatternService.hpp"
 #include "SupportPatternCallbacks.hpp"
 // Host moved-bound diagnostics use the support counters module; it lives on the support side because support plugins use only the plugin API.
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "StepRunner.hpp"
 
-/* register_selector_traits copies support group presentation defaults into Orchestrator at host startup.
+/* Build support surfaces on separate layers so path generators can later turn
+   them into printed support material.
+
+   register_selector_traits copies support group presentation defaults into Orchestrator at host startup.
    STEP_SUPPORT calls every active support family once per object. A family may
    sample INFILL_PATTERN plugins through the payload callbacks. They forward to
    one InfillPatternService shared by every object run, which may be concurrent.
+
+   clear() resets surface/material completion without deleting geometry; a Slicing
+   replay owns auxiliary-layer cleanup. run_step() resets those flags before
+   dispatch so only a completed matching family can certify its surface result.
 
    Lazy service: building the service runs the setup() of every pattern that
    this step may call, which costs time, so the first callback builds it
@@ -82,7 +90,20 @@
      renumbered: interface_id drives the alternation of the angle of the interface layers, so it follows the creation order, not the
      z order, which is an accepted limit.
    - A layer whose new height would not be above the minimum height of a layer (ApiInternal::LayerAccess::min_scaled_height, the limit of
-     the Layer constructor) makes the step throw std::runtime_error; the families publish layers far thicker than 1 um. */
+     the Layer constructor) makes the step throw std::runtime_error; the families publish layers far thicker than 1 um.
+
+   Selected direct calls:
+
+       run_step()
+           |-- Steps::Detail::run_object_step_plugins() [join family object runs]
+           `-- align_support_z() [after every family has published]
+               |-- Detail::close_z_mapping()
+               |-- ApiInternal::LayerAccess::set_z()
+               `-- Detail::sort_support_layers()
+
+   Pattern callbacks are invoked by a support family through its payload; they
+   are not direct calls from run_step(). The shared lazy service outlives those
+   joined object runs. */
 
 namespace Slic3r::Steps::StepGenerateSupport {
 // Copy support group presentation defaults into the borrowed host without changing print data or provider ownership;
@@ -245,7 +266,14 @@ void align_support_z(const std::vector<PrintObject *> &objects, double z_step)
 }
 } // namespace
 
-void clear(Print &) {}
+void clear(Print &print)
+{
+    for (PrintObject &object : print.objects())
+        if (slic3r_api::SupportPipelineInfo *state=object.get_property<slic3r_api::SupportPipelineInfo>()) {
+            state->surfaces_generated=0;
+            state->material_generated=0;
+        }
+}
 void prepare(Print &) {}
 
 bool validate_pre(const Print &, std::string *)
@@ -264,6 +292,8 @@ bool validate_post(const Print &, std::string *)
 // Borrows the run inputs, owns the lazy pattern service until joined object runs finish, and propagates runner/cancellation/allocation failures; families publish surfaces, which the islands of the object's auxiliary layers own after publication.
 void run_step(Orchestrator &orchestrator, Print &print)
 {
+    // A rerun must not inherit completion from the preceding family invocation.
+    clear(print);
     // Lives for the whole step; only built when a family calls a pattern callback.
     LazyPatternService patterns(orchestrator, print);
     Steps::Detail::run_object_step_plugins(orchestrator,
