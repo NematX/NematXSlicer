@@ -1,7 +1,7 @@
 # Specification — SuperSlicer REST Server
 
-**Status:** proposed JSON contract, pending validation\
-**Version:** 0.74
+**Status:** V1 contract\
+**Version:** 1.0
 
 ## 1. Objective
 
@@ -31,7 +31,7 @@ Confirmed for the initial scope:
 - different sessions may slice simultaneously, with at most one active
   slicing operation per session;
 - accounts are stored in a file administered outside the API; a local tool
-  for generating Argon2id hashes must be created;
+  for generating Argon2id hashes is shipped with the server (see §9 and deployment.md);
 - the first version covers FFF/FDM slicing and G-code generation from a model;
 - it exposes profiles/configurations and manages sessions;
 - installed profiles may be listed and selected, but not created, modified,
@@ -332,16 +332,30 @@ characters; `null` means no name, and an empty string is refused with
 
 ### 5.4. `GET .../list_profiles`
 
-Return installed profiles as flat lists by type. Each profile must contain an
-opaque `id` and a display `name`; only `vendor` and `technology` may additionally
-be present, both optional.
+Return profiles as flat lists by type. `id` is opaque; `name` is the full unique
+preset name, not its possibly repeated alias. System presets additionally have
+`vendor` (vendor display name); user presets omit it. Prints and filaments have a
+boolean `compatible`; printers do not.
+
+The profile root follows the GUI data layout: optional `vendor/*.ini` system
+bundles and optional flat `print/*.ini`, `printer/*.ini`, `filament/*.ini` user
+presets. System inheritance is resolved and abstract `*…*` presets are excluded.
+All system presets are visible without GUI installed-printer filtering. Vendor
+files are read in filename order; duplicate names retain the first preset and
+produce a startup warning. A flat user preset named like a system preset is
+ignored by the core loader. Restart after modifying the catalog.
+
+Vendor bundles without printer models/variants and without template metadata
+are skipped as in the GUI, with a startup warning naming the file. This includes
+`Templates.ini` in the pinned 2.7 profile distribution. Malformed/unreadable INIs
+and invalid vendor sections remain fatal startup errors.
 
 ```json
 {
-  "print": [{"id":"print-id", "name":"0.20 mm"}],
-  "printer": [{"id":"printer-id", "name":"My printer"}],
+  "print": [{"id":"print-id", "name":"0.20mm NORMAL .4N", "vendor":"Custom", "compatible":true}],
+  "printer": [{"id":"printer-id", "name":"Basic 0.4 nozzle", "vendor":"Custom"}],
   "extruder": [],
-  "filaments": [{"id":"filament-id", "name":"PLA"}]
+  "filaments": [{"id":"filament-id", "name":"Basic PLA @BASIC", "vendor":"Custom", "compatible":true}]
 }
 ```
 
@@ -349,6 +363,36 @@ Catalog lists are independent of the ordered arrays sent to `set_profile`.
 Extruder profiles do not exist yet: `extruder` is an empty list in V1.
 Settings in the `extruder` category remain available, notably through the
 printer profile; they do not require independent extruder profiles to exist.
+
+Optional query parameters: `printer=<id>`, `print=<id>`, and
+`compatible_only=0|1`. Without overrides, compatibility is evaluated against the
+session's printer and print, not the catalog defaults. Overrides evaluate another
+combination without changing the session. `compatible_only=1` filters prints and
+filaments; printers are always returned. Print compatibility checks the printer;
+filaments also check the print and use the **first extruder**. `set_profile` still
+validates every actual filament slot and returns `422` for incompatibility.
+
+Conditions use the session's current configuration, including `set_setting` and
+`set_settings` edits, even when a catalog ID remains. Its catalog name and vendor
+are retained for identity checks. An explicit printer/print query override uses
+that catalog preset instead of the session's edits for the overridden category.
+
+An embedded/modified session profile with no catalog ID is evaluated from the
+session configuration with an empty name. Named compatibility lists cannot match
+it; conditions still apply. An anonymous printer has no vendor identity, so
+conditions are evaluated without restricting it to one vendor.
+
+After authentication, refusals are checked in this order:
+
+| Check | Response |
+| --- | --- |
+| Method is not GET | `404 route_not_found` |
+| Nonempty body; unknown/repeated query key; empty value; compatible_only not 0/1 | `400 invalid_request` |
+| Missing session or another account's session | `404 session_not_found` |
+| Engine not initialized | `503 engine_not_initialized` |
+| Unknown printer/print ID, or non-FFF printer | `422 invalid_profile` |
+
+Otherwise the response is `200` with the lists above.
 
 ### 5.5. `POST .../set_profile`
 
@@ -377,6 +421,13 @@ local modifications to settings in its category, even when selecting the same
 profile again. `set_profile` reloads the complete print/printer/filament
 configuration; session preferences are retained. The `200 OK` response returns
 the effective selection in the same form.
+
+Preparing defaults for `create_session` and applying `set_profile` run on the
+import worker pool, not the network thread. Other sessions remain responsive.
+Selection captures the session revision before preparing its configuration:
+concurrent changes cause `409 session_changed`, and deletion causes `404`;
+neither permits a late selection to overwrite newer state. Shutdown joins these
+workers before releasing the catalog and sessions.
 
 ### 5.5.1. Configuration loading and engine changes
 
@@ -550,7 +601,7 @@ with a generic message.
 
 `load_project` accepts only the `.3mf` extension (`422 unsupported_model_format`
 before any storage). The project is recomposed as in the interface: settings are
-split into print, printer, and filament profiles on a private catalog copy;
+split into print, printer, and filament profiles on a private copy of the catalog presets it names;
 a 3MF without configuration resets all settings to system defaults. All scene
 data read by the 3MF loader is retained (object settings, modifiers, layer ranges,
 per-height G-code, etc.). The scene, configuration, session profile selection,
@@ -1153,11 +1204,10 @@ The specification therefore requires:
   the default limit is 1 GiB per uploaded file and may be changed in the server
   configuration.
 
-Accounts are created by the administrator outside the API. A local tool for
-generating salted Argon2id hashes must be created and shipped with the server.
-Its output must be directly usable in the accounts file, including the salt
-and verification parameters; no plaintext password is persisted or logged.
-This tool is not a functionality already available.
+Accounts are created by the administrator outside the API. The shipped local
+Argon2id tool (§9 and [deployment.md](deployment.md)) emits an accounts document
+including the salt and verification parameters. No plaintext password is
+persisted or logged.
 
 ## 7. Acceptance criteria
 
@@ -1172,7 +1222,7 @@ V1 is acceptable if:
    slicing. JSON values follow the `value`/`enabled`/`percent` object contracts,
    including parallel arrays and retention of disabled values. Loading a profile
    clears the relevant local modifications; the target rules in §5.5.1 are
-   verified after integration of the corresponding engine changes.
+    verified by the profile and settings integration tests below.
 4. A session can add a model, load a 3MF project, and return the object/part/instance
    hierarchy with unique identifiers.
 5. `transform/{id}` accepts an object, instance, or volume ID and preserves the
@@ -1196,21 +1246,65 @@ V1 is acceptable if:
     period restarts after success, failure, or effective stop. No crash recovery
     is required in V1.
 
-## 8. Decisions required before freezing the contract
+### Acceptance evidence
 
-1. **Accounts:** determine the path and JSON schema of the administrator-managed
-   file used by the server.
+The following are exact `TEST_CASE` names in the named executables. Tests use
+real loopback HTTP where appropriate; TLS termination remains an operator and
+platform validation responsibility, not an in-process TLS implementation.
+
+| Criterion | Executable and test |
+|---|---|
+| 1 | `rest_launch_tests`: `REST launch help options and resource-default precedence`; installed launcher checks described in deployment.md |
+| 2 | `rest_server_tests`: `REST server creates authenticated sessions through the global routes`; `rest_engine_tests`: `settings catalog exposes finalized definitions` |
+| 3 | `rest_profiles_tests`: `REST profile IDs are opaque and selections are isolated`, `REST vendor bundles ignored by the GUI warn without preventing startup`, `Profile compatibility reads edited session values but overrides use catalog presets`; `rest_settings_tests`: `REST sessions read and update typed settings atomically` |
+| 4 | `rest_models_tests`: `REST add_model imports STL OBJ and 3MF`, `REST list_objects exposes stable IDs across uploads and project replacement` |
+| 5 | `rest_models_tests`: `REST transforms instances and objects atomically with explicit bases and bed placement`, `REST volume transforms use reference axes and retain shared-instance geometry`, `REST instance counts duplicate the current original and preserve retained IDs` |
+| 6 | `rest_slice_tests`: `REST real slice publishes readable sanitized progress outside the session lock`, `REST cancel_slicing stops a running engine and allows a new slice` |
+| 7 | `rest_e2e_tests`: `E1 complete public REST workflow`; `rest_slice_tests`: `REST viewer keeps the last result across invalidations and refuses replaced IDs`, `REST open G-code transfer retains its file through deletion replacement and disconnect` |
+| 8 | `rest_slice_tests`: `REST delete removes only the owned session and its unreferenced result` |
+| 9 | `rest_e2e_tests`: `E2 accounts authentication and ownership`; actual encrypted proxy checks: platform-validation.md |
+| 10 | `rest_e2e_tests`: `E4 post processing is inert from all configuration sources`; `rest_launch_tests`: `REST launch account writer produces a document accepted by HTTP` |
+| 11 | `rest_e2e_tests`: `E5 expiration shutdown and restart`; `rest_slice_tests`: `REST slice keeps registry work busy and restarts TTL at completion` |
+
+## 8. Decisions
+
+1. **Accounts:** administrator-managed `paths.accounts`, with a `users` object
+   keyed by username, for example `{"users":{"Alice":{"password_hash":"<encoded Argon2id hash>"}}}`
+   (§6 and deployment.md). No API account administration.
 2. **Headless build:** resolved in §9. The REST mode builds with or without the
    GUI; without the GUI, no GUI executable is produced.
-3. **Engine concurrency:** before enabling parallel slicing, validate and, if
-   necessary, correct isolation of global `libslic3r` state between sessions.
-4. **Coordinate-space details:** resolved for objects/instances in phase 21 and
-   volumes in phase 22 (§5.12). Relative volume operations use the GUI's linear
+3. **Engine concurrency:** separate session engines and configurable slice workers
+   (§5.14); isolation and independent cancellation are tested by `E3 simultaneous
+   engines cancel independently` in `rest_e2e_tests`.
+4. **Coordinate-space details:** fixed for objects/instances and volumes (§5.12).
+   Relative volume operations use the GUI's linear
    reference transform; absolute platter replacement uses the full instance
    transform. `instance` selects the reference, defaulting to the original,
    and volume bed placement affects every parent instance.
 5. **Unknown-setting preservation:** format, provenance, and write priority are
    fixed in §5.5.1; no additional decision is required for the V1 contract.
+
+### Known limitations
+
+- Progress percentages/messages are indicative engine output, not a monotonic
+  completion estimate; the engine progress rework is outside V1.
+- No crash recovery or persistent sessions/results/tokens. Graceful shutdown
+  cleans owned artifacts; a later startup removes stale work files.
+- Accounts and profile catalogs are read only at startup; edits require restart.
+- Defaults/selection copy only the presets they can read, but filament
+  compatibility is still evaluated over the whole catalog once per distinct
+  printer tool, so multi-tool printers in large catalogs cost more. These run on
+  the import pool rather than blocking network polling; worker capacity and
+  memory still limit concurrency. See deployment.md for measured observations.
+- Viewer `metadata.objects` contains engine instance labels (for example
+  `cube_stl id:0 copy 0`), not a separately reconstructed object-name list.
+  Engine speed is duplicated in the two viewer speed fields in V1.
+- Native TLS, browser CORS and remote administration are not provided. Operators
+  must supply encrypted remote transport and validate their actual proxies.
+- Linux/macOS packaging/services, actual proxies, visual GUI startup with future
+  vendor keys and interactive terminal no-echo remain external validation items.
+  See [platform-validation.md](platform-validation.md). A frozen contract does
+  not claim these checks have been performed.
 
 ## 9. Executables and launch modes
 

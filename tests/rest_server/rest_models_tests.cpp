@@ -397,7 +397,11 @@ TEST_CASE("REST save_project snapshot survives deletion while the network stays 
     const std::shared_ptr<std::promise<void>> entered = std::make_shared<std::promise<void>>();
     const std::shared_ptr<std::promise<void>> release = std::make_shared<std::promise<void>>();
     const std::shared_future<void> ready = release->get_future().share();
-    fixture.set_import_observer([entered, ready]() {
+    const std::shared_ptr<std::atomic<bool>> armed = std::make_shared<std::atomic<bool>>(false);
+    fixture.set_import_observer([entered, ready, armed]() {
+        // Defaults share the pool; gate only the one export under test.
+        if (!armed->exchange(false))
+            return;
         entered->set_value();
         ready.wait_for(std::chrono::seconds(10));
     });
@@ -411,6 +415,7 @@ TEST_CASE("REST save_project snapshot survives deletion while the network stays 
     data.scene->add_default_instances();
     REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true,
         Slic3r::Rest::SessionRegistry::Clock::now()));
+    armed->store(true);
     std::future<HttpResponseMessage> saved = std::async(std::launch::async, [&]() {
         return fixture.request(http::verb::get, route + "/save_project");
     });
@@ -1439,14 +1444,19 @@ TEST_CASE("REST add_model parses away from the network thread", "[rest_models]")
     const std::shared_ptr<std::promise<void>> import_started = std::make_shared<std::promise<void>>();
     std::promise<void> release_import;
     std::shared_future<void> released = release_import.get_future().share();
+    const std::shared_ptr<std::atomic<bool>> armed = std::make_shared<std::atomic<bool>>(false);
     fixture.stop();
-    fixture.set_import_observer([import_started, released]() {
+    fixture.set_import_observer([import_started, released, armed]() {
+        // Defaults share the pool; gate only the one model import under test.
+        if (!armed->exchange(false))
+            return;
         import_started->set_value();
         released.wait_for(std::chrono::seconds(10));
     });
     fixture.start();
 
     const std::string target = "/session/" + create_session(fixture) + "/add_model";
+    armed->store(true);
     std::future<HttpResponseMessage> upload = std::async(std::launch::async, [&fixture, &target]() {
         return upload_model(fixture, target, "part.obj", make_obj_with_padding());
     });

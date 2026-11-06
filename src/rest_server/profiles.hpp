@@ -2,8 +2,8 @@
  * REST profile catalog and isolated profile selection.
  *
  * PresetBundle is loaded once from the configured profile directory. Requests
- * select profiles on a private copy so one session cannot mutate another
- * session's effective configuration or the shared catalog.
+ * select profiles on a private reduced copy so one session cannot mutate
+ * another session's effective configuration or the shared catalog.
  * Applications return the core-generated profile sections beside the flat
  * settings so callers can preserve them in project snapshots.
  */
@@ -28,11 +28,32 @@ struct ProfileApplication {
     std::string profile_sections;
 };
 
+// Preset's named constructor is protected. This temporary preset carries a
+// session snapshot without inventing a catalog name or vendor identity.
+struct SessionCompatibilityPreset : Preset {
+    SessionCompatibilityPreset(Type category, const DynamicPrintConfig &configuration)
+        : Preset(category, "")
+    {
+        config = configuration;
+    }
+};
+
 class ProfileCatalog {
 public:
     explicit ProfileCatalog(const std::filesystem::path &profiles_directory);
 
     nlohmann::json list_profiles() const;
+    struct CompatibilityContext {
+        // Embedded or modified session profiles supply their configuration in
+        // temporary presets when there is no catalog ID to resolve.
+        const Preset *printer = nullptr;
+        const Preset *print = nullptr;
+    };
+    // Read-only compatibility checks; filament conditions see extruder zero.
+    nlohmann::json list_profiles(const CompatibilityContext &context, bool compatible_only) const;
+    const Preset *printer_by_id(const std::string &id) const;
+    const Preset *print_by_id(const std::string &id) const;
+    const std::vector<std::string> &warnings() const { return warnings_; }
     ProfileApplication defaults() const;
     ProfileApplication select(const ProfileSelection &requested) const;
     // Split a complete project configuration into print/printer/filament
@@ -45,7 +66,21 @@ public:
         const std::string &profile_sections = std::string()) const;
 
 private:
+    // Tests compare reduced bundles with full copies through this accessor.
+    friend struct ProfileCatalogTestAccess;
+
+    // Private bundle for one request: a reduced copy of the catalog holding
+    // `names`, which is much cheaper than a full copy for large catalogs.
+    PresetBundle working_bundle(const PresetBundle::PresetSubset &names) const;
+    // Names a selection of `printer` and `print` may read: both presets and
+    // every filament compatible with one of the printer's extruders, which
+    // default selection and template filtering compare.
+    PresetBundle::PresetSubset selection_names(const ProfileSelection &requested) const;
+
     PresetBundle bundle_;
+    // Test oracle only: work on full catalog copies, as before reduced bundles.
+    bool full_bundle_copies_ = false;
+    std::vector<std::string> warnings_;
     // IDs are generated per catalog and resolve only within this server instance.
     std::unordered_map<std::string, std::string> print_profile_ids_;
     std::unordered_map<std::string, std::string> print_profile_names_;

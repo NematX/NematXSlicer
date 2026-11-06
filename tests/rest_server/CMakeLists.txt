@@ -26,6 +26,7 @@ add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
 # exercise the uninitialized engine, so they must run in another process.
 add_executable(rest_launch_tests rest_launch_tests.cpp)
 target_compile_definitions(rest_launch_tests PRIVATE
+    SLIC3R_REST_SOURCE_DIRECTORY=R"\(${CMAKE_SOURCE_DIR}\)"
     SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)")
 target_link_libraries(rest_launch_tests test_common slic3r_rest slic3r_rest_engine boost_libs)
 if (WIN32)
@@ -52,10 +53,13 @@ add_test(NAME rest_standalone_password_stdin COMMAND ${CMAKE_COMMAND}
 set_tests_properties(rest_standalone_password_stdin PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE)
 
 add_executable(rest_profiles_tests
+    rest_profile_review_tests.cpp
+    rest_profile_subset_tests.cpp
     rest_profiles_tests.cpp
 )
 
 target_compile_definitions(rest_profiles_tests PRIVATE
+    SLIC3R_REST_SOURCE_DIRECTORY=R"\(${CMAKE_SOURCE_DIR}\)"
     SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)"
 )
 

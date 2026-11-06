@@ -920,11 +920,12 @@ nlohmann::json session_name_json(const std::optional<std::string> &name)
 
 // Create an owned session, seeded from the profile catalog defaults when the
 // engine catalog is available. The body is empty or carries an optional name.
-HttpResponse handle_create_session(
+std::optional<HttpResponse> handle_create_session(
     HttpRequest &request,
     const RouteServices &services,
     const std::string &username,
-    const std::string &request_id)
+    const std::string &request_id,
+    const DeferredResponder &respond)
 {
 if (request.method != "POST")
     return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
@@ -935,27 +936,27 @@ if (!request.body.empty())
 SessionData session_data{std::make_shared<Model>(), {}, nlohmann::json::object()};
 session_data.name = name;
 if (services.profiles != nullptr) {
-    // Defaults are built before the session is published; a broken
-    // server-side catalog becomes an internal error, not a worker crash.
-    ProfileApplication initial;
-    try {
-        initial = services.profiles->defaults();
-    } catch (const std::exception &) {
-        return make_error_response(
-            500,
-            "internal_error",
-            "The server profile catalog could not provide defaults.",
-            request_id);
-    } catch (...) {
-        return make_error_response(
-            500,
-            "internal_error",
-            "The server profile catalog could not provide defaults.",
-            request_id);
-    }
-    session_data.configuration = initial.configuration;
-    session_data.profile_sections = initial.profile_sections;
-    session_data.profiles = initial.selection;
+    // Catalog copies run on the existing import pool. Publish only after the
+    // defaults succeed; stop() joins this pool before releasing the registry.
+    asio::post(services.imports, [profiles = services.profiles, sessions = &services.sessions,
+        username, name, request_id, respond, data = std::move(session_data), observer = services.import_observer]() mutable {
+        try {
+            if (observer)
+                observer();
+            ProfileApplication initial = profiles->defaults();
+            data.configuration = std::move(initial.configuration);
+            data.profile_sections = std::move(initial.profile_sections);
+            data.profiles = std::move(initial.selection);
+            const std::shared_ptr<SessionContext> session = sessions->create(username,
+                SessionRegistry::Clock::now(), std::move(data));
+            respond(HttpResponse::json(201, nlohmann::json{
+                {"session_id", session->session_id()}, {"name", session_name_json(name)}}));
+        } catch (...) {
+            respond(make_error_response(500, "internal_error",
+                "The server profile catalog could not provide defaults.", request_id));
+        }
+    });
+    return std::nullopt;
 }
 const std::shared_ptr<SessionContext> session = services.sessions.create(
     username,
@@ -967,6 +968,9 @@ return HttpResponse::json(201, nlohmann::json{
 
 // List the installed profiles visible to one session. The shared catalog is
 // only read here.
+// Shared strict percent-decoding/duplicate detection for form-style queries.
+bool parse_form_query(const std::string &query, std::map<std::string, std::string> &parameters);
+
 HttpResponse handle_list_profiles(
     HttpRequest &request,
     const RouteServices &services,
@@ -976,7 +980,17 @@ HttpResponse handle_list_profiles(
     const std::string &session_id = request.path_segments[1];
 if (request.method != "GET")
     return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-if (services.sessions.find(username, session_id, SessionRegistry::Clock::now()) == nullptr)
+if (!request.body.empty())
+    return make_error_response(400, "invalid_request", "list_profiles requires an empty body.", request_id);
+std::map<std::string, std::string> parameters;
+if (!parse_form_query(request.query, parameters))
+    return make_error_response(400, "invalid_request", "Invalid profile query.", request_id);
+for (const auto &[key, value] : parameters)
+    if (value.empty() || (key != "printer" && key != "print" && key != "compatible_only") ||
+        (key == "compatible_only" && value != "0" && value != "1"))
+        return make_error_response(400, "invalid_request", "Invalid profile query.", request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(username, session_id, SessionRegistry::Clock::now());
+if (session == nullptr)
     return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
 if (services.profiles == nullptr)
     return make_error_response(
@@ -984,16 +998,49 @@ if (services.profiles == nullptr)
         "engine_not_initialized",
         "The REST engine is not initialized.",
         request_id);
-return HttpResponse::json(200, services.profiles->list_profiles());
+const std::optional<SessionData> data = session->data_snapshot();
+if (!data.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+const bool explicit_printer = parameters.count("printer") != 0;
+const bool explicit_print = parameters.count("print") != 0;
+ProfileCatalog::CompatibilityContext context;
+context.printer = services.profiles->printer_by_id(explicit_printer ? parameters.at("printer") : data->profiles.printer);
+context.print = services.profiles->print_by_id(explicit_print ? parameters.at("print") : data->profiles.print);
+if ((explicit_printer && context.printer == nullptr) || (explicit_print && context.print == nullptr) ||
+    (context.printer != nullptr && context.printer->printer_technology() != ptFFF))
+    return make_error_response(422, "invalid_profile", "The selected profile is unavailable or not FFF.", request_id);
+// Without query overrides, use the live configuration, even when a catalog ID
+// remains after set_settings. Keep catalog name/vendor identity for named lists.
+std::optional<Preset> session_printer;
+std::optional<Preset> session_print;
+if (!explicit_printer) {
+    if (context.printer != nullptr)
+        session_printer.emplace(*context.printer);
+    else
+        session_printer.emplace(SessionCompatibilityPreset(Preset::TYPE_PRINTER, data->configuration));
+    session_printer->config = data->configuration;
+    context.printer = &*session_printer;
+}
+if (!explicit_print) {
+    if (context.print != nullptr)
+        session_print.emplace(*context.print);
+    else
+        session_print.emplace(SessionCompatibilityPreset(Preset::TYPE_FFF_PRINT, data->configuration));
+    session_print->config = data->configuration;
+    context.print = &*session_print;
+}
+return HttpResponse::json(200, services.profiles->list_profiles(context,
+    parameters.count("compatible_only") != 0 && parameters.at("compatible_only") == "1"));
 }
 
 // Apply a full profile selection on a candidate configuration outside the
 // session lock, then commit it under the session revision.
-HttpResponse handle_set_profile(
+std::optional<HttpResponse> handle_set_profile(
     HttpRequest &request,
     const RouteServices &services,
     const std::string &username,
-    const std::string &request_id)
+    const std::string &request_id,
+    const DeferredResponder &respond)
 {
     const std::string &session_id = request.path_segments[1];
 if (request.method != "POST")
@@ -1024,9 +1071,20 @@ if (!mutation.has_value())
         "The session is currently slicing.",
         request_id);
 
+const std::optional<SessionData> current = session->data_snapshot();
+if (!current.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+// Capture the revision and snapshot before dispatch. Concurrent mutation or
+// deletion wins; expensive selection never holds the network thread or a lock.
+asio::post(services.imports, [session, token = *mutation, candidate = *current,
+    profiles = services.profiles, requested = std::move(requested), request_id, respond,
+    observer = services.import_observer]() mutable {
+const HttpResponse response = [&]() -> HttpResponse {
 ProfileApplication application;
 try {
-    application = services.profiles->select(requested);
+    if (observer)
+        observer();
+    application = profiles->select(requested);
 } catch (const std::invalid_argument &error) {
     return invalid_profile_request(error.what(), request_id);
 } catch (const std::exception &) {
@@ -1043,16 +1101,14 @@ try {
         request_id);
 }
 
-const std::optional<SessionData> current = session->data_snapshot();
-if (!current.has_value())
+if (!session->data_snapshot().has_value())
     return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
 const nlohmann::json response_body = profile_selection_json(application.selection);
-SessionData candidate = current.value();
 candidate.configuration = std::move(application.configuration);
 candidate.profile_sections = std::move(application.profile_sections);
 candidate.profiles = std::move(application.selection);
 if (!session->commit_mutation(
-        mutation.value(),
+         token,
         std::move(candidate),
         true,
         SessionRegistry::Clock::now()))
@@ -1062,6 +1118,10 @@ if (!session->commit_mutation(
         "The session changed while the profile selection was prepared.",
         request_id);
 return HttpResponse::json(200, response_body);
+}();
+respond(response);
+});
+return std::nullopt;
 }
 
 // Read-only listing of the session scene. The session lock only covers the
@@ -2536,7 +2596,7 @@ std::optional<HttpResponse> dispatch_request(
     if (request.path == "/list_settings")
         return handle_list_settings(request, request_id);
     if (request.path == "/create_session")
-        return handle_create_session(request, services, authentication->username, request_id);
+        return handle_create_session(request, services, authentication->username, request_id, respond);
 
     // Session routes match decoded segments and resolve the owning account before
     // their handler reads or mutates the session.
@@ -2545,7 +2605,7 @@ std::optional<HttpResponse> dispatch_request(
         if (request.path_segments.size() == 3 && operation == "list_profiles")
             return handle_list_profiles(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_profile")
-            return handle_set_profile(request, services, authentication->username, request_id);
+            return handle_set_profile(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "add_model")
             return handle_add_model(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "load_project")
@@ -3233,6 +3293,12 @@ public:
         return bound_port_;
     }
 
+    // Copied after startup so launch diagnostics do not borrow catalog storage.
+    std::vector<std::string> startup_warnings() const
+    {
+        return profile_catalog_ == nullptr ? std::vector<std::string>() : profile_catalog_->warnings();
+    }
+
     // Services addressed by the routes for one request; valid while the runtime
     // is running and the worker has not been joined.
     RouteServices route_services()
@@ -3602,6 +3668,11 @@ bool RestServer::running() const noexcept
 std::uint16_t RestServer::bound_port() const noexcept
 {
     return impl_->runtime_.bound_port();
+}
+
+std::vector<std::string> RestServer::startup_warnings() const
+{
+    return impl_->runtime_.startup_warnings();
 }
 
 SessionRegistry &RestServer::session_registry() const

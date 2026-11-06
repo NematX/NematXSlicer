@@ -177,6 +177,8 @@ int run_rest_server(int argc, char **argv, const RestLaunchDefaults &defaults,
         const std::string listen_host = bind_address.find(':') == std::string::npos
             ? bind_address : '[' + bind_address + ']';
         std::cout << "listening on " << listen_host << ':' << server.bound_port() << std::endl;
+        for (const std::string &warning : server.startup_warnings())
+            std::cerr << invocation << ": " << warning << std::endl;
 
         if (on_started)
             on_started(server.bound_port());

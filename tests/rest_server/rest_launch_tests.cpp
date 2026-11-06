@@ -5,6 +5,7 @@
 
 #include "rest_main_internal.hpp"
 #include "rest_server_fixture.hpp"
+#include "rest_vendor_test_helpers.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <csignal>
@@ -291,6 +292,9 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
     Capture lifecycle;
     ServerConfig config = make_valid_config(root.path());
     config.resource_directory = SLIC3R_REST_RESOURCE_DIRECTORY;
+    write_vendor_profiles(config.profiles_directory);
+    std::filesystem::copy_file(config.profiles_directory / "vendor/Test.ini",
+        config.profiles_directory / "vendor/Test2.ini", std::filesystem::copy_options::overwrite_existing);
     const std::filesystem::path work = root.path() / std::filesystem::u8path(u8"travail-é");
     const std::filesystem::path config_file = root.path() / "server.json";
     Arguments account_args({"test", "--username", "Alice"});
@@ -303,6 +307,8 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
         {"accounts", config.accounts_file.generic_u8string()}}}};
     std::ofstream(config_file) << document.dump();
     Arguments args({"rest_launch_test", "--config", config_file.u8string(), "--work-dir", work.u8string()});
+    RestLaunchDefaults launch_defaults;
+    launch_defaults.invocation = "corrected-launch-name";
     PreviousSignals previous(prior_signal);
     const std::vector<int> shutdown_signals{SIGINT, SIGTERM
 #ifdef _WIN32
@@ -311,8 +317,13 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
     };
     for (const int shutdown_signal : shutdown_signals) {
         bool started = false;
-        REQUIRE(run_rest_server(args.count(), args.pointers.data(), {}, [&](std::uint16_t port) {
+        REQUIRE(run_rest_server(args.count(), args.pointers.data(), launch_defaults, [&](std::uint16_t port) {
             started = true;
+            CHECK(lifecycle.out.str().find("listening on ") != std::string::npos);
+            CHECK(lifecycle.err.str().find("Test print @TEST") != std::string::npos);
+            CHECK(lifecycle.err.str().find("corrected-launch-name: Vendor configuration file ") != std::string::npos);
+            CHECK(lifecycle.err.str().find("rest_launch_test: Vendor configuration file ") == std::string::npos);
+            CHECK(lifecycle.err.str().find("secret") == std::string::npos);
             REQUIRE(port != 0);
             REQUIRE(login_at(port).result() == http::status::ok);
             // The synthetic argv[0] must not become an invented engine path.
@@ -339,7 +350,7 @@ TEST_CASE("REST launch accepts UTF-8 work paths and restores shutdown signals", 
     nlohmann::json ipv6_document = document;
     ipv6_document["listen"]["address"] = "::1";
     std::ofstream(config_file) << ipv6_document.dump();
-    REQUIRE(run_rest_server(args.count(), args.pointers.data(), {}, [&](std::uint16_t port) {
+    REQUIRE(run_rest_server(args.count(), args.pointers.data(), launch_defaults, [&](std::uint16_t port) {
         REQUIRE(login_at(port, "::1").result() == http::status::ok);
         REQUIRE(std::raise(SIGTERM) == 0);
     }) == 0);

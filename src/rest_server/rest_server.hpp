@@ -133,6 +133,8 @@ public:
     void stop() noexcept;
     bool running() const noexcept;
     std::uint16_t bound_port() const noexcept;
+    // Nonfatal catalog diagnostics available after start(), without credentials.
+    std::vector<std::string> startup_warnings() const;
     // In-process access to the live sessions, used by integration tests to put
     // a session in a state no public route can reach yet (for example a
     // running slicing job). Valid only while the server is running.

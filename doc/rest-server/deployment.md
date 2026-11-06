@@ -72,19 +72,78 @@ To add users, securely merge hash entries without replacing existing users.
 Account edits require restarting the server. Restrict the service account's
 permissions and protect accounts, tokens and backups.
 
-## Flat profiles in this release
+## Vendor and user profiles
 
-REST currently reads `profiles/print/*.ini`, `profiles/printer/*.ini` and
-`profiles/filament/*.ini`. It does **not** load a vendor bundle in `vendor/` yet.
-As a GUI workaround, select the desired vendor presets, save each category as a
-named user preset, and copy its full INI from the GUI data directory's `print`,
-`printer` or `filament` subdirectory. Remove the `inherits` setting from the
-copies after confirming they contain resolved settings; leave GUI originals
-untouched. Update `default_print_profile`/`default_filament_profile` references
-to the copied names, or select all three categories explicitly through REST.
-Do not copy a vendor file containing `[print:...]` sections directly: inheritance
-and abstract parents need resolution first. Restart after replacing profiles.
+Copy `vendor`, `print`, `printer` and `filament` from the data directory of a
+configured GUI to the REST profile root. Alternatively, copy the desired `.ini`
+files from [slic3r-profiles](https://github.com/slic3r/slic3r-profiles) into
+`profiles/vendor/`. Each subdirectory is optional. Vendor bundles are loaded with
+the GUI system loader: inheritance is resolved, abstract parents are removed,
+and printer model/variant metadata is checked. Flat user INIs are complete
+configurations layered over system presets; keep their `inherits` parent names.
 
+All system profiles are listed, without GUI installation filtering. Names are
+the full preset names (not aliases); compatibility can be queried before
+selection (§5.4 of the contract). Vendor files are loaded in filename order:
+duplicate preset names keep the first definition and produce warnings on stderr
+after `listening on`. A user preset with a system preset's name is ignored by the
+core loader with a log warning. Vendor bundles that the GUI skips because they
+have no models/variants and no template metadata are also skipped, with a startup
+warning (including `Templates.ini` from the pinned 2.7 package profiles).
+Unreadable/malformed INIs and invalid vendor sections still fail startup.
+Restart after modifying profiles; never edit the catalog during a live process.
+
+Profile paths and filenames are UTF-8, including on Windows. Preserved unknown
+bundle keys remain in custom-setting sidecars; they are not applied as engine
+options or presented as substituted values by the GUI system loader.
+
+### Indicative performance
+
+Windows Release measurements on 2026-10-04: Windows 10 Pro, AMD Ryzen 7 7840U
+(8 cores/16 threads), 31.3 GiB usable RAM, MSVC 19.44.35228.0, C++17.
+Selection/defaults are means over 20 calls of the catalog's default printer;
+"every printer" selects each printer with its default print once (mean/max);
+load and list are single observations.
+
+Defaults, selections and project loads work on a reduced copy of the catalog:
+the presets they name, their parents, and the filaments compatible with one of
+the printer's extruders.
+
+| Catalog | FFF profiles | Load | Selection | Defaults | Every printer (mean / max) | Compatibility list |
+|---|---:|---:|---:|---:|---:|---:|
+| Pinned package `c3fc5fd5948c74c51dd6d49d1521b6059eb82f7d` (37 INIs) | 6,912 | 4.301 s | 7.1 ms | 6.9 ms | 32.6 / 271 ms (642 printers) | 16.8 ms |
+| Upstream main `ca25c7ec55dcc6073da61e39692c321cdb6497dc` (23 INIs) | 1,845 | 0.792 s | 4.9 ms | 5.0 ms | 11.4 / 60 ms (338 printers) | 6.2 ms |
+
+The slowest printers have several tools with different settings (for example
+5-tool printers with per-tool offsets): filament compatibility is evaluated over
+the whole catalog once per distinct tool, about 40 ms each on the pinned package.
+
+Earlier measurements, which copied the whole catalog for every request:
+
+| Catalog | Load | Selection | Defaults | Compatibility list |
+|---|---:|---:|---:|---:|
+| Pinned package | 23.769 s | 2.533 s | 2.106 s | 38.705 ms |
+| Upstream main | 6.683 s | 0.831 s | 0.757 s | 15.445 ms |
+
+On the day of the change, before it, a full catalog copy alone measured 0.73 to
+1.72 s (pinned package) and 0.20 to 0.81 s (main) across runs, with selection at
+1.34 s and defaults at 1.29 s on the pinned package. Load times varied between
+sessions (23.8 s to 4.3 s on the pinned package); they are not controlled
+comparisons.
+
+Package inputs were copied from the pinned `resources/profiles` submodule and
+processed by the official `download_vendor_bundles.py` (its extra repository list
+was empty). The package catalog emitted one expected warning for skipped
+`Templates.ini`; main emitted no catalog warnings. No bundle was edited or
+flattened. A prior Debug run of main, with whole-catalog copies, measured
+7.038 s load, 2.114 s selection, 1.669 s defaults and 99.338 ms list.
+
+Defaults and selections use the import worker pool, preserving network
+responsiveness but consuming worker slots and memory. These figures are not
+latency/throughput guarantees; measure your own deployment. The earlier benchmark
+initialization also logged an unavailable cached Python plugin package and a
+disabled `max_overhang_threshold` plugin type mismatch; these were not catalog
+warnings and no plugin repair is claimed.
 ## Operation
 
 Startup prints `listening on ADDRESS:PORT` (IPv6: `[ADDRESS]:PORT`) after binding; port
@@ -114,7 +173,7 @@ For a disposable installation check:
 1. Install to a prefix containing a space and a non-ASCII character. From another
    directory, launch the installed REST launcher with `--config PATH --port 0`.
    Read the assigned port from `listening on`; do not expose the test server.
-2. Supply the converted Basic profiles and an account named `Smoke` (or pass
+2. Place `Basic.ini` in `profiles/vendor/` and supply an account named `Smoke` (or pass
    `-Username NAME`). Set `REST_SMOKE_PASSWORD` in the caller's environment and run
    `smoke-test.ps1 -BaseUrl http://127.0.0.1:PORT -OutputDirectory PATH`.
 3. Stop with Ctrl+Break on Windows, verify exit 0 and ordered `stopping`/`stopped`
@@ -155,21 +214,24 @@ JSON, UTF-8 encoding and unknown-key diagnostics. Missing GMP/MPFR DLLs prevent
 Windows startup before application diagnostics. A 401 means credentials/token
 failed; a 404 may deliberately hide another account's session. See the spec for
 409 busy/stale-result cases. Logs/progress should never contain credentials.
-Progress percentages are indicative, jobs have no crash recovery, and large
-viewer transfers still obey non-file response timeouts. Linux/macOS service
-examples, proxy behavior and console no-echo interaction need platform validation.
+Large viewer transfers still obey non-file response timeouts.
+See the contract's [Known limitations](rest-server.md#known-limitations) and the
+[platform checklist](platform-validation.md) for the authoritative remaining scope.
 
 ## Developer verification
 
-Validation in this development environment uses Debug; it is not a Release,
-Linux/macOS or real reverse-proxy validation. Test those configurations before
-production use. Development-only build wrappers are not distributed tools.
+Windows Debug and Release have been validated. Release core, GUI-enabled
+application, launchers, standalone tools, enabled STEP module and REST suites
+built separately; all 19 REST/preset CTest selections passed (144.01 s), and
+profile suite randomized seeds 2/5 passed. Both installed server forms passed
+the public Basic workflow, PATH launch outside the checkout, actual Ctrl+Break
+exit 0 and clean work storage under a prefix with spaces/non-ASCII characters.
+This is not Linux/macOS, real reverse-proxy, visual GUI or physical terminal
+validation. Development-only build wrappers are not distributed tools.
 
-The helper in `rest_deployment_tests` flattens the checked-in small Basic bundle
-using the GUI's `LoadSystem` loader. It is a test fixture, not an installed
-converter or a complete vendor catalog. To export it, set
-`REST_TEST_FLAT_PROFILES` to a disposable output directory and run
-`rest_deployment_tests "*Basic profiles*"`.
+`rest_deployment_tests` loads the checked-in small Basic bundle directly from
+`profiles/vendor/`, selects its profiles over real loopback HTTP and slices a
+cube. The fixture is not a complete vendor distribution.
 
 Build test targets explicitly. `ctest -R "^rest_" -LE rest_app` excludes commands
 requiring application launchers, but includes standalone-command tests. The

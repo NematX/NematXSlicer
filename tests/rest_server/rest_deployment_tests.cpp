@@ -1,8 +1,7 @@
 // Deployment fixtures are validated against production configuration and profile loaders.
 #include <catch_main.hpp>
-#include <boost/nowide/cstdlib.hpp>
 #include "rest_models_test_helpers.hpp"
-#include "rest_deployment_test_helpers.hpp"
+#include "rest_vendor_test_helpers.hpp"
 #include "profiles.hpp"
 
 #include <cstdlib>
@@ -38,28 +37,36 @@ TEST_CASE("REST deployment examples load and unknown keys fail at every level", 
     }
 }
 
-TEST_CASE("REST deployment Basic profiles flatten with resolved inheritance", "[rest_deployment]")
+TEST_CASE("REST deployment Basic vendor profiles slice through public HTTP routes", "[rest_deployment]")
 {
     ensure_engine_initialized();
     TempDirectory root;
-    const std::filesystem::path source = std::filesystem::path(SLIC3R_REST_SOURCE_DIRECTORY) / "tests/data/rest_profiles/Basic.ini";
-    flatten_basic_profiles(source, root.path());
-    const std::filesystem::path printer = root.path() / "printer/Basic 0.4 nozzle.ini";
-    REQUIRE(std::filesystem::is_regular_file(printer));
-    CHECK(read_file(printer).find("nozzle_diameter = 0.4") != std::string::npos);
-    CHECK(read_file(printer).find("inherits =") == std::string::npos);
-    CHECK(std::filesystem::is_regular_file(root.path() / "print/0.20mm NORMAL .4N.ini"));
-    CHECK(std::filesystem::is_regular_file(root.path() / "filament/Basic PLA @BASIC.ini"));
-    const std::string print = read_file(root.path() / "print/0.20mm NORMAL .4N.ini");
-    CHECK(print.find("layer_height = 0.2") != std::string::npos);
-    CHECK(print.find("perimeters = 3") != std::string::npos);
-    CHECK(print.find("inherits =") == std::string::npos);
-    std::size_t files = 0;
-    for (const std::filesystem::directory_entry &entry : std::filesystem::recursive_directory_iterator(root.path()))
-        if (entry.is_regular_file())
-            ++files;
-    CHECK(files == 3); // Abstract parents must not become selectable profiles.
-    // Optional output supports the installed smoke workflow without a production converter.
-    if (const char *output = boost::nowide::getenv("REST_TEST_FLAT_PROFILES"))
-        flatten_basic_profiles(source, std::filesystem::u8path(output));
+    write_vendor_profiles(root.path(), false);
+    RestServerFixture fixture({}, true, false, "work", {}, root.path());
+    const std::string route = "/session/" + create_session(fixture);
+    const nlohmann::json profiles = nlohmann::json::parse(fixture.request(http::verb::get, route + "/list_profiles").body());
+    nlohmann::json selection{{"print", ""}, {"printer", ""}, {"extruder", nlohmann::json::array()}, {"filaments", nlohmann::json::array()}};
+    for (const char *category : {"print", "printer", "filaments"}) {
+        REQUIRE(profiles[category].size() == 1);
+        CHECK(profiles[category][0]["vendor"] == "Custom");
+        if (std::string(category) == "filaments")
+            selection[category].push_back(profiles[category][0]["id"]);
+        else
+            selection[category] = profiles[category][0]["id"];
+    }
+    REQUIRE(fixture.request(http::verb::post, route + "/set_profile", selection.dump(), "application/json").result() == http::status::ok);
+    REQUIRE(upload_model(fixture, route + "/add_model", "cube.stl", make_cube_stl()).result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, route + "/slice").result() == http::status::accepted);
+    const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(300);
+    std::string status;
+    do {
+        const HttpResponseMessage response = fixture.request(http::verb::get, route + "/state");
+        REQUIRE(response.result() == http::status::ok);
+        status = nlohmann::json::parse(response.body())["etat"];
+        if (status == "sliced" || status == "failed")
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    } while (std::chrono::steady_clock::now() < deadline);
+    REQUIRE(status == "sliced");
+    CHECK(fixture.request(http::verb::get, route + "/get_gcode").result() == http::status::ok);
 }

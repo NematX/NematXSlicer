@@ -98,13 +98,15 @@ public:
     };
 
     explicit RestServerFixture(Limits limits = {}, bool with_account = true, bool with_profiles = false,
-        std::filesystem::path work_directory_name = "work", std::optional<std::string> account_document = {})
+        std::filesystem::path work_directory_name = "work", std::optional<std::string> account_document = {},
+        std::filesystem::path profiles_source = {})
         : root_directory_(),
           limits_(limits),
           with_account_(with_account),
           with_profiles_(with_profiles),
           work_directory_name_(std::move(work_directory_name)),
           account_document_(std::move(account_document)),
+          profiles_source_(std::move(profiles_source)),
           server_(create_server())
     {
         server_->start();
@@ -300,6 +302,10 @@ private:
         std::filesystem::create_directories(config.resource_directory);
         std::filesystem::create_directories(config.profiles_directory);
         std::filesystem::create_directories(config.work_directory);
+        // Vendor tests exercise the public server with the same on-disk catalog.
+        if (!profiles_source_.empty())
+            std::filesystem::copy(profiles_source_, config.profiles_directory,
+                std::filesystem::copy_options::recursive | std::filesystem::copy_options::overwrite_existing);
         if (with_profiles_) {
             // Empty synthetic INIs inherit the engine defaults; printer INIs
             // only connect each printer to its default filament profile.
@@ -371,6 +377,7 @@ private:
     bool with_profiles_;
     std::filesystem::path work_directory_name_;
     std::optional<std::string> account_document_;
+    std::filesystem::path profiles_source_;
     std::unique_ptr<Slic3r::Rest::RestServer> server_;
     std::string default_token_;
     std::atomic<std::uint32_t> handler_calls_{0};

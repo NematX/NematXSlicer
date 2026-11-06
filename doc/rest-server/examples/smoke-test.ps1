@@ -1,4 +1,5 @@
 # Public HTTP workflow for a server already listening on loopback.
+# Place Basic.ini in the configured profiles/vendor directory before startup.
 # Supply REST_SMOKE_PASSWORD in the process environment (never an argv password).
 param([string]$BaseUrl = 'http://127.0.0.1:8080', [string]$Username = 'Smoke', [string]$OutputDirectory = '.')
 $ErrorActionPreference = 'Stop'
