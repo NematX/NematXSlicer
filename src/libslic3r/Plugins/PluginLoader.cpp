@@ -99,6 +99,7 @@ plugin settings. A plugin's own layout fragment takes precedence over generated 
 #include "libslic3r/Plugins/Infill/Lightning/LightningPattern.hpp"
 #include "libslic3r/Plugins/Infill/ConcentricPattern.hpp"
 #include "libslic3r/Plugins/Infill/DefaultInfillGenerator.hpp"
+#include "libslic3r/Plugins/Infill/BridgeVolume.hpp"
 #include "libslic3r/Plugins/Infill/EnsuringPattern.hpp"
 #include "libslic3r/Plugins/Infill/GyroidPattern.hpp"
 #include "libslic3r/Plugins/Infill/PostFullFillVolume.hpp"
@@ -848,6 +849,7 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::SurfaceGeneration::SolidShellsPlugin::register_solid_shells_plugin);
     register_builtin_plugin(orchestrator, "surface.bridge_preparation", slic3r_api::BridgePreparation::register_surface);
     register_builtin_plugin(orchestrator, "infill.recipe.bridge_preparation", slic3r_api::BridgePreparation::register_recipe);
+    register_builtin_plugin(orchestrator, "bridge.finalize_volume", slic3r_api::BridgeVolume::register_plugin);
     register_builtin_plugin(orchestrator, "surface.top_surface_expansion",
         slic3r_api::SurfaceGeneration::TopSurfaceExpansionPlugin::register_top_surface_expansion_plugin);
     register_builtin_plugin(orchestrator, "surface.clean_infill_surfaces",

@@ -662,6 +662,13 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     using namespace std::literals;
     typedef t_config_option_key Key;
     typedef std::string Val;
+    // Map serialized bridge model names to native exclusive-group provider ids.
+    // The disabled state uses the regional flow switch, not a separate algorithm.
+    for_ech_entry(dict, {"bridge_volume_compensation"}, [](Key &key, Val &value) {
+        if (value=="surface_density_v1") value="bridge.finalize_surface_volume";
+        else if (value=="conservative_clearance_v1") value="bridge.finalize_volume";
+        else if (value=="disabled") { key="bridge_volume_compensation_enabled";value="0"; }
+    });
     // Migrate the old switch without depending on map iteration order. A true
     // switch used to override the palette selector, including in mixed profiles.
     const std::unordered_map<Key, std::pair<Key, Val>>::iterator old_color = dict.find("thumbnails_custom_color");

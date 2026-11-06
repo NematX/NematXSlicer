@@ -39,6 +39,7 @@ dense_infill.recipe_modifier = 1
 dense_infill.post_infill_order = 1
 infill.generator.default = 1
 infill.recipe.bridge_preparation = 1
+bridge.finalize_volume = 0
 bridge_detector.default = 1
 rectilinear = 1
 monotonic = 1

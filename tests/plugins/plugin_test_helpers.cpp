@@ -125,6 +125,7 @@
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
 #include "libslic3r/Plugins/Surface/TopSurfaceExpansion.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
+#include "libslic3r/Plugins/Infill/BridgeVolume.hpp"
 
 
 
@@ -896,6 +897,7 @@ void ensure_plugin_test_runtime_initialized()
         // even in tests that leave the feature inactive.
         slic3r_api::BridgePreparation::register_surface(orchestrator_handle_value);
         slic3r_api::BridgePreparation::register_recipe(orchestrator_handle_value);
+        slic3r_api::BridgeVolume::register_plugin(orchestrator_handle_value);
         slic3r_api::SurfaceGeneration::TopSurfaceExpansionPlugin::register_top_surface_expansion_plugin(
             orchestrator_handle_value);
         slic3r_api::SurfaceGeneration::CleanInfillSurfacesPlugin::register_clean_infill_surfaces_plugin(
@@ -1049,6 +1051,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "surface.solid_shells");
         activate_plugin_or_fail(orchestrator, "surface.bridge_preparation");
         activate_plugin_or_fail(orchestrator, "infill.recipe.bridge_preparation");
+        activate_plugin_or_fail(orchestrator, "bridge.finalize_volume");
         activate_plugin_or_fail(orchestrator, "surface.top_surface_expansion");
         activate_plugin_or_fail(orchestrator, "surface.clean_infill_surfaces");
         activate_plugin_or_fail(orchestrator, "surface.infill_region_compatibility_splitter");
@@ -1078,6 +1081,7 @@ void ensure_plugin_test_runtime_initialized()
         visibility->second.set_default_value(new ConfigOptionBool(false));
         orchestrator.finalize_plugin_option_defs();
         // Preserve the shared test baseline; bridge integration cases opt in by scope.
+        orchestrator.set_plugin_active("bridge.finalize_volume", false);
         orchestrator.set_plugin_active("infill.recipe.bridge_preparation", false);
         orchestrator.set_plugin_active("surface.bridge_preparation", false);
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);

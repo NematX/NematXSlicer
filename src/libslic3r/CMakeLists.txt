@@ -322,6 +322,10 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/Lightning/LightningPreparation.hpp
 	Plugins/Infill/Lightning/LightningTreeNode.cpp
 	Plugins/Infill/Lightning/LightningTreeNode.hpp
+	Plugins/Infill/BridgeClearance.cpp
+	Plugins/Infill/BridgeClearance.hpp
+	Plugins/Infill/BridgeVolume.cpp
+	Plugins/Infill/BridgeVolume.hpp
 	Plugins/Infill/DefaultInfillGenerator.cpp
 	Plugins/Infill/DefaultInfillGenerator.hpp
 	Plugins/Infill/EnsuringPattern.cpp

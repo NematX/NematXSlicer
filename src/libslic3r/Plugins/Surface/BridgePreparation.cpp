@@ -9,13 +9,14 @@
 
    This plugin chooses a direction for each unsupported bottom area, then extends
    into nearby internal infill areas above the model's lower slices. Uniform growth
-   can add peripheral rows outside the unsupported area. Preparation does not
-   generate supports, audit actual lower contacts or change flow.
+   can add peripheral rows outside the unsupported area. The experimental volume provider checks
+   their actual lower contacts when selected. Preparation does not generate supports or change flow.
 
    The resulting surfaces carry BridgeSurfaceInfo and are called prepared bridges.
    The recipe pass tells infill generation to print them as separate parallel rows.
    A recipe is the set of pattern, flow and connection parameters passed to an
-   infill pattern. Flow remains the native nominal bridge flow.
+   infill pattern. The experimental provider in BridgeVolume.cpp checks actual end contacts
+   and can adjust flow; the surface preparation itself does neither.
 
    An island is one connected slice on a layer. Its region groups can share
    geometry but have different material settings. Partition those inputs by their

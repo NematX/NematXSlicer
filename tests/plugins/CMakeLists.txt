@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     test_auxiliary_layer_helpers.cpp
     test_bridge_detector_cancellation.cpp
     test_bridge_ordering.cpp
+    test_bridge_pipeline.cpp
     test_bridge_preparation.cpp
     mesh_queries_c_fixture.c
     plugin_api_headers_c_fixture.c

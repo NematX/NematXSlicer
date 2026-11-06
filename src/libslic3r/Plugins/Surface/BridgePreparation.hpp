@@ -5,11 +5,11 @@
 /* Register the passes that choose bridge directions and expand their fill areas.
 
    The loader first registers the pass that changes surfaces, then the pass that
-   sets their infill parameters. Both passes keep native nominal bridge flow.
+   sets their infill parameters. Volume correction is registered in BridgeVolume.hpp.
    The infill generator calls validate_recipe() after all parameter modifiers, so
    a later plugin cannot silently replace the selected direction or parallel rows.
    expansion_margins() resolves uniform and axial distances for preparation and
-   callers, using the same external-perimeter width and shell limit.
+   final path checks, using the same external-perimeter width and shell limit.
    Handles are borrowed for the call; invalid parameters stop generation.
 */
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
