@@ -62,6 +62,8 @@ inline nlohmann::json painted_keys(const ModelVolume &volume)
 }
 void append_object_entities(const ModelObject &object, std::vector<EntityBinding> &out);
 bool is_loadable_part_type(ModelVolumeType type);
+// Invalidate the cut identity and cut metadata of every object in the same group.
+void invalidate_cut_group(ModelObject &object);
 
 SceneChange set_part_type(ModelObject &object, ModelVolume &volume, ModelVolumeType type);
 SceneChange rename_object(ModelObject &object, const std::string &name);

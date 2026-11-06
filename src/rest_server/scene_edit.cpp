@@ -24,14 +24,6 @@ size_t model_part_count(const ModelObject &object)
         [](const ModelVolume *volume) { return volume->is_model_part(); }));
 }
 
-void invalidate_cut_group(ModelObject &object)
-{
-    const CutObjectBase cut = object.cut_id;
-    for (ModelObject *candidate : object.get_model()->object_ptrs())
-        if (candidate->cut_id.is_equal(cut))
-            candidate->invalidate_cut();
-}
-
 void validate_name(const std::string &name)
 {
     try {
@@ -59,6 +51,15 @@ bool shape_allowed(ModelVolumeType type, const std::string &shape)
 }
 
 } // namespace
+
+// Invalidate the source object's cut identity and every object carrying the same identity.
+void invalidate_cut_group(ModelObject &object)
+{
+    const CutObjectBase cut = object.cut_id;
+    for (ModelObject *candidate : object.get_model()->object_ptrs())
+        if (candidate->cut_id.is_equal(cut))
+            candidate->invalidate_cut();
+}
 
 SceneEditError::SceneEditError(int status, std::string code, const std::string &message)
     : std::runtime_error(message), status_(status), code_(std::move(code))

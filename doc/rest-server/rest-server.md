@@ -3,8 +3,9 @@
 **Status:** V1 contract\
 **Version:** 1.1
 
-Version 1.1 adds scene editing (§5.16) and entity settings/layer ranges (§5.17);
-1.0 routes and response meanings are unchanged. New response fields are additive.
+Version 1.1 adds scene editing (§5.16), entity settings/layer ranges (§5.17),
+arrangement/orientation (§5.18), and plane cuts (§5.19); 1.0 routes and response
+meanings are unchanged. New response fields are additive.
 
 ## 1. Objective
 
@@ -147,6 +148,7 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, instances, and layer ranges |
 | `POST` | `/session/{session_id}/arrange` | Optional JSON placement settings and object/instance IDs |
 | `POST` | `/session/{session_id}/orient` | Optional JSON orientation settings and object/instance IDs |
+| `POST` | `/session/{session_id}/cut/{id}` | Cut an object or solid part by a plane |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
@@ -1453,6 +1455,120 @@ IDs return `422 invalid_arrange` or `422 invalid_orient`.
   `422 invalid_arrange` or `422 invalid_orient`; an uninitialized engine returns
   `503 engine_not_initialized`.
 
+### 5.19. `POST .../cut/{id}` — plane cut (1.1)
+
+This route cuts either an object or one printable solid part. It uses the same
+plane orientation as the GUI: the side in the direction of `normal` is the
+`upper` side. The body is a closed JSON object:
+
+```json
+{
+  "plane": {"point": [100, 100, 10], "normal": [0, 0, 1]},
+  "space": "platter",
+  "instance": "instance-id",
+  "keep_upper": true,
+  "keep_lower": true,
+  "keep_as_parts": false,
+  "flip_upper": false,
+  "flip_lower": false,
+  "place_on_cut_upper": false,
+  "place_on_cut_lower": false,
+  "invalidate_cut": false,
+  "arrange": false
+}
+```
+
+`plane` is required. `point` and `normal` contain three finite millimeter
+coordinates; `normal` must be non-zero and is normalized. `keep_upper` and
+`keep_lower` default to `true`, and at least one must remain true. `space`
+defaults to `platter` and accepts:
+
+| `space` | Coordinates used for `point` and `normal` |
+|---|---|
+| `platter` | Global platter coordinates |
+| `object` | The placed reference instance's object coordinates |
+| `volume` | The target part's local coordinates; for an object target, the reference instance's coordinates |
+
+For a reference instance transform `I` and a target part transform `V`, the
+plane is converted to platter coordinates with `M = identity` for `platter`,
+`M = I` for `object`, and `M = I × V` for `volume` on a part (`M = I` for
+`volume` on an object):
+
+```
+point_platter  = M × point
+normal_platter = normalize((M.linear()⁻¹)ᵀ × normal)
+```
+
+The linear transform must be invertible. The resulting engine cut frame is a
+translation by `point_platter - offset(I)` followed by the smallest rotation
+that maps local +Z to `normal_platter`. This inverse-transpose conversion keeps
+the plane correct under non-uniform scaling and mirroring. `instance` is
+optional and defaults to the object's first instance; when supplied it must be
+an instance of the target object (for a part target, of the part's object). An unknown ID returns
+`404 entity_not_found`, while an instance of another object returns
+`422 invalid_cut`.
+
+Before changing the scene, the route checks every vertex of each targeted solid
+part. At least one vertex must be more than `1e-6` above and one more than
+`1e-6` below the plane in the cut frame. A plane that does not cross the
+geometry returns `422 invalid_cut` and leaves the session unchanged.
+
+For an object target, `keep_as_parts` keeps both halves in one object as two
+parts named with `_A` (upper) and `_B` (lower). It requires both keep flags and
+cannot be combined with `flip_*` or `place_on_cut_*`. Without it, the route
+creates one object per retained side, in upper-then-lower response order.
+`flip_upper`, `flip_lower`, `place_on_cut_upper`, and `place_on_cut_lower` have
+the same meaning as the GUI cut controls and are refused with `keep_as_parts`.
+The source object and all of its object, part, instance, and layer-range IDs are
+removed; generated entities receive new IDs. The cut group's identity and
+checksum follow the GUI rules, and other objects in that group are synchronized.
+Each generated object is sorted and placed on the bed as in the GUI operation.
+
+For a part target, the entity must have type `part`. Only `keep_upper` and
+`keep_lower` are meaningful; `keep_as_parts`, all `flip_*` and
+`place_on_cut_*` options, and `arrange` return `422 invalid_cut`. Only the
+selected part is replaced by new part IDs; other parts, their transforms,
+instances, modifiers, settings, height ranges, and object identity remain
+unchanged. An object cut clears painting data on every part of the source
+object; a part cut clears painting data only on the selected part.
+Keeping only one side leaves the parent object at its existing position; a
+client can reposition it with `transform` and `ensure_on_bed: true`.
+Cutting a part of an object already in a cut group requires
+`invalidate_cut: true`; otherwise the route returns `422 cut_object`. With
+invalidation, the group metadata is invalidated before the replacement. The
+`invalidate_cut` field is accepted for any target but has no other effect.
+
+The response identifies removed entities and the newly created sides:
+
+```json
+{
+  "removed": ["old-object-id", "old-part-id", "old-instance-id"],
+  "objects": [
+    {"id": "upper-object-id", "side": "upper"},
+    {"id": "lower-object-id", "side": "lower"}
+  ]
+}
+```
+
+An object kept as parts uses `"side":"parts"` and one `objects` entry. A part
+cut returns `parts` instead of `objects`, with one entry per retained side.
+`arrange: true` is valid only for an object cut. It cuts first and then uses
+the default `/arrange` settings on the new object instances. The complete
+operation runs on the import pool and the response additionally contains
+`"beds":{"instance-id":0|k|null}`. Without arrangement, the operation is
+synchronous and invokes the scene-edit observer immediately before the commit.
+Both paths reject stale concurrent commits with `409 session_changed` and
+active slicing with `409 session_busy`; a session deleted while an arranged
+operation is running returns `404 session_not_found`.
+
+Successful cuts invalidate current G-code, mark the viewer outdated, and leave
+the session ready. Other failures use the common error format: malformed JSON,
+unknown fields, missing fields, and wrong types return `400 invalid_request`;
+unknown sessions or entities return `404`; unsupported target/options, a
+non-solid target, a degenerate normal, a non-crossing plane, or an invalid
+combination return `422 invalid_cut`; and a restricted cut-group part returns
+`422 cut_object`.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1548,6 +1664,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 1.1 scene editing | `rest_models_tests`: `REST list_objects reports part types paintings and cut objects`, `REST set_part_type changes types atomically and keeps unchanged types uncommitted`, `REST rename validates names and invalidates G-code only for objects`, `REST delete_entity removes entities and keeps the retained part ID`, `REST add_part checks the target before upload and imports a part`, `REST add_shape creates default and sized shapes`, `REST split and merge replace scene entities in one commit`, `REST scene edits are refused while slicing and on concurrent changes`, `REST negative volumes and support enforcers change the sliced result` |
 | 1.1 entity settings and ranges | `rest_models_tests`: `Entity setting scopes follow the GUI lists and plugin containers`, `Entity settings write atomically and remove overrides`, `Layer ranges validate bounds overlaps and nozzle height limits`, `REST list_settings publishes entity setting scopes`, `REST entity settings read and write objects parts and layer ranges`, `REST layer ranges are entities with IDs that follow their bounds`, `REST entity setting edits are refused while slicing and on concurrent changes`, `REST entity settings change the sliced result`, `REST entity settings and layer ranges survive save_project and load_project` |
 | 1.1 arrangement and orientation | `rest_models_tests`: `Arrange defaults follow the GUI distance rules`, `Arrange separates instances and keeps unselected ones fixed`, `Arrange reports virtual beds and unplaced instances`, `Orient rotates each instance from its own mesh`; `rest_placement_tests`: `REST arrange validates parameters and targets`, `REST arrange moves instances onto the bed and reports their beds`, `REST orient validates parameters and rotates instances onto the bed`, `REST arrange and orient are refused while slicing and on concurrent changes` |
+| 1.1 plane cut | `rest_models_tests`: `Part cuts keep the cut geometry in place for every instance`, `Object cuts split the geometry as the GUI does`, `Cut planes are equivalent in platter object and volume spaces`, `Part cuts replace only the cut part`, `Cut validation rejects degenerate requests`, `REST cut validates the request and the target`, `REST cut validates reference instances`, `REST cut enforces cut-group invalidation`, `REST cut replaces objects and parts with new IDs`, `REST cut can arrange the new objects`, visible `REST cut results slice`, hidden and not executed `REST cut results with two objects slice` (`[.rest_multi_object_engine]`), `REST cut is refused while slicing and on concurrent changes` |
 
 ## 8. Decisions
 
@@ -1595,6 +1712,12 @@ platform validation responsibility, not an in-process TLS implementation.
 - Arrangement and orientation jobs use the import pool and are not cancellable;
   graceful shutdown waits for the active operation to finish. Arrangement
   ignores the wipe tower, and virtual beds are outside the printable area.
+- Plane cuts currently do not create connectors, grooves, dowels, or contour
+  selections. An object cut clears painting data on every source part; a solid
+  part cut clears it only on the selected part, as required by the engine.
+- The current slicing engine may crash or assert on multi-object scenes or on
+  objects whose lowest point is above the bed; these plugin-pipeline limits are
+  unrelated to plane cuts.
 - Native TLS, browser CORS and remote administration are not provided. Operators
   must supply encrypted remote transport and validate their actual proxies.
 - Linux/macOS packaging/services, actual proxies, visual GUI startup with future

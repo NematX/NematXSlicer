@@ -11,6 +11,7 @@
 #include "rest_server.hpp"
 
 #include "auth.hpp"
+#include "cut.hpp"
 #include "entity_settings.hpp"
 #include "engine.hpp"
 #include "file_names.hpp"
@@ -1716,6 +1717,341 @@ std::optional<HttpResponse> read_scene_edit_body(HttpRequest &request, std::init
 HttpResponse scene_edit_error(const SceneEditError &error, const std::string &request_id)
 {
     return make_error_response(error.status(), error.code(), error.what(), request_id);
+}
+
+struct CutTarget {
+    EntityReference entity;
+    std::uint64_t instance_engine_id = 0;
+};
+
+struct CutWorkOutcome {
+    CutOutcome cut;
+    std::optional<ArrangeOutcome> arrangement;
+};
+
+// Read a finite three-number cut-plane vector and store malformed input as 400.
+bool read_cut_vector(const nlohmann::json &value, const std::string &field, Vec3d &result,
+    HttpResponse &error, const std::string &request_id)
+{
+    if (!value.is_array() || value.size() != 3)
+        error = make_error_response(400, "invalid_request", field + " must be an array of three numbers.", request_id);
+    else {
+        for (std::size_t index = 0; index < 3; ++index)
+            if (!value.at(index).is_number()) {
+                error = make_error_response(400, "invalid_request", field + " must be an array of three numbers.", request_id);
+                return false;
+            }
+        result = Vec3d(value.at(0).get<double>(), value.at(1).get<double>(), value.at(2).get<double>());
+        if (!result.allFinite())
+            error = make_error_response(400, "invalid_request", field + " must contain finite numbers.", request_id);
+    }
+    return error.status == 200;
+}
+
+// Parse and validate the closed cut body before acquiring the session mutation token.
+bool parse_cut_request(HttpRequest &request, CutRequest &cut, std::optional<std::string> &instance_id,
+    HttpResponse &error, const std::string &request_id)
+{
+    if (std::optional<HttpResponse> body_error = read_scene_edit_body(request,
+            {"plane", "space", "instance", "keep_upper", "keep_lower", "keep_as_parts",
+             "flip_upper", "flip_lower", "place_on_cut_upper", "place_on_cut_lower", "invalidate_cut", "arrange"},
+            request_id)) {
+        error = std::move(body_error.value());
+        return false;
+    }
+    const nlohmann::json &body = *request.json_body;
+    if (!body.contains("plane") || !body.at("plane").is_object()) {
+        error = make_error_response(400, "invalid_request", "The cut body requires a plane object.", request_id);
+        return false;
+    }
+    const nlohmann::json &plane = body.at("plane");
+    for (nlohmann::json::const_iterator item = plane.begin(); item != plane.end(); ++item)
+        if (item.key() != "point" && item.key() != "normal") {
+            error = make_error_response(400, "invalid_request", "Unknown plane field: " + item.key(), request_id);
+            return false;
+        }
+    if (!plane.contains("point") || !plane.contains("normal")) {
+        error = make_error_response(400, "invalid_request", "The cut plane requires point and normal fields.", request_id);
+        return false;
+    }
+    if (!read_cut_vector(plane.at("point"), "plane.point", cut.point, error, request_id) ||
+        !read_cut_vector(plane.at("normal"), "plane.normal", cut.normal, error, request_id))
+        return false;
+
+    if (body.contains("space")) {
+        if (!body.at("space").is_string()) {
+            error = make_error_response(400, "invalid_request", "space must be a string.", request_id);
+            return false;
+        }
+        const std::string space = body.at("space").get<std::string>();
+        if (space == "platter") cut.space = CutSpace::platter;
+        else if (space == "object") cut.space = CutSpace::object;
+        else if (space == "volume") cut.space = CutSpace::volume;
+        else {
+            error = make_error_response(422, "invalid_cut", "The cut space is not supported.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("instance")) {
+        if (!body.at("instance").is_string()) {
+            error = make_error_response(400, "invalid_request", "instance must be a string.", request_id);
+            return false;
+        }
+        instance_id = body.at("instance").get<std::string>();
+    }
+
+    const std::pair<const char *, bool *> booleans[] = {
+        {"keep_upper", &cut.keep_upper}, {"keep_lower", &cut.keep_lower}, {"keep_as_parts", &cut.keep_as_parts},
+        {"flip_upper", &cut.flip_upper}, {"flip_lower", &cut.flip_lower},
+        {"place_on_cut_upper", &cut.place_on_cut_upper}, {"place_on_cut_lower", &cut.place_on_cut_lower},
+        {"invalidate_cut", &cut.invalidate_cut}, {"arrange", &cut.arrange}
+    };
+    for (const std::pair<const char *, bool *> &entry : booleans)
+        if (body.contains(entry.first)) {
+            if (!body.at(entry.first).is_boolean()) {
+                error = make_error_response(400, "invalid_request", std::string(entry.first) + " must be a boolean.", request_id);
+                return false;
+            }
+            *entry.second = body.at(entry.first).get<bool>();
+        }
+    try {
+        validate_cut_request(cut);
+    } catch (const SceneEditError &cut_error) {
+        error = scene_edit_error(cut_error, request_id);
+        return false;
+    }
+    cut.normal.normalize();
+    return true;
+}
+
+// Resolve the target and reference instance against the mutation revision.
+std::optional<HttpResponse> resolve_cut_target(
+    SessionContext &session,
+    const SessionData &current,
+    SessionContext::MutationToken token,
+    const std::string &target_id,
+    const std::optional<std::string> &instance_id,
+    const CutRequest &request,
+    CutTarget &target,
+    const std::string &request_id)
+{
+    if (current.scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to cut.", request_id);
+    const std::optional<EntityReference> entity = session.resolve_entity(target_id);
+    if (session.snapshot().revision != token.revision)
+        return make_error_response(409, "session_changed", "The session changed while the cut target was resolved.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object && entity->kind != EntityKind::volume)
+        return make_error_response(422, "invalid_cut", "The cut target must be an object or solid part.", request_id);
+
+    ModelObject *object = nullptr;
+    if (entity->kind == EntityKind::object) {
+        const std::vector<ModelInstance *> instances = find_transform_instances(*current.scene, *entity);
+        if (instances.empty())
+            return make_error_response(422, "invalid_cut", "The target object has no instance.", request_id);
+        object = instances.front()->get_object();
+    } else {
+        const std::pair<ModelObject *, ModelVolume *> volume = find_transform_volume(*current.scene, *entity);
+        object = volume.first;
+        if (!volume.second->is_model_part())
+            return make_error_response(422, "invalid_cut", "Only solid model parts can be cut.", request_id);
+        if (request.keep_as_parts || request.flip_upper || request.flip_lower ||
+            request.place_on_cut_upper || request.place_on_cut_lower || request.arrange)
+            return make_error_response(422, "invalid_cut", "The selected part does not support these cut options.", request_id);
+    }
+
+    target.entity = *entity;
+    target.instance_engine_id = object->instances.front()->id().id;
+    if (instance_id.has_value()) {
+        const std::optional<EntityReference> reference = session.resolve_entity(instance_id.value());
+        if (session.snapshot().revision != token.revision)
+            return make_error_response(409, "session_changed", "The session changed while the cut instance was resolved.", request_id);
+        if (!reference)
+            return make_error_response(404, "entity_not_found", "The reference instance does not exist.", request_id);
+        if (reference->kind != EntityKind::instance)
+            return make_error_response(422, "invalid_cut", "The instance field must identify an instance.", request_id);
+        const std::vector<ModelInstance *> references = find_transform_instances(*current.scene, *reference);
+        if (references.empty() || references.front()->get_object() != object)
+            return make_error_response(422, "invalid_cut", "The reference instance belongs to another object.", request_id);
+        target.instance_engine_id = references.front()->id().id;
+    }
+    return std::nullopt;
+}
+
+// Apply the cut to the private candidate and optionally arrange its new instances.
+CutWorkOutcome perform_cut_request(SessionData &candidate, const CutTarget &target, const CutRequest &request)
+{
+    if (candidate.scene == nullptr)
+        throw std::logic_error("The cut candidate has no scene.");
+    ModelObject *object = nullptr;
+    ModelVolume *part = nullptr;
+    if (target.entity.kind == EntityKind::object)
+        object = find_transform_instances(*candidate.scene, target.entity).front()->get_object();
+    else {
+        const std::pair<ModelObject *, ModelVolume *> volume = find_transform_volume(*candidate.scene, target.entity);
+        object = volume.first;
+        part = volume.second;
+    }
+    const std::vector<ModelInstance *> instances = object->instances;
+    const std::vector<ModelInstance *>::const_iterator selected = std::find_if(instances.begin(), instances.end(),
+        [&target](const ModelInstance *instance) { return instance->id().id == target.instance_engine_id; });
+    if (selected == instances.end())
+        throw SceneEditError(422, "invalid_cut", "The selected instance is not in the target object.");
+    const std::size_t instance_index = static_cast<std::size_t>(std::distance(instances.begin(), selected));
+
+    CutWorkOutcome outcome;
+    if (part != nullptr)
+        outcome.cut = cut_part(*object, *part, instance_index, request);
+    else
+        outcome.cut = cut_object(*candidate.scene, *object, instance_index, request);
+    if (request.arrange) {
+        InstanceTargets arranged;
+        for (ModelObject *created : outcome.cut.objects)
+            for (const ModelInstance *instance : created->instances)
+                arranged.push_back(instance->id().id);
+        outcome.arrangement = arrange_instances(*candidate.scene, candidate.configuration, arranged, ArrangeRequest{});
+    }
+    return outcome;
+}
+
+// Serialize cut IDs and side labels using the bindings returned by commit_mutation.
+HttpResponse cut_response(const CutWorkOutcome &outcome, const std::vector<std::string> &removed,
+    const std::vector<EntityBinding> &bindings, const std::vector<std::string> &bound_ids)
+{
+    if (bindings.size() != bound_ids.size())
+        throw std::logic_error("The cut binding result has an unexpected size.");
+    std::map<std::uint64_t, std::string> id_by_engine;
+    for (std::size_t index = 0; index < bindings.size(); ++index)
+        id_by_engine.emplace(bindings[index].engine_id, bound_ids[index]);
+
+    nlohmann::json body{{"removed", removed}};
+    if (!outcome.cut.parts.empty()) {
+        nlohmann::json parts = nlohmann::json::array();
+        if (outcome.cut.parts.size() != outcome.cut.sides.size())
+            throw std::logic_error("The cut part result has mismatched sides.");
+        for (std::size_t index = 0; index < outcome.cut.parts.size(); ++index)
+            parts.push_back({{"id", id_by_engine.at(outcome.cut.parts[index]->id().id)}, {"side", outcome.cut.sides[index]}});
+        body["parts"] = std::move(parts);
+    } else {
+        nlohmann::json objects = nlohmann::json::array();
+        if (outcome.cut.objects.size() != outcome.cut.sides.size())
+            throw std::logic_error("The cut object result has mismatched sides.");
+        for (std::size_t index = 0; index < outcome.cut.objects.size(); ++index)
+            objects.push_back({{"id", id_by_engine.at(outcome.cut.objects[index]->id().id)}, {"side", outcome.cut.sides[index]}});
+        body["objects"] = std::move(objects);
+    }
+    if (outcome.arrangement.has_value()) {
+        nlohmann::json beds = nlohmann::json::object();
+        for (const ArrangedInstance &instance : outcome.arrangement->instances) {
+            const std::map<std::uint64_t, std::string>::const_iterator id = id_by_engine.find(instance.instance_id);
+            if (id == id_by_engine.end())
+                throw std::logic_error("The cut arrangement returned an unbound instance.");
+            beds[id->second] = instance.bed.has_value() ? nlohmann::json(instance.bed.value()) : nlohmann::json(nullptr);
+        }
+        body["beds"] = std::move(beds);
+    }
+    return HttpResponse::json(200, body);
+}
+
+// Capture removed IDs, run the synchronous observer, and publish the candidate atomically.
+HttpResponse commit_cut(SessionContext &session, SessionContext::MutationToken token, SessionData candidate,
+    CutWorkOutcome outcome, const std::string &request_id, const std::function<void()> &scene_observer,
+    bool call_scene_observer)
+{
+    const std::optional<std::vector<std::string>> removed = session.entity_ids(token, outcome.cut.change.unbindings);
+    if (!removed) {
+        if (!session.data_snapshot().has_value())
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        return make_error_response(409, "session_changed", "The session changed while the cut was prepared.", request_id);
+    }
+    if (call_scene_observer && scene_observer)
+        scene_observer();
+    std::vector<std::string> bound_ids;
+    if (!session.commit_mutation(token, std::move(candidate), true, SessionRegistry::Clock::now(),
+            outcome.cut.change.bindings, bound_ids, false, outcome.cut.change.unbindings)) {
+        if (!session.data_snapshot().has_value())
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        return make_error_response(409, "session_changed", "The session changed while the cut was prepared.", request_id);
+    }
+    return cut_response(outcome, removed.value(), outcome.cut.change.bindings, bound_ids);
+}
+
+// Validate, resolve, and commit the plane-cut route; arranged work uses the import pool.
+std::optional<HttpResponse> handle_cut(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    CutRequest cut;
+    std::optional<std::string> instance_id;
+    HttpResponse parse_error;
+    if (!parse_cut_request(request, cut, instance_id, parse_error, request_id))
+        return parse_error;
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the cut was prepared.", request_id);
+    CutTarget target;
+    if (std::optional<HttpResponse> target_error = resolve_cut_target(*session, current.value(), mutation.value(),
+            request.path_segments[3], instance_id, cut, target, request_id))
+        return target_error;
+
+    if (!cut.arrange) {
+        try {
+            SessionData candidate = current.value();
+            candidate.scene = std::make_shared<Model>(*current->scene);
+            const CutWorkOutcome outcome = perform_cut_request(candidate, target, cut);
+            return commit_cut(*session, mutation.value(), std::move(candidate), outcome, request_id,
+                services.scene_edit_observer, true);
+        } catch (const SceneEditError &error) {
+            return scene_edit_error(error, request_id);
+        } catch (const std::exception &) {
+            return make_error_response(500, "internal_error", "The server could not cut the scene.", request_id);
+        } catch (...) {
+            return make_error_response(500, "internal_error", "The server could not cut the scene.", request_id);
+        }
+    }
+
+    asio::post(services.imports, [session, token = mutation.value(), data = current.value(), target, cut,
+        request_id, respond, observer = services.import_observer]() mutable {
+        HttpResponse response;
+        try {
+            if (observer)
+                observer();
+            if (!session->data_snapshot()) {
+                response = make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+            } else {
+                SessionData candidate = std::move(data);
+                candidate.scene = std::make_shared<Model>(*candidate.scene);
+                const CutWorkOutcome outcome = perform_cut_request(candidate, target, cut);
+                response = commit_cut(*session, token, std::move(candidate), outcome, request_id, {}, false);
+            }
+        } catch (const SceneEditError &error) {
+            response = scene_edit_error(error, request_id);
+        } catch (const std::exception &) {
+            response = make_error_response(500, "internal_error", "The server could not cut the scene.", request_id);
+        } catch (...) {
+            response = make_error_response(500, "internal_error", "The server could not cut the scene.", request_id);
+        }
+        respond(response);
+    });
+    return std::nullopt;
 }
 
 // Parse an empty body as the route defaults, or validate a closed JSON object.
@@ -3943,6 +4279,8 @@ std::optional<HttpResponse> dispatch_request(
             return handle_arrange(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "orient")
             return handle_orient(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 4 && operation == "cut")
+            return handle_cut(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "transform")
             return handle_transform(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "set_part_type")
