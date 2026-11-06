@@ -1509,7 +1509,8 @@ TEST_CASE("REST list_objects exposes stable IDs across uploads and project repla
     REQUIRE(first_listing.at("objects").at(0).at("parts").size() == 1);
     REQUIRE(first_listing.at("objects").at(0).at("instances").size() == 1);
     // Entity settings add override-presence and range-list fields to the object and part.
-    CHECK(first_listing.at("objects").at(0).size() == 8);
+    CHECK(first_listing.at("objects").at(0).size() == 9);
+    CHECK(first_listing.at("objects").at(0).contains("variable_layer_height"));
     CHECK(first_listing.at("objects").at(0).contains("cut"));
     CHECK(first_listing.at("objects").at(0).contains("has_settings"));
     CHECK(first_listing.at("objects").at(0).contains("layer_ranges"));

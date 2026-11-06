@@ -52,6 +52,8 @@ add_library(slic3r_rest STATIC
     entity_settings.hpp
     file_names.cpp
     file_names.hpp
+    layer_height.cpp
+    layer_height.hpp
     multipart_upload.cpp
     multipart_upload.hpp
     paint.cpp

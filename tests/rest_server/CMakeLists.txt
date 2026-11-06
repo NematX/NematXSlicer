@@ -83,9 +83,11 @@ add_executable(rest_models_tests
     cut_tests.cpp
     entity_settings_tests.cpp
     file_names_tests.cpp
+    layer_height_tests.cpp
     paint_tests.cpp
     placement_tests.cpp
     rest_entity_settings_tests.cpp
+    rest_layer_height_tests.cpp
     rest_models_tests.cpp
     rest_custom_gcodes_tests.cpp
     rest_cut_tests.cpp

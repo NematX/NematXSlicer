@@ -491,6 +491,7 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                 {"matrix", matrix_json(Transform3d::Identity())},
                 {"cut", object->is_cut()},
                 {"has_settings", !object->config.empty()},
+                {"variable_layer_height", !object->layer_height_profile.empty()},
                 {"parts", std::move(parts)},
                 {"instances", std::move(instances)},
                 {"layer_ranges", std::move(layer_ranges)}

@@ -147,7 +147,7 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/set_settings` | JSON object of settings to modify |
 | `POST` | `/session/{session_id}/add_model` | Upload an STL, OBJ, or 3MF |
 | `POST` | `/session/{session_id}/load_project` | Upload a 3MF project |
-| `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, instances, and layer ranges |
+| `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, instances, layer ranges, and variable-layer-height presence |
 | `POST` | `/session/{session_id}/arrange` | Optional JSON placement settings and object/instance IDs |
 | `POST` | `/session/{session_id}/orient` | Optional JSON orientation settings and object/instance IDs |
 | `POST` | `/session/{session_id}/cut/{id}` | Cut an object or solid part by a plane |
@@ -156,6 +156,8 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `GET` | `/session/{session_id}/get_paint/{part_id}` | Read painted triangles for a solid part |
 | `GET` | `/session/{session_id}/get_custom_gcodes` | Read the custom G-code list (color changes, pauses, templates, custom G-code per height) |
 | `POST` | `/session/{session_id}/set_custom_gcodes` | Replace the whole custom G-code list |
+| `GET` | `/session/{session_id}/get_layer_height_profile/{object_id}` | Read the stored and effective layer-height profile |
+| `POST` | `/session/{session_id}/set_layer_height_profile/{object_id}` | Replace, adapt, smooth, or reset an object's layer-height profile |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
@@ -694,6 +696,7 @@ matrix is identity; effective transformations reside on its instances and volume
       "name": "part.stl",
       "cut": false,
       "has_settings": false,
+      "variable_layer_height": false,
       "matrix": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
       "parts": [
         {"id":"part-id", "name":"part.stl", "type":"part", "painted":[], "has_settings":false, "matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}
@@ -735,6 +738,10 @@ default `extruder = 0`, so its `has_settings` is `true`. `layer_ranges` is
 ordered by height bounds and contains each range's stable ID, exact `min`/`max` bounds
 in millimeters, and override-presence flag. The ID remains stable when its bounds
 are changed through `set_layer_range`.
+
+`variable_layer_height` is `true` when the object stores a non-empty layer-height
+profile. It reports stored data even when a later geometry change makes that
+profile inapplicable; use `get_layer_height_profile` to inspect `applied`.
 
 ### 5.12. `POST .../transform/{id}`
 
@@ -1803,6 +1810,117 @@ the highest one is emitted. A `tool_change` is processed separately and applies
 in addition to it. Layers are only known when slicing, so this is not reported by
 the API.
 
+### 5.22. Variable layer height (1.1)
+
+Each object stores a flat sequence of `[z, height]` pairs in millimeters,
+relative to the bed-level base of the printed part. Heights are piecewise linear
+between points; a step is represented by two points at the same Z. Z values must
+be non-decreasing, and no Z may appear more than twice. The first Z is that base
+(`0`), and the last Z is the object top. The first object layer remains fixed at
+the effective first layer height (`first_layer_height` resolved and rounded to
+`z_step`); a point is exempt from printer height bounds only when a following
+point exists at or below that first-layer Z. An anchor whose segment crosses the
+first-layer boundary is subject to the bounds. `save_project` and `load_project`
+round-trip profiles written by SuperSlicer, including two-point profiles. A
+Bambu-format 3MF is loaded by the fallback importer, which still drops two-point
+profiles; the object then stores no profile (`profile` is empty and `applied` is
+false) and layers fall back to the layer-range profile. 3MF stores profile
+values with 6 decimals, so a reloaded top stays within the 1e-3 mm tolerance. A
+non-empty profile takes precedence over the `layer_height` values in the
+object's height ranges; the other range settings remain in effect. Resetting the
+profile returns layer-height selection to those ranges.
+
+`GET /session/{session_id}/get_layer_height_profile/{object_id}` takes no body
+or query and reads one scene snapshot, including while slicing:
+
+```json
+{
+  "profile": [[0.0, 0.2], [5.0, 0.2], [5.0, 0.1], [20.0, 0.1]],
+  "applied": true,
+  "valid": true,
+  "object_height": 20.0,
+  "min_layer_height": 0.07,
+  "max_layer_height": 0.3,
+  "layers": [0.2, 0.4, 0.6]
+}
+```
+
+`profile` is the stored sequence. REST validates the stored profile when it is
+non-empty; otherwise it validates the effective profile from the object's layer
+ranges. The profile top must be within 1e-3 mm (the engine's 10 × EPSILON) of the
+object top, the engine's retention tolerance. Explicit input accepts a final Z
+within `1e-3` mm and normalizes it to the exact object top before the other
+profile checks. REST also checks finite values, a zero first Z, ordering and
+repeated-Z steps, and printer height bounds; the engine's retention check alone
+does not enforce those rules. `valid` reports these REST checks, and valid responses omit `errors`.
+`applied` is true exactly when the engine's effective profile equals the stored
+non-empty profile, so it can be true even when REST reports `valid: false` (for
+example, a stored point outside printer bounds). If a stored profile fails REST
+validation, GET still returns HTTP 200 with `valid: false`, an `errors` array, and
+no `layers`; the route never asks the layer generator to consume invalid data.
+A profile that is empty uses the layer-range profile instead. `object_height` and
+the minimum/maximum bounds are computed from the object's slicing parameters. An
+object thinner than its first layer is reported as `valid: false` by GET, because
+the fixed first layer ends above the object top. `layers` contains the top Z of
+each effective object layer, relative to the bed-level base; it reflects the
+fixed first layer, the applicable profile, or the layer ranges.
+
+`POST /session/{session_id}/set_layer_height_profile/{object_id}` takes a closed
+JSON object with exactly one operation:
+
+| Body | Effect |
+|---|---|
+| `{"profile": [[z, height], ...]}` | Store an explicit profile |
+| `{"adaptive": {"quality": 0.5, "min_height": 0.07, "max_height": 0.3}}` | Generate an adaptive profile; the optional bounds default to the object's printer bounds |
+| `{"smooth": {"radius": 5, "keep_min": false}}` | Smooth the effective profile; `keep_min` defaults to `false` |
+| `{"reset": true}` | Clear the stored profile |
+
+Explicit profiles require at least two points, finite values, a first `z` of
+zero, non-decreasing Z values (no Z may occur more than twice), and a last `z`
+within `1e-3` mm of the object height. An accepted final Z is normalized to the
+exact object top before ordering and repeated-Z checks. Heights must be within
+printer bounds with a `1e-6` mm tolerance, except when a point has a following
+point at or below the effective first layer height. The latter point controls
+layers above the boundary and remains subject to printer bounds; an anchor whose
+segment crosses the boundary is not exempt.
+
+`quality` is in `[0,1]`. Optional adaptive bounds must be ordered and within
+printer limits; each is rounded to `z_step`, then clamped to the printer limits
+before the engine generates the profile. The returned profile
+shows the normalized result. Requested bounds apply to adaptive points except
+the fixed-first-layer anchors and final gap point; the engine clamps the final
+gap point to printer layer-height limits. Smoothing `radius` is an integer in
+`[1,10]`. An object without a solid part cannot be edited.
+
+Point failures return `422 invalid_layer_height_profile` with
+`details: [{"point": i, "reason": r}]`; reasons include `first_z`, `z_order`,
+`height_range`, and `last_z`. Global profile failures carry only a reason, with
+no point index. The stable global reasons are `invalid_length` (a stored profile
+with an odd number of values) and `too_few_points`; other global failures come
+from profiles derived from layer ranges and from profiles generated by
+`adaptive` or `smooth`. An explicit profile with fewer than two points returns
+the same status and code with reason `too_few_points` in the message and no
+`details`, because no point index identifies that failure. Smoothing returns 422
+whenever
+`get_layer_height_profile` reports `valid: false`, with the same error details.
+
+Malformed JSON, unknown or missing fields, wrong types, and requests with zero
+or multiple operations return `400`. Unknown objects return `404`; a part or
+instance target returns `422`. Setting a profile is synchronous: an unchanged
+flat profile does not create a new revision. A changed profile is committed on a
+private scene copy, invalidates current G-code, marks the viewer outdated, and
+returns the session to `ready`. The scene-edit observer runs immediately before
+commit. Active slicing returns `409 session_busy`; a competing scene change
+returns `409 session_changed`.
+
+Changing object height does not clear the stored profile. If the stored profile
+ends more than 1e-3 mm (the engine's 10 × EPSILON) from the current object top,
+GET keeps `profile` visible and reports `valid: false` with the endpoint error
+and no `layers`; `reset` or a new valid profile can repair it. Layer-height
+slicing parameters use the first instance (see Known limitations). The REST API
+does not expose the layer-height brush; clients can send an explicit profile
+instead. SLA layer-height editing is not exposed.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1901,6 +2019,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 1.1 plane cut | `rest_models_tests`: `Part cuts keep the cut geometry in place for every instance`, `Object cuts split the geometry as the GUI does`, `Cut planes are equivalent in platter object and volume spaces`, `Part cuts replace only the cut part`, `Cut validation rejects degenerate requests`, `REST cut validates the request and the target`, `REST cut validates reference instances`, `REST cut enforces cut-group invalidation`, `REST cut replaces objects and parts with new IDs`, `REST cut can arrange the new objects`, visible `REST cut results slice`, hidden and not executed `REST cut results with two objects slice` (`[.rest_multi_object_engine]`), `REST cut is refused while slicing and on concurrent changes` |
 | 1.1 facet painting | `rest_models_tests`: `Brush strokes paint the expected area`, `Fill tools follow the GUI semantics`, `Points rays and spaces select the same paint`, `Object targets paint the nearest part`, `MMU and generic channels store their states`, `Paint validation leaves the scene unchanged`, `REST paint kinds are listed`, `REST paint validates the request and the target`, `REST paint updates parts and reports changes`, `REST get_paint returns painted triangles`, `REST paint persists in projects`, `REST paint is refused while slicing and on concurrent changes`, `REST painted parts slice`; `REST support painting reaches the support engine` is hidden and not executed (`[.rest_support_engine]`) |
 | 1.1 custom G-code per height | `rest_models_tests`: `Custom G-code mode follows the engine rule`, `Custom G-code entries are validated and sorted`, `Custom G-code JSON reports modes and warnings`, `REST custom G-codes validate requests`, `REST custom G-codes replace the whole list`, `REST custom G-codes persist in projects`, `REST custom G-codes are refused while slicing and on concurrent changes`, `REST custom G-codes reach the G-code`, `REST custom G-code tool changes reach the G-code` |
+| 1.1 variable layer height | `rest_models_tests`: `Explicit layer height profiles are validated`, `Adaptive and smoothed profiles follow the GUI tools`, `Stale layer height profiles are reported`, `REST layer height profiles validate requests`, `REST layer height profiles replace and reset`, `REST layer height profiles persist in projects`, `REST layer height profiles persist non-round object heights`, `REST range profiles accept near-top endpoints and omit point indices`, `REST adaptive bounds constrain profiles within printer limits`, `REST adaptive profiles round-trip a fixed first layer above the maximum`, `REST invalid stored layer height profiles are reported safely`, `REST smoothing rejects stored profiles ignored by the engine`, `REST layer height profiles are refused while slicing and on concurrent changes`, `REST layer height profiles reach the G-code` |
 
 ## 8. Decisions
 
@@ -1930,6 +2049,8 @@ platform validation responsibility, not an in-process TLS implementation.
 - Built-in shape defaults are fixed because the REST server has no camera.
 - Splitting into objects discards modifiers, matching the GUI operation.
 - Merging is limited to objects that each have exactly one instance.
+- Objects whose instances have different Z extents use the first instance's
+  height for layer-height profiles and slicing parameters.
 - Entity-setting combinations are checked by the slicer during slicing, not by
   the REST override writer. `extruders`/`wipe` scope is not filtered for a
   single-extruder printer, so clients may see settings the current printer does
@@ -1972,6 +2093,10 @@ platform validation responsibility, not an in-process TLS implementation.
 - On multi-extruder sessions, `get_custom_gcodes` and `set_custom_gcodes` apply a
   `Print` to compute the mode, so session configurations that make `Print::apply`
   hit a Debug assert also abort these routes, as they do slice and arrange.
+- Variable layer-height profiles are stored when an object is scaled, but the
+  engine ignores a profile whose top no longer matches the object height. REST
+  exposes no brush operation, and slicing parameters use the first instance of
+  each object.
 - The current slicing engine may crash or assert on multi-object scenes or on
   objects whose lowest point is above the bed; these plugin-pipeline limits are
   unrelated to plane cuts.

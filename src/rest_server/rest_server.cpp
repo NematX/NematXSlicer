@@ -16,6 +16,7 @@
 #include "entity_settings.hpp"
 #include "engine.hpp"
 #include "file_names.hpp"
+#include "layer_height.hpp"
 #include "multipart_upload.hpp"
 #include "paint.hpp"
 #include "placement.hpp"
@@ -2593,6 +2594,238 @@ bool parse_custom_gcodes_request(HttpRequest &request, std::vector<CustomGCodeEn
     return true;
 }
 
+// Read one closed JSON operation into owned values; false returns a 400 shape/type/empty or 422 domain response, and scene state is untouched.
+bool parse_layer_height_request(HttpRequest &request, LayerHeightRequest &operation, HttpResponse &error,
+    const std::string &request_id)
+{
+    if (std::optional<HttpResponse> body_error = read_scene_edit_body(
+            request, {"profile", "adaptive", "smooth", "reset"}, request_id)) {
+        error = std::move(body_error.value());
+        return false;
+    }
+    const nlohmann::json &body = *request.json_body;
+    if (body.size() != 1) {
+        error = make_error_response(400, "invalid_request", "Exactly one layer height operation is required.", request_id);
+        return false;
+    }
+
+    if (body.contains("profile")) {
+        const nlohmann::json &values = body.at("profile");
+        if (!values.is_array()) {
+            error = make_error_response(400, "invalid_request", "profile must be an array of [z, height] pairs.", request_id);
+            return false;
+        }
+        std::vector<std::pair<double, double>> points;
+        points.reserve(values.size());
+        for (const nlohmann::json &value : values) {
+            if (!value.is_array() || value.size() != 2 || !value.at(0).is_number() || !value.at(1).is_number()) {
+                error = make_error_response(400, "invalid_request", "Each profile point must contain two numbers.", request_id);
+                return false;
+            }
+            points.emplace_back(value.at(0).get<double>(), value.at(1).get<double>());
+        }
+        operation.profile = std::move(points);
+        return true;
+    }
+
+    if (body.contains("adaptive")) {
+        const nlohmann::json &value = body.at("adaptive");
+        if (!value.is_object()) {
+            error = make_error_response(400, "invalid_request", "adaptive must be an object.", request_id);
+            return false;
+        }
+        for (const auto &field : value.items())
+            if (field.key() != "quality" && field.key() != "min_height" && field.key() != "max_height") {
+                error = make_error_response(400, "invalid_request", "Unknown adaptive field: " + field.key(), request_id);
+                return false;
+            }
+        if (!value.contains("quality") || !value.at("quality").is_number() ||
+            (value.contains("min_height") && !value.at("min_height").is_number()) ||
+            (value.contains("max_height") && !value.at("max_height").is_number())) {
+            error = make_error_response(400, "invalid_request", "adaptive requires numeric quality and optional numeric bounds.", request_id);
+            return false;
+        }
+        LayerHeightAdaptiveRequest adaptive;
+        adaptive.quality = value.at("quality").get<double>();
+        if (value.contains("min_height"))
+            adaptive.min_height = value.at("min_height").get<double>();
+        if (value.contains("max_height"))
+            adaptive.max_height = value.at("max_height").get<double>();
+        operation.adaptive = adaptive;
+        return true;
+    }
+
+    if (body.contains("smooth")) {
+        const nlohmann::json &value = body.at("smooth");
+        if (!value.is_object()) {
+            error = make_error_response(400, "invalid_request", "smooth must be an object.", request_id);
+            return false;
+        }
+        for (const auto &field : value.items())
+            if (field.key() != "radius" && field.key() != "keep_min") {
+                error = make_error_response(400, "invalid_request", "Unknown smoothing field: " + field.key(), request_id);
+                return false;
+            }
+        if (!value.contains("radius") || !value.at("radius").is_number_integer() ||
+            (value.contains("keep_min") && !value.at("keep_min").is_boolean())) {
+            error = make_error_response(400, "invalid_request", "smooth requires an integer radius and optional boolean keep_min.", request_id);
+            return false;
+        }
+        std::uint64_t radius = 0;
+        if (value.at("radius").is_number_unsigned()) {
+            radius = value.at("radius").get<std::uint64_t>();
+        } else {
+            const std::int64_t signed_radius = value.at("radius").get<std::int64_t>();
+            if (signed_radius < 1) {
+                error = make_error_response(422, "invalid_layer_height_profile",
+                    "Smoothing radius must be between 1 and 10.", request_id);
+                return false;
+            }
+            radius = static_cast<std::uint64_t>(signed_radius);
+        }
+        if (radius < 1 || radius > 10) {
+            error = make_error_response(422, "invalid_layer_height_profile",
+                "Smoothing radius must be between 1 and 10.", request_id);
+            return false;
+        }
+        const bool keep_min = value.contains("keep_min") && value.at("keep_min").get<bool>();
+        operation.smooth = HeightProfileSmoothingParams(static_cast<unsigned int>(radius), keep_min);
+        return true;
+    }
+
+    if (!body.at("reset").is_boolean() || !body.at("reset").get<bool>()) {
+        error = make_error_response(400, "invalid_request", "reset must be true.", request_id);
+        return false;
+    }
+    operation.reset = true;
+    return true;
+}
+
+// Return a borrowed object pointer when the ID is present; it remains valid only while the supplied scene lives.
+ModelObject *find_layer_height_object(Model &scene, std::uint64_t object_id)
+{
+    for (ModelObject *object : scene.object_ptrs())
+        if (static_cast<std::uint64_t>(object->id().id) == object_id)
+            return object;
+    return nullptr;
+}
+
+// Read a revision-bounded scene snapshot without mutation, including during slicing; missing, changed, and invalid targets return HTTP errors.
+HttpResponse handle_get_layer_height_profile(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty() || !request.query.empty())
+        return make_error_response(400, "invalid_request", "get_layer_height_profile accepts no body or query.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::optional<SessionData> data = session->data_snapshot();
+    if (!data)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != revision)
+        return make_error_response(409, "session_changed", "The scene changed while the profile was read.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_layer_height_profile", "The target must be an object.", request_id);
+    if (data->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to read.", request_id);
+    ModelObject *object = find_layer_height_object(*data->scene, entity->engine_id);
+    if (object == nullptr)
+        return make_error_response(500, "internal_error", "The resolved object is missing from the scene snapshot.", request_id);
+    try {
+        return HttpResponse::json(200, layer_height_json(*object, data->configuration));
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not read the layer height profile.", request_id);
+    }
+}
+
+// Validate an operation against one scene snapshot and commit a private copy only on change; validation, busy, stale, and missing-session failures return HTTP errors.
+HttpResponse handle_set_layer_height_profile(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    LayerHeightRequest operation;
+    HttpResponse parse_error;
+    if (!parse_layer_height_request(request, operation, parse_error, request_id))
+        return parse_error;
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The scene changed while the profile was prepared.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_layer_height_profile", "The target must be an object.", request_id);
+    if (current->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to edit.", request_id);
+    ModelObject *current_object = find_layer_height_object(*current->scene, entity->engine_id);
+    if (current_object == nullptr)
+        return make_error_response(500, "internal_error", "The resolved object is missing from the scene snapshot.", request_id);
+
+    try {
+        const std::vector<double> profile = compute_layer_height_profile(*current_object, current->configuration, operation);
+        const std::vector<double> &stored = current_object->layer_height_profile.get();
+        if (profile == stored) {
+            if (!session->entity_ids(mutation.value(), {}))
+                return !session->data_snapshot()
+                    ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                    : make_error_response(409, "session_changed", "The session changed while the profile was prepared.", request_id);
+            return HttpResponse::json(200, layer_height_json(*current_object, current->configuration));
+        }
+
+        SessionData candidate = current.value();
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        ModelObject *candidate_object = find_layer_height_object(*candidate.scene, entity->engine_id);
+        if (candidate_object == nullptr)
+            return make_error_response(500, "internal_error", "The copied object is missing from the scene.", request_id);
+        if (profile.empty())
+            candidate_object->layer_height_profile.clear();
+        else
+            candidate_object->layer_height_profile.set(profile);
+        const nlohmann::json response = layer_height_json(*candidate_object, candidate.configuration);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        if (!session->commit_mutation(mutation.value(), std::move(candidate), true, SessionRegistry::Clock::now()))
+            return !session->data_snapshot()
+                ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                : make_error_response(409, "session_changed", "The session changed while the profile was prepared.", request_id);
+        return HttpResponse::json(200, response);
+    } catch (const LayerHeightPointError &error) {
+        const nlohmann::json details = nlohmann::json::array({{{"point", error.point()}, {"reason", error.reason()}}});
+        return make_error_response(422, "invalid_layer_height_profile", error.what(), request_id, &details);
+    } catch (const LayerHeightProfileError &error) {
+        const nlohmann::json details = nlohmann::json::array({{{"reason", error.reason()}}});
+        return make_error_response(422, "invalid_layer_height_profile", error.what(), request_id, &details);
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not set the layer height profile.", request_id);
+    }
+}
+
 // Read one snapshot and serialize the stored list with its modes and warnings.
 HttpResponse handle_get_custom_gcodes(HttpRequest &request, const RouteServices &services,
     const std::string &username, const std::string &request_id)
@@ -5088,6 +5321,10 @@ std::optional<HttpResponse> dispatch_request(
             return handle_get_custom_gcodes(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_custom_gcodes")
             return handle_set_custom_gcodes(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "get_layer_height_profile")
+            return handle_get_layer_height_profile(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "set_layer_height_profile")
+            return handle_set_layer_height_profile(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "cut")
             return handle_cut(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "transform")
