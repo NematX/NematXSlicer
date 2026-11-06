@@ -6,6 +6,20 @@
 
 using namespace Slic3r::Rest;
 
+TEST_CASE("Attachment names include an ASCII fallback and RFC5987 UTF-8", "[rest_file_names]")
+{
+    CHECK(content_disposition_attachment("Bracket.3mf") ==
+        "attachment; filename=\"Bracket.3mf\"; filename*=UTF-8''Bracket.3mf");
+    CHECK(content_disposition_attachment(u8"pi\u00e8ce.3mf") ==
+        "attachment; filename=\"pi_ce.3mf\"; filename*=UTF-8''pi%C3%A8ce.3mf");
+    CHECK(content_disposition_attachment(u8"part\U0001F600.3mf") ==
+        "attachment; filename=\"part_.3mf\"; filename*=UTF-8''part%F0%9F%98%80.3mf");
+    CHECK(content_disposition_attachment("a b'%.3mf") ==
+        "attachment; filename=\"a b'_.3mf\"; filename*=UTF-8''a%20b%27%25.3mf");
+    CHECK(content_disposition_attachment("part%20name.3mf") ==
+        "attachment; filename=\"part_20name.3mf\"; filename*=UTF-8''part%2520name.3mf");
+}
+
 TEST_CASE("Session names are bounded UTF-8 without control characters", "[rest_file_names]")
 {
     CHECK_NOTHROW(validate_session_name("Support bracket"));

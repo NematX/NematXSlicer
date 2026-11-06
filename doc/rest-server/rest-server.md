@@ -141,7 +141,7 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/cancel_slicing` | Request cancellation of active slicing (`202 Accepted`) |
 | `GET` | `/session/{session_id}/get_gcode` | Download raw G-code after successful slicing |
 | `POST` | `/session/{session_id}/clear_platter` | Clear the platter; JSON response |
-| `GET` | `/session/{session_id}/save_project` | Binary 3MF download |
+| `GET` | `/session/{session_id}/save_project` | Binary 3MF snapshot download; optional `file_name` query |
 | `GET` | `/session/{session_id}/get_gcode_for_view` | Paginated viewer JSON (`offset`, `limit`, `result_id`) with an `outdated` flag |
 | `DELETE` | `/session/{session_id}/delete` | Destroy the session; no response body |
 
@@ -804,7 +804,41 @@ current G-code unavailable, and retains the previous viewer as outdated.
   A non-empty body returns `400 invalid_request`, checked before the slicing
   state; a valid request during slicing returns `409 session_busy`, and a
   concurrent mutation returns `409 session_changed`.
-- `/save_project` returns a binary 3MF file, not a JSON object.
+- `GET /session/{session_id}/save_project` has no body and returns a streamed
+  binary 3MF file (`Content-Type: model/3mf`, `Cache-Control: no-store`), not JSON.
+  - **Contents and snapshot:** One committed scene/configuration/name snapshot is
+    exported on the model worker pool. Saving is allowed during slicing and does
+    not change revision, status, name, G-code, viewer snapshot, or entity IDs.
+    Later mutations or session deletion do not change a captured export.
+    The archive contains geometry, object/volume hierarchy, instances, transforms,
+    slicing configuration, embedded profile settings, and unknown print/printer/
+    filament settings preserved in custom settings. No thumbnail is generated.
+    Source paths are reduced to file names; `print_host`, `printhost_apikey`,
+    `printhost_cafile`, and `printhost_port` are stripped as in GUI secure exports.
+  - **Reload:** `load_project` recovers settings with new entity IDs and normalizes
+    single-volume offsets into instance translations without changing world-space
+    geometry. Inactive phony option values are not serialized. Session-only
+    preferences and opaque profile IDs are not restored. An embedded preset is
+    named after the loaded file, followed by its original source in parentheses
+    only when that source differs; repeated save/reload cycles keep the same name.
+  - **Name:** The optional `file_name` query uses form decoding (`+` means space;
+    `%HH` decodes bytes). Empty pairs are ignored; unknown keys, repeated decoded
+    keys, malformed escapes, decoded NUL, and empty `file_name` return
+    `400 invalid_request`. A portable `.3mf` name is derived from the requested
+    name, then session name, then `project.3mf`. Unsupported characters become
+    underscores, device names gain an underscore prefix, trailing dots/spaces are
+    removed, and an existing `.3MF` suffix retains its case. Names containing only
+    dots/spaces fall back rather than fail. `Content-Disposition: attachment`
+    supplies an ASCII fallback (one underscore per non-ASCII code point; percent
+    signs also become underscores) and RFC5987 `filename*` preserving exact UTF-8.
+  - **Errors:** After authentication, refusal order is method/path
+    (`404 route_not_found`), engine (`503 engine_not_initialized`), body
+    (`400 invalid_request`), query (`400 invalid_request`), owning session/snapshot
+    (`404 session_not_found`), then empty scene (`409 empty_scene`). Export/storage
+    failures return generic `500 internal_error` without exposing paths.
+  - **Temporary files:** `rest-export-` files in `work/exports` are deleted after
+    responses complete or disconnect; stale matching files are removed at startup
+    without deleting unrelated files.
 - `/delete` returns `204 No Content`; the session ID and data are invalidated.
 
 #### Result validity

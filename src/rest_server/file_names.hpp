@@ -26,4 +26,7 @@ std::optional<std::string> session_name_from_file(const std::string &file_name);
 // usable name remains, so the caller can fall back to another name.
 std::optional<std::string> portable_file_name(const std::string &name, const std::string &extension);
 
+// Legacy clients get a safe ASCII fallback; filename* preserves the exact UTF-8 name.
+std::string content_disposition_attachment(const std::string &file_name);
+
 } // namespace Slic3r::Rest

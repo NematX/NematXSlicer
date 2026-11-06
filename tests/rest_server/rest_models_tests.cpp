@@ -17,6 +17,7 @@
 #include <boost/property_tree/ini_parser.hpp>
 
 #include "engine.hpp"
+#include "file_names.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -347,7 +348,386 @@ nlohmann::json read_objects(const RestServerFixture &fixture, const std::string 
     return nlohmann::json::parse(response.body());
 }
 
+// A client has the whole download once Content-Length bytes arrived, but the
+// server releases the temporary file only when its write completion runs on
+// the network thread, slightly later. Poll instead of racing that release.
+std::size_t wait_for_work_file_count(const RestServerFixture &fixture, std::size_t expected)
+{
+    const std::chrono::steady_clock::time_point deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::size_t count = fixture.work_file_count();
+    while (count != expected && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        count = fixture.work_file_count();
+    }
+    return count;
+}
+
 } // namespace
+
+TEST_CASE("REST save_project round-trips a modified enriched project without changing its source", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    Slic3r::DynamicPrintConfig partial;
+    partial.set_deserialize_strict("layer_height", "0.3");
+    const std::string enriched = add_project_config_lines(make_3mf(2, &partial),
+        "; future_print_key = 42\n; printer_future_key = pf\n; filament_future_key = 7\n");
+    REQUIRE(object_ids(upload_model(fixture, route + "/load_project", "original.3mf", enriched)).size() == 2);
+    const std::string added = object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).front();
+    Slic3r::Transform3d matrix = Slic3r::Transform3d::Identity();
+    matrix.translation() = Slic3r::Vec3d(14, 27, 6);
+    REQUIRE(fixture.request(http::verb::post, route + "/transform/" + added,
+        transform_body(matrix, "platter").dump(), "application/json").result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, route + "/set_instance_count/" + added,
+        R"({"count":3})", "application/json").result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, route + "/set_setting/layer_height/0.25").result() == http::status::ok);
+    Slic3r::Rest::SessionData secure = session->data_snapshot().value();
+    secure.preferences = {{"units", "inches"}};
+    for (const char *key : {"print_host", "printhost_apikey", "printhost_cafile", "printhost_port"})
+        secure.configuration.set_key_value(key, new Slic3r::ConfigOptionString("secret-witness"));
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), secure, false,
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const Slic3r::Rest::SessionData before = session->data_snapshot().value();
+    const nlohmann::json listed = read_objects(fixture, route);
+    const std::map<std::string, std::string> profiles = fixture.profile_files();
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    const Slic3r::Rest::SessionContext::Snapshot slicing = session->snapshot();
+    const HttpResponseMessage during = fixture.request(http::verb::get, route + "/save_project");
+    REQUIRE(during.result() == http::status::ok);
+    CHECK(session->snapshot().status == slicing.status);
+    CHECK(session->snapshot().revision == slicing.revision);
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    const Slic3r::Rest::SessionContext::Snapshot sliced = session->snapshot();
+    const HttpResponseMessage saved = fixture.request(http::verb::get, route + "/save_project");
+    REQUIRE(saved.result() == http::status::ok);
+    CHECK(saved.body().substr(0, 2) == "PK");
+    CHECK(saved[http::field::content_type] == "model/3mf");
+    CHECK(saved[http::field::cache_control] == "no-store");
+    CHECK(saved[http::field::content_disposition] == Slic3r::Rest::content_disposition_attachment("original.3mf"));
+    CHECK(saved[http::field::content_length] == std::to_string(saved.body().size()));
+    CHECK(session->snapshot().revision == sliced.revision);
+    CHECK(session->snapshot().status == sliced.status);
+    CHECK(session->snapshot().current_gcode == sliced.current_gcode);
+    CHECK(session->viewer_snapshot() == viewer);
+    CHECK(read_objects(fixture, route) == listed);
+    CHECK(session->data_snapshot()->name == before.name);
+    CHECK(session->data_snapshot()->scene == before.scene);
+    CHECK(session->data_snapshot()->configuration.diff(before.configuration).empty());
+    CHECK(session->data_snapshot()->profile_sections == before.profile_sections);
+    CHECK(session->data_snapshot()->preferences == before.preferences);
+    const std::string other_id = create_session(fixture);
+    const std::string other_route = "/session/" + other_id;
+    REQUIRE(object_ids(upload_model(fixture, other_route + "/load_project", "original.3mf", saved.body())).size() == 3);
+    const Slic3r::Rest::SessionData after = find_session(fixture, other_id)->data_snapshot().value();
+    Slic3r::DynamicPrintConfig expected(before.configuration);
+    for (const char *key : {"print_host", "printhost_apikey", "printhost_cafile", "printhost_port"})
+        expected.erase(key);
+    Slic3r::DynamicPrintConfig actual(after.configuration);
+    // Reloading a project saved from the same file keeps a stable preset name.
+    for (const char *key : {"print_settings_id", "printer_settings_id", "filament_settings_id"}) {
+        INFO(key);
+        CHECK(actual.opt_serialize(key) == "original.3mf");
+        actual.erase(key);
+        expected.erase(key);
+    }
+    for (const std::string &key : expected.keys()) {
+        if (!expected.option(key)->is_phony())
+            continue;
+        REQUIRE(actual.has(key));
+        CHECK(actual.option(key)->is_phony());
+        CHECK(actual.opt_serialize(key) == expected.opt_serialize(key));
+        actual.erase(key);
+    }
+    for (const std::string &key : expected.keys())
+        if (expected.option(key)->is_phony())
+            expected.erase(key);
+    CHECK(actual.diff(expected).empty());
+    CHECK(after.name == before.name);
+    CHECK(after.preferences == nlohmann::json::object());
+    CHECK(after.profiles.print == before.profiles.print);
+    CHECK(after.profiles.printer == before.profiles.printer);
+    CHECK(after.profiles.filaments == before.profiles.filaments);
+    CHECK(after.profiles.extruder == before.profiles.extruder);
+    REQUIRE(after.scene->object_ptrs().size() == before.scene->object_ptrs().size());
+    for (std::size_t index = 0; index < before.scene->object_ptrs().size(); ++index) {
+        const Slic3r::ModelObject *a = before.scene->object_ptrs()[index];
+        const Slic3r::ModelObject *b = after.scene->object_ptrs()[index];
+        CHECK(a->name == b->name);
+        REQUIRE(a->volumes.size() == b->volumes.size());
+        REQUIRE(a->instances.size() == b->instances.size());
+        for (std::size_t v = 0; v < a->volumes.size(); ++v) {
+            CHECK(a->volumes[v]->name == b->volumes[v]->name);
+            Slic3r::Transform3d expected_volume = a->volumes[v]->get_matrix();
+            if (a->volumes.size() == 1)
+                expected_volume.translation().setZero();
+            CHECK(expected_volume.isApprox(b->volumes[v]->get_matrix(), 1e-6));
+            CHECK(a->volumes[v]->mesh().facets_count() == b->volumes[v]->mesh().facets_count());
+        }
+        for (std::size_t i = 0; i < a->instances.size(); ++i) {
+            Slic3r::Transform3d expected_instance = a->instances[i]->get_matrix();
+            // The 3MF loader moves a single volume's translation into each instance without moving its geometry.
+            if (a->volumes.size() == 1)
+                expected_instance.translation() = (a->instances[i]->get_matrix() * a->volumes.front()->get_matrix()).translation();
+            CHECK(expected_instance.isApprox(b->instances[i]->get_matrix(), 1e-6));
+            for (std::size_t v = 0; v < a->volumes.size(); ++v)
+                CHECK((a->instances[i]->get_matrix() * a->volumes[v]->get_matrix()).isApprox(
+                    b->instances[i]->get_matrix() * b->volumes[v]->get_matrix(), 1e-6));
+        }
+    }
+    const HttpResponseMessage saved_again = fixture.request(http::verb::get, other_route + "/save_project");
+    REQUIRE(saved_again.result() == http::status::ok);
+    const std::string third_id = create_session(fixture);
+    REQUIRE(object_ids(upload_model(fixture, "/session/" + third_id + "/load_project",
+        "original.3mf", saved_again.body())).size() == 3);
+    const Slic3r::Rest::SessionData second_round = find_session(fixture, third_id)->data_snapshot().value();
+    for (const char *key : {"print_settings_id", "printer_settings_id", "filament_settings_id"}) {
+        INFO(key);
+        CHECK(second_round.configuration.opt_serialize(key) == "original.3mf");
+    }
+    TempDirectory directory;
+    const std::filesystem::path path = directory.path() / "saved.3mf";
+    std::ofstream(path, std::ios::binary) << saved.body();
+    Slic3r::DynamicPrintConfig reloaded;
+    Slic3r::ConfigSubstitutionContext substitutions(Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+    Slic3r::Model model = Slic3r::Model::read_from_file(path.string(), &reloaded, &substitutions);
+    for (const char *key : {"print_host", "printhost_apikey", "printhost_cafile", "printhost_port"}) {
+        CHECK_FALSE(reloaded.has(key));
+        CHECK(before.configuration.opt_string(key) == "secret-witness");
+    }
+    CHECK(fixture.profile_files() == profiles);
+    CHECK(wait_for_work_file_count(fixture, 0) == 0);
+}
+
+TEST_CASE("REST save_project writes snapshot profile sections and replaces them on selection", "[rest_save_project][rest_profile_sections]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    const Slic3r::Rest::SessionData initial = session->data_snapshot().value();
+    REQUIRE_FALSE(initial.profile_sections.empty());
+    REQUIRE(object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).size() == 1);
+    REQUIRE(fixture.request(http::verb::post, route + "/set_setting/layer_height/0.25").result() == http::status::ok);
+    Slic3r::Rest::SessionData local = session->data_snapshot().value();
+    local.configuration.set_deserialize_strict("printhost_password", "local-password-witness");
+    local.configuration.set_deserialize_strict("printhost_client_cert_password", "local-certificate-witness");
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), std::move(local), false,
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const Slic3r::Rest::SessionData before = session->data_snapshot().value();
+    const HttpResponseMessage response = fixture.request(http::verb::get, route + "/save_project");
+    REQUIRE(response.result() == http::status::ok);
+    TempDirectory directory;
+    const std::filesystem::path path = directory.path() / "saved.3mf";
+    std::ofstream(path, std::ios::binary) << response.body();
+    Slic3r::DynamicPrintConfig configuration;
+    Slic3r::ConfigSubstitutionContext substitutions(Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    std::string sections;
+    const Slic3r::Model model = Slic3r::Model::read_from_archive(path.u8string(), &configuration, &substitutions,
+        Slic3r::Model::LoadAttribute::AddDefaultInstances, &sections);
+    REQUIRE(model.object_ptrs().size() == 1);
+    CHECK(sections == before.profile_sections);
+    CHECK(configuration.opt_float("layer_height") == Approx(0.25));
+    CHECK_FALSE(configuration.has("default_filament_profile"));
+    CHECK_FALSE(configuration.has("printhost_password"));
+    CHECK_FALSE(configuration.has("printhost_client_cert_password"));
+    CHECK(sections.find("local-password-witness") == std::string::npos);
+    CHECK(sections.find("local-certificate-witness") == std::string::npos);
+    CHECK(session->data_snapshot()->profile_sections == before.profile_sections);
+    const std::string loaded_id = create_session(fixture);
+    REQUIRE(object_ids(upload_model(fixture, "/session/" + loaded_id + "/load_project", "saved.3mf", response.body())).size() == 1);
+    CHECK(find_session(fixture, loaded_id)->data_snapshot()->profile_sections == before.profile_sections);
+
+    const HttpResponseMessage listed = fixture.request(http::verb::get, route + "/list_profiles");
+    REQUIRE(listed.result() == http::status::ok);
+    const nlohmann::json profiles = nlohmann::json::parse(listed.body());
+    std::string printer_id;
+    for (const nlohmann::json &printer : profiles.at("printer"))
+        if (printer.at("name") == "rest-printer-b")
+            printer_id = printer.at("id").get<std::string>();
+    REQUIRE_FALSE(printer_id.empty());
+    const nlohmann::json selection = {{"print", initial.profiles.print}, {"printer", printer_id},
+        {"extruder", nlohmann::json::array()}, {"filaments", nlohmann::json::array()}};
+    REQUIRE(fixture.request(http::verb::post, route + "/set_profile", selection.dump(), "application/json").result() == http::status::ok);
+    const Slic3r::Rest::SessionData selected = session->data_snapshot().value();
+    REQUIRE(selected.profile_sections != before.profile_sections);
+    boost::property_tree::ptree selected_sections;
+    std::istringstream input(selected.profile_sections);
+    boost::property_tree::read_ini(input, selected_sections);
+    const boost::property_tree::ptree::const_assoc_iterator printer = selected_sections.find("printer:rest-printer-b");
+    REQUIRE(printer != selected_sections.not_found());
+    CHECK(printer->second.get<std::string>("default_filament_profile") == "rest-filament-b");
+    const HttpResponseMessage saved_selection = fixture.request(http::verb::get, route + "/save_project");
+    REQUIRE(saved_selection.result() == http::status::ok);
+    std::ofstream(path, std::ios::binary) << saved_selection.body();
+    Slic3r::DynamicPrintConfig selected_configuration;
+    std::string saved_sections;
+    Slic3r::Model::read_from_archive(path.u8string(), &selected_configuration, &substitutions,
+        Slic3r::Model::LoadAttribute::AddDefaultInstances, &saved_sections);
+    CHECK(saved_sections == selected.profile_sections);
+}
+
+TEST_CASE("REST save_project chooses portable attachment names", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string route = "/session/" + create_session(fixture);
+    REQUIRE(object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).size() == 1);
+    const auto check_name = [&](const std::string &query, const std::string &expected) {
+        const HttpResponseMessage response = fixture.request(http::verb::get, route + "/save_project" + query);
+        REQUIRE(response.result() == http::status::ok);
+        CHECK(response[http::field::content_disposition] == Slic3r::Rest::content_disposition_attachment(expected));
+        CHECK(wait_for_work_file_count(fixture, 0) == 0);
+    };
+    check_name("", "project.3mf");
+    REQUIRE(fixture.request(http::verb::post, route + "/set_name", R"({"name":"Bracket"})",
+        "application/json").result() == http::status::ok);
+    check_name("", "Bracket.3mf");
+    check_name("?file_name=pi%C3%A8ce%3Av2", u8"pi\u00e8ce_v2.3mf");
+    check_name("?file_name=nul", "_nul.3mf");
+    check_name("?file_name=Part.3MF", "Part.3MF");
+    check_name("?file_name=Support+bracket", "Support bracket.3mf");
+    check_name("?file_name=a%2Bb", "a+b.3mf");
+    check_name("?&&file%5Fname=Part&&", "Part.3mf");
+    check_name("?file_name=...", "Bracket.3mf");
+    REQUIRE(fixture.request(http::verb::post, route + "/set_name", R"({"name":"..."})",
+        "application/json").result() == http::status::ok);
+    check_name("?file_name=...", "project.3mf");
+}
+
+TEST_CASE("REST save_project refuses invalid requests without mutation or temporary files", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    require_error(fixture.request(http::verb::get, route + "/save_project"), http::status::conflict, "empty_scene");
+    REQUIRE(object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).size() == 1);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    const Slic3r::Rest::SessionContext::Snapshot before = session->snapshot();
+    const nlohmann::json listed = read_objects(fixture, route);
+    require_error(fixture.request(http::verb::post, route + "/save_project", "bad"), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, route + "/save_project/extra"), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, route + "/save_project", "bad"), http::status::bad_request, "invalid_request");
+    for (const std::string &query : {"?unknown=x", "?file_name=x&file%5Fname=y", "?file_name=%", "?file_name=%G1",
+            "?file_name=", "?file_name", "?file_name=%00", "?file_name=x&unknown=y"})
+        require_error(fixture.request(http::verb::get, route + "/save_project" + query), http::status::bad_request, "invalid_request");
+    require_error(fixture.request_without_auth(http::verb::get, route + "/save_project"), http::status::unauthorized, "unauthorized");
+    const std::string bob = fixture.login_token("Bob", "secret");
+    require_error(fixture.request(http::verb::get, route + "/save_project", {}, {},
+        {{"Authorization", "Bearer " + bob}}), http::status::not_found, "session_not_found");
+    require_error(fixture.request(http::verb::get, "/session/missing/save_project"), http::status::not_found, "session_not_found");
+    CHECK(session->snapshot().revision == before.revision);
+    CHECK(session->snapshot().status == before.status);
+    CHECK(read_objects(fixture, route) == listed);
+    CHECK_FALSE(session->data_snapshot()->name.has_value());
+    CHECK(fixture.work_file_count() == 0);
+}
+
+TEST_CASE("REST save_project snapshot survives deletion while the network stays responsive", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    fixture.stop();
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> ready = release.get_future().share();
+    fixture.set_import_observer([&]() { entered.set_value(); ready.wait(); });
+    fixture.start();
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    Slic3r::Rest::SessionData data = session->data_snapshot().value();
+    data.scene = std::make_shared<Slic3r::Model>();
+    data.scene->add_object("cube", "cube.stl", Slic3r::make_cube(10, 10, 10));
+    data.scene->add_default_instances();
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true,
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    std::future<HttpResponseMessage> saved = std::async(std::launch::async, [&]() {
+        return fixture.request(http::verb::get, route + "/save_project");
+    });
+    const std::future_status started = entered.get_future().wait_for(std::chrono::seconds(5));
+    if (started != std::future_status::ready) {
+        release.set_value();
+        REQUIRE(started == std::future_status::ready);
+    }
+    const HttpResponseMessage created = fixture.request(http::verb::post, "/create_session");
+    const Slic3r::Rest::SessionEraseResult erased = fixture.sessions().erase(
+        Slic3r::Rest::normalize_username("Alice"), id);
+    release.set_value();
+    CHECK(created.result() == http::status::created);
+    CHECK(erased == Slic3r::Rest::SessionEraseResult::erased);
+    const HttpResponseMessage response = saved.get();
+    CHECK(response.result() == http::status::ok);
+    CHECK(response.body().substr(0, 2) == "PK");
+    CHECK(wait_for_work_file_count(fixture, 0) == 0);
+}
+
+TEST_CASE("REST save_project storage errors are generic and leave the session intact", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    REQUIRE(object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).size() == 1);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    const Slic3r::Rest::SessionContext::Snapshot before = session->snapshot();
+    const std::filesystem::path exports = fixture.work_directory() / "exports";
+    std::filesystem::rename(exports, fixture.work_directory() / "exports-backup");
+    std::ofstream(exports) << "not a directory";
+    const HttpResponseMessage response = fixture.request(http::verb::get, route + "/save_project");
+    require_error(response, http::status::internal_server_error, "internal_error");
+    CHECK(response.body().find(fixture.work_directory().string()) == std::string::npos);
+    CHECK(session->snapshot().revision == before.revision);
+    CHECK(session->snapshot().status == before.status);
+    CHECK(fixture.work_file_count() == 1);
+}
+
+TEST_CASE("REST save_project cleans abandoned responses and stale exports", "[rest_save_project]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    fixture.stop();
+    const std::filesystem::path exports = fixture.work_directory() / "exports";
+    std::ofstream(exports / "rest-export-stale.3mf") << "stale";
+    std::ofstream(exports / "keep.txt") << "keep";
+    fixture.start();
+    CHECK_FALSE(std::filesystem::exists(exports / "rest-export-stale.3mf"));
+    CHECK(read_file(exports / "keep.txt") == "keep");
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    REQUIRE(object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).size() == 1);
+    asio::io_context context;
+    Tcp::socket socket = fixture.connect_socket(context);
+    const std::string request = "GET " + route + "/save_project HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " +
+        fixture.token() + "\r\nConnection: close\r\n\r\n";
+    asio::write(socket, asio::buffer(request));
+    char byte;
+    socket.read_some(asio::buffer(&byte, 1));
+    ErrorCode ignored;
+    socket.set_option(asio::socket_base::linger(true, 0), ignored);
+    socket.close(ignored);
+    // keep.txt is the only remaining file once the export is released.
+    CHECK(wait_for_work_file_count(fixture, 1) == 1);
+    CHECK(read_file(exports / "keep.txt") == "keep");
+}
+
+TEST_CASE("REST startup reports export directory failures as paths.work errors", "[rest_save_project]")
+{
+    RestServerFixture fixture;
+    fixture.stop();
+    const std::filesystem::path exports = fixture.work_directory() / "exports";
+    std::filesystem::rename(exports, fixture.work_directory() / "exports-backup");
+    std::ofstream(exports) << "not a directory";
+    CHECK_THROWS_AS(fixture.start(), std::invalid_argument);
+    CHECK_THROWS_WITH(fixture.start(), Catch::Matchers::StartsWith("paths.work: cannot create the export directory:"));
+}
 
 TEST_CASE("REST transforms instances and objects atomically with explicit bases and bed placement", "[rest_transform]")
 {

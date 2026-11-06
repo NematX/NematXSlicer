@@ -168,4 +168,29 @@ std::optional<std::string> portable_file_name(const std::string &name, const std
     return stem + suffix;
 }
 
+std::string content_disposition_attachment(const std::string &file_name)
+{
+    std::string fallback;
+    for (std::size_t index = 0; index < file_name.size();) {
+        const std::size_t length = utf8_sequence_length(file_name, index);
+        const unsigned char character = static_cast<unsigned char>(file_name[index]);
+        fallback.push_back(length == 1 && character >= 0x20 && character < 0x7F &&
+            character != '"' && character != '\\' && character != '%' ? static_cast<char>(character) : '_');
+        index += length == 0 ? 1 : length;
+    }
+    const char *hex = "0123456789ABCDEF";
+    std::string encoded;
+    for (unsigned char character : file_name) {
+        if ((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+            (character >= '0' && character <= '9') || std::string("!#$&+-.^_`|~").find(character) != std::string::npos)
+            encoded.push_back(static_cast<char>(character));
+        else {
+            encoded.push_back('%');
+            encoded.push_back(hex[character >> 4]);
+            encoded.push_back(hex[character & 15]);
+        }
+    }
+    return "attachment; filename=\"" + fallback + "\"; filename*=UTF-8''" + encoded;
+}
+
 } // namespace Slic3r::Rest

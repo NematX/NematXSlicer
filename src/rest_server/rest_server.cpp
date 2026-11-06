@@ -16,7 +16,9 @@
 #include "profiles.hpp"
 #include "session.hpp"
 #include "settings.hpp"
+#include "temporary_file.hpp"
 #include "transform.hpp"
+#include "libslic3r/Format/3mf.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio.hpp>
@@ -639,6 +641,7 @@ struct RouteServices {
     asio::thread_pool &imports;
     const std::function<void()> &import_observer;
     std::uint32_t max_instances_per_object;
+    const std::filesystem::path &export_directory;
 };
 
 struct AuthenticatedRequest {
@@ -1949,6 +1952,97 @@ std::optional<HttpResponse> handle_load_project(
     return std::nullopt;
 }
 
+// Decode once so encoded duplicate keys and NUL cannot bypass query validation.
+bool parse_form_query(const std::string &query, std::map<std::string, std::string> &parameters)
+{
+    for (std::size_t cursor = 0; cursor < query.size();) {
+        const std::size_t end = query.find('&', cursor);
+        const std::string pair = query.substr(cursor, end == std::string::npos ? end : end - cursor);
+        cursor = end == std::string::npos ? query.size() : end + 1;
+        if (pair.empty())
+            continue;
+        const std::size_t equals = pair.find('=');
+        std::string key;
+        std::string value;
+        std::string encoded_key = pair.substr(0, equals);
+        std::string encoded_value = equals == std::string::npos ? std::string() : pair.substr(equals + 1);
+        std::replace(encoded_key.begin(), encoded_key.end(), '+', ' ');
+        std::replace(encoded_value.begin(), encoded_value.end(), '+', ' ');
+        if (!decode_path_segment(encoded_key, key) || !decode_path_segment(encoded_value, value) ||
+            !parameters.emplace(std::move(key), std::move(value)).second)
+            return false;
+    }
+    return true;
+}
+
+// The response owns its private archive until the asynchronous transport releases it.
+HttpResponse export_project(const SessionData &data, const std::filesystem::path &directory,
+    const std::string &filename, const std::string &request_id)
+{
+    try {
+        const std::shared_ptr<TemporaryFile> file = create_temporary_file(directory, "rest-export-", ".3mf");
+        // store_3mf can mutate baked_transformation and objects, so it must not receive the committed scene.
+        Model scene(*data.scene);
+        DynamicPrintConfig configuration(data.configuration);
+        for (const char *key : {"print_host", "printhost_apikey", "printhost_cafile", "printhost_port"})
+            configuration.erase(key);
+        const std::string path = file->path.u8string();
+        if (!store_3mf(path.c_str(), &scene, &configuration,
+                OptionStore3mf{}.set_fullpath_sources(false).set_profile_sections(data.profile_sections)))
+            throw std::runtime_error("Project export failed.");
+        HttpResponse response;
+        response.content_type = "model/3mf";
+        response.body_file = file->path;
+        response.body_file_owner = file;
+        response.headers.emplace("Content-Disposition", content_disposition_attachment(filename));
+        response.headers.emplace("Cache-Control", "no-store");
+        return response;
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not save the project.", request_id);
+    }
+}
+
+// Capture committed data before dispatch so later mutations or deletion cannot change the export.
+std::optional<HttpResponse> handle_save_project(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id, const DeferredResponder &respond)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (services.profiles == nullptr)
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The save_project route does not accept a request body.", request_id);
+    std::map<std::string, std::string> parameters;
+    if (!parse_form_query(request.query, parameters) || parameters.size() > 1 ||
+        (!parameters.empty() && (parameters.begin()->first != "file_name" || parameters.begin()->second.empty())))
+        return make_error_response(400, "invalid_request", "The save_project query is invalid.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::optional<SessionData> data = session->data_snapshot();
+    if (!data)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (data->scene == nullptr || data->scene->object_ptrs().empty())
+        return make_error_response(409, "empty_scene", "The session contains no objects.", request_id);
+    std::optional<std::string> filename;
+    if (!parameters.empty())
+        filename = portable_file_name(parameters.begin()->second, ".3mf");
+    if (!filename && data->name)
+        filename = portable_file_name(*data->name, ".3mf");
+    asio::post(services.imports, [data = std::move(*data), directory = services.export_directory,
+        filename = filename.value_or("project.3mf"), request_id, respond, observer = services.import_observer]() {
+        try {
+            if (observer)
+                observer();
+            respond(export_project(data, directory, filename, request_id));
+        } catch (...) {
+            respond(make_error_response(500, "internal_error", "The server could not save the project.", request_id));
+        }
+    });
+    return std::nullopt;
+}
+
 // Route injected by tests only; it is never registered in the standalone
 // executable.
 HttpResponse handle_private_test(
@@ -2019,6 +2113,8 @@ std::optional<HttpResponse> dispatch_request(
             return handle_add_model(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "load_project")
             return handle_load_project(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "save_project")
+            return handle_save_project(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "set_name")
             return handle_set_name(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_name")
@@ -2375,6 +2471,16 @@ private:
         };
     }
 
+    void set_response_fields(http::response_header<> &message, const HttpResponse &response)
+    {
+        message.set(http::field::server, "SuperSlicer REST");
+        message.set(http::field::connection, "close");
+        if (!response.no_body && !response.content_type.empty())
+            message.set(http::field::content_type, response.content_type);
+        for (const std::pair<const std::string, std::string> &header : response.headers)
+            message.set(header.first, header.second);
+    }
+
     void write_response(const HttpResponse &response)
     {
         if (closed_)
@@ -2385,14 +2491,29 @@ private:
         unsigned int status = response.status;
         if (status < 100 || status > 599)
             status = 500;
+        if (!response.body_file.empty()) {
+            file_response_owner_ = response.body_file_owner;
+            file_response_message_.emplace(static_cast<http::status>(status), 11);
+            ErrorCode error;
+            file_response_message_->body().open(response.body_file.u8string().c_str(), beast::file_mode::scan, error);
+            if (error) {
+                file_response_message_.reset();
+                file_response_owner_.reset();
+                write_response(make_error_response(500, "internal_error", "The server could not send the file.", request_id_));
+                return;
+            }
+            set_response_fields(*file_response_message_, response);
+            file_response_message_->prepare_payload();
+            arm_timeout(config_->request_timeout);
+            const std::shared_ptr<HttpSession> self = shared_from_this();
+            http::async_write(socket_, *file_response_message_, [self](const ErrorCode &error, std::size_t bytes) {
+                self->handle_write(error, bytes);
+            });
+            return;
+        }
         response_message_.emplace(static_cast<http::status>(status), 11);
-        response_message_->set(http::field::server, "SuperSlicer REST");
-        response_message_->keep_alive(false);
+        set_response_fields(*response_message_, response);
         response_message_->body() = response.no_body ? std::string() : response.body;
-        if (!response.no_body && !response.content_type.empty())
-            response_message_->set(http::field::content_type, response.content_type);
-        for (const std::pair<const std::string, std::string> &header : response.headers)
-            response_message_->set(header.first, header.second);
         response_message_->prepare_payload();
         arm_timeout(config_->request_timeout);
         const std::shared_ptr<HttpSession> self = shared_from_this();
@@ -2405,6 +2526,8 @@ private:
     void handle_write(const ErrorCode &error, std::size_t)
     {
         cancel_timeout();
+        file_response_message_.reset();
+        file_response_owner_.reset();
         if (error || parser_.is_done()) {
             close();
             return;
@@ -2454,6 +2577,9 @@ private:
     CloseCallback close_callback_;
     asio::steady_timer timer_;
     std::optional<HttpResponseMessage> response_message_;
+    // Reverse destruction closes the read handle before the temporary file is deleted on Windows.
+    std::shared_ptr<const void> file_response_owner_;
+    std::optional<http::response<http::file_body>> file_response_message_;
     // True once an upload is accepted: the timeout becomes an idle limit.
     bool idle_timeout_ = false;
     std::size_t drained_bytes_ = 0;
@@ -2498,6 +2624,15 @@ public:
             throw std::invalid_argument(json_error_message(
                 "paths.work", filesystem_error.message()));
         remove_stale_uploads(upload_directory(config_.work_directory));
+        export_directory_ = config_.work_directory / "exports";
+        std::filesystem::create_directories(export_directory_, filesystem_error);
+        if (filesystem_error)
+            throw std::invalid_argument("paths.work: cannot create the export directory: " + filesystem_error.message());
+        try {
+            remove_stale_temporary_files(export_directory_, "rest-export-");
+        } catch (const std::filesystem::filesystem_error &failure) {
+            throw std::invalid_argument("paths.work: cannot list the export directory: " + failure.code().message());
+        }
 
         ErrorCode error;
         const asio::ip::address address = asio::ip::make_address(config_.bind_address, error);
@@ -2603,7 +2738,8 @@ public:
             private_test_handler_,
             *import_pool_,
             import_observer_,
-            config_.max_instances_per_object};
+            config_.max_instances_per_object,
+            export_directory_};
     }
 
     void set_import_observer(std::function<void()> observer)
@@ -2681,6 +2817,7 @@ private:
     }
 
     ServerConfig config_;
+    std::filesystem::path export_directory_;
     std::shared_ptr<const ServerConfig> config_shared_;
     std::shared_ptr<AuthService> auth_service_;
     std::unique_ptr<ProfileCatalog> profile_catalog_;

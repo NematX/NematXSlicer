@@ -96,6 +96,10 @@ struct HttpResponse {
     unsigned int status = 200;
     std::string body;
     std::string content_type = "application/json; charset=utf-8";
+    // A nonempty path replaces body; its file must survive asynchronous transport reads.
+    std::filesystem::path body_file;
+    // Transport retains this owner until completion or disconnect, then permits file cleanup.
+    std::shared_ptr<const void> body_file_owner;
     bool no_body = false;
     // Extra headers set verbatim on the wire, for example Cache-Control on a
     // credential response.

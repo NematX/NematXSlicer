@@ -24,6 +24,16 @@
 
 using namespace RestServerTest;
 
+TEST_CASE("REST save_project checks method before engine initialization", "[rest_server][rest_save_project]")
+{
+    RestServerFixture fixture;
+    const HttpResponseMessage method = fixture.request(http::verb::post, "/session/missing/save_project", "bad");
+    CHECK(method.result() == http::status::not_found);
+    const HttpResponseMessage engine = fixture.request(http::verb::get, "/session/missing/save_project?bad=x", "bad");
+    CHECK(engine.result() == http::status::service_unavailable);
+    CHECK(nlohmann::json::parse(engine.body()).at("error").at("code") == "engine_not_initialized");
+}
+
 TEST_CASE("REST server handles loopback JSON and route errors", "[rest_server]")
 {
     RestServerFixture fixture;
