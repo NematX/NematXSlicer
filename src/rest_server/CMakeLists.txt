@@ -41,6 +41,8 @@ endif ()
 set_property(TARGET slic3r_rest_auth PROPERTY FOLDER "rest_server")
 
 add_library(slic3r_rest STATIC
+    multipart_upload.cpp
+    multipart_upload.hpp
     profiles.cpp
     profiles.hpp
     rest_server.cpp
@@ -49,6 +51,8 @@ add_library(slic3r_rest STATIC
     settings_codec.cpp
     settings.hpp
     settings_internal.hpp
+    temporary_file.cpp
+    temporary_file.hpp
 )
 
 target_include_directories(slic3r_rest

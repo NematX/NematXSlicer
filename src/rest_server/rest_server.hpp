@@ -22,6 +22,7 @@
 namespace Slic3r::Rest {
 
 class SessionRegistry;
+struct HttpUpload;
 
 struct ServerConfig {
     std::string bind_address;
@@ -31,8 +32,14 @@ struct ServerConfig {
     std::filesystem::path work_directory;
     std::filesystem::path accounts_file;
     std::uint64_t max_request_body_bytes;
+    std::uint64_t max_upload_bytes;
     std::uint64_t max_header_bytes;
     std::uint32_t max_connections;
+    // Threads parsing uploaded models away from the network thread, so a long
+    // import never delays other requests.
+    std::uint32_t import_threads;
+    // Deadline for a whole buffered request, and idle delay between two reads
+    // of a streamed upload.
     std::chrono::seconds request_timeout;
     std::chrono::seconds token_ttl;
     // Session inactivity delay; distinct from the bearer token TTL.
@@ -70,6 +77,18 @@ struct HttpRequest {
     std::map<std::string, std::string> headers;
     std::string body;
     std::shared_ptr<const nlohmann::json> json_body;
+    std::shared_ptr<const HttpUpload> upload;
+};
+
+// Completed multipart upload. The destructor deletes the temporary file, so
+// the file lives exactly as long as the last owner of this object.
+struct HttpUpload {
+    std::filesystem::path temporary_path;
+    std::string filename;
+    std::string extension;
+    std::uint64_t byte_count = 0;
+
+    ~HttpUpload();
 };
 
 struct HttpResponse {
@@ -80,6 +99,7 @@ struct HttpResponse {
     // Extra headers set verbatim on the wire, for example Cache-Control on a
     // credential response.
     std::map<std::string, std::string> headers;
+    bool stream_request = false;
 
     static HttpResponse json(unsigned int status, const nlohmann::json &payload);
     static HttpResponse error(
@@ -109,6 +129,10 @@ public:
     // a session in a state no public route can reach yet (for example a
     // running slicing job). Valid only while the server is running.
     SessionRegistry &session_registry() const;
+    // Test hook called on the import thread before each model is parsed; a
+    // test can block in it to prove the network thread keeps serving requests.
+    // Must be set before start().
+    void set_import_observer(std::function<void()> observer);
 
 private:
     class Impl;

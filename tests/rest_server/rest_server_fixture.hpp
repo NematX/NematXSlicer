@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -83,6 +84,7 @@ class RestServerFixture {
 public:
     struct Limits {
         std::uint64_t max_body_bytes = 1024 * 1024;
+        std::uint64_t max_upload_bytes = 1024 * 1024;
         std::uint64_t max_header_bytes = 16 * 1024;
         std::uint32_t max_connections = 64;
         std::chrono::seconds timeout{30};
@@ -196,6 +198,34 @@ public:
         return server_->session_registry();
     }
 
+    // The server accepts the import hook only while stopped: call stop(), set
+    // it, then start() again.
+    void set_import_observer(std::function<void()> observer)
+    {
+        server_->set_import_observer(std::move(observer));
+    }
+
+    const std::string &token() const
+    {
+        return default_token_;
+    }
+
+    std::filesystem::path work_directory() const
+    {
+        return root_directory_.path() / "work";
+    }
+
+    std::size_t work_file_count() const
+    {
+        std::size_t count = 0;
+        const std::filesystem::path work = root_directory_.path() / "work";
+        for (const std::filesystem::directory_entry &entry :
+             std::filesystem::recursive_directory_iterator(work))
+            if (entry.is_regular_file())
+                ++count;
+        return count;
+    }
+
     std::map<std::string, std::string> profile_files() const
     {
         std::map<std::string, std::string> files;
@@ -224,6 +254,7 @@ private:
         config.work_directory = root / "work";
         config.accounts_file = root / "accounts.json";
         config.max_request_body_bytes = limits_.max_body_bytes;
+        config.max_upload_bytes = limits_.max_upload_bytes;
         config.max_header_bytes = limits_.max_header_bytes;
         config.max_connections = limits_.max_connections;
         config.request_timeout = limits_.timeout;

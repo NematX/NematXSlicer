@@ -45,6 +45,29 @@ endif ()
 set_property(TARGET rest_profiles_tests PROPERTY FOLDER "tests")
 add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 
+add_executable(rest_models_tests
+    rest_models_tests.cpp
+)
+
+target_compile_definitions(rest_models_tests PRIVATE
+    SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)"
+)
+
+target_link_libraries(rest_models_tests
+    test_common
+    slic3r_rest
+    slic3r_rest_engine
+    boost_libs
+)
+
+if (WIN32)
+    target_compile_definitions(rest_models_tests PRIVATE _WIN32_WINNT=0x0601)
+    prusaslicer_copy_dlls(rest_models_tests)
+endif ()
+
+set_property(TARGET rest_models_tests PROPERTY FOLDER "tests")
+add_test(rest_models_tests rest_models_tests ${CATCH_EXTRA_ARGS})
+
 add_executable(rest_settings_tests
     rest_settings_tests.cpp
 )
@@ -128,6 +151,7 @@ add_test(rest_auth_tests rest_auth_tests ${CATCH_EXTRA_ARGS})
 set_tests_properties(
     rest_server_tests
     rest_profiles_tests
+    rest_models_tests
     rest_settings_tests
     rest_engine_tests
     rest_session_tests

@@ -4,6 +4,8 @@
  * The configured profile tree is loaded into a read-only bundle. Selection
  * requests copy that bundle, validate every requested profile, and build the
  * complete FFF configuration before the session mutation is committed.
+ * Project profile sections are passed to the core and regenerated from the
+ * loaded presets rather than copied from an untrusted archive.
  */
 
 #include "profiles.hpp"
@@ -24,6 +26,9 @@ namespace Slic3r::Rest {
 namespace {
 
 using Json = nlohmann::json;
+
+// Compose project-capable session settings without copying values reserved for a profile's local owner.
+DynamicPrintConfig session_configuration(const PresetBundle &bundle);
 
 void load_collection(
     PresetCollection &collection,
@@ -239,8 +244,18 @@ ProfileApplication apply_selection(PresetBundle bundle, const ProfileSelection &
 
     ProfileApplication application;
     application.selection = effective_selection(bundle);
-    application.configuration = bundle.full_config_secure();
+    application.configuration = session_configuration(bundle);
+    application.profile_sections = bundle.project_profile_sections();
     return application;
+}
+
+DynamicPrintConfig session_configuration(const PresetBundle &bundle)
+{
+    DynamicPrintConfig configuration = bundle.full_config();
+    for (const std::string &key : configuration.keys())
+        if (!configuration.writes_key(key, ConfigWriteTarget::Project))
+            configuration.erase(key);
+    return configuration;
 }
 
 std::string resolve_profile_id(
@@ -263,6 +278,48 @@ std::string profile_id_for_name(
     if (profile == names_to_ids.end())
         throw std::invalid_argument(std::string("The effective ") + category + " profile is unavailable.");
     return profile->second;
+}
+
+// True when the edited copy of the selected preset holds a value that changes
+// the configuration. The engine's dirty flag is not used directly: loading a
+// project also recomputes the phony width/spacing pair and the print_version
+// stamp, which the flag reports as modifications although they change nothing.
+bool edited_preset_modified(const PresetCollection &collection)
+{
+    const Preset &edited = collection.get_edited_preset();
+    const Preset &selected = collection.get_selected_preset();
+    for (const auto &[key, flags] : PresetCollection::dirty_options(&edited, &selected, true)) {
+        if (key.key == "print_version")
+            continue;
+        const ConfigOption *edited_option = edited.config.option(key.key);
+        const ConfigOption *selected_option = selected.config.option(key.key);
+        if ((edited_option != nullptr && edited_option->is_phony()) ||
+            (selected_option != nullptr && selected_option->is_phony()))
+            continue;
+        return true;
+    }
+    return false;
+}
+
+// Catalog ID of a preset selected after a project load, or "" when the
+// project does not use the installed preset unchanged. The engine reports a
+// difference in two ways: a new external preset (embedded profile, or a
+// modified filament slot), or the installed preset selected with a modified
+// edited copy. The edited copy is identified by name, so when two filament
+// slots use the same installed preset and only one is modified, both report
+// "": an unchanged slot may be shown as modified, never the reverse.
+std::string installed_profile_id(
+    const PresetCollection &collection,
+    const std::string &name,
+    const std::unordered_map<std::string, std::string> &names_to_ids)
+{
+    const Preset *preset = collection.find_preset(name, false, false);
+    if (preset == nullptr || preset->is_external)
+        return {};
+    if (collection.get_edited_preset().name == name && edited_preset_modified(collection))
+        return {};
+    const std::unordered_map<std::string, std::string>::const_iterator profile = names_to_ids.find(name);
+    return profile == names_to_ids.end() ? std::string() : profile->second;
 }
 
 } // namespace
@@ -324,6 +381,25 @@ ProfileApplication ProfileCatalog::select(const ProfileSelection &requested) con
     application.selection.printer = profile_id_for_name(printer_profile_ids_, application.selection.printer, "printer");
     for (std::string &filament : application.selection.filaments)
         filament = profile_id_for_name(filament_profile_ids_, filament, "filament");
+    return application;
+}
+
+ProfileApplication ProfileCatalog::load_project(DynamicPrintConfig project, const std::string &project_name,
+    const std::string &profile_sections) const
+{
+    PresetBundle bundle = bundle_;
+    bundle.load_config_model(project_name, std::move(project), profile_sections);
+
+    ProfileApplication application;
+    application.selection.print = installed_profile_id(
+        bundle.fff_prints, bundle.fff_prints.get_selected_preset_name(), print_profile_ids_);
+    application.selection.printer = installed_profile_id(
+        bundle.printers, bundle.printers.get_selected_preset_name(), printer_profile_ids_);
+    for (const ExtruderFilaments &slot : bundle.extruders_filaments)
+        application.selection.filaments.push_back(installed_profile_id(
+            bundle.filaments, slot.get_selected_preset_name(), filament_profile_ids_));
+    application.configuration = session_configuration(bundle);
+    application.profile_sections = bundle.project_profile_sections();
     return application;
 }
 

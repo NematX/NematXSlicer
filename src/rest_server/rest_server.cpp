@@ -11,16 +11,19 @@
 #include "rest_server.hpp"
 
 #include "auth.hpp"
+#include "multipart_upload.hpp"
 #include "profiles.hpp"
 #include "session.hpp"
 #include "settings.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <boost/beast/version.hpp>
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <fstream>
@@ -44,17 +47,32 @@ namespace asio = boost::asio;
 
 using ErrorCode = boost::system::error_code;
 using Tcp = asio::ip::tcp;
-using HttpRequestMessage = http::request<http::string_body>;
+using HttpRequestMessage = http::request<http::buffer_body>;
 using HttpResponseMessage = http::response<http::string_body>;
-using HttpRequestParser = http::request_parser<http::string_body>;
+using HttpRequestParser = http::request_parser<http::buffer_body>;
+// Delivers a response that a route produces later on another thread. It may
+// be called from any thread, exactly once.
+using DeferredResponder = std::function<void(HttpResponse)>;
 // Resolves one parsed request to a response; the transport owns no routing.
-using RestRouter = std::function<HttpResponse(HttpRequest &, const std::string &request_id)>;
+// An empty result means the route kept `respond` and will answer later.
+using RestRouter = std::function<std::optional<HttpResponse>(
+    HttpRequest &,
+    const std::string &request_id,
+    bool body_complete,
+    const DeferredResponder &respond)>;
 
 // Default buffered JSON body limit. The specification's 1 GiB upload limit
 // belongs to the streamed multipart route, not to buffered JSON bodies.
 constexpr std::uint64_t default_max_request_body_bytes = 16ULL * 1024ULL * 1024ULL;
+constexpr std::uint64_t default_max_upload_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t default_max_header_bytes = 16ULL * 1024ULL;
 constexpr std::uint32_t default_max_connections = 64;
+constexpr std::uint32_t default_import_threads = 2;
+// After an early error response the refused request body is read and dropped
+// within these bounds, so closing the socket sends FIN instead of a TCP reset
+// that would hide the response from the client.
+constexpr std::size_t max_drain_bytes = 1024 * 1024;
+constexpr std::chrono::seconds drain_timeout{2};
 constexpr std::int64_t default_request_timeout_seconds = 30;
 constexpr std::int64_t default_token_ttl_seconds = 24 * 60 * 60;
 constexpr std::int64_t default_session_ttl_seconds = 24 * 60 * 60;
@@ -192,6 +210,9 @@ void apply_json_config(
         if (limits.contains("max_request_body_bytes"))
             config.max_request_body_bytes = read_unsigned_json(
                 limits.at("max_request_body_bytes"), "limits.max_request_body_bytes");
+        if (limits.contains("max_upload_bytes"))
+            config.max_upload_bytes = read_unsigned_json(
+                limits.at("max_upload_bytes"), "limits.max_upload_bytes");
         if (limits.contains("max_header_bytes"))
             config.max_header_bytes = read_unsigned_json(
                 limits.at("max_header_bytes"), "limits.max_header_bytes");
@@ -201,6 +222,13 @@ void apply_json_config(
             if (max_connections > std::numeric_limits<std::uint32_t>::max())
                 throw std::invalid_argument("limits.max_connections is too large");
             config.max_connections = static_cast<std::uint32_t>(max_connections);
+        }
+        if (limits.contains("import_threads")) {
+            const std::uint64_t import_threads = read_unsigned_json(
+                limits.at("import_threads"), "limits.import_threads");
+            if (import_threads > std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument("limits.import_threads is too large");
+            config.import_threads = static_cast<std::uint32_t>(import_threads);
         }
     }
 
@@ -415,8 +443,8 @@ bool parse_request_json(
     return true;
 }
 
-// Copy method, target, headers and buffered body out of the parser. The target
-// is decoded once here; JSON is parsed later by the route that declares it.
+// Copy method, target and headers out of the parser. The body is supplied by the
+// transport after either bounded buffering or multipart streaming completes.
 bool build_request_context(
     HttpRequestMessage &message,
     HttpRequest &request,
@@ -438,9 +466,6 @@ bool build_request_context(
     request.path_segments = std::move(target.segments);
     request.query = target.query;
     request.request_id = request_id;
-    // The parser message is not reused: the connection serves one request and is
-    // then closed, so the buffered body can be moved instead of copied.
-    request.body = std::move(message.body());
     for (HttpRequestMessage::const_iterator iterator = message.begin(); iterator != message.end(); ++iterator) {
         const boost::core::basic_string_view<char> name_view = iterator->name_string();
         const boost::core::basic_string_view<char> value_view = iterator->value();
@@ -598,7 +623,54 @@ struct RouteServices {
     SessionRegistry &sessions;
     const ProfileCatalog *profiles;
     const RequestHandler &private_test_handler;
+    // Worker threads for model parsing; jobs never touch the registry, only
+    // the session they captured, so they may outlive the request dispatch.
+    asio::thread_pool &imports;
+    const std::function<void()> &import_observer;
 };
+
+struct AuthenticatedRequest {
+    std::string token;
+    std::string username;
+    AuthTimePoint now;
+};
+
+std::optional<AuthenticatedRequest> authenticate_request(
+    const HttpRequest &request,
+    const RouteServices &services,
+    HttpResponse &error_response,
+    const std::string &request_id)
+{
+    const std::optional<std::string> token = bearer_token(request);
+    if (!token.has_value()) {
+        error_response = make_unauthorized_response(request_id);
+        return std::nullopt;
+    }
+    const AuthTimePoint now = std::chrono::system_clock::now();
+    const std::optional<std::string> username = services.auth.username_for_token(*token, now);
+    if (!username.has_value()) {
+        error_response = make_unauthorized_response(request_id);
+        return std::nullopt;
+    }
+    return AuthenticatedRequest{*token, *username, now};
+}
+
+// Routes whose body is a streamed multipart file instead of buffered JSON.
+bool is_upload_route(const HttpRequest &request)
+{
+    return request.path_segments.size() == 3 &&
+        request.path_segments[0] == "session" &&
+        (request.path_segments[2] == "add_model" || request.path_segments[2] == "load_project");
+}
+
+// File formats accepted by an upload route: any model for add_model, only a
+// 3MF project for load_project.
+std::vector<std::string> upload_extensions(const HttpRequest &request)
+{
+    if (request.path_segments[2] == "load_project")
+        return {".3mf"};
+    return {".stl", ".obj", ".3mf"};
+}
 
 
 // Public login route. An unknown account and a wrong password return the same
@@ -724,6 +796,7 @@ if (services.profiles != nullptr) {
             request_id);
     }
     session_data.configuration = initial.configuration;
+    session_data.profile_sections = initial.profile_sections;
     session_data.profiles = initial.selection;
 }
 const std::shared_ptr<SessionContext> session = services.sessions.create(
@@ -817,6 +890,7 @@ if (!current.has_value())
 const nlohmann::json response_body = profile_selection_json(application.selection);
 SessionData candidate = current.value();
 candidate.configuration = std::move(application.configuration);
+candidate.profile_sections = std::move(application.profile_sections);
 candidate.profiles = std::move(application.selection);
 if (!session->commit_mutation(
         mutation.value(),
@@ -1093,6 +1167,428 @@ try {
 }
 }
 
+// Reserve an upload only after authentication and session ownership have been
+// checked, so an unauthenticated client cannot make the server write a file.
+HttpResponse handle_upload_preflight(
+    const HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (request.path_segments[2] == "load_project" && services.profiles == nullptr)
+        return make_error_response(
+            503,
+            "engine_not_initialized",
+            "The REST engine is not initialized.",
+            request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username,
+        request.path_segments[1],
+        SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!session->begin_mutation().has_value())
+        return make_error_response(
+            409,
+            "session_busy",
+            "The session is currently slicing.",
+            request_id);
+
+    HttpResponse response;
+    response.stream_request = true;
+    return response;
+}
+
+// Replace every occurrence of `from` in `text`; used to keep server paths out
+// of error messages returned to clients.
+void replace_all(std::string &text, const std::string &from, const std::string &to)
+{
+    if (from.empty())
+        return;
+    for (std::size_t position = text.find(from); position != std::string::npos;
+         position = text.find(from, position + to.size()))
+        text.replace(position, from.size(), to);
+}
+
+// Map a name the loaders derived from the server temporary file to the client
+// file name. STL/OBJ loaders use the temporary file name itself; the 3MF
+// loader falls back to "<temporary stem>_N" for unnamed objects, which
+// becomes "<client stem>_N". Other names come from the file and are kept.
+std::string client_visible_name(const std::string &name, const HttpUpload &upload)
+{
+    const std::string temporary_name = upload.temporary_path.filename().string();
+    if (name == temporary_name)
+        return upload.filename;
+    const std::string temporary_stem = upload.temporary_path.stem().string();
+    if (!temporary_stem.empty() && name.compare(0, temporary_stem.size(), temporary_stem) == 0) {
+        // String split rather than std::filesystem: the client name is UTF-8.
+        const std::size_t dot = upload.filename.find_last_of('.');
+        const std::string client_stem = dot == std::string::npos ? upload.filename : upload.filename.substr(0, dot);
+        return client_stem + name.substr(temporary_stem.size());
+    }
+    return name;
+}
+
+// Remove every trace of the server temporary path from an imported object:
+// object and volume names, and their source file references. Clients, the
+// object listing and saved projects must only see the client file name.
+void hide_upload_path(ModelObject &object, const HttpUpload &upload)
+{
+    const std::string source_path = upload.temporary_path.string();
+    object.name = object.name.empty() ? upload.filename : client_visible_name(object.name, upload);
+    if (object.input_file == source_path)
+        object.input_file = upload.filename;
+    for (ModelVolume *volume : object.volumes) {
+        volume->name = client_visible_name(volume->name, upload);
+        if (volume->source.input_file == source_path)
+            volume->source.input_file = upload.filename;
+    }
+}
+
+// Runs on an import thread. Parse the upload, add its objects to a private
+// scene copy, and commit the scene together with the new entity IDs, so a
+// failed import can neither leak mappings nor publish a half-built scene.
+// Loader failures (std::runtime_error, including Slic3r::RuntimeError) are
+// client errors; anything else is an internal error with a generic message.
+// Only objects are imported: model-level 3MF data such as the project
+// configuration or per-height custom G-code is discarded.
+HttpResponse import_model(
+    SessionContext &session,
+    SessionContext::MutationToken mutation,
+    const SessionData &current,
+    const HttpUpload &upload,
+    const std::string &request_id)
+{
+    const std::string source_path = upload.temporary_path.string();
+    const std::string temporary_name = upload.temporary_path.filename().string();
+    try {
+        Model imported = Model::read_from_file(
+            source_path,
+            nullptr,
+            nullptr,
+            Model::LoadAttribute::AddDefaultInstances);
+        const std::shared_ptr<Model> candidate_scene = std::make_shared<Model>(*current.scene);
+        std::vector<std::size_t> object_binding_indices;
+        std::vector<EntityBinding> bindings;
+
+        for (ModelObject *imported_object : imported.object_ptrs()) {
+            ModelObject *added_object = candidate_scene->add_object(*imported_object);
+            hide_upload_path(*added_object, upload);
+
+            object_binding_indices.push_back(bindings.size());
+            bindings.push_back({EntityKind::object, static_cast<std::uint64_t>(added_object->id().id)});
+            for (ModelVolume *volume : added_object->volumes)
+                bindings.push_back({EntityKind::volume, static_cast<std::uint64_t>(volume->id().id)});
+            for (ModelInstance *instance : added_object->instances)
+                bindings.push_back({EntityKind::instance, static_cast<std::uint64_t>(instance->id().id)});
+        }
+
+        SessionData candidate = current;
+        candidate.scene = candidate_scene;
+        std::vector<std::string> bound_ids;
+        if (!session.commit_mutation(
+                mutation,
+                std::move(candidate),
+                true,
+                SessionRegistry::Clock::now(),
+                bindings,
+                bound_ids))
+            return make_error_response(
+                409,
+                "session_changed",
+                "The session changed while the model was imported.",
+                request_id);
+
+        nlohmann::json object_ids = nlohmann::json::array();
+        for (std::size_t binding_index : object_binding_indices)
+            object_ids.push_back(bound_ids.at(binding_index));
+        return HttpResponse::json(200, nlohmann::json{
+            {"object_ids", object_ids},
+            {"object_count", object_ids.size()}
+        });
+    } catch (const std::runtime_error &error) {
+        std::string message = error.what();
+        replace_all(message, source_path, upload.filename);
+        replace_all(message, temporary_name, upload.filename);
+        return make_error_response(422, "invalid_model", message, request_id);
+    } catch (...) {
+        return make_error_response(
+            500,
+            "internal_error",
+            "The server could not import the model.",
+            request_id);
+    }
+}
+
+// Validate the completed upload on the network thread, then hand the parsing
+// to the import pool. The job owns everything it uses (session, snapshot,
+// temporary file), and answers through `respond` once the import is done.
+std::optional<HttpResponse> handle_add_model(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (request.upload == nullptr)
+        return make_error_response(
+            400,
+            "invalid_multipart",
+            "The request must contain one uploaded file.",
+            request_id);
+
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username,
+        request.path_segments[1],
+        SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation.has_value())
+        return make_error_response(
+            409,
+            "session_busy",
+            "The session is currently slicing.",
+            request_id);
+    std::optional<SessionData> current = session->data_snapshot();
+    if (!current.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+
+    asio::post(services.imports, [
+        session,
+        token = mutation.value(),
+        data = std::move(current.value()),
+        upload = request.upload,
+        request_id,
+        respond,
+        observer = services.import_observer]() {
+        if (observer)
+            observer();
+        respond(import_model(*session, token, data, *upload, request_id));
+    });
+    return std::nullopt;
+}
+
+// Name the first integer extruder option ("extruder" or "*_extruder") whose
+// 1-based index exceeds the extruders of the project; 0 means "default".
+std::optional<std::string> extruder_out_of_range(
+    const DynamicPrintConfig &config,
+    std::size_t extruder_count,
+    const std::string &owner)
+{
+    for (const std::string &key : config.keys()) {
+        if (key != "extruder" && !boost::ends_with(key, "_extruder"))
+            continue;
+        const ConfigOptionInt *option = dynamic_cast<const ConfigOptionInt *>(config.option(key));
+        if (option != nullptr && option->value > 0 && static_cast<std::size_t>(option->value) > extruder_count)
+            return owner + " uses extruder " + std::to_string(option->value) + " in " + key +
+                ", but the project defines " + std::to_string(extruder_count) + " extruder(s).";
+    }
+    return std::nullopt;
+}
+
+// Check the project configuration, every object, volume and layer range
+// against the extruder count of the project. It must run on the configuration
+// as loaded: the profile recomposition clamps the global *_extruder options
+// to the extruder count and would hide an invalid index.
+std::optional<std::string> project_extruder_error(
+    const Model &scene,
+    const DynamicPrintConfig &configuration,
+    std::size_t count)
+{
+    std::optional<std::string> error = extruder_out_of_range(configuration, count, "The project configuration");
+    for (const ModelObject *object : scene.object_ptrs()) {
+        const std::string owner = "Object \"" + object->name + "\"";
+        if (!error)
+            error = extruder_out_of_range(object->config.get(), count, owner);
+        for (const ModelVolume *volume : object->volumes)
+            if (!error)
+                error = extruder_out_of_range(volume->config.get(), count, owner);
+        for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
+            if (!error)
+                error = extruder_out_of_range(range.second.get(), count, owner);
+    }
+    return error;
+}
+
+// Runs on an import thread. Load a 3MF project into a new scene and a
+// configuration recomposed from its embedded profiles, then replace the
+// session scene, configuration and profile selection in one commit that also
+// drops every previous entity ID. Session preferences are kept. Loader and
+// configuration errors are client errors (422 invalid_project); the session
+// is left untouched by any refusal.
+HttpResponse import_project(
+    SessionContext &session,
+    SessionContext::MutationToken mutation,
+    const SessionData &current,
+    const HttpUpload &upload,
+    const ProfileCatalog &profiles,
+    const std::string &request_id)
+{
+    const std::string source_path = upload.temporary_path.string();
+    const std::string temporary_name = upload.temporary_path.filename().string();
+    const auto invalid_project = [&request_id](const std::string &message) {
+        return make_error_response(422, "invalid_project", message, request_id);
+    };
+    try {
+        // The substitution context collects the keys the engine does not
+        // know, so they can be preserved as custom settings. Only the Enable
+        // rule records the unknown keys that the legacy handling drops.
+        DynamicPrintConfig loaded;
+        ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+        std::string profile_sections;
+        Model scene = Model::read_from_archive(
+            source_path,
+            &loaded,
+            &substitutions,
+            Model::LoadAttribute::AddDefaultInstances,
+            &profile_sections);
+        // Unlike the archive reader, the project route requires a scene, as the generic model reader does.
+        if (scene.object_ptrs().empty())
+            return invalid_project("The supplied file couldn't be read because it's empty");
+        substitutions.sort_and_remove_duplicates();
+        if (Preset::printer_technology(loaded) != ptFFF)
+            return invalid_project("The project is not an FFF project.");
+
+        // A project replaces every slicing category: keys it does not contain
+        // start from the system defaults, as for a profile load.
+        DynamicPrintConfig project;
+        project.apply(FullPrintConfig::defaults());
+        project.apply(loaded, true);
+
+        // The extruder count drives every per-extruder vector: an empty nozzle
+        // list would make the normalization and the preset split below index
+        // empty vectors. Extruder indices are checked before they are clamped.
+        const ConfigOptionFloats *nozzle_diameter = project.option<ConfigOptionFloats>("nozzle_diameter");
+        if (nozzle_diameter == nullptr || nozzle_diameter->empty())
+            return invalid_project("The project defines no extruder.");
+        if (const std::optional<std::string> error = project_extruder_error(scene, project, nozzle_diameter->size()))
+            return invalid_project(error.value());
+
+        Preset::normalize(project);
+        preserve_unknown_project_settings(project, substitutions.get());
+        validate_preset_custom_settings(project);
+        ProfileApplication application = profiles.load_project(std::move(project), upload.filename, profile_sections);
+
+        const std::string validation_error = DynamicPrintConfig(application.configuration).validate();
+        if (!validation_error.empty())
+            return invalid_project("The project configuration is invalid: " + validation_error);
+
+        std::vector<std::size_t> object_binding_indices;
+        std::vector<EntityBinding> bindings;
+        for (ModelObject *object : scene.object_ptrs()) {
+            hide_upload_path(*object, upload);
+            object_binding_indices.push_back(bindings.size());
+            bindings.push_back({EntityKind::object, static_cast<std::uint64_t>(object->id().id)});
+            for (ModelVolume *volume : object->volumes)
+                bindings.push_back({EntityKind::volume, static_cast<std::uint64_t>(volume->id().id)});
+            for (ModelInstance *instance : object->instances)
+                bindings.push_back({EntityKind::instance, static_cast<std::uint64_t>(instance->id().id)});
+        }
+
+        SessionData candidate;
+        candidate.scene = std::make_shared<Model>(std::move(scene));
+        candidate.configuration = std::move(application.configuration);
+        candidate.profile_sections = std::move(application.profile_sections);
+        candidate.preferences = current.preferences;
+        candidate.profiles = std::move(application.selection);
+        std::vector<std::string> bound_ids;
+        if (!session.commit_mutation(
+                mutation,
+                std::move(candidate),
+                true,
+                SessionRegistry::Clock::now(),
+                bindings,
+                bound_ids,
+                true))
+            return make_error_response(
+                409,
+                "session_changed",
+                "The session changed while the project was loaded.",
+                request_id);
+
+        nlohmann::json object_ids = nlohmann::json::array();
+        for (std::size_t binding_index : object_binding_indices)
+            object_ids.push_back(bound_ids.at(binding_index));
+        return HttpResponse::json(200, nlohmann::json{
+            {"object_ids", object_ids},
+            {"object_count", object_ids.size()}
+        });
+    } catch (const std::runtime_error &error) {
+        std::string message = error.what();
+        replace_all(message, source_path, upload.filename);
+        replace_all(message, temporary_name, upload.filename);
+        return invalid_project(message);
+    } catch (...) {
+        return make_error_response(
+            500,
+            "internal_error",
+            "The server could not load the project.",
+            request_id);
+    }
+}
+
+// Same flow as add_model: validate on the network thread, then load the
+// project on the import pool and answer through `respond`.
+std::optional<HttpResponse> handle_load_project(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (services.profiles == nullptr)
+        return make_error_response(
+            503,
+            "engine_not_initialized",
+            "The REST engine is not initialized.",
+            request_id);
+    if (request.upload == nullptr)
+        return make_error_response(
+            400,
+            "invalid_multipart",
+            "The request must contain one uploaded file.",
+            request_id);
+
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username,
+        request.path_segments[1],
+        SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation.has_value())
+        return make_error_response(
+            409,
+            "session_busy",
+            "The session is currently slicing.",
+            request_id);
+    std::optional<SessionData> current = session->data_snapshot();
+    if (!current.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+
+    asio::post(services.imports, [
+        session,
+        token = mutation.value(),
+        data = std::move(current.value()),
+        upload = request.upload,
+        profiles = services.profiles,
+        request_id,
+        respond,
+        observer = services.import_observer]() {
+        if (observer)
+            observer();
+        respond(import_project(*session, token, data, *upload, *profiles, request_id));
+    });
+    return std::nullopt;
+}
+
 // Route injected by tests only; it is never registered in the standalone
 // executable.
 HttpResponse handle_private_test(
@@ -1118,48 +1614,59 @@ try {
 }
 
 
-HttpResponse dispatch_request(
+// Route one request. `body_complete` is false only for the upload preflight,
+// which runs after the headers so a refused upload is never written to disk.
+std::optional<HttpResponse> dispatch_request(
     HttpRequest &request,
     const RouteServices &services,
-    const std::string &request_id)
+    const std::string &request_id,
+    bool body_complete,
+    const DeferredResponder &respond)
 {
     if (request.path == "/login")
         return handle_login(request, services, request_id);
 
     // Every route except /login requires a valid bearer token before route
     // resolution, so an unknown path cannot be probed without credentials.
-    const std::optional<std::string> token = bearer_token(request);
-    if (!token.has_value())
-        return make_unauthorized_response(request_id);
+    HttpResponse authentication_error;
+    const std::optional<AuthenticatedRequest> authentication = authenticate_request(
+        request,
+        services,
+        authentication_error,
+        request_id);
+    if (!authentication.has_value())
+        return authentication_error;
 
-    const AuthTimePoint now = std::chrono::system_clock::now();
-    const std::optional<std::string> username = services.auth.username_for_token(*token, now);
-    if (!username.has_value())
-        return make_unauthorized_response(request_id);
+    if (!body_complete && is_upload_route(request))
+        return handle_upload_preflight(request, services, authentication->username, request_id);
 
     if (request.path == "/logout")
-        return handle_logout(request, services, *token, now, request_id);
+        return handle_logout(request, services, authentication->token, authentication->now, request_id);
     if (request.path == "/list_settings")
         return handle_list_settings(request, request_id);
     if (request.path == "/create_session")
-        return handle_create_session(request, services, *username, request_id);
+        return handle_create_session(request, services, authentication->username, request_id);
 
     // Session routes match decoded segments and resolve the owning account before
     // their handler reads or mutates the session.
     if (request.path_segments.size() >= 3 && request.path_segments[0] == "session") {
         const std::string &operation = request.path_segments[2];
         if (request.path_segments.size() == 3 && operation == "list_profiles")
-            return handle_list_profiles(request, services, *username, request_id);
+            return handle_list_profiles(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_profile")
-            return handle_set_profile(request, services, *username, request_id);
+            return handle_set_profile(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "add_model")
+            return handle_add_model(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "load_project")
+            return handle_load_project(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "get_setting")
-            return handle_get_setting(request, services, *username, request_id);
+            return handle_get_setting(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_settings")
-            return handle_get_settings(request, services, *username, request_id);
+            return handle_get_settings(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 5 && operation == "set_setting")
-            return handle_set_setting(request, services, *username, request_id);
+            return handle_set_setting(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_settings")
-            return handle_set_settings(request, services, *username, request_id);
+            return handle_set_settings(request, services, authentication->username, request_id);
     }
 
     return handle_private_test(request, services, request_id);
@@ -1168,6 +1675,32 @@ HttpResponse dispatch_request(
 
 class HttpSession;
 
+// HTTP body limit shared by every route: the largest buffered JSON body or the
+// file payload plus its multipart framing. The framing is the part headers
+// (bounded by max_header_bytes in the multipart parser), a preamble of the same
+// bound, and a few boundary lines; the file bytes are bounded by the parser.
+std::uint64_t parser_body_limit(const ServerConfig &config)
+{
+    constexpr std::uint64_t boundary_lines_bytes = 4ULL * 1024ULL;
+    const std::uint64_t maximum = std::numeric_limits<std::uint64_t>::max();
+    const std::uint64_t framing = config.max_header_bytes > (maximum - boundary_lines_bytes) / 2
+        ? maximum
+        : 2 * config.max_header_bytes + boundary_lines_bytes;
+    const std::uint64_t upload_limit = config.max_upload_bytes > maximum - framing
+        ? maximum
+        : config.max_upload_bytes + framing;
+    return std::max(config.max_request_body_bytes, upload_limit);
+}
+
+// One accepted connection serving exactly one request.
+//
+// Buffered requests (every JSON route) must arrive completely within one
+// request deadline, so a client dripping bytes cannot hold a connection
+// forever. A streamed upload may legitimately take longer than that deadline,
+// so it uses the same delay as an idle limit between two reads instead.
+// Routes may answer later through a DeferredResponder; no timer runs while the
+// server itself is working on the request. After an early error response the
+// unread request body is drained within bounds before the socket is closed.
 class HttpSession : public std::enable_shared_from_this<HttpSession> {
 public:
     using CloseCallback = std::function<void(HttpSession *)>;
@@ -1207,11 +1740,11 @@ public:
     }
 
 private:
-    // One deadline per socket operation: a client stalling while sending a
-    // request or reading a response is closed instead of being queued.
-    void arm_timeout()
+    // Close the connection when `delay` elapses. Re-arming replaces the
+    // previous deadline; its pending wait completes with operation_aborted.
+    void arm_timeout(std::chrono::steady_clock::duration delay)
     {
-        timer_.expires_after(config_->request_timeout);
+        timer_.expires_after(delay);
         const std::shared_ptr<HttpSession> self = shared_from_this();
         timer_.async_wait([self](const ErrorCode &error) {
             if (!error)
@@ -1225,22 +1758,26 @@ private:
         timer_.cancel(ignored);
     }
 
+    // The deadline armed here covers the headers and, for buffered requests,
+    // the whole body as well.
     void read_request()
     {
         if (closed_.load())
             return;
-        parser_.body_limit(config_->max_request_body_bytes);
+        parser_.body_limit(parser_body_limit(*config_));
         parser_.header_limit(config_->max_header_bytes);
-        arm_timeout();
+        arm_timeout(config_->request_timeout);
         const std::shared_ptr<HttpSession> self = shared_from_this();
-        http::async_read(socket_, buffer_, parser_, [self](const ErrorCode &error, std::size_t bytes) {
-            self->handle_read(error, bytes);
+        http::async_read_header(socket_, buffer_, parser_, [self](const ErrorCode &error, std::size_t bytes) {
+            self->handle_header(error, bytes);
         });
     }
 
-    void handle_read(const ErrorCode &error, std::size_t)
+    // Build the request context from the headers. An upload is authorized
+    // here, before any byte of its body is stored, and switches the session to
+    // the idle timeout; other requests keep the running request deadline.
+    void handle_header(const ErrorCode &error, std::size_t)
     {
-        cancel_timeout();
         if (closed_.load())
             return;
         if (error == http::error::end_of_stream) {
@@ -1273,38 +1810,205 @@ private:
         }
 
         HttpRequestMessage &message = parser_.get();
-        const std::string request_id = make_request_id();
-        HttpRequest request;
+        request_id_ = make_request_id();
         HttpResponse response;
-        if (!build_request_context(message, request, response, request_id)) {
+        request_ = HttpRequest();
+        if (!build_request_context(message, request_, response, request_id_)) {
             write_response(response);
             return;
         }
-        try {
-            response = router_(request, request_id);
-        } catch (const std::exception &) {
-            response = make_error_response(
-                500,
-                "internal_error",
-                "An internal server error occurred.",
-                request_id);
-        } catch (...) {
-            response = make_error_response(
-                500,
-                "internal_error",
-                "An internal server error occurred.",
-                request_id);
+
+        if (is_upload_route(request_)) {
+            response = route(false).value_or(HttpResponse());
+            if (!response.stream_request) {
+                write_response(response);
+                return;
+            }
+            try {
+                upload_parser_ = std::make_unique<MultipartUploadParser>(
+                    header_value(request_, "content-type"),
+                    upload_directory(config_->work_directory),
+                    config_->max_upload_bytes,
+                    config_->max_header_bytes,
+                    upload_extensions(request_));
+            } catch (const MultipartUploadError &upload_error) {
+                write_response(make_error_response(
+                    upload_error.status(),
+                    upload_error.code(),
+                    upload_error.what(),
+                    request_id_));
+                return;
+            } catch (const std::exception &upload_error) {
+                write_response(make_error_response(
+                    400,
+                    "invalid_multipart",
+                    upload_error.what(),
+                    request_id_));
+                return;
+            }
+            idle_timeout_ = true;
         }
-        // Credentials must not stay in the request buffers after routing.
-        request.json_body.reset();
-        clear_secret(request.body);
-        write_response(response);
+        read_body();
+    }
+
+    void read_body()
+    {
+        if (closed_.load())
+            return;
+        if (parser_.is_done()) {
+            finish_request();
+            return;
+        }
+
+        http::buffer_body::value_type &body = parser_.get().body();
+        body.data = body_chunk_.data();
+        body.size = body_chunk_.size();
+        if (idle_timeout_)
+            arm_timeout(config_->request_timeout);
+        const std::shared_ptr<HttpSession> self = shared_from_this();
+        http::async_read_some(socket_, buffer_, parser_, [self](const ErrorCode &error, std::size_t bytes) {
+            self->handle_body(error, bytes);
+        });
+    }
+
+    // Stream upload bytes to the multipart parser, or append JSON bytes to the
+    // bounded buffer, then continue until the HTTP body is complete.
+    void handle_body(const ErrorCode &error, std::size_t)
+    {
+        if (idle_timeout_)
+            cancel_timeout();
+        if (closed_.load())
+            return;
+
+        const http::buffer_body::value_type &body = parser_.get().body();
+        const std::size_t remaining = std::min(body.size, body_chunk_.size());
+        const std::size_t received = body_chunk_.size() - remaining;
+        try {
+            if (received != 0) {
+                if (upload_parser_ != nullptr) {
+                    upload_parser_->consume(body_chunk_.data(), received);
+                } else {
+                    if (received > config_->max_request_body_bytes -
+                        std::min<std::uint64_t>(config_->max_request_body_bytes, buffered_body_.size())) {
+                        write_response(make_error_response(
+                            413,
+                            "request_too_large",
+                            "The request body exceeds the configured size limit.",
+                            request_id_));
+                        return;
+                    }
+                    buffered_body_.append(body_chunk_.data(), received);
+                }
+            }
+        } catch (const MultipartUploadError &upload_error) {
+            write_response(make_error_response(
+                upload_error.status(),
+                upload_error.code(),
+                upload_error.what(),
+                request_id_));
+            return;
+        } catch (const std::exception &upload_error) {
+            write_response(make_error_response(
+                400,
+                "invalid_multipart",
+                upload_error.what(),
+                request_id_));
+            return;
+        }
+
+        if (error && error != http::error::need_buffer) {
+            if (error == http::error::body_limit)
+                write_response(make_error_response(
+                    413,
+                    "request_too_large",
+                    "The request body exceeds the configured size limit.",
+                    request_id_));
+            else
+                write_response(make_error_response(
+                    400,
+                    "invalid_request",
+                    "The request body is truncated or invalid.",
+                    request_id_));
+            return;
+        }
+        if (parser_.is_done())
+            finish_request();
+        else
+            read_body();
+    }
+
+    // The body is complete: stop the client timeout and route the request. A
+    // deferred route answers later through the responder.
+    void finish_request()
+    {
+        cancel_timeout();
+        try {
+            if (upload_parser_ != nullptr) {
+                request_.upload = upload_parser_->finish();
+                upload_parser_.reset();
+            } else {
+                request_.body = std::move(buffered_body_);
+            }
+        } catch (const MultipartUploadError &upload_error) {
+            write_response(make_error_response(
+                upload_error.status(),
+                upload_error.code(),
+                upload_error.what(),
+                request_id_));
+            return;
+        } catch (const std::exception &error) {
+            write_response(make_error_response(
+                400,
+                "invalid_multipart",
+                error.what(),
+                request_id_));
+            return;
+        }
+
+        const std::optional<HttpResponse> response = route(true);
+        // Credentials must not stay in the request buffers after routing. A
+        // deferred import keeps its own reference to the uploaded file.
+        request_.json_body.reset();
+        request_.upload.reset();
+        clear_secret(request_.body);
+        request_.body.clear();
+        if (response.has_value())
+            write_response(response.value());
+    }
+
+    // Call the router and turn any escaping exception into a 500 response.
+    std::optional<HttpResponse> route(bool body_complete)
+    {
+        try {
+            return router_(request_, request_id_, body_complete, make_responder());
+        } catch (const std::exception &) {
+        } catch (...) {
+        }
+        return make_error_response(
+            500,
+            "internal_error",
+            "An internal server error occurred.",
+            request_id_);
+    }
+
+    // The responder may be called from an import thread: it posts the write
+    // back to the connection's executor, which owns the socket.
+    DeferredResponder make_responder()
+    {
+        const std::shared_ptr<HttpSession> self = shared_from_this();
+        return [self](HttpResponse response) {
+            asio::post(self->socket_.get_executor(), [self, response = std::move(response)]() {
+                self->write_response(response);
+            });
+        };
     }
 
     void write_response(const HttpResponse &response)
     {
         if (closed_)
             return;
+        upload_parser_.reset();
+        request_.upload.reset();
 
         unsigned int status = response.status;
         if (status < 100 || status > 599)
@@ -1318,7 +2022,7 @@ private:
         for (const std::pair<const std::string, std::string> &header : response.headers)
             response_message_->set(header.first, header.second);
         response_message_->prepare_payload();
-        arm_timeout();
+        arm_timeout(config_->request_timeout);
         const std::shared_ptr<HttpSession> self = shared_from_this();
         http::async_write(socket_, response_message_.value(), [self](
             const ErrorCode &error, std::size_t bytes) {
@@ -1326,20 +2030,61 @@ private:
         });
     }
 
-    void handle_write(const ErrorCode &, std::size_t)
+    void handle_write(const ErrorCode &error, std::size_t)
     {
         cancel_timeout();
-        close();
+        if (error || parser_.is_done()) {
+            close();
+            return;
+        }
+        drain_request();
+    }
+
+    // The response was sent before the client finished its request body.
+    // Closing now with unread input would make the OS send a TCP reset, and
+    // many clients would then report "connection reset" instead of the
+    // response. Half-close the sending side and discard the remaining input
+    // until the client stops, the byte bound is reached, or the delay expires.
+    void drain_request()
+    {
+        ErrorCode ignored;
+        socket_.shutdown(Tcp::socket::shutdown_send, ignored);
+        drained_bytes_ = 0;
+        arm_timeout(drain_timeout);
+        read_drain();
+    }
+
+    void read_drain()
+    {
+        const std::shared_ptr<HttpSession> self = shared_from_this();
+        socket_.async_read_some(asio::buffer(body_chunk_), [self](const ErrorCode &error, std::size_t bytes) {
+            if (self->closed_.load())
+                return;
+            self->drained_bytes_ += bytes;
+            if (error || self->drained_bytes_ >= max_drain_bytes) {
+                self->close();
+                return;
+            }
+            self->read_drain();
+        });
     }
 
     Tcp::socket socket_;
     beast::flat_buffer buffer_;
     HttpRequestParser parser_;
+    HttpRequest request_;
+    std::string request_id_;
+    std::string buffered_body_;
+    std::array<char, 64 * 1024> body_chunk_{};
+    std::unique_ptr<MultipartUploadParser> upload_parser_;
     std::shared_ptr<const ServerConfig> config_;
     RestRouter router_;
     CloseCallback close_callback_;
     asio::steady_timer timer_;
     std::optional<HttpResponseMessage> response_message_;
+    // True once an upload is accepted: the timeout becomes an idle limit.
+    bool idle_timeout_ = false;
+    std::size_t drained_bytes_ = 0;
     std::atomic<bool> closed_{false};
 };
 
@@ -1380,6 +2125,7 @@ public:
         if (filesystem_error)
             throw std::invalid_argument(json_error_message(
                 "paths.work", filesystem_error.message()));
+        remove_stale_uploads(upload_directory(config_.work_directory));
 
         ErrorCode error;
         const asio::ip::address address = asio::ip::make_address(config_.bind_address, error);
@@ -1415,6 +2161,7 @@ public:
             acceptor_.close(error);
             throw std::runtime_error("could not read REST listener port: " + message);
         }
+        import_pool_ = std::make_unique<asio::thread_pool>(config_.import_threads);
         running_.store(true);
         const std::uint64_t generation = ++run_generation_;
         accept_next(generation);
@@ -1445,12 +2192,18 @@ public:
         for (const std::shared_ptr<HttpSession> &session : sessions)
             session->close();
 
+        // Running imports finish before the network thread stops: their
+        // responses are posted to io_context_ and their captured connections
+        // must be released while it still exists.
+        if (import_pool_ != nullptr)
+            import_pool_->join();
         io_context_.stop();
         if (worker_.joinable())
             worker_.join();
 
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         sessions_.clear();
+        import_pool_.reset();
         auth_service_.reset();
         profile_catalog_.reset();
         session_registry_.reset();
@@ -1471,7 +2224,20 @@ public:
     // is running and the worker has not been joined.
     RouteServices route_services() const
     {
-        return RouteServices{*auth_service_, *session_registry_, profile_catalog_.get(), private_test_handler_};
+        return RouteServices{
+            *auth_service_,
+            *session_registry_,
+            profile_catalog_.get(),
+            private_test_handler_,
+            *import_pool_,
+            import_observer_};
+    }
+
+    void set_import_observer(std::function<void()> observer)
+    {
+        if (running_.load())
+            throw std::logic_error("The import observer must be set before the REST server starts");
+        import_observer_ = std::move(observer);
     }
 
     SessionRegistry &session_registry() const
@@ -1550,6 +2316,9 @@ private:
     // HttpSession borrows it.
     std::unique_ptr<SessionRegistry> session_registry_;
     RequestHandler private_test_handler_;
+    std::function<void()> import_observer_;
+    // Created in start(), joined in stop() before the network thread stops.
+    std::unique_ptr<asio::thread_pool> import_pool_;
     asio::io_context io_context_;
     Tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_{io_context_};
@@ -1576,8 +2345,10 @@ ServerConfig ServerConfig::defaults()
     config.work_directory = root / "rest_work";
     config.accounts_file = root / "rest_accounts.json";
     config.max_request_body_bytes = default_max_request_body_bytes;
+    config.max_upload_bytes = default_max_upload_bytes;
     config.max_header_bytes = default_max_header_bytes;
     config.max_connections = default_max_connections;
+    config.import_threads = default_import_threads;
     config.request_timeout = std::chrono::seconds(default_request_timeout_seconds);
     config.token_ttl = std::chrono::seconds(default_token_ttl_seconds);
     config.session_ttl = std::chrono::seconds(default_session_ttl_seconds);
@@ -1625,10 +2396,14 @@ void ServerConfig::validate() const
 
     if (max_request_body_bytes == 0)
         throw std::invalid_argument("limits.max_request_body_bytes must be positive");
+    if (max_upload_bytes == 0)
+        throw std::invalid_argument("limits.max_upload_bytes must be positive");
     if (max_header_bytes == 0)
         throw std::invalid_argument("limits.max_header_bytes must be positive");
     if (max_connections == 0)
         throw std::invalid_argument("limits.max_connections must be positive");
+    if (import_threads == 0)
+        throw std::invalid_argument("limits.import_threads must be positive");
     if (request_timeout.count() <= 0)
         throw std::invalid_argument("timeouts.request_seconds must be positive");
     if (token_ttl.count() <= 0)
@@ -1707,8 +2482,12 @@ public:
     Impl(ServerConfig config, RequestHandler private_test_handler)
         : runtime_(
               std::move(config),
-              [this](HttpRequest &request, const std::string &request_id) {
-                  return dispatch_request(request, runtime_.route_services(), request_id);
+              [this](
+                  HttpRequest &request,
+                  const std::string &request_id,
+                  bool body_complete,
+                  const DeferredResponder &respond) {
+                  return dispatch_request(request, runtime_.route_services(), request_id, body_complete, respond);
               },
               std::move(private_test_handler))
     {
@@ -1747,6 +2526,11 @@ std::uint16_t RestServer::bound_port() const noexcept
 SessionRegistry &RestServer::session_registry() const
 {
     return impl_->runtime_.session_registry();
+}
+
+void RestServer::set_import_observer(std::function<void()> observer)
+{
+    impl_->runtime_.set_import_observer(std::move(observer));
 }
 
 } // namespace Slic3r::Rest

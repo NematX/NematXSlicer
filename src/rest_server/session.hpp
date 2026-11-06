@@ -6,6 +6,8 @@
  * mutations use a revision token so imported candidates can be prepared
  * without holding a session lock and rejected if another mutation wins first.
  * Work tokens provide the same stale-commit protection for slicing workers.
+ * Profile metadata is kept as core-generated sections beside the flat settings,
+ * so a project snapshot can save each selected profile's own metadata.
  */
 
 #pragma once
@@ -49,6 +51,8 @@ struct SessionData {
     DynamicPrintConfig configuration;
     nlohmann::json preferences = nlohmann::json::object();
     ProfileSelection profiles;
+    // Core-generated INI sections of the selected profiles, separate from slicing settings.
+    std::string profile_sections;
 };
 
 struct ViewerSnapshot {
@@ -67,6 +71,11 @@ enum class EntityKind {
 };
 
 struct EntityReference {
+    EntityKind kind;
+    std::uint64_t engine_id;
+};
+
+struct EntityBinding {
     EntityKind kind;
     std::uint64_t engine_id;
 };
@@ -115,6 +124,17 @@ public:
         SessionData candidate,
         bool affects_slicing,
         TimePoint completed_at);
+    // Commit the candidate and bind its new engine entities in the same locked
+    // step. `replace_entities` first drops every existing entity ID, for a
+    // mutation that replaces the whole scene.
+    bool commit_mutation(
+        MutationToken token,
+        SessionData candidate,
+        bool affects_slicing,
+        TimePoint completed_at,
+        const std::vector<EntityBinding> &bindings,
+        std::vector<std::string> &bound_ids,
+        bool replace_entities = false);
 
     std::optional<WorkToken> begin_work(TimePoint started_at);
     bool finish_work(

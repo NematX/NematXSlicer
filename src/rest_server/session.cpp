@@ -98,9 +98,53 @@ bool SessionContext::commit_mutation(
     bool affects_slicing,
     TimePoint completed_at)
 {
+    const std::vector<EntityBinding> bindings;
+    std::vector<std::string> ignored_ids;
+    return commit_mutation(
+        token,
+        std::move(candidate),
+        affects_slicing,
+        completed_at,
+        bindings,
+        ignored_ids);
+}
+
+bool SessionContext::commit_mutation(
+    MutationToken token,
+    SessionData candidate,
+    bool affects_slicing,
+    TimePoint completed_at,
+    const std::vector<EntityBinding> &bindings,
+    std::vector<std::string> &bound_ids,
+    bool replace_entities)
+{
     std::lock_guard<std::mutex> lock(mutex_);
     if (retired_ || active_work_generation_.has_value() || token.revision != revision_)
         return false;
+
+    if (replace_entities) {
+        entity_ids_by_key_.clear();
+        entity_keys_by_id_.clear();
+    }
+
+    std::vector<std::string> new_bound_ids;
+    new_bound_ids.reserve(bindings.size());
+    for (const EntityBinding &binding : bindings) {
+        const EntityKey key{binding.kind, binding.engine_id};
+        const std::map<EntityKey, std::string>::const_iterator existing = entity_ids_by_key_.find(key);
+        if (existing != entity_ids_by_key_.end()) {
+            new_bound_ids.push_back(existing->second);
+            continue;
+        }
+
+        std::string entity_id;
+        do {
+            entity_id = make_opaque_id("entity");
+        } while (entity_keys_by_id_.find(entity_id) != entity_keys_by_id_.end());
+        entity_ids_by_key_.emplace(key, entity_id);
+        entity_keys_by_id_.emplace(entity_id, key);
+        new_bound_ids.push_back(std::move(entity_id));
+    }
 
     data_ = std::move(candidate);
     ++revision_;
@@ -111,6 +155,7 @@ bool SessionContext::commit_mutation(
         error_message_.clear();
     }
     last_activity_ = completed_at;
+    bound_ids = std::move(new_bound_ids);
     return true;
 }
 

@@ -377,6 +377,23 @@ A profile embedded in a project need not exist in the installed catalog for
 its recognized settings to be loaded into the session. Loading a project
 does not create or modify shared installed profiles.
 
+A 3MF project's configuration is flat: the profile supplying an unknown key
+is no longer known. Its key name is used as a provenance hint, with N being
+the project's extruder count:
+
+- a `filament_*` key whose raw value is an array of N elements is distributed
+  into `filament_custom_setting`, one element per slot. A value starting with
+  `"` is a string list separated by `;`; otherwise elements are separated by `,`;
+- a key starting with `printer_`, `firmware_`, `machine_`, `printhost_`, `host_`,
+  `bed_`, `thumbnails_`, `gcode_`, or an extruder prefix (`extruder_`, `retract_`,
+  `deretract_`, `nozzle_`, `tool_`) goes into the `printer` group: in V1,
+  extruder settings come from the printer profile;
+- every other key, including a `filament_*` key of a different size, goes into
+  the `print` group.
+
+Unknown keys from object, volume, or layer-range configurations are collected
+by the same loader and follow the same rules.
+
 ### 5.6. `GET .../get_setting/{setting_id}`
 
 Read a session setting's effective value. No request body.
@@ -474,13 +491,47 @@ accepts a 3MF project, replaces the existing scene, and reloads the slicing
 configuration from its saved profiles/settings. Previous local modifications
 are cleared; absent slicing settings and categories revert to system defaults
 according to §5.5.1. Session preferences are retained. Unknown settings are
-preserved as custom data according to §5.5.1. `add_model` does not apply the
-project configuration of a 3MF imported as a model. Both routes return newly
-created IDs:
+preserved as custom data according to §5.5.1. `add_model` does not apply a 3MF's
+project configuration or other model-level data such as per-height custom
+G-code: only its objects are added. Both routes return newly created IDs:
 
 ```json
 {"object_ids":["object-id-1"],"object_count":1}
 ```
+
+Multipart data is processed incrementally; authentication, the session, and its
+state are checked from the headers, before any byte is written. The payload is
+written into the work directory's `uploads` subdirectory under an exclusively
+created random name; the client-supplied name is used only for the extension.
+`limits.max_upload_bytes` limits file bytes, defaulting to 1 GiB. Temporary files
+are removed after success or rejection, and files left by an abrupt stop are
+removed at startup (one server per work directory). Everything following the
+closing boundary is an ignored epilogue.
+
+Model parsing runs on a dedicated pool of `limits.import_threads` threads
+(default 2) without blocking other requests. `timeouts.request_seconds` is one
+deadline for a complete JSON request, and an idle timeout between reads for an
+upload. An error sent before upload completion (`401`, `404`, `409`, `413`,
+`422`, etc.) is followed by bounded draining of the remaining body (1 MiB or 2 s)
+before closing, so the client receives the response. An engine-unreadable file
+produces `422 invalid_model`; other internal errors produce `500 internal_error`
+with a generic message.
+
+`load_project` accepts only the `.3mf` extension (`422 unsupported_model_format`
+before any storage). The project is recomposed as in the interface: settings are
+split into print, printer, and filament profiles on a private catalog copy;
+a 3MF without configuration resets all settings to system defaults. All scene
+data read by the 3MF loader is retained (object settings, modifiers, layer ranges,
+per-height G-code, etc.). The scene, configuration, and session profile selection
+are replaced in one operation; all previous object, part, and instance IDs are
+invalidated. In the recorded selection, a profile keeps its catalog ID only if
+the project uses the installed profile unchanged; an embedded or modified profile
+has no ID. A supplied `post_process` is retained but never executed. Reject the
+project with `422 invalid_project`, without changing the session, if it is not
+FFF, defines no nozzle, its configuration (checked as loaded, before automatic
+index correction), an object, volume, or layer range uses an extruder absent from
+the project, engine cross-validation fails, a `*_custom_setting` is malformed,
+or the file is unreadable.
 
 ### 5.11. `GET .../list_objects`
 

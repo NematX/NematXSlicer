@@ -347,7 +347,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
             "work": "work",
             "accounts": "accounts.json"
         },
-        "limits": {"max_request_body_bytes": 2048, "max_header_bytes": 4096, "max_connections": 4},
+        "limits": {"max_request_body_bytes": 2048, "max_upload_bytes": 4096, "max_header_bytes": 4096, "max_connections": 4, "import_threads": 3},
         "timeouts": {"request_seconds": 5},
         "auth": {"token_ttl_seconds": 120, "login_window_seconds": 30, "max_login_attempts": 3},
         "sessions": {"expiration_seconds": 240}
@@ -362,6 +362,8 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
     REQUIRE(config.resource_directory == root.path() / "resources");
     REQUIRE(config.profiles_directory == root.path() / "profiles");
     REQUIRE(config.max_request_body_bytes == 2048);
+    REQUIRE(config.max_upload_bytes == 4096);
+    REQUIRE(config.import_threads == 3);
     REQUIRE(config.request_timeout == std::chrono::seconds(5));
     REQUIRE(config.token_ttl == std::chrono::seconds(120));
     REQUIRE(config.session_ttl == std::chrono::seconds(240));
@@ -375,6 +377,8 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     const Slic3r::Rest::ServerConfig valid = make_valid_config(root.path());
     REQUIRE_NOTHROW(valid.validate());
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_request_body_bytes == 16ULL * 1024ULL * 1024ULL);
+    REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_upload_bytes == 1ULL * 1024ULL * 1024ULL * 1024ULL);
+    REQUIRE(Slic3r::Rest::ServerConfig::defaults().import_threads == 2);
 
     Slic3r::Rest::ServerConfig missing_resource = valid;
     missing_resource.resource_directory = root.path() / "missing";
@@ -394,6 +398,10 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     zero_body_limit.max_request_body_bytes = 0;
     REQUIRE_THROWS_AS(zero_body_limit.validate(), std::invalid_argument);
 
+    Slic3r::Rest::ServerConfig zero_upload_limit = valid;
+    zero_upload_limit.max_upload_bytes = 0;
+    REQUIRE_THROWS_AS(zero_upload_limit.validate(), std::invalid_argument);
+
     Slic3r::Rest::ServerConfig zero_header_limit = valid;
     zero_header_limit.max_header_bytes = 0;
     REQUIRE_THROWS_AS(zero_header_limit.validate(), std::invalid_argument);
@@ -401,6 +409,10 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     Slic3r::Rest::ServerConfig zero_connections = valid;
     zero_connections.max_connections = 0;
     REQUIRE_THROWS_AS(zero_connections.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig zero_import_threads = valid;
+    zero_import_threads.import_threads = 0;
+    REQUIRE_THROWS_AS(zero_import_threads.validate(), std::invalid_argument);
 
     Slic3r::Rest::ServerConfig zero_timeout = valid;
     zero_timeout.request_timeout = std::chrono::seconds(0);
@@ -475,6 +487,44 @@ TEST_CASE("REST server closes stalled connections after the request timeout", "[
 
     REQUIRE(error == asio::error::eof);
     REQUIRE(elapsed < std::chrono::seconds(3));
+}
+
+// A buffered JSON body must arrive within one request deadline: sending one
+// byte just before each idle delay would otherwise keep the connection alive
+// indefinitely. The server closes at the deadline, so once the client stops
+// dripping the connection is already gone instead of still waiting for data.
+TEST_CASE("REST server applies one deadline to a slowly sent JSON body", "[rest_server]")
+{
+    RestServerFixture::Limits limits;
+    limits.timeout = std::chrono::seconds(1);
+    RestServerFixture fixture(limits);
+
+    asio::io_context context;
+    beast::tcp_stream stream(context);
+    stream.connect(Tcp::endpoint(asio::ip::make_address("127.0.0.1"), fixture.bound_port()));
+    const std::string header =
+        "POST /__test__/json HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization: Bearer " + fixture.token() + "\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 32\r\n\r\n";
+    asio::write(stream, asio::buffer(header));
+    for (int index = 0; index < 8; ++index) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        ErrorCode ignored;
+        asio::write(stream, asio::buffer(std::string(" ")), ignored);
+    }
+
+    stream.expires_after(std::chrono::seconds(3));
+    std::array<char, 64> data{};
+    ErrorCode error;
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    stream.read_some(asio::buffer(data), error);
+    const std::chrono::milliseconds elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started);
+
+    REQUIRE(error);
+    REQUIRE(elapsed < std::chrono::milliseconds(500));
 }
 
 TEST_CASE("REST server enforces the connection limit", "[rest_server]")
