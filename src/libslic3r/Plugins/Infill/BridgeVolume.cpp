@@ -1,42 +1,56 @@
 ///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
-/* Provide the experimental bridge-flow finalizer, using the occupied space of
-   lower extrusion paths rather than assuming that every model slice is filled.
-   It runs after model/support path generation and before extrusion ordering.
+/* Provide two alternative bridge-flow corrections at STEP_FINALIZE_SLICING,
+   after model/support path generation and before ordering builds the print plan.
+   The host's bridge_volume exclusive group selects one provider, not two passes.
 
-   BridgePreparation.cpp supplies surfaces with a chosen direction and a
-   BridgeSurfaceInfo marker. For external bridges, subtract linked lower slices
-   to recover the original unsupported core. For internal bridges, the complete
-   prepared area is the working core. Generated infill rows refer back to their
-   source surface, so this pass can check their direction, role and allowed area.
+   Both providers consume surfaces marked with BridgeSurfaceInfo. An external
+   bridge's original unsupported core is reconstructed by subtracting linked
+   lower slices. An internal bridge uses its complete prepared area as its
+   working core. The chosen direction and source-surface identity connect each
+   generated row to this geometry and to its owning region's settings.
 
-   An extrusion footprint is its XY path widened by half its width, together
-   with the Z interval filled by the thread. index_layer() collects these from
-   model and support paths. Support uses its actual auxiliary-layer Z, not the
-   neighboring model layer's Z. Process model layers from bottom to top: correct
-   a lower bridge's private copy before indexing it beneath a higher bridge.
-   The current layer is not treated as material below itself.
+   The default surface model asks BridgeSurfaceVolume::Index for a mean volume
+   budget below each row. It uses typed surfaces, regional infill densities and
+   actual layer heights, not the positions of individual lower infill lines.
+   An unusable support density remains unknown. A density estimate does not
+   certify local collision clearance; its budget calculation is explained in
+   BridgeSurfaceVolume.cpp.
 
-   BridgeClearance::Index measures two different things. clearance() accounts
-   for the bridge width when finding vertical space; contacts() asks which known
-   lower paths reach the row's centerline. The contact check detects missing or
-   one-sided anchors. Rows added beside the original core by uniform expansion
-   must cross the uniformly expanded source area and are checked through their
-   individual contact gaps; they need not cross the original core. A local support
-   request can explain a missing anchor, but is never counted as deposited material.
+   The experimental model instead builds a BridgeClearance::Index from lower
+   model/support paths. An extrusion footprint is its XY path widened by half
+   its width, together with its occupied Z interval. Paths supply both vertical
+   clearance and contact with the row's centerline. Support paths use their own
+   Z, which may fall between object layers. Only this model indexes corrected
+   lower bridges before measuring the space beneath higher ones.
 
-   Circular incoming flow can be reduced by flattening its section while keeping
-   width and printing Z. section_pieces() chooses constant-flow portions and
-   transitions without going below the printable height floor. Unknown portions
-   or unsupported incoming shapes retain their original flow without a fit claim.
-   A floor-limited result can still overlap lower material. Disabling regional
-   compensation retains flow but does not bypass row validation or contact checks.
+   BridgePreparation.cpp chooses directions and assigns anchoring areas; it does
+   not establish actual lower-path contact. The experimental model checks those
+   contacts, including the gaps of peripheral rows added by uniform expansion.
+   A peripheral row must cross the uniformly expanded source area, not necessarily
+   the original unsupported core.
+   A local support request can explain a missing anchor, but is never counted as
+   deposited material. Neither provider generates support.
 
-   Selected calls are not a timeline. traverse() is inherited from
-   ExtrusionTreeVisitors.hpp and invokes visit_leaf() as a virtual callback.
+   An island is one connected slice on a layer; its region groups select material
+   settings. A bucket is one such group's extrusion tree for one extrusion role.
+   First collect the prepared surfaces and clone the affected infill buckets.
+   Traverse those copies from bottom to top. Common checks reject a wrong role,
+   direction, Z or source area before correction. A regional switch can retain incoming
+   flow without skipping those checks; the experimental contact checks still run.
+
+   Modelled incoming flow is a circular thread. Correction reduces its section
+   and height without rerouting the row or changing its width or printing Z.
+   Unknown or unsupported incoming shapes retain their original flow without a
+   fit guarantee. The printable height floor may prevent a requested reduction;
+   the recorded confidence distinguishes that limit from a successful fit.
+
+   Selected calls below are not a timeline. The two model branches are alternatives.
+   traverse() is inherited from ExtrusionTreeVisitors.hpp; it invokes visit_leaf()
+   through a virtual callback rather than through a direct call in run_impl().
 
        Finalizer::run_impl()
-           |-- index_layer()
+           |-- index_layer() [experimental model only]
            |   `-- OccupationVisitor::traverse() [inherited traversal]
            |       `-- OccupationVisitor::visit_leaf() [virtual callback]
            |           |-- occupied_segments()
@@ -44,30 +58,31 @@
            |-- CorrectionVisitor::traverse() [inherited traversal]
            |   `-- CorrectionVisitor::visit_leaf() [virtual callback]
            |       `-- correct_leaf()
-           |           |-- BridgeClearance::Index::clearance()
-           |           |-- BridgeClearance::Index::contacts() [known contacts only]
-           |           |-- BridgeClearance::section_pieces()
+           |           |-- BridgeSurfaceVolume::Index::sections() [surface model]
+           |           |-- BridgeClearance::Index::clearance() [experimental]
+           |           |-- BridgeClearance::Index::contacts() [experimental, known contacts]
+           |           |-- BridgeClearance::section_pieces() [experimental]
            |           `-- publish_pieces()
            `-- replace_infill_buckets() [host publication callback]
 
    A strand is one continuous row, even when flow changes split it into pieces.
-   publish_pieces() splits a private row where flow changes, preserves its joins
-   and stores incoming/assigned flow in BridgeVolumeInfo on each piece. The
-   containing collection is marked BridgeAtomicStrand so ordering keeps its
-   pieces connected and reverses them only together. Input and geometry signatures
-   make an unchanged replay a no-op; changed inputs require nominal infill to be
-   regenerated. path_signature() also lets the host check later geometry edits.
+   publish_pieces() splits a private row where flow changes. Each piece receives
+   BridgeVolumeInfo with its incoming/assigned flow and input/geometry signatures.
+   A containing collection receives BridgeAtomicStrand so ordering preserves the
+   sequence and reverses it only as a whole. Matching replay records are left
+   unchanged; changed inputs require regeneration of nominal infill, not a second
+   correction of already adjusted flow. path_signature() also lets the host detect
+   later changes to corrected geometry.
 
-   Work is done on copies owned by plugin storage; host objects are borrowed.
-   Construction and correction errors leave the live infill unchanged. The host
-   checks the complete replacement batch before exchanging any bucket content;
-   root identities remain stable and the copies receive the old contents. This
-   publication guarantee does not undo a completed exchange if later work fails.
-   One object run is sequential; the host may process different objects in parallel.
-   Geometry calculations use mm and cross-sectional areas use mm2 (mm3/mm).
+   Private trees and scratch geometry belong to the run's plugin storage; host
+   views are borrowed. After all corrections succeed, the host validates and
+   exchanges the object's affected buckets as one batch, keeping root identities.
+   The copies then own the old contents. This is not a rollback of earlier plugin
+   runs. One object run is sequential; different objects may run in parallel.
 */
 #include "BridgeVolume.hpp"
 #include "BridgeClearance.hpp"
+#include "BridgeSurfaceVolume.hpp"
 #include "libslic3r/Plugins/Surface/BridgeGeometry.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include <algorithm>
@@ -131,14 +146,15 @@ std::vector<BridgeClearance::Occupation> occupied_segments(const c_extrusion_seg
 void index_layer(const Layer &layer,BridgeClearance::Index &index,uint64_t &signature,
     const std::map<const extrusion_entity_handle *,size_t> &clones,const std::vector<Bucket> &buckets,
     bool &unknown,const plugin_run_context *run_ctx);
-// Validate a prepared row, check its end contacts and measure lower-path clearance.
-// Disabling compensation retains flow but still checks the row and contacts. Unknown
-// portions keep incoming flow. Invalid paths or outdated correction records throw
-// before the private infill copies are published.
+// Validate a prepared row and reduce its area against the selected lower-material
+// model. Only the experimental model measures end contacts. Disabled/unknown
+// portions keep incoming flow. Invalid paths or outdated correction
+// records throw, leaving the object's original infill unchanged.
 void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,const SurfaceWork &surface,
     const BridgeClearance::Index &index,double z,const Config &print_config,
     const run_ctx_finalize_slicing &ctx,uint64_t signature,bool unknown,
-    Diagnostics &diagnostics,const plugin_run_context *run_ctx,const EPropertyInfill &recipe);
+    Diagnostics &diagnostics,const plugin_run_context *run_ctx,const EPropertyInfill &recipe,
+    const BridgeSurfaceVolume::Index *density);
 // Split the copied path where its cross section changes and record each piece's
 // incoming and adjusted flow. Too-short intervals, failed splits and real gaps throw.
 void publish_pieces(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,
@@ -171,12 +187,13 @@ public:
     bool unknown;
     Diagnostics &diagnostics;
     const plugin_run_context *ctx;
+    const BridgeSurfaceVolume::Index *density;
     // Borrow immutable surface/index inputs and mutable diagnostics until traversal ends.
     CorrectionVisitor(const std::map<uint64_t,SurfaceWork> &surfaces,const BridgeClearance::Index &index,double z,
         const Config &config,const run_ctx_finalize_slicing &context,uint64_t signature,bool unknown,
-        Diagnostics &diagnostics,const plugin_run_context *ctx)
+        Diagnostics &diagnostics,const plugin_run_context *ctx,const BridgeSurfaceVolume::Index *density)
         : surfaces(surfaces),index(index),z(z),print_config(config),context(context),signature(signature),
-          unknown(unknown),diagnostics(diagnostics),ctx(ctx) {}
+          unknown(unknown),diagnostics(diagnostics),ctx(ctx),density(density) {}
 private:
     // Correct paths whose source surface was marked by BridgePreparation.cpp;
     // add object and bridge identifiers to errors without changing that surface.
@@ -185,21 +202,24 @@ private:
 class Finalizer final : public PluginBase {
 public:
     // Bind the process-held finalizer to the loader's long-lived host.
-    explicit Finalizer(orchestrator_handle *orch) : PluginBase(orch) {}
+    explicit Finalizer(orchestrator_handle *orch,bool surface) : PluginBase(orch),m_surface(surface) {}
     // Describe the native model selector after registering this member. The host
     // owns its active choices, default, UI and dispatch; no model enum is defined here.
     void register_group() const;
 private:
+    bool m_surface;
     // Keep each model independently activatable under its stable provider id.
-    const char *id_impl() const noexcept override { return "bridge.finalize_volume"; }
+    const char *id_impl() const noexcept override { return m_surface ? "bridge.finalize_surface_volume" : "bridge.finalize_volume"; }
     // Name the plugin's flow correction and end-contact checks in the UI.
-    const char *name_impl() const noexcept override { return "Experimental bridge clearance from extrusions"; }
-    // Let the host select this member for the bridge-volume finalization job.
+    const char *name_impl() const noexcept override { return m_surface ? "Bridge volume from surfaces" : "Experimental bridge clearance from extrusions"; }
+    // Both providers are alternatives for one finalization job, not sequential passes.
     const char *exclusive_group_impl() const noexcept override { return "bridge_volume"; }
-    // Keep the group preference independent of execution order or registration order.
-    int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
-    // Describe the experimental footprint audit without claiming a physical simulation.
-    const char *description_impl() const noexcept override { return "Experimental: compensates bridge volume locally against actual lower extrusion footprints."; }
+    // Prefer the surface model independently of execution order or registration order.
+    int32_t exclusive_group_priority_impl() const noexcept override { return m_surface ? 0 : 10; }
+    // Distinguish the mean volume estimate from the experimental footprint audit.
+    const char *description_impl() const noexcept override { return m_surface ?
+        "Finds room for excess bridge volume in lower sparse and void surfaces, stopping at solid material." :
+        "Experimental: compensates bridge volume locally against actual lower extrusion footprints."; }
     // Wait for support paths so they count as lower material, before paths are ordered.
     slicing_step_t step_impl() const noexcept override { return STEP_FINALIZE_SLICING; }
     // Require the bridge areas and printing directions chosen by BridgePreparation.cpp.
@@ -226,7 +246,7 @@ void Finalizer::register_group() const
     definition.exclusive_group="bridge_volume";
     definition.option_key="bridge_volume_compensation";
     definition.label="Bridge volume model";
-    definition.tooltip="Selects the active plugin used to adjust bridge volume. The experimental model uses actual extrusion footprints.";
+    definition.tooltip="Selects the active plugin used to adjust bridge volume. The surface model estimates room from lower surfaces and infill density; the experimental model uses actual extrusion footprints.";
     definition.container_type=RAW_CONTAINER_TYPE_PROJECT;
     definition.category=RAW_OPTION_CATEGORY_INFILL;
     definition.has_invalidates_step=1;definition.invalidates_step=STEP_FINALIZE_SLICING;
@@ -337,7 +357,7 @@ void CorrectionVisitor::visit_leaf(MutableExtrusionEntity leaf)
         throw std::runtime_error("A prepared bridge has a nonzero inherited Z offset.");
     const EPropertyAttributes attributes=*attr;
     try {
-        correct_leaf(leaf,attributes,found->second,index,z,print_config,context,signature,unknown,diagnostics,ctx,*infill);
+        correct_leaf(leaf,attributes,found->second,index,z,print_config,context,signature,unknown,diagnostics,ctx,*infill,density);
     } catch (const PluginCancelled &) {
         throw;
     } catch (const std::exception &error) {
@@ -350,7 +370,8 @@ void CorrectionVisitor::visit_leaf(MutableExtrusionEntity leaf)
 void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,const SurfaceWork &work,
     const BridgeClearance::Index &index,double z,const Config &print_config,
     const run_ctx_finalize_slicing &ctx,uint64_t signature,bool unknown,
-    Diagnostics &diagnostics,const plugin_run_context *run_ctx,const EPropertyInfill &recipe)
+    Diagnostics &diagnostics,const plugin_run_context *run_ctx,const EPropertyInfill &recipe,
+    const BridgeSurfaceVolume::Index *density)
 {
     throw_if_cancelled(run_ctx);
     if (leaf.segment_count()==0) return;
@@ -360,6 +381,11 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
         throw std::runtime_error("A bridge has invalid flow dimensions.");
     const BridgeSurfaceInfo &info=*work.surface.get(BridgeSurfaceInfo::key);
     signature=mix(signature,work.input_signature);
+    if (density!=nullptr) {
+        signature=mix(signature,uint64_t(recipe.spacing()));
+        const double recipe_density=recipe.density();uint64_t bits=0;
+        std::memcpy(&bits,&recipe_density,sizeof(bits));signature=mix(signature,bits);
+    }
     // BridgeVolumeInfo means this path has already been corrected. If its inputs
     // changed, rebuild the original path first; do not reduce its flow a second time.
     if (const BridgeVolumeInfo *stamp=leaf.get(BridgeVolumeInfo::key)) {
@@ -410,6 +436,24 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
         for (const Polyline part : through_uniform.readonly()) uniform_length+=unscaled(part.length());
         if (uniform_length<=tolerance)
             throw std::runtime_error("A peripheral bridge row does not traverse its uniformly expanded core.");
+    }
+    if (density!=nullptr) {
+        if (!work.enabled) return;
+        const double nominal=BridgeClearance::area(width,width);
+        const bool modeled=std::abs(width-height)<2e-6 &&
+            std::abs(nominal-attributes.mm3_per_mm())<=std::max(1e-8,nominal*1e-5) && recipe.spacing()>0 &&
+            recipe.density()>0.f && recipe.density()<=1.f;
+        std::vector<BridgeClearance::SectionPiece> pieces;
+        if (modeled) pieces=density->sections(start,finish,work.bottom_z,work.layer_height,
+            attributes.mm3_per_mm(),unscaled(recipe.spacing())/recipe.density(),width,work.minimum_height);
+        else pieces.push_back({0.,length,attributes.mm3_per_mm(),height,0.,0.,BRIDGE_CONFIDENCE_UNKNOWN});
+        for (BridgeClearance::SectionPiece &piece : pieces) {
+            if (piece.area==attributes.mm3_per_mm()) piece.height=height;
+            diagnostics.unknown=diagnostics.unknown || piece.confidence==BRIDGE_CONFIDENCE_UNKNOWN;
+            diagnostics.floor=diagnostics.floor || piece.confidence==BRIDGE_CONFIDENCE_DENSITY_FLOOR_LIMITED;
+        }
+        publish_pieces(leaf,attributes,pieces,info.logical_key,signature,run_ctx);
+        return;
     }
     const c_vec2d a{unscaled(start.x),unscaled(start.y)},b{unscaled(finish.x),unscaled(finish.y)};
     std::vector<BridgeClearance::Interval> intervals=index.clearance(a,b,width,height,z);
@@ -703,11 +747,14 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
     }
     if (surfaces.empty()) return;
     BridgeClearance::Index index(run_ctx);
+    std::unique_ptr<BridgeSurfaceVolume::Index> density;
+    if (m_surface) density=std::make_unique<BridgeSurfaceVolume::Index>(object,*ctx,run_ctx);
     Diagnostics diagnostics;
     // Missing support paths may mean generation has not finished, not empty space.
     // Only the completion flag lets an empty support result be used as known input.
     bool unknown=!ctx->support_material_generated;
     uint64_t signature=mix(1469598103934665603ull,ctx->support_material_generated);
+    if (density) signature=mix(signature,density->signature());
     std::vector<Layer> auxiliary;
     for (uint32_t idx=0; idx<object.auxiliary_layer_count(); ++idx) {
         const Layer layer=object.auxiliary_layer(idx);
@@ -720,14 +767,14 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
     for (uint32_t idx=0; idx<object.layer_count(); ++idx) {
         throw_if_cancelled(run_ctx);
         const Layer layer=object.layer(idx);
-        while (next_auxiliary<auxiliary.size() && auxiliary[next_auxiliary].print_z()<layer.print_z())
+        while (!m_surface && next_auxiliary<auxiliary.size() && auxiliary[next_auxiliary].print_z()<layer.print_z())
             index_layer(auxiliary[next_auxiliary++],index,signature,clones,buckets,unknown,run_ctx);
         for (Bucket &bucket : buckets)
             if (bucket.layer_idx==idx) {
-                CorrectionVisitor visitor(surfaces,index,unscaled(layer.print_z()),print_config,*ctx,signature,unknown,diagnostics,run_ctx);
+                CorrectionVisitor visitor(surfaces,index,unscaled(layer.print_z()),print_config,*ctx,signature,unknown,diagnostics,run_ctx,density.get());
                 visitor.traverse(bucket.output.mutable_view());
             }
-        index_layer(layer,index,signature,clones,buckets,unknown,run_ctx);
+        if (!m_surface) index_layer(layer,index,signature,clones,buckets,unknown,run_ctx);
     }
     std::vector<raw_final_infill_replacement> replacements;
     for (Bucket &bucket : buckets) replacements.push_back({bucket.source,bucket.output.mutable_handle()});
@@ -739,7 +786,9 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
     if (run_ctx->report_warning!=nullptr) {
         const std::string prefix="Object '"+object.name()+"': ";
         if (diagnostics.unknown) run_ctx->report_warning(run_ctx->host_context,(prefix+"bridge compensation is incomplete; unknown portions retain nominal flow.").c_str());
-        if (diagnostics.floor) run_ctx->report_warning(run_ctx->host_context,(prefix+("the printable bridge height floor leaves a local geometric clearance limit unsatisfied.")).c_str());
+        if (diagnostics.floor) run_ctx->report_warning(run_ctx->host_context,(prefix+(m_surface ?
+            "the printable bridge height floor exceeds the estimated surface volume budget." :
+            "the printable bridge height floor leaves a local geometric clearance limit unsatisfied.")).c_str());
         if (diagnostics.one_sided || diagnostics.unanchored) run_ctx->report_warning(run_ctx->host_context,(prefix+"bridge portions without a local support request have missing modeled anchors.").c_str());
     }
 }
@@ -759,7 +808,12 @@ uint64_t path_signature(const extrusion_entity_handle *entity)
 }
 void register_plugin(orchestrator_handle *orch)
 {
-    static Finalizer plugin(orch);
+    static Finalizer plugin(orch,false);
+    orchestrator_register_plugin(orch,plugin.c_instance());plugin.register_group();
+}
+void register_surface_plugin(orchestrator_handle *orch)
+{
+    static Finalizer plugin(orch,true);
     orchestrator_register_plugin(orch,plugin.c_instance());plugin.register_group();
 }
 }}

@@ -9,6 +9,7 @@
    together. Replacement checks every copied tree before changing any original.
 
    BridgeVolumeInfo records the incoming and adjusted flow on each bridge piece.
+   Density states describe a mean surface-volume budget, never collision certification.
    This file checks those records against the actual paths and remembers a hash
    of the object's model/support paths and bridge surfaces. If a later plugin
    changes that data or removes a record, the step fails rather than exporting
@@ -153,7 +154,9 @@ bool collect_certificates(const ExtrusionEntity &entity, const ExtrusionAttribut
     if (const slic3r_api::BridgeVolumeInfo *stamp = entity.get_property<slic3r_api::BridgeVolumeInfo>()) {
         const uint64_t geometry = slic3r_api::BridgeVolume::path_signature(
             reinterpret_cast<const extrusion_entity_handle *>(&entity));
-        const bool known = stamp->confidence == BRIDGE_CONFIDENCE_CERTIFIED || stamp->confidence == BRIDGE_CONFIDENCE_FLOOR_LIMITED;
+        const bool estimated = stamp->confidence == BRIDGE_CONFIDENCE_DENSITY_ESTIMATE ||
+            stamp->confidence == BRIDGE_CONFIDENCE_DENSITY_FLOOR_LIMITED;
+        const bool known = estimated || stamp->confidence == BRIDGE_CONFIDENCE_CERTIFIED || stamp->confidence == BRIDGE_CONFIDENCE_FLOOR_LIMITED;
         const bool state_valid = known ? stamp->correction_state == BRIDGE_CORRECTION_APPLIED :
             stamp->confidence == BRIDGE_CONFIDENCE_UNKNOWN && stamp->correction_state == BRIDGE_CORRECTION_KEPT_NOMINAL_UNKNOWN;
         const bool valid = entity.has_polyline() && entity.polyline_ref().size() >= 2 && attributes != nullptr && state_valid && z_offset == 0 &&
@@ -166,9 +169,11 @@ bool collect_certificates(const ExtrusionEntity &entity, const ExtrusionAttribut
         // the incoming shape. Only Certified must fit within the available area.
         const bool shape_valid = !known || (attributes != nullptr && std::abs(attributes->mm3_per_mm -
             slic3r_api::BridgeClearance::area(attributes->width, attributes->height)) < 1e-7);
-        const bool cap_valid = stamp->confidence != BRIDGE_CONFIDENCE_CERTIFIED ||
+        const bool cap_valid = (stamp->confidence != BRIDGE_CONFIDENCE_CERTIFIED && stamp->confidence != BRIDGE_CONFIDENCE_DENSITY_ESTIMATE) ||
             stamp->effective_area_mm2 <= stamp->area_cap_mm2 + std::max(1e-12,stamp->nominal.mm3_per_mm*1e-6);
-        if (!valid || !shape_valid || !cap_valid) {
+        const bool estimate_valid = !estimated || (std::isfinite(stamp->available_height_mm) && stamp->available_height_mm >= 0. &&
+            std::isfinite(stamp->area_cap_mm2) && stamp->area_cap_mm2 > 0.);
+        if (!valid || !shape_valid || !cap_valid || !estimate_valid) {
             if (error != nullptr)
                 *error = "A finalized bridge no longer matches its certified path, flow or clearance.";
             return false;

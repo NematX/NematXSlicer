@@ -44,7 +44,8 @@
            `-- action() [test callback]
                `-- replace_infill_buckets() [host publication callback]
 
-   The same probe mechanism also tests cancellation and replay protection. Each action is synchronous and borrows its payload.
+   The same probe mechanism also tests cancellation, replay protection and
+   surface-density budgets. Each action is synchronous and borrows its payload.
    Fixture owns its model, print and native geometry; API views remain borrowed
    while those owners live. Native XY uses scaled integers; clearance lengths
    use mm, sections mm2 and volumes mm3. Injected support states test contracts,
@@ -75,6 +76,7 @@
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Plugins/Infill/BridgeClearance.hpp"
+#include "libslic3r/Plugins/Infill/BridgeSurfaceVolume.hpp"
 #include "libslic3r/Plugins/Surface/BridgeGeometry.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include "libslic3r/Steps/StepFinalizeSlicing.hpp"
@@ -190,7 +192,8 @@ void same_area(const slic3r_api::ExPolygonCollection &actual,const ExPolygons &e
 Fixture::Fixture(std::initializer_list<std::pair<std::string,std::string>> overrides)
 {
     DynamicPrintConfig config=perimeter_config({{"layer_height","0.2"},{"first_layer_height","0.2"},
-        {"perimeters","0"},{"bridged_infill_margin","1"},{"bridged_infill_uniform_margin","0"},{"bridge_angle","0"}});
+        {"perimeters","0"},{"bridged_infill_margin","1"},{"bridged_infill_uniform_margin","0"},{"bridge_angle","0"},
+        {"bridge_volume_compensation","bridge.finalize_volume"}});
     for (const std::pair<std::string,std::string> &entry : overrides)
         config.set_deserialize_strict(entry.first,entry.second);
     prepare_cube_print(prepared,config);
@@ -419,6 +422,121 @@ TEST_CASE("External margins cannot claim the cores of neighboring internal bridg
     }
     CHECK(external==1);CHECK(internal==2);CHECK(sum*SCALING_FACTOR*SCALING_FACTOR==Approx(32.));
     same_area(view(partition),ExPolygons{rectangle_expolygon(-8,-1,8,1)});
+}
+
+TEST_CASE("Surface volume searches the requested excess below variable layers and stops locally at solid","[plugins][bridge-surface-volume]")
+{
+    Fixture fixture({{"fill_density","80%"}});fixture.internal();
+    PrintObject &object=fixture.prepared.print.object(0);
+    ApiInternal::LayerAccess::set_z(object.layer(0),scale_i(.1),scale_i(.1));
+    ApiInternal::LayerAccess::set_z(object.layer(1),scale_i(.2),scale_i(.1));
+    const ExPolygons full{rectangle_expolygon(-8,-2,8,2)};
+    SurfaceCollection &first=object.layer(0).island(0).regions_islands().front().set_fill_surfaces();
+    first.clear();first.append(ExPolygons{rectangle_expolygon(-8,-2,0,2)},stPosInternal|stDensSolid);
+    first.append(ExPolygons{rectangle_expolygon(0,-2,8,2)},stPosInternal|stDensVoid);
+    Layer &middle=object.layer(1);
+    PrintRegionConfig lower_config=middle.region(0).region().config();lower_config.set_deserialize_strict("fill_density","30%");
+    ApiInternal::LayerAccess::add_region(middle,fixture.prepared.print.register_print_region(lower_config));
+    ApiInternal::LayerRegionAccess::slices_mutable(middle.region(0)).clear();
+    ApiInternal::LayerRegionAccess::slices_mutable(middle.region(1))=full;
+    middle.island(0).mutable_regions_islands().clear();middle.island(0).fill_regions(middle);
+    SurfaceCollection &second=middle.island(0).get_or_add_region_island(middle.island(0).regions(),0).set_fill_surfaces();
+    second.append(full,stPosInternal|stDensSparse);
+    ProbeScope scope;
+    scope.probe.action=[&](const run_ctx_finalize_slicing &ctx,const plugin_run_context &run) {
+        slic3r_api::BridgeSurfaceVolume::Index index(slic3r_api::Object(ctx.object),ctx,&run);
+        // A=.128, pitch=.4 and h=.2 means 160% deposition: .12 mm extra.
+        // The 30% sparse band gives .07, leaving .05 to seek in the older band.
+        const std::vector<Clearance::SectionPiece> pieces=index.sections({scale_i(-4.),0},{scale_i(4.),0},.2,.2,.128,.4,.5,.02);
+        REQUIRE(pieces.size()==2);
+        CHECK(pieces[0].begin==0.);CHECK(pieces[0].end==Approx(4.));CHECK(pieces[1].begin==Approx(4.));CHECK(pieces[1].end==Approx(8.));
+        CHECK(pieces[0].clearance==Approx(.27));CHECK(pieces[0].area==Approx(.108));
+        CHECK(pieces[1].clearance==Approx(.32));CHECK(pieces[1].area==Approx(.128));
+        for (const Clearance::SectionPiece &piece : pieces) CHECK(piece.confidence==BRIDGE_CONFIDENCE_DENSITY_ESTIMATE);
+        // Change only sparse paths, not surfaces: neither the budget nor its
+        // replay signature may acquire line-scale fragmentation or phase dependence.
+        const uint64_t signature=index.signature();
+        for (size_t i=0;i<20;++i) {
+            ExtrusionEntity path(false,ArcPolyline(Points{Point(scale_i(-7.+i*.5),scale_i(-2.)),Point(scale_i(-6.+i*.5),scale_i(2.))}));
+            path.add_property(ExtrusionAttributes(ExtrusionRole::InternalInfill,ExtrusionFlow(.08,.4f,.2f)));
+            object.layer(1).island(0).regions_islands().front().mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
+        }
+        slic3r_api::BridgeSurfaceVolume::Index changed(slic3r_api::Object(ctx.object),ctx,&run);
+        const std::vector<Clearance::SectionPiece> repeated=changed.sections({scale_i(-4.),0},{scale_i(4.),0},.2,.2,.128,.4,.5,.02);
+        REQUIRE(repeated.size()==pieces.size());CHECK(changed.signature()==signature);
+        for (size_t i=0;i<pieces.size();++i) { CHECK(repeated[i].area==pieces[i].area);CHECK(repeated[i].clearance==pieces[i].clearance); }
+    };
+    Active active({"test.bridge.final_probe"});REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+}
+
+TEST_CASE("Surface volume treats perimeter as a barrier and never credits void below the platform","[plugins][bridge-surface-volume]")
+{
+    Fixture fixture({{"fill_density","0%"}});fixture.internal();
+    PrintObject &object=fixture.prepared.print.object(0);
+    LayerSliceIsland &lower=object.layer(0).island(0);
+    ApiInternal::LayerIslandAccess::set_infill_areas(lower,ExPolygons{rectangle_expolygon(-2,-2,2,2)});
+    SurfaceCollection &surfaces=lower.regions_islands().front().set_fill_surfaces();
+    surfaces.clear();surfaces.append(lower.infill_areas(),stPosInternal|stDensVoid);
+    ProbeScope scope;
+    scope.probe.action=[&](const run_ctx_finalize_slicing &ctx,const plugin_run_context &run) {
+        const slic3r_api::BridgeSurfaceVolume::Index index(slic3r_api::Object(ctx.object),ctx,&run);
+        const std::vector<Clearance::SectionPiece> pieces=index.sections({scale_i(-4.),0},{scale_i(4.),0},.2,.2,.18,.4,.6,.02);
+        REQUIRE(pieces.size()==3);
+        CHECK(pieces[0].area==Approx(.08));CHECK(pieces[1].area==Approx(.16));CHECK(pieces[2].area==Approx(.08));
+        CHECK(pieces[1].clearance==Approx(.4));
+    };
+    Active active({"test.bridge.final_probe"});REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+}
+
+TEST_CASE("Surface volume stops once sufficient and keeps only unusable support portions unknown","[plugins][bridge-surface-volume]")
+{
+    Fixture fixture;fixture.frame();
+    PrintObject &object=fixture.prepared.print.object(0);
+    Layer &support=object.add_auxiliary_layer(0,scale_i(.1),scale_i(.1));
+    support.get_or_add_property<LayerSupportProperty>().interface_id=0;
+    ApiInternal::LayerAccess::set_islands(support,ExPolygons{rectangle_expolygon(-2,-2,0,2)});
+    ProbeScope scope;
+    scope.probe.action=[&](const run_ctx_finalize_slicing &ctx,const plugin_run_context &run) {
+        const slic3r_api::BridgeSurfaceVolume::Index index(slic3r_api::Object(ctx.object),ctx,&run);
+        // .04 mm excess is satisfied in the .1 mm air gap above the unknown
+        // support; the search must stop without consulting that lower material.
+        const std::vector<Clearance::SectionPiece> enough=index.sections({scale_i(-1.5),0},{scale_i(1.5),0},.2,.2,.096,.4,.5,.02);
+        REQUIRE(enough.size()==1);CHECK(enough[0].area==Approx(.096));CHECK(enough[0].confidence==BRIDGE_CONFIDENCE_DENSITY_ESTIMATE);
+        const std::vector<Clearance::SectionPiece> more=index.sections({scale_i(-1.5),0},{scale_i(1.5),0},.2,.2,.15,.4,.5,.02);
+        REQUIRE(more.size()==2);CHECK(more[0].confidence==BRIDGE_CONFIDENCE_UNKNOWN);CHECK(more[0].area==.15);
+        CHECK(more[1].confidence==BRIDGE_CONFIDENCE_DENSITY_ESTIMATE);CHECK(more[1].area==.15);
+    };
+    Active active({"test.bridge.final_probe"});REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+}
+
+TEST_CASE("Surface finalization stays coarse and independent of experimental activation","[plugins][bridge-surface-volume][bridge-internal]")
+{
+    for (const bool experimental : {false,true}) {
+        Fixture fixture({{"bridge_volume_compensation","bridge.finalize_surface_volume"},{"fill_density","30%"},{"internal_bridge_expansion","0"}});
+        fixture.internal(stPosTop);fixture.prepare();
+        PrintObject &object=fixture.prepared.print.object(0);
+        slic3r_api::SupportPipelineInfo &state=object.get_or_add_property<slic3r_api::SupportPipelineInfo>();state.demand_computed=1;state.material_generated=1;
+        {
+            Active active({"infill.generator.default","infill.recipe.bridge_preparation","surface.bridge_preparation","surface.solid_shells","rectilinear"});
+            Steps::StepGenerateInfill::run_step(Orchestrator::instance(),fixture.prepared.print);
+        }
+        size_t rows=0;
+        for (const LayerRegionIsland &group : fixture.island().regions_islands()) if (group.has_extrusion(LayerRegionIsland::INFILLS))
+            visit_leaves(group.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &,const ExtrusionAttributes &attr) { if (attr.role==ExtrusionRole::InternalBridgeInfill) ++rows; });
+        REQUIRE(rows>0);
+        Active active({"bridge.finalize_surface_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
+        REQUIRE(Orchestrator::instance().set_plugin_active("bridge.finalize_volume",experimental));
+        REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+        size_t pieces=0;
+        for (const LayerRegionIsland &group : fixture.island().regions_islands()) if (group.has_extrusion(LayerRegionIsland::INFILLS))
+            visit_leaves(group.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attr) {
+                if (attr.role!=ExtrusionRole::InternalBridgeInfill) return;
+                const slic3r_api::BridgeVolumeInfo *stamp=leaf.get_property<slic3r_api::BridgeVolumeInfo>();REQUIRE(stamp!=nullptr);
+                CHECK(stamp->confidence==BRIDGE_CONFIDENCE_DENSITY_ESTIMATE);CHECK(attr.width==stamp->nominal.width);
+                CHECK(attr.mm3_per_mm<=stamp->nominal.mm3_per_mm);++pieces;
+            });
+        CHECK(pieces==rows);REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+    }
 }
 
 TEST_CASE("Bridge axial expansion preserves rows and stops before holes","[plugins][bridge-preparation]")
@@ -960,8 +1078,8 @@ TEST_CASE("The finalization host refuses foreign duplicate and non-extrusion don
 
 TEST_CASE("Later finalization plugins cannot change or remove bridge certificates","[plugins][bridge-volume]")
 {
-    for (const bool remove_stamp : {false,true}) {
-        Fixture fixture;
+    for (const bool surface_model : {false,true}) for (const bool remove_stamp : {false,true}) {
+        Fixture fixture({{"bridge_volume_compensation",surface_model ? "bridge.finalize_surface_volume" : "bridge.finalize_volume"}});
         fixture.prepare();fixture.add_paths();
         ProbeScope scope;
         scope.probe.action=[&](const run_ctx_finalize_slicing &,const plugin_run_context &) {
@@ -973,7 +1091,7 @@ TEST_CASE("Later finalization plugins cannot change or remove bridge certificate
                     else leaf->get_or_add_property<ExtrusionAttributes>().mm3_per_mm*=2.;
                 }
         };
-        Active active({"bridge.finalize_volume",
+        Active active({surface_model ? "bridge.finalize_surface_volume" : "bridge.finalize_volume",
             "surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells","test.bridge.final_probe"});
         REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
     }

@@ -849,6 +849,7 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::SurfaceGeneration::SolidShellsPlugin::register_solid_shells_plugin);
     register_builtin_plugin(orchestrator, "surface.bridge_preparation", slic3r_api::BridgePreparation::register_surface);
     register_builtin_plugin(orchestrator, "infill.recipe.bridge_preparation", slic3r_api::BridgePreparation::register_recipe);
+    register_builtin_plugin(orchestrator, "bridge.finalize_surface_volume", slic3r_api::BridgeVolume::register_surface_plugin);
     register_builtin_plugin(orchestrator, "bridge.finalize_volume", slic3r_api::BridgeVolume::register_plugin);
     register_builtin_plugin(orchestrator, "surface.top_surface_expansion",
         slic3r_api::SurfaceGeneration::TopSurfaceExpansionPlugin::register_top_surface_expansion_plugin);
