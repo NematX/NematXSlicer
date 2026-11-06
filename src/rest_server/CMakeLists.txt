@@ -41,6 +41,8 @@ endif ()
 set_property(TARGET slic3r_rest_auth PROPERTY FOLDER "rest_server")
 
 add_library(slic3r_rest STATIC
+    profiles.cpp
+    profiles.hpp
     rest_server.cpp
     rest_server.hpp
     settings.cpp

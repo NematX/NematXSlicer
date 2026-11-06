@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -36,10 +37,18 @@ enum class SessionStatus {
 
 const char *session_status_name(SessionStatus status) noexcept;
 
+struct ProfileSelection {
+    std::string print;
+    std::string printer;
+    std::vector<std::string> extruder;
+    std::vector<std::string> filaments;
+};
+
 struct SessionData {
     std::shared_ptr<Model> scene;
     DynamicPrintConfig configuration;
     nlohmann::json preferences = nlohmann::json::object();
+    ProfileSelection profiles;
 };
 
 struct ViewerSnapshot {
