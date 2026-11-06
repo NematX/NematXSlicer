@@ -11,16 +11,28 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 
-namespace slic3r_api { namespace Ordering { namespace TreeOrderingGeometry {
-
 /*
-Shared geometry mutations used by built-in extrusion-tree ordering providers.
+Geometry queries and tree mutations for built-in extrusion-tree orderers.
 
 These operations preserve existing entity handles whenever possible. Loop
 rotation accepts seams on lines and arcs, splits only the segment containing
 the seam, and preserves segment Z offsets. The caller owns the policy deciding
 which seam, direction, or ordering should be selected.
+
+A marked bridge strand is one continuous unit even when splitting gave it child
+paths. Test atomic_strand() before descending into a tree; any permitted reversal
+uses reverse_tree() on the complete strand, then final ordering can lock its flags.
+
+Example after choosing to reverse a MutableExtrusionEntity strand:
+    if (atomic_strand(strand.readonly()) && strand.readonly().reversible())
+        reverse_tree(strand, run_ctx);
 */
+
+namespace slic3r_api { namespace Ordering { namespace TreeOrderingGeometry {
+
+// Return whether this node has a nonzero strand marker; callers must not reorder
+// or reverse its descendants independently, even when the collection is reversible.
+bool atomic_strand(const ExtrusionEntity &entity);
 
 /* Reverse every local path and child order so the complete tree runs backward. */
 void reverse_tree(

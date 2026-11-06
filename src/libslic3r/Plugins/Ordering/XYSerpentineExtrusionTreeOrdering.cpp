@@ -64,6 +64,12 @@ The normal call flow is:
             |-- reverse_tree() for nearer reversible exits
             |-- SeamPlacerRouter::place_seam() for atomic loops
             `-- disable_ordering_flags_recursively()
+
+A collection marked with BridgeAtomicStrand represents one continuous split
+bridge row. Treat it as a single candidate: do not spatially sort its children or
+choose their directions independently. Any permitted reversal applies to the
+whole sequence through reverse_tree(), then final ordering locks its descendant
+permissions. The marker is not permission to reverse an otherwise fixed path.
 */
 
 const char *k_no_dependencies[] = { nullptr };
@@ -398,7 +404,8 @@ void spatially_order_entity(MutableExtrusionEntity entity,
                             const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if (entity.empty() || entity.readonly().is_loop())
+    // Spatial child sorting would break a marked strand's continuous sequence.
+    if (entity.empty() || entity.readonly().is_loop() || TreeOrderingGeometry::atomic_strand(entity.readonly()))
         return;
 
     if (entity.readonly().sortable()) {
@@ -534,6 +541,12 @@ c_point finalize_entity(MutableExtrusionEntity entity,
             squared_distance(current_position, entity.front())) {
         throw_if_cancelled(run_ctx);
         TreeOrderingGeometry::reverse_tree(entity, run_ctx);
+    }
+
+    // Whole-strand orientation is settled above; do not orient pieces independently.
+    if (TreeOrderingGeometry::atomic_strand(entity.readonly())) {
+        TreeOrderingGeometry::disable_ordering_flags_recursively(entity,run_ctx);
+        return entity.back();
     }
 
     c_point position = current_position;
