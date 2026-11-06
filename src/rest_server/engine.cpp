@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <boost/filesystem/path.hpp>
+#include <boost/format.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
@@ -100,6 +101,18 @@ void initialize_config_definitions()
 }
 
 } // namespace
+
+std::string format_status_text(const std::string &text, const std::vector<std::string> &args)
+{
+    try {
+        boost::format formatter(text);
+        for (const std::string &arg : args)
+            formatter % arg;
+        return formatter.str();
+    } catch (const boost::io::format_error &) {
+        return text;
+    }
+}
 
 Engine &Engine::instance()
 {
@@ -228,6 +241,7 @@ SliceResult Engine::slice(
     if (print.empty())
         throw std::runtime_error("The REST slice model is empty.");
 
+    // TODO(progress rework): callback percent-only updates look like clears; use GUI wakeups or the future libslic3r model.
     if (progress)
         print.set_status_callback(std::move(progress));
     else

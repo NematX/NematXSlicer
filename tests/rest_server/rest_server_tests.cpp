@@ -24,7 +24,7 @@
 
 using namespace RestServerTest;
 
-TEST_CASE("REST save_project checks method before engine initialization", "[rest_server][rest_save_project]")
+TEST_CASE("REST save_project checks method before engine initialization", "[rest_server][rest_save_project][rest_slice]")
 {
     RestServerFixture fixture;
     const HttpResponseMessage method = fixture.request(http::verb::post, "/session/missing/save_project", "bad");
@@ -32,6 +32,26 @@ TEST_CASE("REST save_project checks method before engine initialization", "[rest
     const HttpResponseMessage engine = fixture.request(http::verb::get, "/session/missing/save_project?bad=x", "bad");
     CHECK(engine.result() == http::status::service_unavailable);
     CHECK(nlohmann::json::parse(engine.body()).at("error").at("code") == "engine_not_initialized");
+
+    const HttpResponseMessage slice = fixture.request(
+        http::verb::post, "/session/missing/slice", "{}", "application/json");
+    CHECK(slice.result() == http::status::service_unavailable);
+    CHECK(nlohmann::json::parse(slice.body()).at("error").at("code") == "engine_not_initialized");
+}
+
+TEST_CASE("REST state reads registry sessions without engine initialization", "[rest_server][rest_state]")
+{
+    RestServerFixture fixture;
+    const HttpResponseMessage created = fixture.request(http::verb::post, "/create_session");
+    REQUIRE(created.result() == http::status::created);
+    const std::string id = nlohmann::json::parse(created.body()).at("session_id");
+
+    const HttpResponseMessage state = fixture.request(http::verb::get, "/session/" + id + "/state");
+    REQUIRE(state.result() == http::status::ok);
+    const nlohmann::json expected{
+        {"etat", "ready"}, {"primary_message", ""}, {"primary_percentage", -1},
+        {"secondary_message", ""}, {"secondary_percentage", -1}};
+    CHECK(nlohmann::json::parse(state.body()) == expected);
 }
 
 TEST_CASE("REST server handles loopback JSON and route errors", "[rest_server]")
@@ -366,7 +386,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
             "work": "work",
             "accounts": "accounts.json"
         },
-        "limits": {"max_request_body_bytes": 2048, "max_upload_bytes": 4096, "max_header_bytes": 4096, "max_connections": 4, "import_threads": 3, "max_instances_per_object": 5},
+        "limits": {"max_request_body_bytes": 2048, "max_upload_bytes": 4096, "max_header_bytes": 4096, "max_connections": 4, "import_threads": 3, "slice_threads": 3, "max_instances_per_object": 5},
         "timeouts": {"request_seconds": 5},
         "auth": {"token_ttl_seconds": 120, "login_window_seconds": 30, "max_login_attempts": 3},
         "sessions": {"expiration_seconds": 240}
@@ -383,6 +403,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
     REQUIRE(config.max_request_body_bytes == 2048);
     REQUIRE(config.max_upload_bytes == 4096);
     REQUIRE(config.import_threads == 3);
+    REQUIRE(config.slice_threads == 3);
     REQUIRE(config.max_instances_per_object == 5);
     REQUIRE(config.request_timeout == std::chrono::seconds(5));
     REQUIRE(config.token_ttl == std::chrono::seconds(120));
@@ -399,6 +420,7 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_request_body_bytes == 16ULL * 1024ULL * 1024ULL);
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_upload_bytes == 1ULL * 1024ULL * 1024ULL * 1024ULL);
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().import_threads == 2);
+    REQUIRE(Slic3r::Rest::ServerConfig::defaults().slice_threads == 2);
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_instances_per_object == 1000);
 
     Slic3r::Rest::ServerConfig missing_resource = valid;
@@ -438,6 +460,10 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     Slic3r::Rest::ServerConfig zero_import_threads = valid;
     zero_import_threads.import_threads = 0;
     REQUIRE_THROWS_AS(zero_import_threads.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig zero_slice_threads = valid;
+    zero_slice_threads.slice_threads = 0;
+    REQUIRE_THROWS_AS(zero_slice_threads.validate(), std::invalid_argument);
 
     Slic3r::Rest::ServerConfig zero_timeout = valid;
     zero_timeout.request_timeout = std::chrono::seconds(0);
@@ -479,6 +505,29 @@ TEST_CASE("REST instance limit configuration rejects invalid values", "[rest_ser
             FAIL("Invalid instance limit accepted");
         } catch (const std::invalid_argument &error) {
             CHECK(std::string(error.what()).find("limits.max_instances_per_object") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("REST slice thread configuration rejects invalid values", "[rest_server][rest_slice]")
+{
+    TempDirectory root;
+    make_valid_config(root.path());
+    const std::filesystem::path config_file = root.path() / "server.json";
+    const std::vector<nlohmann::json> invalid{0, -1, true, 1.5, "2", std::uint64_t{1} << 32};
+    for (const nlohmann::json &value : invalid) {
+        CAPTURE(value.dump());
+        const nlohmann::json document{
+            {"paths", {{"resources", "resources"}, {"profiles", "profiles"},
+                       {"work", "work"}, {"accounts", "accounts.json"}}},
+            {"limits", {{"slice_threads", value}}}
+        };
+        std::ofstream(config_file) << document.dump();
+        try {
+            Slic3r::Rest::load_server_config(config_file);
+            FAIL("Invalid slice thread count accepted");
+        } catch (const std::invalid_argument &error) {
+            CHECK(std::string(error.what()).find("limits.slice_threads") != std::string::npos);
         }
     }
 }

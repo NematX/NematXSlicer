@@ -8,6 +8,7 @@
 
 #include "session.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <iomanip>
@@ -208,7 +209,9 @@ bool SessionContext::commit_mutation(
     return true;
 }
 
-std::optional<SessionContext::WorkToken> SessionContext::begin_work(TimePoint started_at)
+std::optional<SessionContext::WorkToken> SessionContext::begin_work(
+    TimePoint started_at,
+    std::function<void()> cancel_hook)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (retired_ || active_work_generation_.has_value())
@@ -216,8 +219,12 @@ std::optional<SessionContext::WorkToken> SessionContext::begin_work(TimePoint st
 
     const std::uint64_t generation = ++next_work_generation_;
     active_work_generation_ = generation;
+    work_started_ = false;
+    cancel_requested_ = false;
+    cancel_hook_ = std::move(cancel_hook);
     ++revision_;
     status_ = SessionStatus::slicing;
+    progress_ = {};
     current_gcode_.reset();
     mark_viewer_outdated_locked();
     error_message_.clear();
@@ -225,32 +232,104 @@ std::optional<SessionContext::WorkToken> SessionContext::begin_work(TimePoint st
     return WorkToken{generation};
 }
 
+bool SessionContext::start_work(WorkToken token)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retired_ || !active_work_generation_ || *active_work_generation_ != token.generation)
+        return false;
+    work_started_ = true;
+    return true;
+}
+
+SessionContext::CancelResult SessionContext::request_cancel(TimePoint now)
+{
+    // Destroyed after the lock is released: an outdated viewer copy and the
+    // hook (which may own the engine control) are released outside the lock.
+    std::shared_ptr<const ViewerSnapshot> discarded_viewer;
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (retired_ || !active_work_generation_)
+            return CancelResult::not_active;
+        if (!work_started_) {
+            // Queued work never reaches the engine: end it now. The worker
+            // later finds its token stale and skips the run.
+            GCodeProcessorResult no_viewer;
+            std::shared_ptr<const void> no_owner;
+            finish_work_locked(WorkToken{*active_work_generation_}, SessionStatus::ready, {}, no_viewer, {}, now,
+                discarded_viewer, no_owner);
+            return CancelResult::cancelled;
+        }
+        if (cancel_requested_)
+            return CancelResult::stopping;
+        cancel_requested_ = true;
+        hook = std::move(cancel_hook_);
+    }
+    if (hook)
+        hook();
+    return CancelResult::stopping;
+}
+
+bool SessionContext::update_progress(WorkToken token, bool secondary, std::string message, int percentage)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retired_ || !active_work_generation_ || *active_work_generation_ != token.generation)
+        return false;
+    std::string &channel_message = secondary ? progress_.secondary_message : progress_.main_message;
+    int &channel_percentage = secondary ? progress_.secondary_percentage : progress_.main_percentage;
+    channel_percentage = std::clamp(percentage, -1, 100);
+    // TODO(progress rework): empty nonnegative updates are percent-only heuristically; producers have no strict order.
+    if (!message.empty() || percentage < 0)
+        channel_message = std::move(message);
+    return true;
+}
+
 bool SessionContext::finish_work(
     WorkToken token,
     std::filesystem::path gcode_file,
     GCodeProcessorResult viewer,
-    TimePoint finished_at)
+    TimePoint finished_at,
+    std::shared_ptr<const void> gcode_owner,
+    std::shared_ptr<const ViewerSnapshot> *discarded_viewer)
 {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return finish_work_locked(
-        token,
-        SessionStatus::sliced,
-        std::move(gcode_file),
-        std::move(viewer),
-        {},
-        finished_at);
+    // `viewer` and `gcode_owner` stay owned by this frame when the result is
+    // discarded (cancelled work), so they are destroyed after the lock.
+    std::shared_ptr<const ViewerSnapshot> previous_viewer;
+    bool committed;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        committed = finish_work_locked(
+            token,
+            SessionStatus::sliced,
+            std::move(gcode_file),
+            viewer,
+            {},
+            finished_at,
+            previous_viewer,
+            gcode_owner);
+    }
+    if (discarded_viewer != nullptr)
+        *discarded_viewer = std::move(previous_viewer);
+    return committed;
 }
 
 bool SessionContext::fail_work(WorkToken token, std::string message, TimePoint finished_at)
 {
+    std::shared_ptr<const ViewerSnapshot> discarded_viewer;
+    GCodeProcessorResult no_viewer;
+    std::shared_ptr<const void> no_owner;
     std::lock_guard<std::mutex> lock(mutex_);
-    return finish_work_locked(token, SessionStatus::failed, {}, {}, std::move(message), finished_at);
+    return finish_work_locked(token, SessionStatus::failed, {}, no_viewer, std::move(message), finished_at,
+        discarded_viewer, no_owner);
 }
 
 bool SessionContext::cancel_work(WorkToken token, TimePoint finished_at)
 {
+    std::shared_ptr<const ViewerSnapshot> discarded_viewer;
+    GCodeProcessorResult no_viewer;
+    std::shared_ptr<const void> no_owner;
     std::lock_guard<std::mutex> lock(mutex_);
-    return finish_work_locked(token, SessionStatus::ready, {}, {}, {}, finished_at);
+    return finish_work_locked(token, SessionStatus::ready, {}, no_viewer, {}, finished_at, discarded_viewer, no_owner);
 }
 
 SessionContext::Snapshot SessionContext::snapshot() const
@@ -267,6 +346,7 @@ SessionContext::Snapshot SessionContext::snapshot() const
     result.retired = retired_;
     result.last_activity = last_activity_;
     result.error_message = error_message_;
+    result.progress = progress_;
     return result;
 }
 
@@ -435,25 +515,40 @@ bool SessionContext::finish_work_locked(
     WorkToken token,
     SessionStatus status,
     std::filesystem::path gcode_file,
-    GCodeProcessorResult viewer,
+    GCodeProcessorResult &viewer,
     std::string error_message,
-    TimePoint completed_at)
+    TimePoint completed_at,
+    std::shared_ptr<const ViewerSnapshot> &discarded_viewer,
+    std::shared_ptr<const void> &gcode_owner)
 {
     if (retired_ || !active_work_generation_.has_value() ||
         active_work_generation_.value() != token.generation)
         return false;
 
+    // An accepted cancellation wins over a late success or failure: the
+    // computed result is discarded and the session returns to ready.
+    if (cancel_requested_) {
+        status = SessionStatus::ready;
+        error_message.clear();
+    }
     active_work_generation_.reset();
+    work_started_ = false;
+    cancel_requested_ = false;
+    // The hook only shares the cheap engine control; dropping it here is safe.
+    cancel_hook_ = nullptr;
     ++revision_;
     status_ = status;
+    progress_ = {};
     error_message_ = std::move(error_message);
     current_gcode_.reset();
     if (status == SessionStatus::sliced) {
         std::shared_ptr<ViewerSnapshot> result = std::make_shared<ViewerSnapshot>();
         result->result_id = make_opaque_id("result");
         result->gcode_file = std::move(gcode_file);
+        result->gcode_owner = std::move(gcode_owner);
         result->viewer = std::make_shared<GCodeProcessorResult>(std::move(viewer));
         result->outdated = false;
+        discarded_viewer = std::move(viewer_snapshot_);
         viewer_snapshot_ = std::move(result);
         current_gcode_ = viewer_snapshot_->gcode_file;
     } else {
@@ -495,6 +590,7 @@ bool SessionContext::retire()
         if (retired_ || active_work_generation_.has_value())
             return false;
         retired_ = true;
+        progress_ = {};
         current_gcode_.reset();
         discarded_viewer = std::move(viewer_snapshot_);
         discarded_data = std::move(data_);

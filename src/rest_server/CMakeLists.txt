@@ -47,6 +47,8 @@ add_library(slic3r_rest STATIC
     multipart_upload.hpp
     profiles.cpp
     profiles.hpp
+    progress.cpp
+    progress.hpp
     rest_server.cpp
     rest_server.hpp
     settings_catalog.cpp
@@ -65,7 +67,7 @@ target_include_directories(slic3r_rest
         ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-target_link_libraries(slic3r_rest PRIVATE boost_libs slic3r_rest_auth slic3r_rest_session libslic3r)
+target_link_libraries(slic3r_rest PRIVATE boost_libs slic3r_rest_auth slic3r_rest_session slic3r_rest_engine libslic3r)
 target_compile_definitions(slic3r_rest PRIVATE NOMINMAX)
 
 add_executable(slic3r_rest_password

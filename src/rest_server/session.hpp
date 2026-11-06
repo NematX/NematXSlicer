@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -40,6 +41,14 @@ enum class SessionStatus {
 
 const char *session_status_name(SessionStatus status) noexcept;
 
+// Last active slice progress; -1 is unavailable. TODO(progress rework): replace with the libslic3r progress model.
+struct SliceProgress {
+    std::string main_message;
+    int main_percentage = -1;
+    std::string secondary_message;
+    int secondary_percentage = -1;
+};
+
 struct ProfileSelection {
     std::string print;
     std::string printer;
@@ -61,6 +70,8 @@ struct SessionData {
 struct ViewerSnapshot {
     std::string result_id;
     std::filesystem::path gcode_file;
+    // The last snapshot or download owner removes the result directory.
+    std::shared_ptr<const void> gcode_owner;
     // The move list is shared and never mutated: marking a snapshot outdated
     // only copies this small header, not the whole GCodeProcessorResult.
     std::shared_ptr<const GCodeProcessorResult> viewer;
@@ -114,6 +125,7 @@ public:
         bool retired = false;
         TimePoint last_activity;
         std::string error_message;
+        SliceProgress progress;
     };
 
     SessionContext(
@@ -145,12 +157,32 @@ public:
         bool replace_entities = false,
         const std::vector<EntityBinding> &unbindings = {});
 
-    std::optional<WorkToken> begin_work(TimePoint started_at);
+    // Cancellation is arbitrated under the session lock:
+    // - queued work (not started) ends at once in `ready`;
+    // - started work keeps `slicing`; `cancel_hook` (stop the engine) is called
+    //   once, outside the lock, and the worker's later report ends in `ready`;
+    // - an accepted cancellation wins over a late success or failure;
+    // - without active work nothing changes.
+    enum class CancelResult {
+        not_active,
+        cancelled,
+        stopping
+    };
+
+    std::optional<WorkToken> begin_work(TimePoint started_at, std::function<void()> cancel_hook = {});
+    // Worker entry point: false when the work was cancelled while queued.
+    bool start_work(WorkToken token);
+    CancelResult request_cancel(TimePoint now);
+    // Merge only the active generation's channel, ignoring stale producer callbacks.
+    bool update_progress(WorkToken token, bool secondary, std::string message, int percentage);
+    // Transfer the displaced viewer to the caller when destruction must also wait for an outer lock.
     bool finish_work(
         WorkToken token,
         std::filesystem::path gcode_file,
         GCodeProcessorResult viewer,
-        TimePoint finished_at);
+        TimePoint finished_at,
+        std::shared_ptr<const void> gcode_owner = {},
+        std::shared_ptr<const ViewerSnapshot> *discarded_viewer = nullptr);
     bool fail_work(WorkToken token, std::string message, TimePoint finished_at);
     bool cancel_work(WorkToken token, TimePoint finished_at);
 
@@ -177,13 +209,16 @@ private:
     };
 
     void mark_viewer_outdated_locked();
+    // Transfer the old result without destroying its moves or directory under the session lock.
     bool finish_work_locked(
         WorkToken token,
         SessionStatus status,
         std::filesystem::path gcode_file,
-        GCodeProcessorResult viewer,
+        GCodeProcessorResult &viewer,
         std::string error_message,
-        TimePoint completed_at);
+        TimePoint completed_at,
+        std::shared_ptr<const ViewerSnapshot> &discarded_viewer,
+        std::shared_ptr<const void> &gcode_owner);
     bool touch(TimePoint accessed_at);
     bool is_expired(TimePoint now) const;
     bool retire();
@@ -194,9 +229,13 @@ private:
     Clock::duration expiration_;
     TimePoint last_activity_;
     SessionStatus status_ = SessionStatus::ready;
+    SliceProgress progress_;
     std::uint64_t revision_ = 0;
     std::uint64_t next_work_generation_ = 0;
     std::optional<std::uint64_t> active_work_generation_;
+    bool work_started_ = false;
+    bool cancel_requested_ = false;
+    std::function<void()> cancel_hook_;
     SessionData data_;
     std::optional<std::filesystem::path> current_gcode_;
     std::shared_ptr<const ViewerSnapshot> viewer_snapshot_;

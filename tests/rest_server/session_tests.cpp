@@ -16,6 +16,7 @@
 #include <chrono>
 #include <filesystem>
 #include <future>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <set>
@@ -118,6 +119,135 @@ TEST_CASE("stale work cannot publish after a later generation", "[rest_session]"
     REQUIRE(session->finish_work(
         second.value(), std::filesystem::path("second.gcode"), viewer_result(), at_hours(6)));
     REQUIRE(session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+}
+
+TEST_CASE("session progress channels update independently and normalize values", "[rest_session][rest_state]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+
+    REQUIRE(session->update_progress(work, false, "Slicing objects", 25));
+    REQUIRE(session->update_progress(work, true, "Generating infill", 40));
+    Session::Snapshot snapshot = session->snapshot();
+    CHECK(snapshot.progress.main_message == "Slicing objects");
+    CHECK(snapshot.progress.main_percentage == 25);
+    CHECK(snapshot.progress.secondary_message == "Generating infill");
+    CHECK(snapshot.progress.secondary_percentage == 40);
+
+    REQUIRE(session->update_progress(work, false, "", std::numeric_limits<int>::max()));
+    REQUIRE(session->update_progress(work, true, "", 0));
+    snapshot = session->snapshot();
+    CHECK(snapshot.progress.main_message == "Slicing objects");
+    CHECK(snapshot.progress.main_percentage == 100);
+    CHECK(snapshot.progress.secondary_message == "Generating infill");
+    CHECK(snapshot.progress.secondary_percentage == 0);
+
+    REQUIRE(session->update_progress(work, true, "", std::numeric_limits<int>::min()));
+    REQUIRE(session->update_progress(work, false, "Waiting for output", -2));
+    snapshot = session->snapshot();
+    CHECK(snapshot.progress.main_message == "Waiting for output");
+    CHECK(snapshot.progress.main_percentage == -1);
+    CHECK(snapshot.progress.secondary_message.empty());
+    CHECK(snapshot.progress.secondary_percentage == -1);
+}
+
+TEST_CASE("session progress rejects inactive stale and retired work", "[rest_session][rest_state]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken first = session->begin_work(at_hours(1)).value();
+    REQUIRE(session->update_progress(first, false, "first", 10));
+    REQUIRE(session->cancel_work(first, at_hours(2)));
+
+    CHECK_FALSE(session->update_progress(first, false, "inactive", 20));
+    const Session::WorkToken second = session->begin_work(at_hours(3)).value();
+    REQUIRE(session->update_progress(second, true, "current", 30));
+    CHECK_FALSE(session->update_progress(first, false, "stale", 40));
+    Session::Snapshot snapshot = session->snapshot();
+    CHECK(snapshot.progress.main_message.empty());
+    CHECK(snapshot.progress.main_percentage == -1);
+    CHECK(snapshot.progress.secondary_message == "current");
+    CHECK(snapshot.progress.secondary_percentage == 30);
+
+    REQUIRE(session->cancel_work(second, at_hours(4)));
+    CHECK_FALSE(session->update_progress(second, true, "inactive", 50));
+    REQUIRE(registry.erase("alice", session->session_id()) == SessionEraseResult::erased);
+    CHECK_FALSE(session->update_progress(second, true, "retired", 60));
+    snapshot = session->snapshot();
+    CHECK(snapshot.retired);
+    CHECK(snapshot.progress.main_message.empty());
+    CHECK(snapshot.progress.main_percentage == -1);
+    CHECK(snapshot.progress.secondary_message.empty());
+    CHECK(snapshot.progress.secondary_percentage == -1);
+}
+
+TEST_CASE("session lifecycle transitions reset every progress field", "[rest_session][rest_state]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const auto check_default_progress = [](const Session::Snapshot &snapshot) {
+        CHECK(snapshot.progress.main_message.empty());
+        CHECK(snapshot.progress.main_percentage == -1);
+        CHECK(snapshot.progress.secondary_message.empty());
+        CHECK(snapshot.progress.secondary_percentage == -1);
+    };
+
+    const Session::WorkToken finished = session->begin_work(at_hours(1)).value();
+    check_default_progress(session->snapshot());
+    REQUIRE(session->update_progress(finished, false, "main", 10));
+    REQUIRE(session->update_progress(finished, true, "secondary", 20));
+    REQUIRE(session->finish_work(
+        finished, std::filesystem::path("done.gcode"), viewer_result(), at_hours(2)));
+    check_default_progress(session->snapshot());
+
+    const Session::WorkToken failed = session->begin_work(at_hours(3)).value();
+    check_default_progress(session->snapshot());
+    REQUIRE(session->update_progress(failed, false, "main", 30));
+    REQUIRE(session->update_progress(failed, true, "secondary", 40));
+    REQUIRE(session->fail_work(failed, "slice failed", at_hours(4)));
+    check_default_progress(session->snapshot());
+
+    const Session::WorkToken canceled = session->begin_work(at_hours(5)).value();
+    check_default_progress(session->snapshot());
+    REQUIRE(session->update_progress(canceled, false, "main", 50));
+    REQUIRE(session->update_progress(canceled, true, "secondary", 60));
+    REQUIRE(session->cancel_work(canceled, at_hours(6)));
+    check_default_progress(session->snapshot());
+
+    REQUIRE(registry.erase("alice", session->session_id()) == SessionEraseResult::erased);
+    check_default_progress(session->snapshot());
+}
+
+TEST_CASE("concurrent progress producers preserve both channels", "[rest_session][rest_state]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+    std::promise<void> gate;
+    const std::shared_future<void> start = gate.get_future().share();
+    std::atomic<bool> main_updated{false};
+    std::atomic<bool> secondary_updated{false};
+
+    std::thread main_producer([&]() {
+        start.wait();
+        main_updated.store(session->update_progress(work, false, "overall", 70));
+    });
+    std::thread secondary_producer([&]() {
+        start.wait();
+        secondary_updated.store(session->update_progress(work, true, "detail", 80));
+    });
+    gate.set_value();
+    main_producer.join();
+    secondary_producer.join();
+
+    REQUIRE(main_updated.load());
+    REQUIRE(secondary_updated.load());
+    const Session::Snapshot snapshot = session->snapshot();
+    CHECK(snapshot.progress.main_message == "overall");
+    CHECK(snapshot.progress.main_percentage == 70);
+    CHECK(snapshot.progress.secondary_message == "detail");
+    CHECK(snapshot.progress.secondary_percentage == 80);
 }
 
 TEST_CASE("failed work keeps the previous viewer outdated", "[rest_session]")
@@ -516,4 +646,108 @@ TEST_CASE("Instance ID removals share the scene commit and stale commits remove 
     CHECK(session->instance_ids(session->begin_mutation().value(), object->id().id).value() ==
         std::vector<std::string>{ids[2]});
     CHECK(session->data_snapshot()->scene->object_ptrs().front()->instances.size() == 1);
+}
+
+TEST_CASE("cancellation without active work changes nothing", "[rest_session][rest_cancel]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::Snapshot before = session->snapshot();
+    CHECK(session->request_cancel(at_hours(1)) == Session::CancelResult::not_active);
+    CHECK(session->snapshot().revision == before.revision);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+}
+
+TEST_CASE("queued work is cancelled at once and its worker skips it", "[rest_session][rest_cancel]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    int hook_calls = 0;
+    const Session::WorkToken work = session->begin_work(at_hours(1), [&hook_calls]() { ++hook_calls; }).value();
+    const std::uint64_t revision = session->snapshot().revision;
+
+    CHECK(session->request_cancel(at_hours(2)) == Session::CancelResult::cancelled);
+    CHECK(hook_calls == 0);
+    const Session::Snapshot cancelled = session->snapshot();
+    CHECK(cancelled.status == Slic3r::Rest::SessionStatus::ready);
+    CHECK(cancelled.revision == revision + 1);
+    CHECK(cancelled.last_activity == at_hours(2));
+    CHECK_FALSE(session->start_work(work));
+    CHECK_FALSE(session->update_progress(work, false, "late", 10));
+    CHECK_FALSE(session->finish_work(work, "late.gcode", viewer_result(), at_hours(3)));
+    CHECK_FALSE(session->fail_work(work, "late", at_hours(3)));
+    CHECK(session->request_cancel(at_hours(3)) == Session::CancelResult::not_active);
+}
+
+TEST_CASE("started work stops once and an accepted cancellation wins", "[rest_session][rest_cancel]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken first = session->begin_work(at_hours(1)).value();
+    REQUIRE(session->finish_work(first, "first.gcode", viewer_result(), at_hours(2)));
+    const std::string first_result = session->viewer_snapshot()->result_id;
+
+    SECTION("a late success is discarded")
+    {
+        int hook_calls = 0;
+        const Session::WorkToken work = session->begin_work(at_hours(3), [&hook_calls]() { ++hook_calls; }).value();
+        REQUIRE(session->start_work(work));
+        CHECK(session->request_cancel(at_hours(4)) == Session::CancelResult::stopping);
+        CHECK(session->request_cancel(at_hours(4)) == Session::CancelResult::stopping);
+        CHECK(hook_calls == 1);
+        CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::slicing);
+
+        // The released owner proves the discarded result is not retained.
+        std::shared_ptr<int> owner = std::make_shared<int>(1);
+        std::weak_ptr<int> watched = owner;
+        REQUIRE(session->finish_work(work, "late.gcode", viewer_result(), at_hours(5), std::move(owner)));
+        CHECK(watched.expired());
+        CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+        CHECK(session->snapshot().last_activity == at_hours(5));
+        CHECK_FALSE(session->current_gcode().has_value());
+        REQUIRE(session->viewer_snapshot() != nullptr);
+        CHECK(session->viewer_snapshot()->result_id == first_result);
+        CHECK(session->viewer_snapshot()->outdated);
+    }
+    SECTION("a late failure ends ready without an error")
+    {
+        const Session::WorkToken work = session->begin_work(at_hours(3)).value();
+        REQUIRE(session->start_work(work));
+        CHECK(session->request_cancel(at_hours(4)) == Session::CancelResult::stopping);
+        REQUIRE(session->fail_work(work, "engine stopped", at_hours(5)));
+        CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+        CHECK(session->snapshot().error_message.empty());
+    }
+    SECTION("a restarted run ignores the cancelled run")
+    {
+        const Session::WorkToken work = session->begin_work(at_hours(3)).value();
+        REQUIRE(session->start_work(work));
+        CHECK(session->request_cancel(at_hours(4)) == Session::CancelResult::stopping);
+        REQUIRE(session->cancel_work(work, at_hours(5)));
+        const Session::WorkToken restarted = session->begin_work(at_hours(6)).value();
+        REQUIRE(session->start_work(restarted));
+        CHECK_FALSE(session->update_progress(work, false, "late", 50));
+        CHECK_FALSE(session->finish_work(work, "late.gcode", viewer_result(), at_hours(7)));
+        REQUIRE(session->finish_work(restarted, "restarted.gcode", viewer_result(), at_hours(8)));
+        CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+        CHECK(session->current_gcode() == std::filesystem::path("restarted.gcode"));
+    }
+}
+
+TEST_CASE("the cancellation hook runs outside the session lock", "[rest_session][rest_cancel]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    std::optional<Slic3r::Rest::SessionStatus> seen;
+    // Reading the session from the hook would deadlock under the lock.
+    const Session::WorkToken work = session->begin_work(at_hours(1), [&seen, &session]() {
+        seen = session->snapshot().status;
+    }).value();
+    REQUIRE(session->start_work(work));
+    std::future<Session::CancelResult> result = std::async(std::launch::async, [&session]() {
+        return session->request_cancel(at_hours(2));
+    });
+    REQUIRE(result.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(result.get() == Session::CancelResult::stopping);
+    CHECK(seen == Slic3r::Rest::SessionStatus::slicing);
 }

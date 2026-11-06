@@ -48,6 +48,7 @@ add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 add_executable(rest_models_tests
     file_names_tests.cpp
     rest_models_tests.cpp
+    rest_slice_tests.cpp
     transform_tests.cpp
 )
 
@@ -153,9 +154,10 @@ add_test(rest_auth_tests rest_auth_tests ${CATCH_EXTRA_ARGS})
 set_tests_properties(
     rest_server_tests
     rest_profiles_tests
-    rest_models_tests
     rest_settings_tests
     rest_engine_tests
     rest_session_tests
     rest_auth_tests
     PROPERTIES TIMEOUT 120)
+
+set_tests_properties(rest_models_tests PROPERTIES TIMEOUT 300)

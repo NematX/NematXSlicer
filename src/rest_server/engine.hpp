@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 
 #include "libslic3r/Config/PrintConfig.hpp"
@@ -52,13 +53,16 @@ struct SliceResult {
     GCodeProcessorResult viewer;
 };
 
+// Match Plater::priv::process_slicing_status formatting without translation; malformed templates remain readable.
+std::string format_status_text(const std::string &text, const std::vector<std::string> &args);
+
 // Caller-side control of one slice, shared between the thread running
 // Engine::slice() and the threads that observe or cancel it.
 // - Cancellation may be requested at any time, including before the print is
 //   created: the request is remembered and applied as soon as the print is
 //   attached, so an early cancel is never lost.
 // - Progress is the engine status stream of the print (main and secondary
-//   channels, plugin progress included), delivered on the slicing thread.
+//   channels, plugin progress included), delivered on producer threads.
 // One control drives one slice at a time; the progress callback is read when
 // the slice starts.
 class SliceControl {

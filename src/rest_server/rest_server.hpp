@@ -39,6 +39,8 @@ struct ServerConfig {
     // Threads parsing uploaded models away from the network thread, so a long
     // import never delays other requests.
     std::uint32_t import_threads;
+    // Excess slice requests wait in slicing state until a worker is available.
+    std::uint32_t slice_threads;
     // Deadline for a whole buffered request, and idle delay between two reads
     // of a streamed upload.
     std::chrono::seconds request_timeout;
@@ -138,6 +140,10 @@ public:
     // test can block in it to prove the network thread keeps serving requests.
     // Must be set before start().
     void set_import_observer(std::function<void()> observer);
+    // Test hook on the slicing worker before the engine starts; set before start().
+    void set_slice_observer(std::function<void()> observer);
+    // Test hook after a run accepts progress, outside the session lock; set before start().
+    void set_progress_observer(std::function<void()> observer);
 
 private:
     class Impl;

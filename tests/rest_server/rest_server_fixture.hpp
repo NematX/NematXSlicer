@@ -88,16 +88,19 @@ public:
         std::uint64_t max_header_bytes = 16 * 1024;
         std::uint32_t max_connections = 64;
         std::uint32_t max_instances_per_object = 1000;
+        std::uint32_t slice_threads = 2;
         std::chrono::seconds timeout{30};
         std::chrono::seconds token_ttl{24 * 60 * 60};
         std::chrono::seconds session_ttl{24 * 60 * 60};
     };
 
-    explicit RestServerFixture(Limits limits = {}, bool with_account = true, bool with_profiles = false)
+    explicit RestServerFixture(Limits limits = {}, bool with_account = true, bool with_profiles = false,
+        std::filesystem::path work_directory_name = "work")
         : root_directory_(),
           limits_(limits),
           with_account_(with_account),
           with_profiles_(with_profiles),
+          work_directory_name_(std::move(work_directory_name)),
           server_(create_server())
     {
         server_->start();
@@ -206,6 +209,18 @@ public:
         server_->set_import_observer(std::move(observer));
     }
 
+    // The slice hook follows the same stopped-only lifecycle as the import hook.
+    void set_slice_observer(std::function<void()> observer)
+    {
+        server_->set_slice_observer(std::move(observer));
+    }
+
+    // The progress hook follows the same stopped-only lifecycle as the worker hooks.
+    void set_progress_observer(std::function<void()> observer)
+    {
+        server_->set_progress_observer(std::move(observer));
+    }
+
     const std::string &token() const
     {
         return default_token_;
@@ -213,13 +228,13 @@ public:
 
     std::filesystem::path work_directory() const
     {
-        return root_directory_.path() / "work";
+        return root_directory_.path() / work_directory_name_;
     }
 
     std::size_t work_file_count() const
     {
         std::size_t count = 0;
-        const std::filesystem::path work = root_directory_.path() / "work";
+        const std::filesystem::path work = root_directory_.path() / work_directory_name_;
         for (const std::filesystem::directory_entry &entry :
              std::filesystem::recursive_directory_iterator(work))
             if (entry.is_regular_file())
@@ -252,13 +267,14 @@ private:
         config.port = 0;
         config.resource_directory = root / "resources";
         config.profiles_directory = root / "profiles";
-        config.work_directory = root / "work";
+        config.work_directory = root / work_directory_name_;
         config.accounts_file = root / "accounts.json";
         config.max_request_body_bytes = limits_.max_body_bytes;
         config.max_upload_bytes = limits_.max_upload_bytes;
         config.max_header_bytes = limits_.max_header_bytes;
         config.max_connections = limits_.max_connections;
         config.max_instances_per_object = limits_.max_instances_per_object;
+        config.slice_threads = limits_.slice_threads;
         config.request_timeout = limits_.timeout;
         config.token_ttl = limits_.token_ttl;
         config.session_ttl = limits_.session_ttl;
@@ -331,6 +347,7 @@ private:
     Limits limits_;
     bool with_account_;
     bool with_profiles_;
+    std::filesystem::path work_directory_name_;
     std::unique_ptr<Slic3r::Rest::RestServer> server_;
     std::string default_token_;
     std::atomic<std::uint32_t> handler_calls_{0};

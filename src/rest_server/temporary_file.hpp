@@ -25,6 +25,19 @@ struct TemporaryFile {
     const std::filesystem::path path;
 };
 
+// Per-run directories also own any temporary files left by engine plugins.
+struct TemporaryDirectory {
+    explicit TemporaryDirectory(std::filesystem::path directory_path);
+    ~TemporaryDirectory();
+    TemporaryDirectory(const TemporaryDirectory &) = delete;
+    TemporaryDirectory &operator=(const TemporaryDirectory &) = delete;
+    const std::filesystem::path path;
+};
+
+// Exclusive run directories isolate engine leftovers until the last shared owner releases them.
+std::shared_ptr<TemporaryDirectory> create_temporary_directory(
+    const std::filesystem::path &directory, const std::string &prefix);
+
 // Return shared cleanup ownership of a closed file; prefix and extension define its server-only domain.
 std::shared_ptr<TemporaryFile> create_temporary_file(
     const std::filesystem::path &directory, const std::string &prefix, const std::string &extension);

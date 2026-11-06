@@ -1,7 +1,7 @@
 # Specification — SuperSlicer REST Server
 
 **Status:** proposed JSON contract, pending validation\
-**Version:** 0.68
+**Version:** 0.70
 
 ## 1. Objective
 
@@ -764,12 +764,18 @@ current G-code unavailable, and retains the previous viewer as outdated.
 ### 5.14. `POST .../slice`, `GET .../state`, `cancel_slicing`, `get_gcode`, `clear_platter`, `save_project`, and `delete`
 
 - `/slice` has no body. It starts slicing in the background and returns
-  `202 Accepted` with a JSON state snapshot matching `GET .../state`
-  (normally `etat: "slicing"`).
+  `202 Accepted` with the same state shape as `GET .../state` below.
 - A second `/slice` call while the session is already `slicing` returns
   `409 Conflict`.
-- `GET .../state` returns JSON containing the two `PrintStatus` channels and
-  the overall session state:
+- Slicing uses a fixed worker pool configured by the positive integer
+  `limits.slice_threads` (default `2`). Additional accepted sessions wait in an
+  unbounded queue; queued sessions are already in the `slicing` internal state.
+- Slice refusal order is authentication (`401`), method/path (`404`), initialized
+  engine (`503`), body validation (`400 invalid_request` for any nonempty body),
+  owning session (`404 session_not_found`), then scene/state. An empty scene
+  returns `409 empty_scene`; an already active session returns `409 session_busy`.
+- `GET /session/{session_id}/state` has no body and returns `200 OK` with
+  the session's current state and live main/secondary `PrintStatus` progress:
 
   ```json
   {
@@ -781,16 +787,89 @@ current G-code unavailable, and retains the previous viewer as outdated.
   }
   ```
 
-  `primary_message` and `secondary_message` are strings. Both percentages are
-  integers; `-1` means progress is unavailable. `etat` is `ready`, `slicing`,
-  `sliced`, or `failed`. On failure, `primary_message` provides the error message.
+  `etat` is `ready`, `slicing`, `sliced`, or `failed`. Both message fields are
+  strings; both percentages are integers, with `-1` meaning unavailable progress
+  and `0` through `100` representing percentage points. Values received outside
+  that range are clamped. The primary channel is indicative overall progress and
+  the secondary channel is indicative detailed progress. Messages are the
+  engine's English, non-translated text. Message templates use their supplied
+  arguments, including `%%` as a literal percent sign; an invalid
+  template is returned as raw text rather than failing slicing.
+- Progress is a current snapshot, not an event stream. Updates from independent
+  producers may be interleaved, and clients must not assume monotonic
+  percentages, regular update intervals, or ordering between the two channels.
+  An empty update with an available percentage retains that channel's previous
+  message; an empty update with unavailable progress clears it. Control events
+  for scene/support/preview reload, warning refresh, slicing/G-code completion,
+  and forced display do not populate either progress channel.
+- Outside `slicing`, progress is blank: both messages are empty and both
+  percentages are `-1`. The sole exception is `failed`, where
+  `primary_message` contains the sanitized English error while the other three
+  progress fields retain their unavailable defaults. Both progress messages and
+  errors mask native and generic UTF-8 renderings of server work and result paths
+  with `<output>`.
+- `state` is an engine-independent registry read. Its route has exactly the three
+  path segments shown, accepts only `GET`, and requires an empty body. Authentication
+  is checked before body validation. An authenticated account receives the same
+  `404 session_not_found` for a missing session and another account's session.
+
+  | State request condition | Response |
+  |---|---|
+  | Nonempty request body, including malformed JSON | `400 invalid_request` |
+  | Missing or invalid authentication | `401 unauthorized` |
+  | Unknown method/path | `404 route_not_found` |
+  | Unknown session or another account's session | `404 session_not_found` |
+
+  Engine initialization does not affect these responses and never produces a
+  `503` for `state`.
+
+  TODO(progress rework): indicative progress and its formatting may change with
+  the libslic3r progress-model redesign.
+- The initial `/slice` response may have unavailable progress, for example:
+
+  ```json
+  {
+    "etat": "slicing",
+    "primary_message": "",
+    "primary_percentage": -1,
+    "secondary_message": "",
+    "secondary_percentage": -1
+  }
+  ```
+
+  Empty messages and `-1` percentages indicate unavailable initial progress,
+  not permanent defaults; subsequent state reads expose live progress when
+  available. Storage or scene preparation can fail after work admission and
+  return `202` already in `failed`, using the same state shape.
+- The sliced input is an immutable scene and configuration snapshot captured
+  after work admission. Later mutations cannot commit while that work is active.
+- Validation, engine, and storage failures transition the session to `failed`.
+  No `post_process` command is executed, including commands retained in imported
+  profiles or projects.
 - `sliced` is published only after successful slicing, G-code export, and
   preparation of the viewer result. No partial file or result is published
   on failure or cancellation.
+- Server shutdown cancels every running and queued slice like `cancel_slicing`,
+  waits for slice and import workers to finish, returns their retained session
+  contexts to `ready`, and removes unpublished output.
 - `POST .../cancel_slicing` has no body and requests that active slicing stop.
-  It returns `202 Accepted` immediately; `GET .../state` reports `ready` once
-  work has effectively stopped. It returns `409 Conflict` if no slicing
-  operation is active. This is the only mutation accepted while `etat: "slicing"`.
+  It is the only mutation accepted while `etat: "slicing"`, and returns
+  `202 Accepted` immediately with the same state shape as `GET .../state`:
+  - queued work that has not started ends at once: the response already reports
+    `etat: "ready"` and the engine never runs;
+  - started work keeps `etat: "slicing"` until the engine has effectively
+    stopped, then reports `ready`; until then new slices and mutations still
+    return `409 session_busy`, and a repeated cancellation returns `202` again;
+  - an accepted cancellation always ends in `ready`, even if the engine finished
+    or failed meanwhile: the computed result is discarded, no error is recorded,
+    and the previous viewer result, if any, is retained as outdated;
+  - the inactivity period restarts when work has effectively stopped.
+
+  Without active slicing, including after a `sliced` publication that won the
+  race, it returns `409 not_slicing`. Refusal order is authentication (`401`),
+  method/path (`404 route_not_found`), body (`400 invalid_request` for any
+  nonempty body), owning session (`404 session_not_found`), then state
+  (`409 not_slicing`). Engine initialization never produces a `503` here.
 - `GET .../get_gcode` has no body and downloads the `.gcode` file after successful
   slicing (`etat: "sliced"`). It returns `409` if no current result is available.
   `get_gcode_for_view` remains the viewer's JSON output.
@@ -839,7 +918,29 @@ current G-code unavailable, and retains the previous viewer as outdated.
   - **Temporary files:** `rest-export-` files in `work/exports` are deleted after
     responses complete or disconnect; stale matching files are removed at startup
     without deleting unrelated files.
+- Slice failures sanitize the configured `paths.work` location and each
+  random result directory as `<output>` when an underlying error contains that
+  path. A result-directory preparation failure records the generic literal
+  `The server could not prepare the result storage.`
+- Each success writes `work/results/rest-result-<random>/output.gcode`. The
+  directory is owned until the last session viewer, viewer response, or download
+  reference releases it. Startup removes unowned matching directories and keeps
+  unrelated files and results still owned across an in-process restart.
+  A failed replacement retains the prior outdated viewer and
+  its one old result directory without leaving a new result directory.
 - `/delete` returns `204 No Content`; the session ID and data are invalidated.
+
+#### Slice errors
+
+| Condition | Response |
+|---|---|
+| Nonempty request body | `400 invalid_request` |
+| Missing or invalid authentication | `401 unauthorized` |
+| Unknown route or method | `404 route_not_found` |
+| Unknown session or another account's session | `404 session_not_found` |
+| Already queued or slicing | `409 session_busy` |
+| Empty scene before work admission | `409 empty_scene` |
+| Uninitialized engine | `503 engine_not_initialized` |
 
 #### Result validity
 
@@ -854,8 +955,8 @@ current G-code unavailable, and retains the previous viewer as outdated.
   viewer result `outdated: true`. Success atomically replaces the results;
   cancellation or failure retains only the old stale viewer result.
   Without a prior success, the viewer returns `409`.
-- Session deletion or inactive expiration also destroys retained results.
-  A session cannot expire while slicing.
+- Registry erase or inactive expiration releases retained results once external
+  viewer/download references are gone. A session cannot expire while slicing.
 
 ### 5.15. `GET .../get_gcode_for_view`
 

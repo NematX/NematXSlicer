@@ -212,6 +212,28 @@ ConcurrentSliceResult run_concurrent_pair(
 
 } // namespace
 
+TEST_CASE("REST status text formats supported arguments and preserves invalid templates", "[rest_engine][rest_state]")
+{
+    using Slic3r::Rest::format_status_text;
+
+    CHECK(format_status_text("Preparing print", {}) == "Preparing print");
+    CHECK(format_status_text("Progress 100%%", {}) == "Progress 100%");
+    CHECK(format_status_text("Generating G-code layer %s / %s", {"3", "10"}) ==
+        "Generating G-code layer 3 / 10");
+    CHECK(format_status_text("Optimizing skirt & brim %s%%", {"45"}) ==
+        "Optimizing skirt & brim 45%");
+    CHECK(format_status_text("Layer %1%", {"7"}) == "Layer 7");
+    CHECK(format_status_text("%2% after %1%", {"first", "second"}) == "second after first");
+
+    CHECK(format_status_text("Generating G-code layer %s / %s", {"3"}) ==
+        "Generating G-code layer %s / %s");
+    CHECK(format_status_text("Optimizing skirt & brim %s%%", {"45", "unexpected"}) ==
+        "Optimizing skirt & brim %s%%");
+    CHECK(format_status_text("Layer %1% of %2%", {"7"}) == "Layer %1% of %2%");
+    CHECK(format_status_text("Preparing print", {"unexpected"}) == "Preparing print");
+    CHECK(format_status_text("Malformed %", {}) == "Malformed %");
+}
+
 TEST_CASE("headless engine performs a real FFF export", "[rest_engine]")
 {
     TemporaryRoot root;

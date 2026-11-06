@@ -11,9 +11,11 @@
 #include "rest_server.hpp"
 
 #include "auth.hpp"
+#include "engine.hpp"
 #include "file_names.hpp"
 #include "multipart_upload.hpp"
 #include "profiles.hpp"
+#include "progress.hpp"
 #include "session.hpp"
 #include "settings.hpp"
 #include "temporary_file.hpp"
@@ -74,6 +76,7 @@ constexpr std::uint64_t default_max_header_bytes = 16ULL * 1024ULL;
 constexpr std::uint32_t default_max_connections = 64;
 constexpr std::uint32_t default_max_instances_per_object = 1000;
 constexpr std::uint32_t default_import_threads = 2;
+constexpr std::uint32_t default_slice_threads = 2;
 // After an early error response the refused request body is read and dropped
 // within these bounds, so closing the socket sends FIN instead of a TCP reset
 // that would hide the response from the client.
@@ -235,6 +238,13 @@ void apply_json_config(
             if (import_threads > std::numeric_limits<std::uint32_t>::max())
                 throw std::invalid_argument("limits.import_threads is too large");
             config.import_threads = static_cast<std::uint32_t>(import_threads);
+        }
+        if (limits.contains("slice_threads")) {
+            const std::uint64_t slice_threads = read_unsigned_json(
+                limits.at("slice_threads"), "limits.slice_threads");
+            if (slice_threads > std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument("limits.slice_threads is too large");
+            config.slice_threads = static_cast<std::uint32_t>(slice_threads);
         }
         if (limits.contains("max_instances_per_object")) {
             const std::uint64_t maximum = read_unsigned_json(
@@ -630,6 +640,57 @@ bool parse_setting_updates(
 }
 
 
+// Submission and shutdown share this lock so no job can arrive after pool joining.
+class SliceJobs {
+public:
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = false;
+    }
+
+    bool submit(asio::thread_pool &pool, const std::shared_ptr<SessionContext> &session,
+        std::function<void(std::uint64_t)> job)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_)
+            return false;
+        const std::uint64_t id = ++next_id_;
+        active_.emplace(id, session);
+        try {
+            asio::post(pool, [job = std::move(job), id]() { job(id); });
+        } catch (...) {
+            active_.erase(id);
+            throw;
+        }
+        return true;
+    }
+
+    // The session arbitrates cancellation against publication; the job stays
+    // registered until it has published, so shutdown can still cancel it.
+    void complete(std::uint64_t id)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_.erase(id);
+    }
+
+    // Shutdown uses the same session cancellation as cancel_slicing: queued
+    // work ends at once, started work stops its engine run.
+    void cancel()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stopping_ = true;
+        for (const std::pair<const std::uint64_t, std::shared_ptr<SessionContext>> &entry : active_)
+            entry.second->request_cancel(SessionRegistry::Clock::now());
+    }
+
+private:
+    std::mutex mutex_;
+    std::uint64_t next_id_ = 0;
+    std::map<std::uint64_t, std::shared_ptr<SessionContext>> active_;
+    bool stopping_ = false;
+};
+
 // Services shared by every authenticated route for one request.
 struct RouteServices {
     AuthService &auth;
@@ -642,6 +703,12 @@ struct RouteServices {
     const std::function<void()> &import_observer;
     std::uint32_t max_instances_per_object;
     const std::filesystem::path &export_directory;
+    asio::thread_pool &slices;
+    SliceJobs &slice_jobs;
+    const std::function<void()> &slice_observer;
+    const std::function<void()> &progress_observer;
+    const std::filesystem::path &result_directory;
+    const std::filesystem::path &work_directory;
 };
 
 struct AuthenticatedRequest {
@@ -2043,6 +2110,146 @@ std::optional<HttpResponse> handle_save_project(const HttpRequest &request, cons
     return std::nullopt;
 }
 
+// The accepted response keeps the state contract even when progress is unavailable.
+nlohmann::json slice_state_json(const SessionContext::Snapshot &state)
+{
+    const SliceProgress progress = state.status == SessionStatus::slicing ? state.progress : SliceProgress{};
+    return {{"etat", session_status_name(state.status)},
+        {"primary_message", state.status == SessionStatus::failed ? state.error_message : progress.main_message},
+        {"primary_percentage", progress.main_percentage}, {"secondary_message", progress.secondary_message},
+        {"secondary_percentage", progress.secondary_percentage}};
+}
+
+// State remains readable without an initialized engine or a current result.
+HttpResponse handle_state(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The state route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    return HttpResponse::json(200, slice_state_json(session->snapshot()));
+}
+
+// Keep worker failures and cancellation within the owning session's work generation.
+void run_slice(const std::shared_ptr<SessionContext> &session, SessionContext::WorkToken token,
+    SessionData data, const std::shared_ptr<TemporaryDirectory> &directory,
+    const std::shared_ptr<SliceControl> &control, const std::function<void()> &observer,
+    const std::filesystem::path &work, SliceJobs &jobs, std::uint64_t id)
+{
+    // Work cancelled while queued already ended in `ready`: skip the engine.
+    if (!session->start_work(token)) {
+        jobs.complete(id);
+        return;
+    }
+    // Reports after an accepted cancellation end in `ready` (session arbitration);
+    // a cancelled engine run surfaces here as an exception.
+    std::shared_ptr<const ViewerSnapshot> discarded_viewer;
+    try {
+        if (observer)
+            observer();
+        // Engine apply and extruder assignment must never mutate the committed shared scene.
+        SliceResult result = Engine::instance().slice(Model(*data.scene), std::move(data.configuration),
+            directory->path / "output.gcode", control.get());
+        session->finish_work(token, std::move(result.output_file), std::move(result.viewer),
+            SessionRegistry::Clock::now(), directory, &discarded_viewer);
+    } catch (const std::exception &error) {
+        session->fail_work(token, sanitized_slice_error(error.what(), directory->path, work),
+            SessionRegistry::Clock::now());
+    } catch (...) {
+        session->fail_work(token, "The server could not slice the project.", SessionRegistry::Clock::now());
+    }
+    jobs.complete(id);
+}
+
+// Admit work before queueing so queued runs already block mutations and expiration.
+HttpResponse handle_slice(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (services.profiles == nullptr)
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The slice route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::optional<SessionData> data = session->data_snapshot();
+    if (!data)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (data->scene == nullptr || data->scene->object_ptrs().empty())
+        return make_error_response(409, "empty_scene", "The session contains no objects.", request_id);
+    // The control exists before admission so cancel_slicing always reaches it.
+    const std::shared_ptr<SliceControl> control = std::make_shared<SliceControl>();
+    const std::optional<SessionContext::WorkToken> token = session->begin_work(
+        SessionRegistry::Clock::now(), [control]() { control->request_cancel(); });
+    if (!token)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    data = session->data_snapshot();
+    if (!data || data->scene == nullptr || data->scene->object_ptrs().empty()) {
+        session->fail_work(*token, "The REST slice model is empty.", SessionRegistry::Clock::now());
+        return HttpResponse::json(202, slice_state_json(session->snapshot()));
+    }
+    std::shared_ptr<TemporaryDirectory> directory;
+    try {
+        directory = create_temporary_directory(services.result_directory, "rest-result-");
+    } catch (...) {
+        session->fail_work(*token, "The server could not prepare the result storage.", SessionRegistry::Clock::now());
+        return HttpResponse::json(202, slice_state_json(session->snapshot()));
+    }
+    try {
+        control->set_progress_callback([session, token = *token, directory_path = directory->path,
+            work = services.work_directory, observer = services.progress_observer](const PrintStatus::SlicingStatus &status) {
+            // TODO(progress rework): forward legacy callbacks without GUI coalescing until the progress model is replaced.
+            std::optional<ProgressUpdate> update = progress_update(status, directory_path, work);
+            if (!update)
+                return;
+            if (session->update_progress(token, update->secondary, std::move(update->message), update->percentage) && observer)
+                observer();
+        });
+        // Capture the accepted state before a fast worker can publish its completed result.
+        HttpResponse response = HttpResponse::json(202, slice_state_json(session->snapshot()));
+        SliceJobs &jobs = services.slice_jobs;
+        if (!jobs.submit(services.slices, session, [session, token = *token, data = std::move(*data),
+            directory, control, observer = services.slice_observer, work = services.work_directory,
+            &jobs](std::uint64_t id) mutable {
+                run_slice(session, token, std::move(data), directory, control, observer, work, jobs, id);
+            })) {
+            session->cancel_work(*token, SessionRegistry::Clock::now());
+            return HttpResponse::json(202, slice_state_json(session->snapshot()));
+        }
+        return response;
+    } catch (...) {
+        session->fail_work(*token, "The server could not schedule the slicing job.", SessionRegistry::Clock::now());
+        return HttpResponse::json(202, slice_state_json(session->snapshot()));
+    }
+}
+
+// Request that the session's slicing stop. Queued work ends at once in
+// `ready`; started work keeps `slicing` until the engine stops. A repeated
+// request during the stop is accepted again. Without active work: 409.
+HttpResponse handle_cancel_slicing(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The cancel_slicing route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (session->request_cancel(SessionRegistry::Clock::now()) == SessionContext::CancelResult::not_active)
+        return make_error_response(409, "not_slicing", "No slicing operation is active.", request_id);
+    return HttpResponse::json(202, slice_state_json(session->snapshot()));
+}
+
 // Route injected by tests only; it is never registered in the standalone
 // executable.
 HttpResponse handle_private_test(
@@ -2115,6 +2322,12 @@ std::optional<HttpResponse> dispatch_request(
             return handle_load_project(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "save_project")
             return handle_save_project(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "slice")
+            return handle_slice(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "cancel_slicing")
+            return handle_cancel_slicing(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "state")
+            return handle_state(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_name")
             return handle_set_name(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_name")
@@ -2634,6 +2847,16 @@ public:
             throw std::invalid_argument("paths.work: cannot list the export directory: " + failure.code().message());
         }
 
+        result_directory_ = config_.work_directory / "results";
+        std::filesystem::create_directories(result_directory_, filesystem_error);
+        if (filesystem_error)
+            throw std::invalid_argument("paths.work: cannot create the result directory: " + filesystem_error.message());
+        try {
+            remove_stale_temporary_files(result_directory_, "rest-result-");
+        } catch (const std::filesystem::filesystem_error &failure) {
+            throw std::invalid_argument("paths.work: cannot list the result directory: " + failure.code().message());
+        }
+
         ErrorCode error;
         const asio::ip::address address = asio::ip::make_address(config_.bind_address, error);
         if (error)
@@ -2669,6 +2892,8 @@ public:
             throw std::runtime_error("could not read REST listener port: " + message);
         }
         import_pool_ = std::make_unique<asio::thread_pool>(config_.import_threads);
+        slice_pool_ = std::make_unique<asio::thread_pool>(config_.slice_threads);
+        slice_jobs_.reset();
         running_.store(true);
         const std::uint64_t generation = ++run_generation_;
         accept_next(generation);
@@ -2699,6 +2924,10 @@ public:
         for (const std::shared_ptr<HttpSession> &session : sessions)
             session->close();
 
+        slice_jobs_.cancel();
+        if (slice_pool_ != nullptr)
+            slice_pool_->join();
+
         // Running imports finish before the network thread stops: their
         // responses are posted to io_context_ and their captured connections
         // must be released while it still exists.
@@ -2711,6 +2940,7 @@ public:
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         sessions_.clear();
         import_pool_.reset();
+        slice_pool_.reset();
         auth_service_.reset();
         profile_catalog_.reset();
         session_registry_.reset();
@@ -2729,7 +2959,7 @@ public:
 
     // Services addressed by the routes for one request; valid while the runtime
     // is running and the worker has not been joined.
-    RouteServices route_services() const
+    RouteServices route_services()
     {
         return RouteServices{
             *auth_service_,
@@ -2739,7 +2969,13 @@ public:
             *import_pool_,
             import_observer_,
             config_.max_instances_per_object,
-            export_directory_};
+            export_directory_,
+            *slice_pool_,
+            slice_jobs_,
+            slice_observer_,
+            progress_observer_,
+            result_directory_,
+            config_.work_directory};
     }
 
     void set_import_observer(std::function<void()> observer)
@@ -2747,6 +2983,20 @@ public:
         if (running_.load())
             throw std::logic_error("The import observer must be set before the REST server starts");
         import_observer_ = std::move(observer);
+    }
+
+    void set_slice_observer(std::function<void()> observer)
+    {
+        if (running_.load())
+            throw std::logic_error("The slice observer must be set before the REST server starts");
+        slice_observer_ = std::move(observer);
+    }
+
+    void set_progress_observer(std::function<void()> observer)
+    {
+        if (running_.load())
+            throw std::logic_error("The progress observer must be set before the REST server starts");
+        progress_observer_ = std::move(observer);
     }
 
     SessionRegistry &session_registry() const
@@ -2818,6 +3068,7 @@ private:
 
     ServerConfig config_;
     std::filesystem::path export_directory_;
+    std::filesystem::path result_directory_;
     std::shared_ptr<const ServerConfig> config_shared_;
     std::shared_ptr<AuthService> auth_service_;
     std::unique_ptr<ProfileCatalog> profile_catalog_;
@@ -2829,6 +3080,10 @@ private:
     std::function<void()> import_observer_;
     // Created in start(), joined in stop() before the network thread stops.
     std::unique_ptr<asio::thread_pool> import_pool_;
+    std::unique_ptr<asio::thread_pool> slice_pool_;
+    SliceJobs slice_jobs_;
+    std::function<void()> slice_observer_;
+    std::function<void()> progress_observer_;
     asio::io_context io_context_;
     Tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_{io_context_};
@@ -2860,6 +3115,7 @@ ServerConfig ServerConfig::defaults()
     config.max_connections = default_max_connections;
     config.max_instances_per_object = default_max_instances_per_object;
     config.import_threads = default_import_threads;
+    config.slice_threads = default_slice_threads;
     config.request_timeout = std::chrono::seconds(default_request_timeout_seconds);
     config.token_ttl = std::chrono::seconds(default_token_ttl_seconds);
     config.session_ttl = std::chrono::seconds(default_session_ttl_seconds);
@@ -2917,6 +3173,8 @@ void ServerConfig::validate() const
         throw std::invalid_argument("limits.max_instances_per_object must be positive");
     if (import_threads == 0)
         throw std::invalid_argument("limits.import_threads must be positive");
+    if (slice_threads == 0)
+        throw std::invalid_argument("limits.slice_threads must be positive");
     if (request_timeout.count() <= 0)
         throw std::invalid_argument("timeouts.request_seconds must be positive");
     if (token_ttl.count() <= 0)
@@ -3044,6 +3302,16 @@ SessionRegistry &RestServer::session_registry() const
 void RestServer::set_import_observer(std::function<void()> observer)
 {
     impl_->runtime_.set_import_observer(std::move(observer));
+}
+
+void RestServer::set_slice_observer(std::function<void()> observer)
+{
+    impl_->runtime_.set_slice_observer(std::move(observer));
+}
+
+void RestServer::set_progress_observer(std::function<void()> observer)
+{
+    impl_->runtime_.set_progress_observer(std::move(observer));
 }
 
 } // namespace Slic3r::Rest
