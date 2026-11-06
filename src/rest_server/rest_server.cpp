@@ -784,6 +784,14 @@ HttpResponse parse_error;
 if (!parse_profile_selection(request, requested, parse_error, request_id))
     return parse_error;
 
+const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+if (!mutation.has_value())
+    return make_error_response(
+        409,
+        "session_busy",
+        "The session is currently slicing.",
+        request_id);
+
 ProfileApplication application;
 try {
     application = services.profiles->select(requested);
@@ -803,13 +811,6 @@ try {
         request_id);
 }
 
-const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
-if (!mutation.has_value())
-    return make_error_response(
-        409,
-        "session_busy",
-        "The session is currently slicing.",
-        request_id);
 const std::optional<SessionData> current = session->data_snapshot();
 if (!current.has_value())
     return make_error_response(404, "session_not_found", "The session does not exist.", request_id);

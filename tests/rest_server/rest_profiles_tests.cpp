@@ -15,6 +15,8 @@
 
 #include <fstream>
 #include <map>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -249,4 +251,159 @@ TEST_CASE("REST profile catalog remains usable with no installed profiles", "[re
         "/session/" + session_id + "/list_profiles");
     REQUIRE(listed.result() == http::status::ok);
     REQUIRE(fixture.running());
+}
+
+TEST_CASE("REST profile catalog rejects invalid custom settings", "[rest_profiles]")
+{
+    ensure_engine_initialized();
+    TempDirectory profiles_root;
+    std::filesystem::create_directories(profiles_root.path() / "print");
+    std::filesystem::create_directories(profiles_root.path() / "printer");
+    std::filesystem::create_directories(profiles_root.path() / "filament");
+    std::ofstream(profiles_root.path() / "print" / "rest-print.ini")
+        << "print_custom_setting = {\n";
+
+    const auto load_catalog = [&]() {
+        Slic3r::Rest::ProfileCatalog catalog(profiles_root.path());
+    };
+    REQUIRE_THROWS_AS(load_catalog(), std::runtime_error);
+}
+
+TEST_CASE("Wizard profile loading fills defaults and separates preset categories", "[rest_profiles][wizard]")
+{
+    ensure_engine_initialized();
+    TempDirectory profiles_root;
+    Slic3r::PresetBundle bundle;
+    Slic3r::PresetsConfigSubstitutions substitutions;
+    Slic3r::PresetCollection *collections[] = {&bundle.fff_prints, &bundle.printers, &bundle.filaments};
+    for (Slic3r::PresetCollection *collection : collections) {
+        const std::string section = collection->section_name();
+        std::filesystem::create_directories(profiles_root.path() / section);
+        collection->load_presets(
+            profiles_root.path().string(), section, substitutions,
+            Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    }
+
+    std::unique_ptr<Slic3r::DynamicPrintConfig> configuration(Slic3r::DynamicPrintConfig::new_from_defaults_keys({
+        "gcode_flavor", "bed_shape", "bed_custom_texture", "bed_custom_model",
+        "nozzle_diameter", "filament_diameter", "temperature", "bed_temperature"
+    }));
+    configuration->set_deserialize_strict("nozzle_diameter", "0.6");
+    configuration->set_deserialize_strict("filament_diameter", "2.85");
+    configuration->set_deserialize_strict("temperature", "235");
+    configuration->set_key_value("print_custom_setting", new Slic3r::ConfigOptionString(
+        R"({"print":{"future":"print value"},"printer":{"future":"printer value"}})"));
+    configuration->set_key_value("filament_custom_setting", new Slic3r::ConfigOptionStrings{
+        R"({"future":"filament value"})"
+    });
+    REQUIRE_FALSE(configuration->has("layer_height"));
+    REQUIRE_FALSE(configuration->has("perimeters"));
+
+    bundle.load_config_from_wizard("wizard-profile", *configuration);
+
+    for (const Slic3r::PresetCollection *collection : collections) {
+        const Slic3r::Preset &preset = collection->get_selected_preset();
+        CAPTURE(collection->section_name());
+        REQUIRE(preset.name == "wizard-profile");
+        CHECK(preset.config.keys() == collection->default_preset().config.keys());
+        REQUIRE(std::filesystem::is_regular_file(preset.file));
+
+        Slic3r::DynamicPrintConfig saved;
+        saved.load_from_ini(preset.file, Slic3r::ForwardCompatibilitySubstitutionRule::Disable);
+        CHECK(saved.has("layer_height") == (collection == &bundle.fff_prints));
+        CHECK(saved.has("nozzle_diameter") == (collection == &bundle.printers));
+        CHECK(saved.has("filament_diameter") == (collection == &bundle.filaments));
+        if (collection == &bundle.fff_prints) {
+            REQUIRE(saved.has("layer_height"));
+            REQUIRE(saved.has("perimeters"));
+            CHECK(saved.opt_serialize("layer_height") == collection->default_preset().config.opt_serialize("layer_height"));
+            CHECK(saved.opt_serialize("perimeters") == collection->default_preset().config.opt_serialize("perimeters"));
+            CHECK(nlohmann::json::parse(saved.opt_string("print_custom_setting")) ==
+                nlohmann::json::parse(R"({"print":{"future":"print value"}})"));
+        } else if (collection == &bundle.printers) {
+            REQUIRE(saved.has("nozzle_diameter"));
+            CHECK(saved.opt_serialize("nozzle_diameter") == "0.6");
+            CHECK(nlohmann::json::parse(saved.opt_string("print_custom_setting")) ==
+                nlohmann::json::parse(R"({"printer":{"future":"printer value"}})"));
+        } else {
+            REQUIRE(saved.has("filament_diameter"));
+            CHECK(saved.opt_serialize("filament_diameter") == "2.85");
+            CHECK(saved.opt_serialize("temperature") == "235");
+            const Slic3r::ConfigOptionStrings *custom =
+                saved.option<Slic3r::ConfigOptionStrings>("filament_custom_setting");
+            REQUIRE(custom != nullptr);
+            REQUIRE(custom->size() == 1);
+            CHECK(nlohmann::json::parse(custom->get_at(0)) ==
+                nlohmann::json::parse(R"({"future":"filament value"})"));
+        }
+    }
+}
+
+TEST_CASE("REST profile configuration preserves unknown profile settings", "[rest_profiles]")
+{
+    ensure_engine_initialized();
+    TempDirectory profiles_root;
+    std::filesystem::create_directories(profiles_root.path() / "print");
+    std::filesystem::create_directories(profiles_root.path() / "printer");
+    std::filesystem::create_directories(profiles_root.path() / "filament");
+    std::ofstream(profiles_root.path() / "print" / "rest-print.ini")
+        << "future_print_setting = print raw\n"
+        << "filament_diameter = 1.75\n"
+        << "print_custom_setting = {\"print\":{\"future_print_setting\":\"explicit\"}}\n";
+    std::ofstream(profiles_root.path() / "printer" / "rest-printer.ini")
+        << "future_printer_setting = printer raw\n"
+        << "layer_height = 0.3\n";
+    std::ofstream(profiles_root.path() / "filament" / "rest-filament.ini")
+        << "future_filament_setting = filament raw\n";
+
+    Slic3r::Rest::ProfileCatalog catalog(profiles_root.path());
+    const nlohmann::json listed = catalog.list_profiles();
+    const Slic3r::Rest::ProfileApplication application = catalog.select({
+        profile_id(listed.at("print"), "rest-print"),
+        profile_id(listed.at("printer"), "rest-printer"),
+        {},
+        {profile_id(listed.at("filaments"), "rest-filament")}
+    });
+    const nlohmann::json print_setting = nlohmann::json::parse(
+        application.configuration.opt_string("print_custom_setting"));
+    REQUIRE(print_setting.at("print").at("future_print_setting") == "explicit");
+    REQUIRE(print_setting.at("print").at("filament_diameter") == "1.75");
+    REQUIRE(print_setting.at("printer").at("future_printer_setting") == "printer raw");
+    REQUIRE(print_setting.at("printer").at("layer_height") == "0.3");
+
+    const Slic3r::ConfigOptionStrings *filament_settings =
+        application.configuration.option<Slic3r::ConfigOptionStrings>("filament_custom_setting");
+    REQUIRE(filament_settings != nullptr);
+    REQUIRE(filament_settings->size() == 1);
+    const nlohmann::json filament_setting = nlohmann::json::parse(filament_settings->get_at(0));
+    REQUIRE(filament_setting.at("future_filament_setting") == "filament raw");
+
+    Slic3r::DynamicPrintConfig roundtrip;
+    roundtrip.load_from_ini_string(
+        "print_custom_setting = " + application.configuration.opt_serialize("print_custom_setting"),
+        Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent);
+    REQUIRE(roundtrip.opt_string("print_custom_setting") == application.configuration.opt_string("print_custom_setting"));
+}
+
+TEST_CASE("REST profile defaults resolve each printer filament slot", "[rest_profiles]")
+{
+    ensure_engine_initialized();
+    TempDirectory profiles_root;
+    std::filesystem::create_directories(profiles_root.path() / "print");
+    std::filesystem::create_directories(profiles_root.path() / "printer");
+    std::filesystem::create_directories(profiles_root.path() / "filament");
+    std::ofstream(profiles_root.path() / "print" / "rest-print.ini");
+    std::ofstream(profiles_root.path() / "printer" / "rest-printer.ini")
+        << "nozzle_diameter = 0.4,0.4\n"
+        << "default_filament_profile = ,rest-filament-b\n";
+    std::ofstream(profiles_root.path() / "filament" / "rest-filament-a.ini");
+    std::ofstream(profiles_root.path() / "filament" / "rest-filament-b.ini");
+
+    Slic3r::Rest::ProfileCatalog catalog(profiles_root.path());
+    const nlohmann::json listed = catalog.list_profiles();
+    const Slic3r::Rest::ProfileApplication application = catalog.defaults();
+    REQUIRE(application.selection.filaments == std::vector<std::string>({
+        profile_id(listed.at("filaments"), "rest-filament-b"),
+        profile_id(listed.at("filaments"), "rest-filament-b")
+    }));
 }

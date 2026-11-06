@@ -128,29 +128,71 @@ ProfileSelection effective_selection(const PresetBundle &bundle)
     return selection;
 }
 
+bool select_filament_if_usable(ExtruderFilaments &slot, const std::string &name, bool require_compatible)
+{
+    for (std::size_t index = 0; index < slot().size(); ++index) {
+        const Filament &filament = slot.filament(index);
+        if (filament.preset->name == name && filament.preset->is_visible &&
+            (!require_compatible || filament.is_compatible)) {
+            slot.select_filament(index);
+            return true;
+        }
+    }
+    return false;
+}
+
 void select_filaments(PresetBundle &bundle, const std::vector<std::string> &filaments)
 {
-    // Explicit filament IDs are already validated and are applied by extruder slot.
     for (std::size_t index = 0; index < filaments.size(); ++index)
-        bundle.extruders_filaments[index].select_filament(filaments[index], true);
+        if (!select_filament_if_usable(bundle.extruders_filaments[index], filaments[index], true))
+            throw std::invalid_argument("A selected filament profile is unavailable or incompatible.");
 }
 
 void select_default_filaments(PresetBundle &bundle)
 {
-    // An empty request follows the per-slot defaults embedded in the printer.
     const ConfigOptionStrings *defaults =
         bundle.printers.get_edited_preset().config.option<ConfigOptionStrings>("default_filament_profile");
-    if (defaults == nullptr)
-        return;
-    const std::size_t count = std::min(bundle.extruders_filaments.size(), defaults->size());
-    for (std::size_t index = 0; index < count; ++index) {
-        const std::string &name = defaults->get_at(index);
-        if (name.empty())
-            continue;
-        const Preset *filament = find_visible_preset(bundle.filaments, name);
-        if (filament == nullptr)
-            throw std::invalid_argument("The printer default filament profile is unavailable: " + name);
-        bundle.extruders_filaments[index].select_filament(filament->name, true);
+    const std::vector<std::string> preferred = defaults == nullptr ? std::vector<std::string>() : defaults->get_values();
+
+    for (std::size_t index = 0; index < bundle.extruders_filaments.size(); ++index) {
+        ExtruderFilaments &slot = bundle.extruders_filaments[index];
+        bool selected = false;
+        if (index < preferred.size() && !preferred[index].empty())
+            if (const Preset *filament = find_visible_preset(bundle.filaments, preferred[index]); filament != nullptr)
+                selected = select_filament_if_usable(slot, filament->name, true);
+
+        for (const std::string &name : preferred) {
+            if (selected)
+                break;
+            if (name.empty())
+                continue;
+            if (const Preset *filament = find_visible_preset(bundle.filaments, name); filament != nullptr)
+                selected = select_filament_if_usable(slot, filament->name, true);
+        }
+
+        if (!selected) {
+            const std::size_t first_profile = bundle.filaments.is_default_suppressed()
+                ? bundle.filaments.num_default_presets()
+                : 0;
+            for (std::size_t candidate = first_profile; candidate < slot().size(); ++candidate) {
+                const Filament &filament = slot.filament(candidate);
+                if (filament.preset->is_visible && filament.is_compatible) {
+                    slot.select_filament(candidate);
+                    selected = true;
+                    break;
+                }
+            }
+            for (std::size_t candidate = 0; !selected && candidate < first_profile && candidate < slot().size(); ++candidate) {
+                const Filament &filament = slot.filament(candidate);
+                if (filament.preset->is_visible && filament.is_compatible) {
+                    slot.select_filament(candidate);
+                    selected = true;
+                }
+            }
+        }
+
+        if (!selected)
+            throw std::invalid_argument("No compatible filament profile is available for the printer.");
     }
 }
 
@@ -178,6 +220,9 @@ ProfileApplication apply_selection(PresetBundle bundle, const ProfileSelection &
         throw std::invalid_argument("The selected print or printer profile is unavailable.");
     bundle.extruders_filaments.clear();
     bundle.update_multi_material_filament_presets();
+    if (bundle.extruders_filaments.size() != count)
+        throw std::invalid_argument("The selected printer has an invalid extruder definition.");
+    bundle.update_compatible(PresetSelectCompatibleType::Never);
     if (requested.filaments.empty())
         select_default_filaments(bundle);
     else
@@ -255,7 +300,10 @@ nlohmann::json ProfileCatalog::list_profiles() const
 
 ProfileApplication ProfileCatalog::defaults() const
 {
-    ProfileApplication application = apply_selection(bundle_, effective_selection(bundle_));
+    ProfileSelection requested;
+    requested.print = bundle_.fff_prints.get_selected_preset_name();
+    requested.printer = bundle_.printers.get_selected_preset_name();
+    ProfileApplication application = apply_selection(bundle_, requested);
     application.selection.print = profile_id_for_name(print_profile_ids_, application.selection.print, "print");
     application.selection.printer = profile_id_for_name(printer_profile_ids_, application.selection.printer, "printer");
     for (std::string &filament : application.selection.filaments)

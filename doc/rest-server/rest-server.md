@@ -357,16 +357,21 @@ configuration, not to partial updates through `set_settings`:
 - recognized settings present in the loaded configuration are applied;
 - settings absent from replaced categories are initialized to system defaults,
   without reusing the session's previous modifications;
-- settings unknown/unavailable to the engine are not applied. Their keys and
-  values are retained in `print_custom_setting` or `filament_custom_setting`,
-  according to provenance, to avoid losing them.
-
-Replacing absent settings with system defaults and preserving unknown settings
-are engine changes to be implemented later; they are not considered already
-available. Their integration and tests are explicit dependencies of the
-corresponding loading phases. The preservation format and classification of
-keys without print or filament provenance remain to be specified during
-that change.
+- settings unknown/unavailable to the engine are not applied. Settings from a
+  print or printer profile are preserved in `print_custom_setting`, as a JSON
+  object whose `print` and `printer` groups each contain key/value pairs.
+  Settings from a filament profile are preserved in `filament_custom_setting`,
+  as an array of JSON objects, one per slot. Values remain raw INI strings
+  and are never interpreted by the engine.
+- Unknown keys and known keys placed in the wrong category are classified
+  according to the profile that supplied them. A value explicitly present in
+  `print_custom_setting` or `filament_custom_setting` overrides the captured value
+  for the same key; the existing `print_custom_variables` and
+  `filament_custom_variables` options are not used.
+- Recomposing, copying, and serializing a configuration preserves this data.
+  For each slot, `filaments: []` tries the corresponding printer default,
+  then the printer's other defaults, then the first visible compatible filament;
+  no available candidate returns `422`.
 
 A profile embedded in a project need not exist in the installed catalog for
 its recognized settings to be loaded into the session. Loading a project
@@ -824,8 +829,5 @@ V1 is acceptable if:
    volume transformed in global space and the GUI pivots and `replace` behavior
    in each space. The single route and three spaces are decided; their detailed
    mapping to GUI operations must be verified before the transformation phases.
-5. **Unknown-setting preservation:** specify the format of
-   `print_custom_setting`/`filament_custom_setting` and classification of keys
-   without print or filament provenance during the engine change planned in
-   §5.5.1. Reverting to system defaults and preserving unknown keys are decided,
-   but their engine support remains to be implemented.
+5. **Unknown-setting preservation:** format, provenance, and write priority are
+   fixed in §5.5.1; no additional decision is required for the V1 contract.
