@@ -25,7 +25,19 @@
    object overrides contain only a subset of printer settings: normalization
    can clamp a tower tool's upper bound only when nozzle data is present.
    Output-statistics definitions describe measured filename placeholders;
-   wipe-tower filament is a length in mm, not an extruded volume. */
+   wipe-tower filament is a length in mm, not an extruded volume. Plugin option
+   registration preserves Prusa-compatible settings and dedicated conversions
+   when classifying which settings to omit from Prusa export.
+
+   Option providers define a key before classifying it for export. A compatible
+   key or one handled by a dedicated conversion stays available; only the other
+   defined keys enter the omission set. The caller's key is not rewritten.
+
+       add_to_prusa_export_to_remove_keys()
+           |-- PrintConfigDef::instance()
+           |-- get() [resolve the already defined option]
+           `-- prusa_export_to_remove_keys.insert() [only when omission is required]
+*/
 #include "PrintConfig.hpp"
 #include "FFFPrintConfig.hpp"
 #include "SLA/SLAPrintConfig.hpp"
@@ -56,6 +68,11 @@
 #include "Utils.hpp"
 
 namespace Slic3r {
+
+// Look up an already defined option and add its key to the export omission set only when
+// it is neither Prusa-compatible nor handled by a dedicated conversion. The caller's
+// key is unchanged; an undefined key is a programming error, and set allocation may throw.
+void add_to_prusa_export_to_remove_keys(std::string &opt_key);
 
 static t_config_enum_names enum_names_from_keys_map(const t_config_enum_values &enum_keys_map)
 {
@@ -2277,7 +2294,11 @@ std::unordered_set<std::string> prusa_export_to_change_keys =
 };
 
 void add_to_prusa_export_to_remove_keys(std::string &opt_key) {
-    prusa_export_to_remove_keys.insert(opt_key);
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(opt_key);
+    assert(definition != nullptr);
+    if ((definition->mode & comPrusa) == 0 &&
+        prusa_export_to_change_keys.find(opt_key) == prusa_export_to_change_keys.end())
+        prusa_export_to_remove_keys.insert(opt_key);
 }
 
 std::map<std::string, std::string> PrintConfigDef::to_prusa(t_config_option_key& opt_key, std::string& value, const DynamicConfig& all_conf) {

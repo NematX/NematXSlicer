@@ -40,6 +40,30 @@
 
 #include <random>
 
+/* Test arrangement geometry and placement rules with small polygon fixtures.
+   A no-fit polygon describes forbidden relative placements; its boundary supplies
+   touching placements for the position search. Tests inspect those boundaries
+   and resulting placements rather than using
+   a second arrangement run as the expected result. Other cases cover bed types,
+   rotations and arrangement-item traits.
+
+   prusa_parts() and prusa_parts_ex() convert fixture contours to arrangement
+   items. check_nfp() constructs geometry, checks candidate positions and may
+   write SVG diagnostics. Coordinates use the slicer's scaled integer units;
+   scale_i()/scale_d() and Point::new_scale() convert millimetre fixture values.
+
+       prusa_parts()
+           |-- offset_ex() [optional fixture inflation]
+           `-- Geometry::convex_hull()
+
+       check_nfp()
+           |-- Geometry::convex_hull()
+           `-- offset_ex()
+
+   Fixtures own their geometry. A one-point contour is not a valid Polygon, so
+   that case cannot be used to exercise the native placement search.
+*/
+
 template<class ArrItem = Slic3r::arr2::ArrangeItem>
 static std::vector<ArrItem> prusa_parts(double infl = 0.) {
     using namespace Slic3r;
@@ -58,7 +82,7 @@ static std::vector<ArrItem> prusa_parts(double infl = 0.) {
             REQUIRE(inp_cpy.back().contour.is_counter_clockwise());
 
             if (infl > 0.)
-                inp_cpy = offset_ex(inp_cpy, scaled(std::ceil(infl / 2.)));
+                inp_cpy = offset_ex(inp_cpy, scale_i(std::ceil(infl / 2.)));
 
             ArrItem item{Geometry::convex_hull(inp_cpy)};
 
@@ -86,7 +110,7 @@ static std::vector<Slic3r::arr2::ArrangeItem> prusa_parts_ex(double infl = 0.)
                                 }));
 
             if (infl > 0.)
-                inp_cpy = offset_ex(inp_cpy, scaled(std::ceil(infl / 2.)));
+                inp_cpy = offset_ex(inp_cpy, scale_i(std::ceil(infl / 2.)));
 
             Point c = get_extents(inp_cpy).center();
             for (auto &p : inp_cpy)
@@ -109,37 +133,39 @@ struct ItemPair {
     ArrangeItem stationary;
 };
 
-using Slic3r::scaled;
+using Slic3r::Point;
+using Slic3r::scale_i;
+using Slic3r::scale_d;
 using Slic3r::Vec2f;
 
 std::vector<ItemPair> nfp_testdata = {
     {
         ArrangeItem { DecomposedShape {
-            scaled(Vec2f{80, 50}) ,
-            scaled(Vec2f{120, 50}),
-            scaled(Vec2f{100, 70}),
+            Point::new_scale(Vec2f{80, 50}) ,
+            Point::new_scale(Vec2f{120, 50}),
+            Point::new_scale(Vec2f{100, 70}),
         }},
         ArrangeItem { DecomposedShape {
-            scaled(Vec2f{40, 10}),
-            scaled(Vec2f{40, 40}),
-            scaled(Vec2f{10, 40}),
-            scaled(Vec2f{10, 10}),
+            Point::new_scale(Vec2f{40, 10}),
+            Point::new_scale(Vec2f{40, 40}),
+            Point::new_scale(Vec2f{10, 40}),
+            Point::new_scale(Vec2f{10, 10}),
         }}
     },
     {
         ArrangeItem {
-            scaled(Vec2f{120, 50}),
-            scaled(Vec2f{140, 70}),
-            scaled(Vec2f{120, 90}),
-            scaled(Vec2f{80, 90}) ,
-            scaled(Vec2f{60, 70}) ,
-            scaled(Vec2f{80, 50}) ,
+            Point::new_scale(Vec2f{120, 50}),
+            Point::new_scale(Vec2f{140, 70}),
+            Point::new_scale(Vec2f{120, 90}),
+            Point::new_scale(Vec2f{80, 90}) ,
+            Point::new_scale(Vec2f{60, 70}) ,
+            Point::new_scale(Vec2f{80, 50}) ,
         },
         ArrangeItem {
-            scaled(Vec2f{40, 10}),
-            scaled(Vec2f{40, 40}),
-            scaled(Vec2f{10, 40}),
-            scaled(Vec2f{10, 10}),
+            Point::new_scale(Vec2f{40, 10}),
+            Point::new_scale(Vec2f{40, 40}),
+            Point::new_scale(Vec2f{10, 40}),
+            Point::new_scale(Vec2f{10, 10}),
         }
     },
 };
@@ -150,37 +176,37 @@ std::vector<PolyPair> nfp_concave_testdata = {
     { // ItemPair
      {
          {
-             scaled(Vec2f{53.3726f, 14.2141f}),
-             scaled(Vec2f{53.2359f, 14.3386f}),
-             scaled(Vec2f{53.0141f, 14.2155f}),
-             scaled(Vec2f{52.8649f, 16.0091f}),
-             scaled(Vec2f{53.3659f, 15.7607f}),
-             scaled(Vec2f{53.8669f, 16.0091f}),
-             scaled(Vec2f{53.7178f, 14.2155f}),
-             scaled(Vec2f{53.4959f, 14.3386f})
+             Point::new_scale(Vec2f{53.3726f, 14.2141f}),
+             Point::new_scale(Vec2f{53.2359f, 14.3386f}),
+             Point::new_scale(Vec2f{53.0141f, 14.2155f}),
+             Point::new_scale(Vec2f{52.8649f, 16.0091f}),
+             Point::new_scale(Vec2f{53.3659f, 15.7607f}),
+             Point::new_scale(Vec2f{53.8669f, 16.0091f}),
+             Point::new_scale(Vec2f{53.7178f, 14.2155f}),
+             Point::new_scale(Vec2f{53.4959f, 14.3386f})
          }
      },
      {
          {
-             scaled(Vec2f{11.8305f, 1.1603f}),
-             scaled(Vec2f{11.8311f, 2.6616f}),
-             scaled(Vec2f{11.3311f, 2.6611f}),
-             scaled(Vec2f{10.9311f, 2.9604f}),
-             scaled(Vec2f{10.9300f, 4.4608f}),
-             scaled(Vec2f{10.9311f, 4.9631f}),
-             scaled(Vec2f{11.3300f, 5.2636f}),
-             scaled(Vec2f{11.8311f, 5.2636f}),
-             scaled(Vec2f{11.8308f, 10.3636f}),
-             scaled(Vec2f{22.3830f, 10.3636f}),
-             scaled(Vec2f{23.6845f, 9.0642f}),
-             scaled(Vec2f{23.6832f, 1.1630f}),
-             scaled(Vec2f{23.2825f, 1.1616f}),
-             scaled(Vec2f{21.0149f, 1.1616f}),
-             scaled(Vec2f{21.1308f, 1.3625f}),
-             scaled(Vec2f{20.9315f, 1.7080f}),
-             scaled(Vec2f{20.5326f, 1.7080f}),
-             scaled(Vec2f{20.3334f, 1.3629f}),
-             scaled(Vec2f{20.4493f, 1.1616f})
+             Point::new_scale(Vec2f{11.8305f, 1.1603f}),
+             Point::new_scale(Vec2f{11.8311f, 2.6616f}),
+             Point::new_scale(Vec2f{11.3311f, 2.6611f}),
+             Point::new_scale(Vec2f{10.9311f, 2.9604f}),
+             Point::new_scale(Vec2f{10.9300f, 4.4608f}),
+             Point::new_scale(Vec2f{10.9311f, 4.9631f}),
+             Point::new_scale(Vec2f{11.3300f, 5.2636f}),
+             Point::new_scale(Vec2f{11.8311f, 5.2636f}),
+             Point::new_scale(Vec2f{11.8308f, 10.3636f}),
+             Point::new_scale(Vec2f{22.3830f, 10.3636f}),
+             Point::new_scale(Vec2f{23.6845f, 9.0642f}),
+             Point::new_scale(Vec2f{23.6832f, 1.1630f}),
+             Point::new_scale(Vec2f{23.2825f, 1.1616f}),
+             Point::new_scale(Vec2f{21.0149f, 1.1616f}),
+             Point::new_scale(Vec2f{21.1308f, 1.3625f}),
+             Point::new_scale(Vec2f{20.9315f, 1.7080f}),
+             Point::new_scale(Vec2f{20.5326f, 1.7080f}),
+             Point::new_scale(Vec2f{20.3334f, 1.3629f}),
+             Point::new_scale(Vec2f{20.4493f, 1.1616f})
          }
      },
      }
@@ -196,16 +222,16 @@ static void check_nfp(const std::string & outfile_prefix,
 
     auto stationary_ex = to_expolygons(stationary);
     auto bedbb = get_extents(bedpoly);
-    bedbb.offset(scaled(1.));
+    bedbb.offset(scale_i(1.));
     auto bedrect = arr2::to_rectangle(bedbb);
 
     ExPolygons bed_negative = diff_ex(bedrect, bedpoly);
     ExPolygons orb_ex_r = to_expolygons(orbiter);
     ExPolygons orb_ex_r_ch = {ExPolygon(Geometry::convex_hull(orb_ex_r))};
-    auto orb_ex_offs_pos_r = offset_ex(orb_ex_r,  scaled<float>(EPSILON));
-    auto orb_ex_offs_neg_r = offset_ex(orb_ex_r, -scaled<float>(EPSILON));
-    auto orb_ex_offs_pos_r_ch = offset_ex(orb_ex_r_ch,  scaled<float>(EPSILON));
-    auto orb_ex_offs_neg_r_ch = offset_ex(orb_ex_r_ch, -scaled<float>(EPSILON));
+    auto orb_ex_offs_pos_r = offset_ex(orb_ex_r,  scale_i(EPSILON));
+    auto orb_ex_offs_neg_r = offset_ex(orb_ex_r, -scale_i(EPSILON));
+    auto orb_ex_offs_pos_r_ch = offset_ex(orb_ex_r_ch,  scale_i(EPSILON));
+    auto orb_ex_offs_neg_r_ch = offset_ex(orb_ex_r_ch, -scale_i(EPSILON));
 
     auto bedpoly_offs = offset_ex(bedpoly, static_cast<float>(SCALED_EPSILON));
 
@@ -376,34 +402,34 @@ TEST_CASE("Static type tests for arrange items", "[arrange2]")
 template<class Bed> Bed init_bed() { return {}; }
 template<> inline Slic3r::arr2::InfiniteBed init_bed<Slic3r::arr2::InfiniteBed>()
 {
-    return Slic3r::arr2::InfiniteBed{{scaled(250.) / 2., scaled(210.) / 2.}};
+    return Slic3r::arr2::InfiniteBed{{scale_i(250.) / 2, scale_i(210.) / 2}};
 }
 
 template<> inline Slic3r::arr2::RectangleBed init_bed<Slic3r::arr2::RectangleBed>()
 {
-    return Slic3r::arr2::RectangleBed{scaled(500.), scaled(500.)};
+    return Slic3r::arr2::RectangleBed{scale_i(500.), scale_i(500.)};
 }
 
 template<> inline Slic3r::arr2::CircleBed init_bed<Slic3r::arr2::CircleBed>()
 {
-    return Slic3r::arr2::CircleBed{Slic3r::Point::Zero(), scaled(300.)};
+    return Slic3r::arr2::CircleBed{Slic3r::Point::Zero(), scale_d(300.)};
 }
 
 template<> inline Slic3r::arr2::IrregularBed init_bed<Slic3r::arr2::IrregularBed>()
 {
     using namespace Slic3r;
-    BoundingBox bb_outer{Point::Zero(), {scaled(500.), scaled(500.)}};
-    BoundingBox corner{Point::Zero(), {scaled(50.), scaled(50.)}};
+    BoundingBox bb_outer{Point::Zero(), {scale_i(500.), scale_i(500.)}};
+    BoundingBox corner{Point::Zero(), {scale_i(50.), scale_i(50.)}};
 
     auto transl = [](BoundingBox bb, Point t) { bb.translate(t); return bb; };
 
     Polygons rect_outer = {arr2::to_rectangle(bb_outer)};
-    Polygons corners = {arr2::to_rectangle(transl(corner, {scaled(10.), scaled(10.)})),
-                        arr2::to_rectangle(transl(corner, {scaled(440.), scaled(10.)})),
-                        arr2::to_rectangle(transl(corner, {scaled(440.), scaled(440.)})),
-                        arr2::to_rectangle(transl(corner, {scaled(10.), scaled(440.)})),
-                        arr2::to_rectangle(BoundingBox({scaled(80.), scaled(450.)}, {scaled(420.), scaled(510.)})),
-                        arr2::to_rectangle(BoundingBox({scaled(80.), scaled(-10.)}, {scaled(420.), scaled(50.)}))};
+    Polygons corners = {arr2::to_rectangle(transl(corner, {scale_i(10.), scale_i(10.)})),
+                        arr2::to_rectangle(transl(corner, {scale_i(440.), scale_i(10.)})),
+                        arr2::to_rectangle(transl(corner, {scale_i(440.), scale_i(440.)})),
+                        arr2::to_rectangle(transl(corner, {scale_i(10.), scale_i(440.)})),
+                        arr2::to_rectangle(BoundingBox({scale_i(80.), scale_i(450.)}, {scale_i(420.), scale_i(510.)})),
+                        arr2::to_rectangle(BoundingBox({scale_i(80.), scale_i(-10.)}, {scale_i(420.), scale_i(50.)}))};
 
     ExPolygons bedshape = diff_ex(rect_outer, corners);
 
@@ -438,7 +464,7 @@ inline std::string bedtype_str(const Slic3r::arr2::IrregularBed &bed)
 TEST_CASE("NFP should be empty if item cannot fit into bed", "[arrange2]") {
     using namespace Slic3r;
 
-    arr2::RectangleBed bed{scaled(10.), scaled(10.)};
+    arr2::RectangleBed bed{scale_i(10.), scale_i(10.)};
     ExPolygons bedshape = arr2::to_expolygons(bed);
 
     for(auto& td : nfp_testdata) {
@@ -561,7 +587,7 @@ TEST_CASE("EdgeCache tests", "[arrange2]") {
     }
 
     SECTION ("Single edge polygon should be considered as 2 lines") {
-        ExPolygon poly{scaled(Vec2f{0.f, 0.f}), scaled(Vec2f{10., 10.})};
+        ExPolygon poly{Point::new_scale(Vec2f{0.f, 0.f}), Point::new_scale(Vec2f{10., 10.})};
 
         arr2::EdgeCache ep{&poly};
         std::vector<arr2::ContourLocation> samples;
@@ -577,14 +603,14 @@ TEST_CASE("EdgeCache tests", "[arrange2]") {
 
     SECTION ("Test address range") {
         // Single edge on the int range boundary
-        ExPolygon poly{scaled(Vec2f{-2000.f, 0.f}), scaled(Vec2f{2000.f, 0.f})};
+        ExPolygon poly{Point::new_scale(Vec2f{-2000.f, 0.f}), Point::new_scale(Vec2f{2000.f, 0.f})};
 
         arr2::EdgeCache ep{&poly};
         REQUIRE(ep.coords({0, 0.25}) == Vec2crd{0, 0});
         REQUIRE(ep.coords({0, 0.75}) == Vec2crd{0, 0});
 
         // Multiple edges on the int range boundary
-        ExPolygon squ{arr2::to_rectangle(scaled(BoundingBoxf{{0., 0.}, {2000., 2000.}}))};
+        ExPolygon squ{arr2::to_rectangle(BoundingBox{Point::Zero(), Point::new_scale(Vec2d{2000., 2000.})})};
 
         arr2::EdgeCache ep2{&squ};
         REQUIRE(ep2.coords({0, 0.})   == Vec2crd{0, 0});
@@ -595,7 +621,7 @@ TEST_CASE("EdgeCache tests", "[arrange2]") {
     }
 
     SECTION("Accuracy argument should skip corners correctly") {
-        ExPolygon poly{arr2::to_rectangle(scaled(BoundingBoxf{{0., 0.}, {10., 10.}}))};
+        ExPolygon poly{arr2::to_rectangle(BoundingBox{Point::Zero(), Point::new_scale(Vec2d{10., 10.})})};
 
         double accuracy = 1.;
         arr2::EdgeCache ep{&poly};
@@ -631,7 +657,7 @@ template<int N> struct PackStrategyTag_<RectangleToCenterPackStrategy<N>> {
 // Dummy arrangeitem that is a rectangle
 struct RectangleItem {
     int bed_index = Unarranged;
-    BoundingBox shape = {{0, 0}, scaled(Vec2d{10., 10.})};
+    BoundingBox shape = {{0, 0}, Point::new_scale(Vec2d{10., 10.})};
     Vec2crd translation = {0, 0};
     double rotation = 0;
 
@@ -696,7 +722,7 @@ TEST_CASE("First fit selection strategy", "[arrange2]")
         return items;
     };
 
-    auto bed = Slic3r::arr2::RectangleBed(scaled(100.), scaled(100.));
+    auto bed = Slic3r::arr2::RectangleBed(scale_i(100.), scale_i(100.));
 
     GIVEN("A packing strategy that does not accept any items")
     {
@@ -827,7 +853,7 @@ TEST_CASE("First fit selection strategy", "[arrange2]")
     {
         using PackStrategy = RectangleToCenterPackStrategy<1>;
 
-        auto bed = Slic3r::arr2::RectangleBed(scaled(100.), scaled(100.));
+        auto bed = Slic3r::arr2::RectangleBed(scale_i(100.), scale_i(100.));
         auto fixed = create_items_n(2);
         std::for_each(fixed.begin(), fixed.end(), [&bed](auto &itm){
             Slic3r::arr2::pack(PackStrategy{}, bed, itm);
@@ -909,32 +935,7 @@ Slic3r::Vec2crd Slic3r::arr2::NFPArrangeItemTraits_<
     return itm.shape.center();
 }
 
-TEST_CASE("Optimal nfp position search with GravityKernel using RectangleItem and InfiniteBed",
-          "[arrange2]")
-{
-    auto bed = Slic3r::arr2::InfiniteBed{};
-    auto strategy = Slic3r::arr2::PackStrategyNFP{Slic3r::arr2::GravityKernel{bed.center}};
-
-    GIVEN("An nfp made of a single point coincident with the bed center")
-    {
-        WHEN ("searching for optimal position")
-        {
-            THEN ("the optimum should be at the single nfp point")
-            {
-                Slic3r::ExPolygons nfp;
-                nfp.emplace_back(Slic3r::ExPolygon{{bed.center}});
-
-                auto item = RectangleItem{};
-
-                double score = pick_best_spot_on_nfp_verts_only(item, nfp, bed, strategy);
-
-                Slic3r::Vec2crd D = bed.center - item.shape.center();
-                REQUIRE(item.translation == D);
-                REQUIRE(score == Approx(0.).margin(EPSILON));
-            }
-        }
-    }
-}
+// Polygon forbids one-point contours, so a single-point NFP cannot reach the position search.
 
 TEMPLATE_TEST_CASE("RectangleOverfitPackingStrategy test", "[arrange2]",
                    Slic3r::arr2::SimpleArrangeItem, Slic3r::arr2::ArrangeItem)
@@ -956,9 +957,9 @@ TEMPLATE_TEST_CASE("RectangleOverfitPackingStrategy test", "[arrange2]",
     RectangleOverfitPackingStrategy pstrategy{PackStrategyNFP{GravityKernel{}},
                                               frontleft_align_fn};
 
-    auto bed = Slic3r::arr2::RectangleBed{scaled(100.), scaled(100.)};
+    auto bed = Slic3r::arr2::RectangleBed{scale_i(100.), scale_i(100.)};
     auto item_blueprint = Slic3r::arr2::to_rectangle(
-        Slic3r::BoundingBox{{0, 0}, {scaled(20.), scaled(20.)}});
+        Slic3r::BoundingBox{{0, 0}, {scale_i(20.), scale_i(20.)}});
 
     auto item_gen_fn = [&item_blueprint] { return ArrItem{item_blueprint}; };
 
@@ -1003,7 +1004,7 @@ TEMPLATE_TEST_CASE("RectangleOverfitPackingStrategy test", "[arrange2]",
 
     GIVEN("Two logical rectangular beds, the second having fixed items") {
 
-        auto fixed_item_bb = Slic3r::BoundingBox{{0, 0}, {scaled(20.), scaled(20.)}};
+        auto fixed_item_bb = Slic3r::BoundingBox{{0, 0}, {scale_i(20.), scale_i(20.)}};
         std::vector<ArrItem> fixed = {
             ArrItem{Slic3r::arr2::to_rectangle(fixed_item_bb)}};
 
@@ -1016,7 +1017,7 @@ TEMPLATE_TEST_CASE("RectangleOverfitPackingStrategy test", "[arrange2]",
             // Add a big rectangle this will fill the first bed so that
             // smaller rectangles will fit only into the next bed
             items.emplace_back(ArrItem{Slic3r::arr2::to_rectangle(
-                Slic3r::BoundingBox{{0, 0}, {scaled(90.), scaled(90.)}})});
+                Slic3r::BoundingBox{{0, 0}, {scale_i(90.), scale_i(90.)}})});
 
             std::generate_n(std::back_inserter(items), 2, item_gen_fn);
 
@@ -1050,11 +1051,11 @@ TEMPLATE_TEST_CASE("Test if allowed item rotations are considered", "[arrange2]"
     using ArrItem = TestType;
 
     auto item_blueprint = Slic3r::arr2::to_rectangle(
-        Slic3r::BoundingBox{{0, 0}, {scaled(20.), scaled(20.)}});
+        Slic3r::BoundingBox{{0, 0}, {scale_i(20.), scale_i(20.)}});
 
     ArrItem itm{item_blueprint};
 
-    auto bed = Slic3r::arr2::RectangleBed{scaled(100.), scaled(100.)};
+    auto bed = Slic3r::arr2::RectangleBed{scale_i(100.), scale_i(100.)};
 
     set_allowed_rotations(itm, {PI});
 
