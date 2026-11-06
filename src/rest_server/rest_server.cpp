@@ -35,6 +35,7 @@
 #include <atomic>
 #include <cctype>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <set>
@@ -68,6 +69,10 @@ using RestRouter = std::function<std::optional<HttpResponse>(
     const std::string &request_id,
     bool body_complete,
     const DeferredResponder &respond)>;
+
+// Reject misspellings at each configuration level instead of silently using defaults.
+void reject_unknown_keys(const nlohmann::json &object, const std::string &level,
+    std::initializer_list<const char *> allowed);
 
 // Default buffered JSON body limit. The specification's 1 GiB upload limit
 // belongs to the streamed multipart route, not to buffered JSON bodies.
@@ -176,10 +181,22 @@ std::filesystem::path read_path_json(
     if (path_text.empty())
         throw std::invalid_argument(json_error_message(field, "must not be empty"));
 
-    const std::filesystem::path path_value(path_text);
+    const std::filesystem::path path_value = std::filesystem::u8path(path_text);
     if (path_value.is_absolute())
         return path_value;
     return base_directory / path_value;
+}
+
+void reject_unknown_keys(const nlohmann::json &object, const std::string &level,
+    std::initializer_list<const char *> allowed)
+{
+    for (nlohmann::json::const_iterator entry = object.begin(); entry != object.end(); ++entry) {
+        bool known = false;
+        for (const char *key : allowed)
+            known = known || entry.key() == key;
+        if (!known)
+            throw std::invalid_argument("unknown configuration key: " + level + "." + entry.key());
+    }
 }
 
 void apply_json_config(
@@ -189,11 +206,13 @@ void apply_json_config(
 {
     if (!document.is_object())
         throw std::invalid_argument("configuration root must be a JSON object");
+    reject_unknown_keys(document, "configuration", {"listen", "paths", "limits", "timeouts", "auth", "sessions"});
 
     if (document.contains("listen")) {
         const nlohmann::json &listen = document.at("listen");
         if (!listen.is_object())
             throw std::invalid_argument("listen must be a JSON object");
+        reject_unknown_keys(listen, "listen", {"address", "port"});
         if (listen.contains("address")) {
             if (!listen.at("address").is_string())
                 throw std::invalid_argument("listen.address must be a string");
@@ -211,6 +230,7 @@ void apply_json_config(
         const nlohmann::json &paths = document.at("paths");
         if (!paths.is_object())
             throw std::invalid_argument("paths must be a JSON object");
+        reject_unknown_keys(paths, "paths", {"resources", "profiles", "work", "accounts"});
         if (paths.contains("resources"))
             config.resource_directory = read_path_json(paths.at("resources"), base_directory, "paths.resources");
         if (paths.contains("profiles"))
@@ -225,6 +245,8 @@ void apply_json_config(
         const nlohmann::json &limits = document.at("limits");
         if (!limits.is_object())
             throw std::invalid_argument("limits must be a JSON object");
+        reject_unknown_keys(limits, "limits", {"max_request_body_bytes", "max_upload_bytes", "max_header_bytes",
+            "max_connections", "import_threads", "slice_threads", "max_instances_per_object"});
         if (limits.contains("max_request_body_bytes"))
             config.max_request_body_bytes = read_unsigned_json(
                 limits.at("max_request_body_bytes"), "limits.max_request_body_bytes");
@@ -268,6 +290,7 @@ void apply_json_config(
         const nlohmann::json &timeouts = document.at("timeouts");
         if (!timeouts.is_object())
             throw std::invalid_argument("timeouts must be a JSON object");
+        reject_unknown_keys(timeouts, "timeouts", {"request_seconds"});
         if (timeouts.contains("request_seconds")) {
             const std::uint64_t seconds = read_unsigned_json(
                 timeouts.at("request_seconds"), "timeouts.request_seconds");
@@ -281,6 +304,7 @@ void apply_json_config(
         const nlohmann::json &auth = document.at("auth");
         if (!auth.is_object())
             throw std::invalid_argument("auth must be a JSON object");
+        reject_unknown_keys(auth, "auth", {"token_ttl_seconds", "login_window_seconds", "max_login_attempts"});
         if (auth.contains("token_ttl_seconds")) {
             const std::uint64_t seconds = read_unsigned_json(
                 auth.at("token_ttl_seconds"), "auth.token_ttl_seconds");
@@ -308,6 +332,7 @@ void apply_json_config(
         const nlohmann::json &sessions = document.at("sessions");
         if (!sessions.is_object())
             throw std::invalid_argument("sessions must be a JSON object");
+        reject_unknown_keys(sessions, "sessions", {"expiration_seconds"});
         if (sessions.contains("expiration_seconds")) {
             const std::uint64_t seconds = read_unsigned_json(
                 sessions.at("expiration_seconds"), "sessions.expiration_seconds");
@@ -3470,9 +3495,13 @@ void ServerConfig::validate() const
 
 ServerConfig load_server_config(
     const std::filesystem::path &config_file,
-    const CommandLineOverrides &overrides)
+    const CommandLineOverrides &overrides,
+    const std::optional<std::filesystem::path> &default_resources)
 {
     ServerConfig config = ServerConfig::defaults();
+    // Host defaults have the lowest priority; JSON and CLI still override them.
+    if (default_resources)
+        config.resource_directory = *default_resources;
     if (!config_file.empty()) {
         const std::filesystem::path absolute_config = std::filesystem::absolute(config_file);
         std::ifstream input(absolute_config);

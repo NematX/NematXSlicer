@@ -66,12 +66,68 @@
 #include "libslic3r/BlacklistedLibraryCheck.hpp"
 
 #include "PrusaSlicer.hpp"
+#ifdef SLIC3R_REST_SERVER_MODE
+    #include "rest_server/rest_main.hpp"
+#endif
 
 #ifdef SLIC3R_GUI
     #include "slic3r/GUI/GUI_Init.hpp"
 #endif /* SLIC3R_GUI */
 
 using namespace Slic3r;
+
+// Resolve resources once in the host, with identical rules for CLI and REST.
+static boost::filesystem::path application_resources(const boost::filesystem::path &binary);
+#ifdef SLIC3R_REST_SERVER_MODE
+// Dispatch before CLI setup so REST never initializes the GUI's data/plugins.
+static std::optional<int> run_rest_mode(int argc, char **argv);
+#endif
+
+static boost::filesystem::path application_resources(const boost::filesystem::path &binary)
+{
+#ifdef __APPLE__
+    return boost::filesystem::canonical(binary).parent_path() / "../Resources";
+#elif defined _WIN32
+    return binary.parent_path() / "resources";
+#elif defined SLIC3R_FHS
+    return SLIC3R_FHS_RESOURCES;
+#else
+    return boost::filesystem::canonical(binary).parent_path() / "../resources";
+#endif
+}
+
+#ifdef SLIC3R_REST_SERVER_MODE
+static std::optional<int> run_rest_mode(int argc, char **argv)
+{
+    const std::string mode = argc > 1 ? argv[1] : "";
+    const bool server = mode == "--rest-server";
+    const bool password = mode == "--rest-hash-password";
+    bool link = false;
+#ifndef _WIN32
+    link = boost::algorithm::ends_with(boost::filesystem::path(argv[0]).filename().string(), SLIC3R_APP_CMD "-rest");
+#endif
+    if (!server && !password && !link)
+        return std::nullopt;
+    std::vector<char *> arguments;
+    arguments.push_back(argv[0]);
+    for (int index = server || password ? 2 : 1; index < argc; ++index)
+        arguments.push_back(argv[index]);
+    arguments.push_back(nullptr);
+    if (password)
+        return Rest::rest_password_main(static_cast<int>(arguments.size() - 1), arguments.data(),
+            std::string(argv[0]) + " --rest-hash-password");
+    const boost::filesystem::path resources = application_resources(boost::dll::program_location());
+    // Dedicated launchers/links already select REST; ordinary hosts need the flag.
+#ifdef _WIN32
+    const bool dedicated = boost::filesystem::path(argv[0]).filename().string() == SLIC3R_APP_CMD "_rest.exe";
+#else
+    const bool dedicated = link;
+#endif
+    const Rest::RestLaunchDefaults defaults{std::filesystem::path(resources.native()),
+        std::string(argv[0]) + (dedicated ? "" : " --rest-server")};
+    return Rest::rest_server_main(static_cast<int>(arguments.size() - 1), arguments.data(), defaults);
+}
+#endif
 
 static PrinterTechnology get_printer_technology(const DynamicConfig &config)
 {
@@ -843,26 +899,7 @@ bool CLI::setup(int argc, char **argv)
     boost::filesystem::path path_to_binary = boost::dll::program_location();
     boost::filesystem::path install_path = path_to_binary.parent_path();
 
-    // Path from the Slic3r binary to its resources.
-#ifdef __APPLE__
-    // The application is packed in the .dmg archive as 'Slic3r.app/Contents/MacOS/Slic3r'
-    // The resources are packed to 'Slic3r.app/Contents/Resources'
-    boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path() / "../Resources";
-#elif defined _WIN32
-    // The application is packed in the .zip archive in the root,
-    // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
-    boost::filesystem::path path_resources = path_to_binary.parent_path() / "resources";
-#elif defined SLIC3R_FHS
-    // The application is packaged according to the Linux Filesystem Hierarchy Standard
-    // Resources are set to the 'Architecture-independent (shared) data', typically /usr/share or /usr/local/share
-    boost::filesystem::path path_resources = SLIC3R_FHS_RESOURCES;
-#else
-    // The application is packed in the .tar.bz archive (or in AppImage) as 'bin/slic3r',
-    // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
-    boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path() / "../resources";
-#endif
+    const boost::filesystem::path path_resources = application_resources(path_to_binary);
 #if !defined(_WIN32) && !defined(__APPLE__)
     //test if launched from appiamge
     const char* appimage_env = std::getenv("APPIMAGE");
@@ -1114,12 +1151,22 @@ extern "C" {
         for (size_t i = 0; i < argc; ++ i)
             argv_ptrs[i] = argv_narrow[i].data();
         // Call the UTF8 main.
+#ifdef SLIC3R_REST_SERVER_MODE
+        const std::optional<int> rest = run_rest_mode(argc, argv_ptrs.data());
+        if (rest)
+            return *rest;
+#endif
         return CLI().run(argc, argv_ptrs.data());
     }
 }
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+#ifdef SLIC3R_REST_SERVER_MODE
+    const std::optional<int> rest = run_rest_mode(argc, argv);
+    if (rest)
+        return *rest;
+#endif
     return CLI().run(argc, argv);
 }
 #endif /* _MSC_VER */

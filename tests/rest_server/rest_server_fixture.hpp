@@ -29,6 +29,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -97,12 +98,13 @@ public:
     };
 
     explicit RestServerFixture(Limits limits = {}, bool with_account = true, bool with_profiles = false,
-        std::filesystem::path work_directory_name = "work")
+        std::filesystem::path work_directory_name = "work", std::optional<std::string> account_document = {})
         : root_directory_(),
           limits_(limits),
           with_account_(with_account),
           with_profiles_(with_profiles),
           work_directory_name_(std::move(work_directory_name)),
+          account_document_(std::move(account_document)),
           server_(create_server())
     {
         server_->start();
@@ -314,7 +316,10 @@ private:
             std::ofstream(config.profiles_directory / "filament" / "rest-filament-a.ini");
             std::ofstream(config.profiles_directory / "filament" / "rest-filament-b.ini");
         }
-        if (with_account_) {
+        if (account_document_) {
+            // Launch tests use the exact document emitted by the account tool.
+            std::ofstream(config.accounts_file) << *account_document_;
+        } else if (with_account_) {
             Slic3r::Rest::Argon2Parameters parameters;
             parameters.memory_kib = 8U * 1024U;
             parameters.time_cost = 2;
@@ -365,6 +370,7 @@ private:
     bool with_account_;
     bool with_profiles_;
     std::filesystem::path work_directory_name_;
+    std::optional<std::string> account_document_;
     std::unique_ptr<Slic3r::Rest::RestServer> server_;
     std::string default_token_;
     std::atomic<std::uint32_t> handler_calls_{0};

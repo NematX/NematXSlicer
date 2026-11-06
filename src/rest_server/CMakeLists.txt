@@ -26,6 +26,9 @@ add_custom_target(slic3r_rest_resources
 add_library(slic3r_rest_auth STATIC
     auth.cpp
     auth.hpp
+    rest_main.hpp
+    rest_main_internal.hpp
+    rest_password_main.cpp
 )
 
 target_include_directories(slic3r_rest_auth
@@ -49,8 +52,11 @@ add_library(slic3r_rest STATIC
     profiles.hpp
     progress.cpp
     progress.hpp
+    rest_main.hpp
+    rest_main_internal.hpp
     rest_server.cpp
     rest_server.hpp
+    rest_server_main.cpp
     settings_catalog.cpp
     settings_codec.cpp
     settings.hpp
@@ -75,7 +81,7 @@ target_compile_definitions(slic3r_rest PRIVATE NOMINMAX)
 add_executable(slic3r_rest_password
     password_tool.cpp
 )
-target_link_libraries(slic3r_rest_password PRIVATE slic3r_rest_auth boost_libs)
+target_link_libraries(slic3r_rest_password PRIVATE slic3r_rest_auth boost_libs nowide)
 set_property(TARGET slic3r_rest_password PROPERTY FOLDER "rest_server")
 
 if (WIN32)
@@ -127,5 +133,12 @@ add_executable(slic3r_rest_server
     main.cpp
 )
 
-target_link_libraries(slic3r_rest_server PRIVATE slic3r_rest slic3r_rest_engine)
+target_link_libraries(slic3r_rest_server PRIVATE slic3r_rest slic3r_rest_engine nowide)
 set_property(TARGET slic3r_rest_server PROPERTY FOLDER "rest_server")
+
+if (WIN32)
+    prusaslicer_copy_dlls(slic3r_rest_server)
+    install(TARGETS slic3r_rest_server slic3r_rest_password RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+else ()
+    install(TARGETS slic3r_rest_server slic3r_rest_password RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif ()

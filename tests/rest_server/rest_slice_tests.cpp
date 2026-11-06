@@ -490,6 +490,25 @@ TEST_CASE("REST slice exports a real cube and publishes one owned result", "[res
     CHECK_FALSE(contains_temporary_file(fixture));
 }
 
+TEST_CASE("REST slice exports and downloads G-code from a UTF-8 work directory", "[rest_slice][rest_utf8]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true, std::filesystem::u8path(u8"travail-é"));
+    const SessionRoute session_route = create_cube_session(fixture);
+    run_successful_slice(fixture, session_route);
+
+    const HttpResponseMessage downloaded = fixture.request(http::verb::get, session_route.route + "/get_gcode");
+    REQUIRE(downloaded.result() == http::status::ok);
+    CHECK(downloaded[http::field::content_type] == "text/x.gcode");
+    CHECK(downloaded.body().find("G1") != std::string::npos);
+    REQUIRE(session_route.session->current_gcode().has_value());
+    const std::filesystem::path published = session_route.session->current_gcode().value();
+    CHECK(published.parent_path().parent_path() == fixture.work_directory() / "results");
+    CHECK(downloaded.body() == read_file(published));
+    CHECK(wait_for_result_count(fixture, 1));
+    CHECK_FALSE(contains_temporary_file(fixture));
+}
+
 TEST_CASE("REST slice accepts one job per session while its worker is blocked", "[rest_slice]")
 {
     ensure_engine_initialized();

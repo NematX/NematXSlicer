@@ -1,7 +1,7 @@
 # Specification — SuperSlicer REST Server
 
 **Status:** proposed JSON contract, pending validation\
-**Version:** 0.72
+**Version:** 0.73
 
 ## 1. Objective
 
@@ -1233,12 +1233,39 @@ application command name (`SLIC3R_APP_CMD`).
   `--accounts-file PATH`, and `--help`. Command-line slicing actions and GUI
   options cannot be combined with it. The process runs until `SIGINT`/`SIGTERM`
   (Ctrl+C), then cancels running slices and stops cleanly.
+  `--rest-server` and `--rest-hash-password` must be the first argument after the
+  program name. All arguments and JSON path strings are UTF-8 on every platform.
+  Exit codes are `0` for help or normal shutdown and `1` for invalid options,
+  configuration or startup errors.
+- **Application resource defaults.** When neither JSON `paths.resources` nor
+  `--resources-dir` supplies resources, application modes use the application's
+  resource directory: `resources` beside the Windows launcher, `../Resources`
+  in a macOS bundle, or the FHS/`../resources` layout on Linux. No paths are
+  borrowed from GUI user data: installed REST profiles (`print`, `printer`,
+  `filament` directories), work storage and accounts are supplied by REST
+  configuration/options or retain the standalone current-directory defaults.
 - **Accounts tool.** The Argon2id provisioning tool (§6) is also a launch mode of
   the same executable: `--rest-hash-password --username NAME` (Windows: through
   `<app>_console.exe`) reads the password without echo and prints the accounts
   JSON, as the standalone tool does.
+  On Windows use `<app>_console.exe --rest-hash-password --username NAME` or
+  `slic3r_rest_password.exe --username NAME`, not `<app>_rest.exe`, which already
+  inserts `--rest-server`. REST/account console modes do not probe OpenGL/Mesa.
 - **Standalone executables.** The build also provides two standalone targets,
   `slic3r_rest_server` (REST mode only) and `slic3r_rest_password` (accounts
   tool only), with the same options and behavior, for deployments that do not
   need the application executable. The application modes and the standalone
   executables share one implementation.
+  Standalone default paths remain relative to the current working directory.
+
+### Launch verification targets
+
+`rest_launch_tests` runs in its own process because launches finalize the engine
+singleton, while `rest_server_tests` also verifies the uninitialized-engine state.
+Build both test targets for launch and transport coverage. The three executable
+application checks have the CTest label `rest_app` and require `Slic3r` plus the
+Windows REST/console launchers (or the application binary and REST link on Unix).
+For standalone-only builds, exclude them with
+`ctest --test-dir build -C Debug -R "^rest_" -LE rest_app --output-on-failure`.
+This still requires building the selected REST test targets and both standalone
+executables; CTest does not build missing executables.

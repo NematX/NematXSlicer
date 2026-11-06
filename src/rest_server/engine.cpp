@@ -17,6 +17,7 @@
 
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
+#include <boost/nowide/integration/filesystem.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
@@ -70,20 +71,23 @@ EnginePaths normalized_engine_paths(const EnginePaths &paths)
 // every thread, so this runs once during initialize().
 void configure_engine_paths(const EnginePaths &paths)
 {
+    // REST dispatch bypasses CLI::run, which otherwise installs this UTF-8 facet.
+    boost::nowide::nowide_filesystem();
     const std::filesystem::path install_directory = paths.binary_file.parent_path().empty()
         ? std::filesystem::current_path()
         : paths.binary_file.parent_path();
     const std::filesystem::path resource_directory = paths.resource_directory;
     const std::filesystem::path data_directory = paths.data_directory;
 
-    set_install_path(boost::filesystem::path(install_directory.string()));
-    set_binary_file(boost::filesystem::path(paths.binary_file.string()));
-    set_resources_dir(resource_directory.string());
-    set_var_dir((resource_directory / "icons").string());
-    set_local_dir((resource_directory / "localization").string());
-    set_sys_shapes_dir((resource_directory / "shapes").string());
-    set_custom_gcodes_dir((resource_directory / "custom_gcodes").string());
-    set_data_dir(data_directory.string());
+    // libslic3r's path strings use UTF-8, not the Windows ANSI code page.
+    set_install_path(boost::filesystem::path(install_directory.u8string()));
+    set_binary_file(boost::filesystem::path(paths.binary_file.u8string()));
+    set_resources_dir(resource_directory.u8string());
+    set_var_dir((resource_directory / "icons").u8string());
+    set_local_dir((resource_directory / "localization").u8string());
+    set_sys_shapes_dir((resource_directory / "shapes").u8string());
+    set_custom_gcodes_dir((resource_directory / "custom_gcodes").u8string());
+    set_data_dir(data_directory.u8string());
 }
 
 // One-time bootstrap: plugins are loaded before the FFF/SLA configuration
@@ -250,8 +254,8 @@ SliceResult Engine::slice(
 
     GCodeProcessorResult viewer;
     const std::string exported_path = orchestrator.export_gcode(
-        print, output_file.string(), &viewer, nullptr);
-    return SliceResult{std::filesystem::path(exported_path), std::move(viewer)};
+        print, output_file.u8string(), &viewer, nullptr);
+    return SliceResult{std::filesystem::u8path(exported_path), std::move(viewer)};
 }
 
 // Project engine moves into viewer pages. The path of a spatial move starts at

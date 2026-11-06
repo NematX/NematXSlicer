@@ -12,7 +12,7 @@
 #include <wchar.h>
 #include "libslic3r/libslic3r_version.h"
 
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
 extern "C" 
 { 
     // Let the NVIDIA and AMD know we want to use their graphics card
@@ -27,7 +27,7 @@ extern "C"
 #include <string>
 #include <vector>
 
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
     #include <GL/GL.h>
 #endif /* SLIC3R_GUI */
 
@@ -36,7 +36,7 @@ extern "C"
 #include <boost/algorithm/string/classification.hpp>
 
 
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
 class OpenGLVersionCheck
 {
 public:
@@ -231,7 +231,15 @@ int wmain(int argc, wchar_t **argv)
     // Allow the asserts to open message box, such message box allows to ignore the assert and continue with the application.
     // Without this call, the seemingly same message box is being opened by the abort() function, but that is too late and
     // the application will be killed even if "Ignore" button is pressed.
-    _set_error_mode(_OUT_TO_MSGBOX);
+    // REST/account modes never create an OpenGL probe or a CRT error dialog,
+    // including when selected explicitly through the ordinary console wrapper.
+#ifdef SLIC3R_WRAPPER_REST
+    const bool rest_launch = true;
+#else
+    const bool rest_launch = argc > 1 && (wcscmp(argv[1], L"--rest-server") == 0 ||
+        wcscmp(argv[1], L"--rest-hash-password") == 0);
+#endif
+    _set_error_mode(rest_launch ? _OUT_TO_STDERR : _OUT_TO_MSGBOX);
 
     std::vector<wchar_t*> argv_extended;
     argv_extended.emplace_back(argv[0]);
@@ -241,13 +249,18 @@ int wmain(int argc, wchar_t **argv)
     argv_extended.emplace_back(gcodeviewer_param);
 #endif /* SLIC3R_WRAPPER_GCODEVIEWER */
 
-#ifdef SLIC3R_GUI
+#ifdef SLIC3R_WRAPPER_REST
+    wchar_t rest_param[] = L"--rest-server";
+    argv_extended.emplace_back(rest_param);
+#endif
+
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
     // Here one may push some additional parameters based on the wrapper type.
     bool force_mesa = false;
     bool force_hw   = false;
 #endif /* SLIC3R_GUI */
     for (int i = 1; i < argc; ++ i) {
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
         if (wcscmp(argv[i], L"--sw-renderer") == 0)
             force_mesa = true;
         else if (wcscmp(argv[i], L"--no-sw-renderer") == 0)
@@ -257,16 +270,16 @@ int wmain(int argc, wchar_t **argv)
     }
     argv_extended.emplace_back(nullptr);
 
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
     OpenGLVersionCheck opengl_version_check;
-    bool load_mesa =
+    bool load_mesa = !rest_launch && (
         // Forced from the command line.
         force_mesa ||
         // Running over a rempote desktop, and the RemoteFX is not enabled, therefore Windows will only provide SW OpenGL 1.1 context.
         // In that case, use Mesa.
         (::GetSystemMetrics(SM_REMOTESESSION) && !force_hw) ||
         // Try to load the default OpenGL driver and test its context version.
-        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(3, 2);
+        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(3, 2));
 #endif /* SLIC3R_GUI */
 
     wchar_t path_to_exe[MAX_PATH + 1] = { 0 };
@@ -278,7 +291,7 @@ int wmain(int argc, wchar_t **argv)
     _wsplitpath(path_to_exe, drive, dir, fname, ext);
     _wmakepath(path_to_exe, drive, dir, nullptr, nullptr);
 
-#ifdef SLIC3R_GUI
+#if defined(SLIC3R_GUI) && !defined(SLIC3R_WRAPPER_REST)
 // https://wiki.qt.io/Cross_compiling_Mesa_for_Windows
 // http://download.qt.io/development_releases/prebuilt/llvmpipe/windows/
     if (load_mesa) {

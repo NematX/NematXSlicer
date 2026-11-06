@@ -22,6 +22,19 @@ endif ()
 
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
 
+# Launching finalizes the process-global engine; transport tests intentionally
+# exercise the uninitialized engine, so they must run in another process.
+add_executable(rest_launch_tests rest_launch_tests.cpp)
+target_compile_definitions(rest_launch_tests PRIVATE
+    SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)")
+target_link_libraries(rest_launch_tests test_common slic3r_rest slic3r_rest_engine boost_libs)
+if (WIN32)
+    target_compile_definitions(rest_launch_tests PRIVATE _WIN32_WINNT=0x0601)
+    prusaslicer_copy_dlls(rest_launch_tests)
+endif ()
+set_property(TARGET rest_launch_tests PROPERTY FOLDER "tests")
+add_test(rest_launch_tests rest_launch_tests ${CATCH_EXTRA_ARGS})
+
 add_executable(rest_profiles_tests
     rest_profiles_tests.cpp
 )
@@ -153,6 +166,7 @@ add_test(rest_auth_tests rest_auth_tests ${CATCH_EXTRA_ARGS})
 
 set_tests_properties(
     rest_server_tests
+    rest_launch_tests
     rest_profiles_tests
     rest_settings_tests
     rest_engine_tests
@@ -181,3 +195,33 @@ set_tests_properties(rest_slice_tests rest_e2e_tests PROPERTIES TIMEOUT 1800)
 # oversubscription between executables while transport/settings tests run in parallel.
 set_tests_properties(rest_engine_tests rest_slice_tests rest_e2e_tests
     PROPERTIES RESOURCE_LOCK rest_slicing)
+
+# These commands exercise the actual executable/DLL dispatch, not an injected main.
+add_test(NAME rest_standalone_help COMMAND ${CMAKE_COMMAND}
+    -DEXECUTABLE=$<TARGET_FILE:slic3r_rest_server> -P ${CMAKE_CURRENT_SOURCE_DIR}/check_rest_help.cmake)
+set_tests_properties(rest_standalone_help PROPERTIES TIMEOUT 600)
+add_test(NAME rest_standalone_password_usage COMMAND ${CMAKE_COMMAND}
+    -DEXECUTABLE=$<TARGET_FILE:slic3r_rest_password> -P ${CMAKE_CURRENT_SOURCE_DIR}/check_password_usage.cmake)
+set_tests_properties(rest_standalone_password_usage PROPERTIES TIMEOUT 600)
+if (TARGET Slic3r)
+    if (WIN32)
+        add_test(NAME rest_launcher_help COMMAND ${CMAKE_COMMAND}
+            -DEXECUTABLE=$<TARGET_FILE:Slic3r_app_rest> -P ${CMAKE_CURRENT_SOURCE_DIR}/check_rest_help.cmake)
+        set(_rest_console_target Slic3r_app_console)
+    else ()
+        add_test(NAME rest_launcher_help COMMAND ${CMAKE_COMMAND}
+            -DEXECUTABLE=$<TARGET_FILE_DIR:Slic3r>/${SLIC3R_APP_CMD}-rest
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_rest_help.cmake)
+        set(_rest_console_target Slic3r)
+    endif ()
+    add_test(NAME rest_app_help COMMAND ${CMAKE_COMMAND}
+        -DEXECUTABLE=$<TARGET_FILE:${_rest_console_target}> -DMODE=--rest-server
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_rest_help.cmake)
+    set_tests_properties(rest_app_help PROPERTIES TIMEOUT 600)
+    add_test(NAME rest_app_password_usage COMMAND ${CMAKE_COMMAND}
+        -DEXECUTABLE=$<TARGET_FILE:${_rest_console_target}> -DMODE=--rest-hash-password
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_password_usage.cmake)
+    set_tests_properties(rest_launcher_help PROPERTIES TIMEOUT 600)
+    set_tests_properties(rest_app_password_usage PROPERTIES TIMEOUT 600)
+    set_tests_properties(rest_launcher_help rest_app_help rest_app_password_usage PROPERTIES LABELS rest_app)
+endif ()

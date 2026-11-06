@@ -65,7 +65,8 @@ struct CommandLineOverrides {
 
 ServerConfig load_server_config(
     const std::filesystem::path &config_file,
-    const CommandLineOverrides &overrides = {});
+    const CommandLineOverrides &overrides = {},
+    const std::optional<std::filesystem::path> &default_resources = {});
 
 struct HttpRequest {
     std::string method;

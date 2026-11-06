@@ -82,7 +82,7 @@ if (SLIC3R_STATIC)
 endif ()
 
 # Dependency build management
-option(SLIC3R_BUILD_REST_SERVER "Build the standalone REST server" OFF)
+option(SLIC3R_BUILD_REST_SERVER "Build the REST server mode and its standalone executables" OFF)
 option(${PROJECT_NAME}_BUILD_DEPS "Build dependencies before the project" OFF)
 option(${PROJECT_NAME}_DEPS_OUTPUT_QUIET "Don't print build output for dependencies" OFF)
 set(${PROJECT_NAME}_DEPS_PRESET "default" CACHE STRING "Preset of the dependencies when ${PROJECT_NAME}_BUILD_DEPS is ON")
