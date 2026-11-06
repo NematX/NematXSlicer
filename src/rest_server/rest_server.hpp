@@ -35,6 +35,7 @@ struct ServerConfig {
     std::uint64_t max_upload_bytes;
     std::uint64_t max_header_bytes;
     std::uint32_t max_connections;
+    std::uint32_t max_instances_per_object;
     // Threads parsing uploaded models away from the network thread, so a long
     // import never delays other requests.
     std::uint32_t import_threads;

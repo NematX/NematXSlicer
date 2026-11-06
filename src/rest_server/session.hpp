@@ -22,6 +22,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/Config/PrintConfig.hpp"
@@ -51,6 +52,8 @@ struct SessionData {
     DynamicPrintConfig configuration;
     nlohmann::json preferences = nlohmann::json::object();
     ProfileSelection profiles;
+    // Optional display name, the GUI project name: it never affects slicing.
+    std::optional<std::string> name;
     // Core-generated INI sections of the selected profiles, separate from slicing settings.
     std::string profile_sections;
 };
@@ -79,6 +82,11 @@ struct EntityBinding {
     EntityKind kind;
     std::uint64_t engine_id;
 };
+
+// Resolve a preserved engine ID inside a private scene copy, not the live scene.
+std::vector<ModelInstance *> find_transform_instances(Model &scene, const EntityReference &entity);
+// Return the parent and volume inside the private scene copy, preserving shared-instance semantics.
+std::pair<ModelObject *, ModelVolume *> find_transform_volume(Model &scene, const EntityReference &entity);
 
 class SessionContext {
 public:
@@ -134,7 +142,8 @@ public:
         TimePoint completed_at,
         const std::vector<EntityBinding> &bindings,
         std::vector<std::string> &bound_ids,
-        bool replace_entities = false);
+        bool replace_entities = false,
+        const std::vector<EntityBinding> &unbindings = {});
 
     std::optional<WorkToken> begin_work(TimePoint started_at);
     bool finish_work(
@@ -147,6 +156,11 @@ public:
 
     Snapshot snapshot() const;
     std::optional<SessionData> data_snapshot() const;
+    // Read ordered instance IDs only if the mutation's revision still owns the snapshot.
+    std::optional<std::vector<std::string>> instance_ids(MutationToken token, std::uint64_t object_id) const;
+    // List the scene with its existing IDs, both taken from one committed state.
+    // Throws std::out_of_range when an entity has no ID (internal invariant).
+    std::optional<nlohmann::json> list_objects() const;
     std::optional<std::filesystem::path> current_gcode() const;
     std::shared_ptr<const ViewerSnapshot> viewer_snapshot() const;
 

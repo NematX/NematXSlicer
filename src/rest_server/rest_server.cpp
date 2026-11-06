@@ -11,10 +11,12 @@
 #include "rest_server.hpp"
 
 #include "auth.hpp"
+#include "file_names.hpp"
 #include "multipart_upload.hpp"
 #include "profiles.hpp"
 #include "session.hpp"
 #include "settings.hpp"
+#include "transform.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio.hpp>
@@ -23,6 +25,7 @@
 #include <boost/beast/version.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -67,6 +70,7 @@ constexpr std::uint64_t default_max_request_body_bytes = 16ULL * 1024ULL * 1024U
 constexpr std::uint64_t default_max_upload_bytes = 1ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t default_max_header_bytes = 16ULL * 1024ULL;
 constexpr std::uint32_t default_max_connections = 64;
+constexpr std::uint32_t default_max_instances_per_object = 1000;
 constexpr std::uint32_t default_import_threads = 2;
 // After an early error response the refused request body is read and dropped
 // within these bounds, so closing the socket sends FIN instead of a TCP reset
@@ -229,6 +233,13 @@ void apply_json_config(
             if (import_threads > std::numeric_limits<std::uint32_t>::max())
                 throw std::invalid_argument("limits.import_threads is too large");
             config.import_threads = static_cast<std::uint32_t>(import_threads);
+        }
+        if (limits.contains("max_instances_per_object")) {
+            const std::uint64_t maximum = read_unsigned_json(
+                limits.at("max_instances_per_object"), "limits.max_instances_per_object");
+            if (maximum > std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument("limits.max_instances_per_object is too large");
+            config.max_instances_per_object = static_cast<std::uint32_t>(maximum);
         }
     }
 
@@ -627,6 +638,7 @@ struct RouteServices {
     // the session they captured, so they may outlive the request dispatch.
     asio::thread_pool &imports;
     const std::function<void()> &import_observer;
+    std::uint32_t max_instances_per_object;
 };
 
 struct AuthenticatedRequest {
@@ -759,23 +771,65 @@ if (!settings_catalog_ready())
 return HttpResponse::json(200, settings_catalog());
 }
 
+// Read the body of create_session or set_name: a JSON object whose only field
+// is `name`, a string or null for no name. `required` makes the field
+// mandatory. Returns the error response of an invalid body.
+std::optional<HttpResponse> read_session_name(
+    HttpRequest &request,
+    bool required,
+    std::optional<std::string> &name,
+    const std::string &request_id)
+{
+    HttpResponse parse_error;
+    if (!parse_request_json(request, parse_error, request_id))
+        return parse_error;
+    if (request.json_body == nullptr || !request.json_body->is_object())
+        return make_error_response(400, "invalid_request", "The body must be a JSON object.", request_id);
+    const nlohmann::json &body = *request.json_body;
+    for (const auto &item : body.items())
+        if (item.key() != "name")
+            return make_error_response(400, "invalid_request", "Unknown field: " + item.key(), request_id);
+    name.reset();
+    if (!body.contains("name")) {
+        if (required)
+            return make_error_response(400, "invalid_request", "The body must contain the name field.", request_id);
+        return std::nullopt;
+    }
+    const nlohmann::json &value = body.at("name");
+    if (value.is_null())
+        return std::nullopt;
+    if (!value.is_string())
+        return make_error_response(400, "invalid_request", "The name must be a string or null.", request_id);
+    try {
+        validate_session_name(value.get<std::string>());
+    } catch (const std::invalid_argument &error) {
+        return make_error_response(400, "invalid_request", error.what(), request_id);
+    }
+    name = value.get<std::string>();
+    return std::nullopt;
+}
+
+nlohmann::json session_name_json(const std::optional<std::string> &name)
+{
+    return name ? nlohmann::json(name.value()) : nlohmann::json(nullptr);
+}
+
 // Create an owned session, seeded from the profile catalog defaults when the
-// engine catalog is available. The route accepts no request body.
+// engine catalog is available. The body is empty or carries an optional name.
 HttpResponse handle_create_session(
-    const HttpRequest &request,
+    HttpRequest &request,
     const RouteServices &services,
     const std::string &username,
     const std::string &request_id)
 {
 if (request.method != "POST")
     return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+std::optional<std::string> name;
 if (!request.body.empty())
-    return make_error_response(
-        400,
-        "invalid_request",
-        "The create_session route does not accept a request body.",
-        request_id);
+    if (std::optional<HttpResponse> error = read_session_name(request, false, name, request_id))
+        return std::move(error.value());
 SessionData session_data{std::make_shared<Model>(), {}, nlohmann::json::object()};
+session_data.name = name;
 if (services.profiles != nullptr) {
     // Defaults are built before the session is published; a broken
     // server-side catalog becomes an internal error, not a worker crash.
@@ -803,7 +857,8 @@ const std::shared_ptr<SessionContext> session = services.sessions.create(
     username,
     SessionRegistry::Clock::now(),
     std::move(session_data));
-return HttpResponse::json(201, nlohmann::json{{"session_id", session->session_id()}});
+return HttpResponse::json(201, nlohmann::json{
+    {"session_id", session->session_id()}, {"name", session_name_json(name)}});
 }
 
 // List the installed profiles visible to one session. The shared catalog is
@@ -903,6 +958,308 @@ if (!session->commit_mutation(
         "The session changed while the profile selection was prepared.",
         request_id);
 return HttpResponse::json(200, response_body);
+}
+
+// Read-only listing of the session scene. The session lock only covers the
+// capture of the scene pointer and IDs; the JSON is built and sent without it.
+HttpResponse handle_list_objects(
+    const HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The list_objects route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    try {
+        const std::optional<nlohmann::json> objects = session->list_objects();
+        if (!objects.has_value())
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        return HttpResponse::json(200, objects.value());
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not read the scene.", request_id);
+    }
+}
+
+// All result matrices are validated before editing the private scene; the revision guards publication.
+HttpResponse handle_transform(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    // The request itself is validated before the session state, so an invalid
+    // body gets the same answer whether or not the session is slicing.
+    HttpResponse parse_error;
+    if (!request.body.empty() && !parse_request_json(request, parse_error, request_id))
+        return parse_error;
+    if (request.json_body == nullptr)
+        return make_error_response(400, "invalid_request", "The transform body must be valid JSON.", request_id);
+    TransformRequest transform;
+    try {
+        transform = parse_transform_request(*request.json_body);
+    } catch (const TransformError &error) {
+        return make_error_response(error.status(), error.status() == 400 ? "invalid_request" : "invalid_transform", error.what(), request_id);
+    }
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the transform was prepared.", request_id);
+    try {
+        if (transform.instance && entity->kind != EntityKind::volume)
+            throw TransformError(422, "The instance field is only valid for a volume target.");
+        SessionData candidate = current.value();
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        std::vector<ModelInstance *> targets;
+        ModelVolume *transformed_volume = nullptr;
+        if (entity->kind == EntityKind::volume) {
+            const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*candidate.scene, entity.value());
+            ModelObject *object = target.first;
+            transformed_volume = target.second;
+            ModelInstance *reference = object->instances.at(0);
+            if (transform.instance) {
+                const std::optional<EntityReference> reference_entity = session->resolve_entity(transform.instance.value());
+                if (session->snapshot().revision != mutation->revision)
+                    return make_error_response(409, "session_changed", "The session changed while the transform was prepared.", request_id);
+                if (!reference_entity)
+                    return make_error_response(404, "entity_not_found", "The reference instance does not exist.", request_id);
+                if (reference_entity->kind != EntityKind::instance)
+                    throw TransformError(422, "The instance field must identify an instance of the volume's object.");
+                reference = find_transform_instances(*candidate.scene, reference_entity.value()).at(0);
+                if (reference->get_object() != object)
+                    throw TransformError(422, "The reference instance belongs to another object.");
+            }
+            const Transform3d matrix = volume_matrix(transformed_volume->get_matrix(), reference->get_matrix(), transform);
+            for (const ModelInstance *instance : object->instances)
+                validate_result(instance->get_matrix() * matrix);
+            transformed_volume->set_transformation(matrix);
+            targets = object->instances;
+        } else {
+            targets = find_transform_instances(*candidate.scene, entity.value());
+            std::vector<Transform3d> matrices;
+            matrices.reserve(targets.size());
+            for (const ModelInstance *instance : targets)
+                matrices.push_back(instance_matrix(instance->get_matrix(), transform));
+            for (std::size_t index = 0; index < targets.size(); ++index)
+                targets[index]->set_transformation(Geometry::Transformation(matrices[index]));
+        }
+        for (ModelObject *object : candidate.scene->object_ptrs()) {
+            for (std::size_t index = 0; index < object->instances.size(); ++index) {
+                ModelInstance *instance = object->instances[index];
+                if (std::find(targets.begin(), targets.end(), instance) == targets.end())
+                    continue;
+                if (transform.ensure_on_bed) {
+                    const double min_z = object->get_instance_min_z(index);
+                    if (!std::isfinite(min_z) || min_z == std::numeric_limits<double>::max())
+                        throw TransformError(422, "The instance has no valid model geometry for bed placement.");
+                    instance->set_offset(Z, instance->get_offset(Z) - min_z);
+                    if (transformed_volume != nullptr)
+                        validate_result(instance->get_matrix() * transformed_volume->get_matrix());
+                    else
+                        validate_result(instance->get_matrix());
+                }
+                object->invalidate_bounding_box();
+            }
+        }
+        const HttpResponse response = HttpResponse::json(200, nlohmann::json{
+            {"id", request.path_segments[3]}, {"action", transform.action}, {"space", transform.space},
+            {"matrix", request.json_body->at("matrix")}
+        });
+        if (!session->commit_mutation(mutation.value(), std::move(candidate), true, SessionRegistry::Clock::now()))
+            return make_error_response(409, "session_changed", "The session changed while the transform was prepared.", request_id);
+        return response;
+    } catch (const TransformError &error) {
+        return make_error_response(error.status(), error.status() == 400 ? "invalid_request" : "invalid_transform", error.what(), request_id);
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not transform the scene.", request_id);
+    }
+}
+
+// Instance removals and additions share the scene commit; a no-op only reads the current IDs.
+HttpResponse handle_set_instance_count(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    // The request is validated before the session state (see handle_transform).
+    HttpResponse parse_error;
+    if (!request.body.empty() && !parse_request_json(request, parse_error, request_id))
+        return parse_error;
+    if (request.json_body == nullptr || !request.json_body->is_object() || request.json_body->size() != 1 ||
+        !request.json_body->contains("count") || !request.json_body->at("count").is_number_integer())
+        return make_error_response(400, "invalid_request", "The body must contain only the integer field count.", request_id);
+    const nlohmann::json &value = request.json_body->at("count");
+    if (!value.is_number_unsigned() && value.get<std::int64_t>() < 1)
+        return make_error_response(422, "invalid_instance_count", "The instance count must be positive.", request_id);
+    const std::uint64_t count = value.get<std::uint64_t>();
+    if (count < 1 || count > services.max_instances_per_object)
+        return make_error_response(422, "invalid_instance_count", "The instance count exceeds the permitted range.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the count was prepared.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_instance_count", "The target must be an object.", request_id);
+    try {
+        std::optional<std::vector<std::string>> ids = session->instance_ids(mutation.value(), entity->engine_id);
+        if (!ids)
+            return make_error_response(409, "session_changed", "The session changed while the count was prepared.", request_id);
+        if (count == ids->size())
+            return HttpResponse::json(200, nlohmann::json{
+                {"object_id", request.path_segments[3]}, {"count", count}, {"instance_ids", ids.value()}});
+        SessionData candidate = current.value();
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        ModelObject *object = find_transform_instances(*candidate.scene, entity.value()).at(0)->get_object();
+        std::vector<EntityBinding> bindings;
+        std::vector<EntityBinding> unbindings;
+        ids->reserve(static_cast<std::size_t>(count));
+        while (object->instances.size() < count) {
+            const ModelInstance *instance = object->add_instance(*object->instances.at(0));
+            bindings.push_back({EntityKind::instance, instance->id().id});
+        }
+        while (object->instances.size() > count) {
+            unbindings.push_back({EntityKind::instance, object->instances.back()->id().id});
+            object->delete_last_instance();
+        }
+        if (ids->size() > count)
+            ids->resize(static_cast<std::size_t>(count));
+        object->invalidate_bounding_box();
+        std::vector<std::string> added_ids;
+        if (!session->commit_mutation(mutation.value(), std::move(candidate), true,
+                SessionRegistry::Clock::now(), bindings, added_ids, false, unbindings))
+            return make_error_response(409, "session_changed", "The session changed while the count was prepared.", request_id);
+        ids->insert(ids->end(), added_ids.begin(), added_ids.end());
+        return HttpResponse::json(200, nlohmann::json{
+            {"object_id", request.path_segments[3]}, {"count", count}, {"instance_ids", ids.value()}});
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not change the instance count.", request_id);
+    }
+}
+
+// Remove every object of the scene while keeping configuration, profiles and
+// preferences. The empty scene and the removal of every entity ID are one
+// commit, so no ID can resolve to a removed entity. Clearing an already empty
+// scene changes nothing and does not commit: the result state (including a
+// `failed` status) is left as it is. The body is checked before the slicing
+// state so an invalid request always gets the same answer.
+HttpResponse handle_clear_platter(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The clear_platter route does not accept a request body.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::size_t cleared = current->scene == nullptr ? 0 : current->scene->objects().size();
+    if (cleared == 0)
+        return HttpResponse::json(200, nlohmann::json{{"cleared_object_count", 0}});
+
+    SessionData candidate = current.value();
+    candidate.scene = std::make_shared<Model>();
+    std::vector<std::string> bound_ids;
+    if (!session->commit_mutation(mutation.value(), std::move(candidate), true,
+            SessionRegistry::Clock::now(), {}, bound_ids, true))
+        return make_error_response(409, "session_changed", "The session changed while the platter was cleared.", request_id);
+    return HttpResponse::json(200, nlohmann::json{{"cleared_object_count", cleared}});
+}
+
+// Rename the session, or remove its name with null. The name never affects
+// slicing: the result state is kept, and an unchanged name commits nothing.
+// Like every mutation it is refused while the session is slicing, after the
+// body is validated.
+HttpResponse handle_set_name(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::optional<std::string> name;
+    if (std::optional<HttpResponse> error = read_session_name(request, true, name, request_id))
+        return std::move(error.value());
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (current->name == name)
+        return HttpResponse::json(200, nlohmann::json{{"name", session_name_json(name)}});
+    SessionData candidate = current.value();
+    candidate.name = name;
+    if (!session->commit_mutation(mutation.value(), std::move(candidate), false, SessionRegistry::Clock::now()))
+        return make_error_response(409, "session_changed", "The session changed while it was renamed.", request_id);
+    return HttpResponse::json(200, nlohmann::json{{"name", session_name_json(name)}});
+}
+
+// Read the session name; null when the session has none.
+HttpResponse handle_get_name(
+    const HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The get_name route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    return HttpResponse::json(200, nlohmann::json{{"name", session_name_json(current->name)}});
 }
 
 // Read one setting from an owned session without mutating it.
@@ -1418,7 +1775,8 @@ std::optional<std::string> project_extruder_error(
 // Runs on an import thread. Load a 3MF project into a new scene and a
 // configuration recomposed from its embedded profiles, then replace the
 // session scene, configuration and profile selection in one commit that also
-// drops every previous entity ID. Session preferences are kept. Loader and
+// drops every previous entity ID. Session preferences are kept; the session
+// takes the project file name. Loader and
 // configuration errors are client errors (422 invalid_project); the session
 // is left untouched by any refusal.
 HttpResponse import_project(
@@ -1496,6 +1854,8 @@ HttpResponse import_project(
         candidate.profile_sections = std::move(application.profile_sections);
         candidate.preferences = current.preferences;
         candidate.profiles = std::move(application.selection);
+        // As in the GUI, the loaded project names the session.
+        candidate.name = session_name_from_file(upload.filename);
         std::vector<std::string> bound_ids;
         if (!session.commit_mutation(
                 mutation,
@@ -1659,6 +2019,18 @@ std::optional<HttpResponse> dispatch_request(
             return handle_add_model(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "load_project")
             return handle_load_project(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "set_name")
+            return handle_set_name(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "get_name")
+            return handle_get_name(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "clear_platter")
+            return handle_clear_platter(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "list_objects")
+            return handle_list_objects(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "transform")
+            return handle_transform(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "set_instance_count")
+            return handle_set_instance_count(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "get_setting")
             return handle_get_setting(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_settings")
@@ -2230,7 +2602,8 @@ public:
             profile_catalog_.get(),
             private_test_handler_,
             *import_pool_,
-            import_observer_};
+            import_observer_,
+            config_.max_instances_per_object};
     }
 
     void set_import_observer(std::function<void()> observer)
@@ -2348,6 +2721,7 @@ ServerConfig ServerConfig::defaults()
     config.max_upload_bytes = default_max_upload_bytes;
     config.max_header_bytes = default_max_header_bytes;
     config.max_connections = default_max_connections;
+    config.max_instances_per_object = default_max_instances_per_object;
     config.import_threads = default_import_threads;
     config.request_timeout = std::chrono::seconds(default_request_timeout_seconds);
     config.token_ttl = std::chrono::seconds(default_token_ttl_seconds);
@@ -2402,6 +2776,8 @@ void ServerConfig::validate() const
         throw std::invalid_argument("limits.max_header_bytes must be positive");
     if (max_connections == 0)
         throw std::invalid_argument("limits.max_connections must be positive");
+    if (max_instances_per_object == 0)
+        throw std::invalid_argument("limits.max_instances_per_object must be positive");
     if (import_threads == 0)
         throw std::invalid_argument("limits.import_threads must be positive");
     if (request_timeout.count() <= 0)

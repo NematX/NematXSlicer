@@ -32,6 +32,8 @@
 #include <future>
 #include <iterator>
 #include <map>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -315,6 +317,629 @@ std::shared_ptr<Slic3r::Rest::SessionContext> find_session(
 }
 
 } // namespace
+
+namespace {
+
+// Build wire matrices explicitly rather than relying on Eigen's storage order.
+nlohmann::json transform_body(const Slic3r::Transform3d &matrix, const std::string &space,
+    const std::string &action = "compose", bool ensure_on_bed = false)
+{
+    nlohmann::json values = nlohmann::json::array();
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            values.push_back(matrix.matrix()(row,column));
+    return {{"matrix", values}, {"space", space}, {"action", action}, {"ensure_on_bed", ensure_on_bed}};
+}
+
+Slic3r::Transform3d listed_matrix(const nlohmann::json &matrix)
+{
+    Slic3r::Transform3d result = Slic3r::Transform3d::Identity();
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            result.matrix()(row,column) = matrix.at(row * 4 + column).get<double>();
+    return result;
+}
+
+nlohmann::json read_objects(const RestServerFixture &fixture, const std::string &route)
+{
+    const HttpResponseMessage response = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(response.result() == http::status::ok);
+    return nlohmann::json::parse(response.body());
+}
+
+} // namespace
+
+TEST_CASE("REST transforms instances and objects atomically with explicit bases and bed placement", "[rest_transform]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    Slic3r::Rest::SessionData data = session->data_snapshot().value();
+    data.scene = std::make_shared<Slic3r::Model>();
+    Slic3r::ModelObject *object = data.scene->add_object("cube", "cube.stl", Slic3r::make_cube(10,10,10));
+    Slic3r::Transform3d initial = Slic3r::Transform3d::Identity();
+    initial.linear() << 0,-1,0, 1,0,0, 0,0,1;
+    initial.translation() = Slic3r::Vec3d(10,20,3);
+    object->add_instance(Slic3r::Geometry::Transformation(initial));
+    object->add_instance()->set_offset(Slic3r::Vec3d(30,40,7));
+    object->add_instance()->set_scaling_factor(Slic3r::Vec3d(2,1,1));
+    std::vector<Slic3r::Rest::EntityBinding> bindings{
+        {Slic3r::Rest::EntityKind::object, object->id().id},
+        {Slic3r::Rest::EntityKind::volume, object->volumes.front()->id().id}
+    };
+    for (const Slic3r::ModelInstance *instance : object->instances)
+        bindings.push_back({Slic3r::Rest::EntityKind::instance, instance->id().id});
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true,
+        Slic3r::Rest::SessionRegistry::Clock::now(), bindings, ids));
+    const nlohmann::json original = read_objects(fixture, route);
+    const std::string object_id = original.at("objects").at(0).at("id");
+    const std::string instance_id = original.at("objects").at(0).at("instances").at(0).at("id");
+    const auto post = [&](const std::string &id, const nlohmann::json &body) {
+        return fixture.request(http::verb::post, route + "/transform/" + id, body.dump(), "application/json");
+    };
+    Slic3r::Transform3d translation = Slic3r::Transform3d::Identity();
+    translation.translation().x() = 5;
+    nlohmann::json body = transform_body(translation, "platter");
+    body.erase("action");
+    body.erase("ensure_on_bed");
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::string result_id = session->viewer_snapshot()->result_id;
+    const HttpResponseMessage global = post(instance_id, body);
+    REQUIRE(global.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(global.body()) == nlohmann::json{
+        {"id", instance_id}, {"action", "compose"}, {"space", "platter"}, {"matrix", body.at("matrix")}});
+    nlohmann::json listed = read_objects(fixture, route);
+    CHECK((listed_matrix(listed["objects"][0]["instances"][0]["matrix"]) * Slic3r::Vec3d(1,0,0)).isApprox(Slic3r::Vec3d(15,21,3)));
+    CHECK(listed["objects"][0]["instances"][1] == original["objects"][0]["instances"][1]);
+    CHECK(listed["objects"][0]["instances"][2] == original["objects"][0]["instances"][2]);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+    CHECK_FALSE(session->current_gcode().has_value());
+    CHECK(session->viewer_snapshot()->outdated);
+    CHECK(session->viewer_snapshot()->result_id == result_id);
+    REQUIRE(post(instance_id, transform_body(translation, "object")).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK((listed_matrix(listed["objects"][0]["instances"][0]["matrix"]) * Slic3r::Vec3d(1,0,0)).isApprox(Slic3r::Vec3d(15,26,3)));
+
+    // The third instance's non-uniform scale makes a local rotation skewed; none may be published.
+    Slic3r::Transform3d rotation = Slic3r::Transform3d::Identity();
+    const double diagonal = std::sqrt(0.5);
+    rotation.linear() << diagonal,-diagonal,0, diagonal,diagonal,0, 0,0,1;
+    const std::uint64_t revision = session->snapshot().revision;
+    require_error(post(object_id, transform_body(rotation, "object")), http::status::unprocessable_entity, "invalid_transform");
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == listed);
+
+    REQUIRE(post(object_id, transform_body(translation, "platter")).result() == http::status::ok);
+    const nlohmann::json translated = read_objects(fixture, route);
+    for (std::size_t index = 0; index < 3; ++index) {
+        const Slic3r::Transform3d previous = listed_matrix(listed["objects"][0]["instances"][index]["matrix"]);
+        const Slic3r::Transform3d actual = listed_matrix(translated["objects"][0]["instances"][index]["matrix"]);
+        CHECK((actual * Slic3r::Vec3d(1,2,3)).isApprox(translation * previous * Slic3r::Vec3d(1,2,3)));
+        CHECK(translated["objects"][0]["instances"][index]["id"] == listed["objects"][0]["instances"][index]["id"]);
+    }
+    REQUIRE(post(instance_id, transform_body(rotation, "volume", "replace")).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK(listed_matrix(listed["objects"][0]["instances"][0]["matrix"]).matrix().isApprox(rotation.matrix()));
+    CHECK(listed["objects"][0]["parts"] == original["objects"][0]["parts"]);
+    CHECK(session->data_snapshot()->configuration.diff(data.configuration).empty());
+
+    Slic3r::Transform3d lifted = Slic3r::Transform3d::Identity();
+    lifted.translation().z() = 15;
+    REQUIRE(post(object_id, transform_body(lifted, "platter", "replace")).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    for (const nlohmann::json &instance : listed["objects"][0]["instances"])
+        CHECK(listed_matrix(instance.at("matrix")).matrix().isApprox(lifted.matrix()));
+    REQUIRE(post(object_id, transform_body(lifted, "object", "replace", true)).result() == http::status::ok);
+    const Slic3r::Rest::SessionData placed = session->data_snapshot().value();
+    for (std::size_t index = 0; index < 3; ++index)
+        CHECK(placed.scene->object_ptrs().front()->get_instance_min_z(index) == Approx(0).margin(1e-8));
+    for (const std::string &id : ids)
+        CHECK(session->resolve_entity(id).has_value());
+
+    // Tilted and sunk geometry is placed by its actual lowest model point, not its origin.
+    Slic3r::Transform3d tilted = Slic3r::Transform3d::Identity();
+    tilted.linear() << 1,0,0, 0,diagonal,-diagonal, 0,diagonal,diagonal;
+    tilted.translation().z() = -12;
+    REQUIRE(post(instance_id, transform_body(tilted, "platter", "replace", true)).result() == http::status::ok);
+    CHECK(session->data_snapshot()->scene->object_ptrs().front()->get_instance_min_z(0) == Approx(0).margin(1e-8));
+
+    Slic3r::Transform3d mirrored = Slic3r::Transform3d::Identity();
+    mirrored.linear() << -1,0,0, 0,2,0, 0,0,3;
+    REQUIRE(post(instance_id, transform_body(mirrored, "volume", "replace")).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK((listed_matrix(listed["objects"][0]["instances"][0]["matrix"]) * Slic3r::Vec3d(1,2,3)).isApprox(Slic3r::Vec3d(-1,4,9)));
+}
+
+TEST_CASE("REST instance counts duplicate the current original and preserve retained IDs", "[rest_instances]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.max_instances_per_object = 5;
+    RestServerFixture fixture(limits, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    const std::string object_id = object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).front();
+    object_ids(upload_model(fixture, route + "/add_model", "other.obj", make_obj_with_padding()));
+    const std::string target = route + "/set_instance_count/" + object_id;
+    nlohmann::json before = read_objects(fixture, route);
+    const std::string original_id = before["objects"][0]["instances"][0]["id"];
+    Slic3r::Transform3d original = Slic3r::Transform3d::Identity();
+    original.linear() << 0,-1,0, 1,0,0, 0,0,1;
+    original.translation() = Slic3r::Vec3d(10,20,7);
+    REQUIRE(fixture.request(http::verb::post, route + "/transform/" + original_id,
+        transform_body(original, "platter", "replace").dump(), "application/json").result() == http::status::ok);
+    before = read_objects(fixture, route);
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    const std::uint64_t revision = session->snapshot().revision;
+    const auto set_count = [&](std::uint64_t count) {
+        const HttpResponseMessage response = fixture.request(http::verb::post, target,
+            nlohmann::json{{"count", count}}.dump(), "application/json");
+        REQUIRE(response.result() == http::status::ok);
+        const nlohmann::json body = nlohmann::json::parse(response.body());
+        CHECK(body.size() == 3);
+        CHECK(body.at("object_id") == object_id);
+        CHECK(body.at("count") == count);
+        return body.at("instance_ids").get<std::vector<std::string>>();
+    };
+    CHECK(set_count(1) == std::vector<std::string>{original_id});
+    CHECK(session->snapshot().revision == revision);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+    CHECK(session->current_gcode().value() == std::filesystem::path("result.gcode"));
+    CHECK(session->viewer_snapshot() == viewer);
+    CHECK(read_objects(fixture, route) == before);
+
+    const std::vector<std::string> three_ids = set_count(3);
+    REQUIRE(three_ids.size() == 3);
+    CHECK(three_ids.front() == original_id);
+    CHECK(std::set<std::string>(three_ids.begin(), three_ids.end()).size() == 3);
+    nlohmann::json listed = read_objects(fixture, route);
+    REQUIRE(listed["objects"][0]["instances"].size() == 3);
+    for (std::size_t index = 0; index < 3; ++index) {
+        CHECK(listed["objects"][0]["instances"][index]["id"] == three_ids[index]);
+        CHECK(listed["objects"][0]["instances"][index]["matrix"] == before["objects"][0]["instances"][0]["matrix"]);
+    }
+    CHECK(listed["objects"][0]["parts"] == before["objects"][0]["parts"]);
+    CHECK(listed["objects"][1] == before["objects"][1]);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+    CHECK_FALSE(session->current_gcode());
+    CHECK(session->viewer_snapshot()->outdated);
+    CHECK(session->viewer_snapshot()->result_id == viewer->result_id);
+    Slic3r::Transform3d moved_copy = Slic3r::Transform3d::Identity();
+    moved_copy.translation() = Slic3r::Vec3d(70,80,9);
+    REQUIRE(fixture.request(http::verb::post, route + "/transform/" + three_ids[1],
+        transform_body(moved_copy, "platter", "replace").dump(), "application/json").result() == http::status::ok);
+    original.linear() << 1,0,0, 0,0,-1, 0,1,0;
+    original.translation() = Slic3r::Vec3d(30,40,11);
+    REQUIRE(fixture.request(http::verb::post, route + "/transform/" + original_id,
+        transform_body(original, "platter", "replace").dump(), "application/json").result() == http::status::ok);
+    const nlohmann::json moved = read_objects(fixture, route);
+    const std::vector<std::string> four_ids = set_count(4);
+    REQUIRE(four_ids.size() == 4);
+    CHECK(std::equal(three_ids.begin(), three_ids.end(), four_ids.begin()));
+    CHECK(std::set<std::string>(four_ids.begin(), four_ids.end()).size() == 4);
+    listed = read_objects(fixture, route);
+    for (std::size_t index = 0; index < 3; ++index)
+        CHECK(listed["objects"][0]["instances"][index] == moved["objects"][0]["instances"][index]);
+    CHECK(listed["objects"][0]["instances"][3]["matrix"] == moved["objects"][0]["instances"][0]["matrix"]);
+    CHECK(listed["objects"][0]["instances"][3]["matrix"] != moved["objects"][0]["instances"][1]["matrix"]);
+    const std::uint64_t unchanged_revision = session->snapshot().revision;
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> outdated = session->viewer_snapshot();
+    CHECK(set_count(4) == four_ids);
+    CHECK(session->snapshot().revision == unchanged_revision);
+    CHECK(session->viewer_snapshot() == outdated);
+    CHECK(set_count(1) == std::vector<std::string>{original_id});
+    const nlohmann::json reduced = read_objects(fixture, route);
+    CHECK(reduced["objects"][0]["instances"] == nlohmann::json::array({moved["objects"][0]["instances"][0]}));
+    CHECK(reduced["objects"][1] == before["objects"][1]);
+    for (std::size_t index = 1; index < four_ids.size(); ++index) {
+        CHECK_FALSE(session->resolve_entity(four_ids[index]));
+        require_error(fixture.request(http::verb::post, route + "/transform/" + four_ids[index],
+            transform_body(Slic3r::Transform3d::Identity(), "platter").dump(), "application/json"),
+            http::status::not_found, "entity_not_found");
+    }
+    const std::vector<std::string> regrown = set_count(5);
+    REQUIRE(regrown.size() == 5);
+    CHECK(std::set<std::string>(regrown.begin(), regrown.end()).size() == 5);
+    for (std::size_t index = 1; index < four_ids.size(); ++index)
+        CHECK(std::find(regrown.begin(), regrown.end(), four_ids[index]) == regrown.end());
+}
+
+TEST_CASE("REST instance count errors respect the configured limit without mutations", "[rest_instances]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.max_instances_per_object = 3;
+    RestServerFixture fixture(limits, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    const std::string object_id = object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).front();
+    const std::string target = route + "/set_instance_count/" + object_id;
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::vector<std::pair<nlohmann::json, unsigned int>> failures{
+        {{{"count", 0}}, 422}, {{{"count", -1}}, 422}, {{{"count", 4}}, 422},
+        {{{"count", 10000000}}, 422},
+        {{{"count", std::numeric_limits<std::uint64_t>::max()}}, 422},
+        {{{"count", std::numeric_limits<std::int64_t>::min()}}, 422},
+        {{{"count", 1.5}}, 400}, {{{"count", 1.0}}, 400}, {{{"count", "2"}}, 400},
+        {{{"count", true}}, 400}, {{{"count", nullptr}}, 400},
+        {nlohmann::json::object(), 400}, {nlohmann::json::array({1}), 400},
+        {{{"count", 2}, {"extra", 0}}, 400}
+    };
+    for (const std::pair<nlohmann::json, unsigned int> &failure : failures) {
+        CAPTURE(failure.first.dump());
+        const HttpResponseMessage response = fixture.request(http::verb::post, target, failure.first.dump(), "application/json");
+        CHECK(response.result_int() == failure.second);
+        CHECK(nlohmann::json::parse(response.body())["error"]["code"] ==
+            (failure.second == 400 ? "invalid_request" : "invalid_instance_count"));
+        CHECK(session->snapshot().revision == revision);
+    }
+    require_error(fixture.request(http::verb::post, target, "{", "application/json"), http::status::bad_request, "invalid_json");
+    require_error(fixture.request(http::verb::post, target, {}, "application/json"), http::status::bad_request, "invalid_request");
+    require_error(fixture.request(http::verb::post, target, "{\"count\":2}", "text/plain"), http::status::bad_request, "invalid_request");
+    const std::string part_id = before["objects"][0]["parts"][0]["id"];
+    const std::string instance_id = before["objects"][0]["instances"][0]["id"];
+    for (const std::string &id : {part_id, instance_id})
+        require_error(fixture.request(http::verb::post, route + "/set_instance_count/" + id,
+            "{\"count\":2}", "application/json"), http::status::unprocessable_entity, "invalid_instance_count");
+    require_error(fixture.request(http::verb::post, route + "/set_instance_count/missing",
+        "{\"count\":2}", "application/json"), http::status::not_found, "entity_not_found");
+    CHECK(fixture.request_without_auth(http::verb::post, target, "{\"count\":2}", "application/json").result() == http::status::unauthorized);
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    CHECK(fixture.request(http::verb::post, target, "{\"count\":2}", "application/json",
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::get, target).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, target + "/extra", "{\"count\":2}", "application/json").result() == http::status::not_found);
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == before);
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    const std::uint64_t busy_revision = session->snapshot().revision;
+    for (int count : {1,2})
+        require_error(fixture.request(http::verb::post, target, nlohmann::json{{"count", count}}.dump(), "application/json"),
+            http::status::conflict, "session_busy");
+    // An invalid request gets the same answer whether or not the session is slicing.
+    require_error(fixture.request(http::verb::post, target, "{", "application/json"), http::status::bad_request, "invalid_json");
+    require_error(fixture.request(http::verb::post, target, "{\"count\":0}", "application/json"),
+        http::status::unprocessable_entity, "invalid_instance_count");
+    CHECK(session->snapshot().revision == busy_revision);
+    CHECK(read_objects(fixture, route) == before);
+    REQUIRE(session->cancel_work(active, Slic3r::Rest::SessionRegistry::Clock::now()));
+}
+
+TEST_CASE("REST volume transforms use reference axes and retain shared-instance geometry", "[rest_transform][rest_volume_transform]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    Slic3r::Rest::SessionData data = session->data_snapshot().value();
+    data.scene = std::make_shared<Slic3r::Model>();
+    Slic3r::ModelObject *object = data.scene->add_object("multipart", "part.stl", Slic3r::make_cube(10,10,10));
+    object->add_volume(Slic3r::make_cube(4,4,4))->set_offset(Slic3r::Vec3d(5,0,0));
+    Slic3r::Transform3d volume = Slic3r::Transform3d::Identity();
+    volume.linear() << 1,0,0, 0,0,-1, 0,1,0;
+    volume.translation() = Slic3r::Vec3d(1,2,3);
+    object->volumes.front()->set_transformation(volume);
+    object->add_instance()->set_offset(Slic3r::Vec3d(10,20,30));
+    Slic3r::Transform3d rotated = Slic3r::Transform3d::Identity();
+    rotated.linear() << 0,-1,0, 1,0,0, 0,0,1;
+    rotated.translation() = Slic3r::Vec3d(40,50,60);
+    object->add_instance(Slic3r::Geometry::Transformation(rotated));
+    Slic3r::ModelObject *other = data.scene->add_object("other", "other.stl", Slic3r::make_cube(2,2,2));
+    other->add_instance();
+    std::vector<Slic3r::Rest::EntityBinding> bindings;
+    for (const Slic3r::ModelObject *item : data.scene->object_ptrs()) {
+        bindings.push_back({Slic3r::Rest::EntityKind::object, item->id().id});
+        for (const Slic3r::ModelVolume *part : item->volumes)
+            bindings.push_back({Slic3r::Rest::EntityKind::volume, part->id().id});
+        for (const Slic3r::ModelInstance *instance : item->instances)
+            bindings.push_back({Slic3r::Rest::EntityKind::instance, instance->id().id});
+    }
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true,
+        Slic3r::Rest::SessionRegistry::Clock::now(), bindings, ids));
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::string part_id = before["objects"][0]["parts"][0]["id"];
+    const std::string reference_id = before["objects"][0]["instances"][1]["id"];
+    const std::string target = route + "/transform/" + part_id;
+    const auto post = [&](const nlohmann::json &body) {
+        return fixture.request(http::verb::post, target, body.dump(), "application/json");
+    };
+    const auto world_point = [](const nlohmann::json &listing, std::size_t instance) -> Slic3r::Vec3d {
+        const Slic3r::Transform3d placement = listed_matrix(listing["objects"][0]["instances"][instance]["matrix"]);
+        const Slic3r::Transform3d local = listed_matrix(listing["objects"][0]["parts"][0]["matrix"]);
+        return placement * local * Slic3r::Vec3d(1,2,3);
+    };
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::string result_id = session->viewer_snapshot()->result_id;
+    Slic3r::Transform3d translation = Slic3r::Transform3d::Identity();
+    translation.translation().x() = 5;
+    nlohmann::json body = transform_body(translation, "platter");
+    const HttpResponseMessage response = post(body);
+    REQUIRE(response.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(response.body()) == nlohmann::json{
+        {"id", part_id}, {"action", "compose"}, {"space", "platter"}, {"matrix", body.at("matrix")}});
+    nlohmann::json listed = read_objects(fixture, route);
+    CHECK(world_point(listed, 0).isApprox(Slic3r::Vec3d(17,19,35)));
+    CHECK(world_point(listed, 1).isApprox(Slic3r::Vec3d(41,57,65)));
+    CHECK(listed["objects"][0]["parts"][1] == before["objects"][0]["parts"][1]);
+    CHECK(listed["objects"][0]["instances"] == before["objects"][0]["instances"]);
+    CHECK(listed["objects"][1] == before["objects"][1]);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+    CHECK_FALSE(session->current_gcode());
+    CHECK(session->viewer_snapshot()->outdated);
+    CHECK(session->viewer_snapshot()->result_id == result_id);
+
+    body["instance"] = reference_id;
+    REQUIRE(post(body).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK(world_point(listed, 0).isApprox(Slic3r::Vec3d(17,14,35)));
+    CHECK(world_point(listed, 1).isApprox(Slic3r::Vec3d(46,57,65)));
+    CHECK(listed["objects"][0]["instances"] == before["objects"][0]["instances"]);
+
+    Slic3r::Transform3d absolute = Slic3r::Transform3d::Identity();
+    absolute.linear() << 0,0,1, 0,1,0, -1,0,0;
+    absolute.translation() = Slic3r::Vec3d(4,5,6);
+    body = transform_body(absolute, "platter", "replace");
+    body["instance"] = reference_id;
+    REQUIRE(post(body).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK(world_point(listed, 1).isApprox(Slic3r::Vec3d(7,7,5)));
+    CHECK(listed["objects"][0]["instances"] == before["objects"][0]["instances"]);
+    body = transform_body(absolute, "object", "replace");
+    REQUIRE(post(body).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    CHECK(listed_matrix(listed["objects"][0]["parts"][0]["matrix"]).matrix().isApprox(absolute.matrix()));
+    CHECK(world_point(listed, 0).isApprox(Slic3r::Vec3d(17,27,35)));
+    CHECK(world_point(listed, 1).isApprox(Slic3r::Vec3d(33,57,65)));
+    body = transform_body(translation, "volume");
+    REQUIRE(post(body).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    const Slic3r::Transform3d expected_local = absolute * translation;
+    CHECK(listed_matrix(listed["objects"][0]["parts"][0]["matrix"]).matrix().isApprox(expected_local.matrix()));
+
+    body = transform_body(Slic3r::Transform3d::Identity(), "object", "compose", true);
+    REQUIRE(post(body).result() == http::status::ok);
+    listed = read_objects(fixture, route);
+    const Slic3r::Rest::SessionData placed = session->data_snapshot().value();
+    for (std::size_t index = 0; index < 2; ++index) {
+        CHECK(placed.scene->object_ptrs().front()->get_instance_min_z(index) == Approx(0).margin(1e-8));
+        const Slic3r::Transform3d old_instance = listed_matrix(before["objects"][0]["instances"][index]["matrix"]);
+        const Slic3r::Transform3d new_instance = listed_matrix(listed["objects"][0]["instances"][index]["matrix"]);
+        CHECK(old_instance.linear().isApprox(new_instance.linear()));
+        CHECK(old_instance.translation().x() == new_instance.translation().x());
+        CHECK(old_instance.translation().y() == new_instance.translation().y());
+        CHECK(listed["objects"][0]["instances"][index]["id"] == before["objects"][0]["instances"][index]["id"]);
+    }
+    CHECK(listed["objects"][0]["parts"][1] == before["objects"][0]["parts"][1]);
+    CHECK(listed["objects"][1] == before["objects"][1]);
+    CHECK(session->data_snapshot()->configuration.diff(data.configuration).empty());
+    for (const std::string &id : ids)
+        CHECK(session->resolve_entity(id).has_value());
+}
+
+TEST_CASE("REST volume transform errors are atomic across all parent instances", "[rest_transform][rest_volume_transform]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl()));
+    Slic3r::Rest::SessionData candidate = session->data_snapshot().value();
+    candidate.scene = std::make_shared<Slic3r::Model>(*candidate.scene);
+    Slic3r::ModelObject *object = candidate.scene->object_ptrs().front();
+    Slic3r::ModelInstance *scaled = object->add_instance();
+    scaled->set_scaling_factor(Slic3r::Vec3d(2,1,1));
+    Slic3r::ModelObject *other = candidate.scene->add_object("other", "other.stl", Slic3r::make_cube(2,2,2));
+    other->add_instance();
+    const std::vector<Slic3r::Rest::EntityBinding> bindings{
+        {Slic3r::Rest::EntityKind::instance, scaled->id().id},
+        {Slic3r::Rest::EntityKind::object, other->id().id},
+        {Slic3r::Rest::EntityKind::volume, other->volumes.front()->id().id},
+        {Slic3r::Rest::EntityKind::instance, other->instances.front()->id().id}
+    };
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), candidate, true,
+        Slic3r::Rest::SessionRegistry::Clock::now(), bindings, ids));
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::string object_id = before["objects"][0]["id"];
+    const std::string part_id = before["objects"][0]["parts"][0]["id"];
+    const std::string instance_id = before["objects"][0]["instances"][0]["id"];
+    const std::string other_instance = before["objects"][1]["instances"][0]["id"];
+    const std::string target = route + "/transform/" + part_id;
+    const auto post = [&](const nlohmann::json &body) {
+        return fixture.request(http::verb::post, target, body.dump(), "application/json");
+    };
+    const Slic3r::Rest::SessionContext::WorkToken finished = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(finished, "current.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    Slic3r::Transform3d rotation = Slic3r::Transform3d::Identity();
+    const double diagonal = std::sqrt(0.5);
+    rotation.linear() << diagonal,-diagonal,0, diagonal,diagonal,0, 0,0,1;
+    require_error(post(transform_body(rotation, "object")), http::status::unprocessable_entity, "invalid_transform");
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == before);
+    Slic3r::Transform3d singular = Slic3r::Transform3d::Identity();
+    singular.linear()(0,0) = 0;
+    require_error(post(transform_body(singular, "object")), http::status::unprocessable_entity, "invalid_transform");
+    const nlohmann::json valid = transform_body(Slic3r::Transform3d::Identity(), "platter");
+    for (const std::string &space : {"platter", "object", "volume"})
+        for (const std::string &bad_reference : {object_id, part_id, other_instance}) {
+            CAPTURE(space, bad_reference);
+            nlohmann::json body = valid;
+            body["space"] = space;
+            body["instance"] = bad_reference;
+            require_error(post(body), http::status::unprocessable_entity, "invalid_transform");
+            CHECK(session->snapshot().revision == revision);
+        }
+    nlohmann::json body = valid;
+    body["instance"] = "missing";
+    require_error(post(body), http::status::not_found, "entity_not_found");
+    body["instance"] = 1;
+    require_error(post(body), http::status::bad_request, "invalid_request");
+    body["instance"] = instance_id;
+    for (const std::string &target_id : {object_id, instance_id})
+        require_error(fixture.request(http::verb::post, route + "/transform/" + target_id,
+            body.dump(), "application/json"), http::status::unprocessable_entity, "invalid_transform");
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == before);
+    CHECK(session->viewer_snapshot() == viewer);
+    CHECK(session->current_gcode().value() == std::filesystem::path("current.gcode"));
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    require_error(post(valid), http::status::conflict, "session_busy");
+    CHECK(read_objects(fixture, route) == before);
+    REQUIRE(session->cancel_work(active, Slic3r::Rest::SessionRegistry::Clock::now()));
+}
+
+TEST_CASE("REST local mirroring preserves an arbitrary 3D rotation", "[rest_transform][rest_mirror_3d]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl()));
+    Slic3r::Rest::SessionData candidate = session->data_snapshot().value();
+    candidate.scene = std::make_shared<Slic3r::Model>(*candidate.scene);
+    Slic3r::ModelObject *object = candidate.scene->object_ptrs().front();
+    Slic3r::Transform3d rotated = Slic3r::Transform3d::Identity();
+    rotated.linear() = Eigen::AngleAxisd(0.7, Slic3r::Vec3d(1,2,3).normalized()).toRotationMatrix();
+    rotated.translation() = Slic3r::Vec3d(10,20,30);
+    object->instances.front()->set_transformation(Slic3r::Geometry::Transformation(rotated));
+    Slic3r::ModelInstance *second = object->add_instance();
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), candidate, true,
+        Slic3r::Rest::SessionRegistry::Clock::now(),
+        {{Slic3r::Rest::EntityKind::instance, second->id().id}}, ids));
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::string instance_id = before["objects"][0]["instances"][0]["id"];
+    Slic3r::Transform3d mirror = Slic3r::Transform3d::Identity();
+    mirror.linear()(0,0) = -1;
+    const nlohmann::json body = transform_body(mirror, "object");
+    const HttpResponseMessage response = fixture.request(http::verb::post,
+        route + "/transform/" + instance_id, body.dump(), "application/json");
+    REQUIRE(response.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(response.body()).at("matrix") == body.at("matrix"));
+    const nlohmann::json after = read_objects(fixture, route);
+    const Slic3r::Transform3d actual = listed_matrix(after["objects"][0]["instances"][0]["matrix"]);
+    const Slic3r::Transform3d expected = rotated * mirror;
+    CHECK(actual.matrix().isApprox(expected.matrix()));
+    for (const Slic3r::Vec3d &point : {Slic3r::Vec3d(1,2,3), Slic3r::Vec3d(-4,5,6)})
+        CHECK((actual * point).isApprox(expected * point));
+    CHECK(actual.linear().determinant() == Approx(-1));
+    CHECK(after["objects"][0]["id"] == before["objects"][0]["id"]);
+    CHECK(after["objects"][0]["parts"] == before["objects"][0]["parts"]);
+    CHECK(after["objects"][0]["instances"][0]["id"] == instance_id);
+    CHECK(after["objects"][0]["instances"][1] == before["objects"][0]["instances"][1]);
+}
+
+TEST_CASE("REST transform refusals leave scene revision and results untouched", "[rest_transform]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    object_ids(upload_model(fixture, route + "/add_model", "cube.stl", make_stl()));
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::string object_id = before["objects"][0]["id"];
+    const std::string part_id = before["objects"][0]["parts"][0]["id"];
+    const std::string target = route + "/transform/" + object_id;
+    const nlohmann::json valid = transform_body(Slic3r::Transform3d::Identity(), "platter");
+    const Slic3r::Rest::SessionContext::WorkToken finished = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(finished, "current.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    std::vector<std::pair<nlohmann::json, unsigned int>> failures;
+    nlohmann::json bad = valid;
+    bad["pivot"] = {1,2,3};
+    failures.emplace_back(bad, 400);
+    bad = valid;
+    bad["ensure_on_bed"] = "true";
+    failures.emplace_back(bad, 400);
+    bad = valid;
+    bad.erase("space");
+    failures.emplace_back(bad, 400);
+    bad = valid;
+    bad["matrix"] = {1,2,3};
+    failures.emplace_back(bad, 422);
+    bad = valid;
+    bad["matrix"][0] = 0;
+    failures.emplace_back(bad, 422);
+    bad = valid;
+    bad["matrix"][12] = 1;
+    failures.emplace_back(bad, 422);
+    bad = valid;
+    bad["action"] = "unknown";
+    failures.emplace_back(bad, 422);
+    bad = valid;
+    bad["space"] = "unknown";
+    failures.emplace_back(bad, 422);
+    for (const std::pair<nlohmann::json, unsigned int> &failure : failures) {
+        const HttpResponseMessage response = fixture.request(http::verb::post, target, failure.first.dump(), "application/json");
+        CHECK(response.result_int() == failure.second);
+        CHECK(nlohmann::json::parse(response.body())["error"]["code"] == (failure.second == 400 ? "invalid_request" : "invalid_transform"));
+    }
+    const HttpResponseMessage malformed = fixture.request(http::verb::post, target, "{", "application/json");
+    require_error(malformed, http::status::bad_request, "invalid_json");
+    CHECK(nlohmann::json::parse(malformed.body()).at("error").at("details") ==
+        nlohmann::json::array({nlohmann::json{{"reason", "invalid_json"}}}));
+    require_error(fixture.request(http::verb::post, target, {}, "application/json"), http::status::bad_request, "invalid_request");
+    require_error(fixture.request(http::verb::post, target, valid.dump(), "text/plain"), http::status::bad_request, "invalid_request");
+    nlohmann::json wrong_reference = valid;
+    wrong_reference["instance"] = object_id;
+    require_error(fixture.request(http::verb::post, route + "/transform/" + part_id, wrong_reference.dump(), "application/json"),
+        http::status::unprocessable_entity, "invalid_transform");
+    require_error(fixture.request(http::verb::post, route + "/transform/missing", valid.dump(), "application/json"),
+        http::status::not_found, "entity_not_found");
+    CHECK(fixture.request(http::verb::get, target).result() == http::status::not_found);
+    CHECK(fixture.request_without_auth(http::verb::post, target, valid.dump(), "application/json").result() == http::status::unauthorized);
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    CHECK(fixture.request(http::verb::post, target, valid.dump(), "application/json",
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == before);
+    CHECK(session->viewer_snapshot() == viewer);
+    CHECK(session->current_gcode().value() == std::filesystem::path("current.gcode"));
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    require_error(fixture.request(http::verb::post, target, valid.dump(), "application/json"), http::status::conflict, "session_busy");
+    // An invalid request gets the same answer whether or not the session is slicing.
+    nlohmann::json busy_invalid = valid;
+    busy_invalid["space"] = "unknown";
+    require_error(fixture.request(http::verb::post, target, busy_invalid.dump(), "application/json"),
+        http::status::unprocessable_entity, "invalid_transform");
+    busy_invalid = valid;
+    busy_invalid["pivot"] = {1, 2, 3};
+    require_error(fixture.request(http::verb::post, target, busy_invalid.dump(), "application/json"),
+        http::status::bad_request, "invalid_request");
+    CHECK(read_objects(fixture, route) == before);
+    REQUIRE(session->cancel_work(active, Slic3r::Rest::SessionRegistry::Clock::now()));
+}
 
 TEST_CASE("Multipart parser accepts fragmented STL body", "[rest_models]")
 {
@@ -711,6 +1336,162 @@ TEST_CASE("REST add_model uses an idle timeout for slow uploads", "[rest_models]
     REQUIRE(object_ids(upload_model(fixture, target, "part.obj", file, slow)).size() == 1);
 }
 
+TEST_CASE("REST list_objects exposes stable IDs across uploads and project replacement", "[rest_objects]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    const HttpResponseMessage empty = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(empty.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(empty.body()) == nlohmann::json{{"objects", nlohmann::json::array()}});
+
+    const std::vector<std::string> stl_ids = object_ids(upload_model(fixture, route + "/add_model", "triangle.stl", make_stl()));
+    const HttpResponseMessage first = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(first.result() == http::status::ok);
+    const nlohmann::json first_listing = nlohmann::json::parse(first.body());
+    REQUIRE(first_listing.at("objects").size() == 1);
+    CHECK(first_listing.at("objects").at(0).at("id") == stl_ids.front());
+    CHECK(first_listing.at("objects").at(0).at("name") == "triangle.stl");
+    REQUIRE(first_listing.at("objects").at(0).at("parts").size() == 1);
+    REQUIRE(first_listing.at("objects").at(0).at("instances").size() == 1);
+    CHECK(first_listing.at("objects").at(0).size() == 5);
+    CHECK(first_listing.at("objects").at(0).at("parts").at(0).size() == 3);
+    CHECK(first_listing.at("objects").at(0).at("instances").at(0).size() == 2);
+    const std::uint64_t revision = session->snapshot().revision;
+    CHECK(fixture.request(http::verb::get, route + "/list_objects").body() == first.body());
+    CHECK(session->snapshot().revision == revision);
+
+    const std::vector<std::string> obj_ids = object_ids(upload_model(fixture, route + "/add_model", "part.obj", make_obj_with_padding()));
+    const HttpResponseMessage added = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(added.result() == http::status::ok);
+    const nlohmann::json added_listing = nlohmann::json::parse(added.body());
+    REQUIRE(added_listing.at("objects").size() == 2);
+    CHECK(added_listing.at("objects").at(0) == first_listing.at("objects").at(0));
+    CHECK(added_listing.at("objects").at(1).at("id") == obj_ids.front());
+
+    const std::vector<std::string> project_ids = object_ids(upload_model(fixture, route + "/load_project", "project.3mf", make_3mf(2)));
+    const HttpResponseMessage replaced = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(replaced.result() == http::status::ok);
+    const nlohmann::json replacement = nlohmann::json::parse(replaced.body());
+    REQUIRE(replacement.at("objects").size() == project_ids.size());
+    std::set<std::string> old_ids;
+    for (const nlohmann::json &object : added_listing.at("objects")) {
+        old_ids.insert(object.at("id").get<std::string>());
+        for (const char *children : {"parts", "instances"})
+            for (const nlohmann::json &child : object.at(children))
+                old_ids.insert(child.at("id").get<std::string>());
+    }
+    std::set<std::string> new_ids;
+    for (std::size_t index = 0; index < project_ids.size(); ++index) {
+        const nlohmann::json &object = replacement.at("objects").at(index);
+        CHECK(object.at("id") == project_ids[index]);
+        REQUIRE(new_ids.insert(project_ids[index]).second);
+        for (const char *children : {"parts", "instances"})
+            for (const nlohmann::json &child : object.at(children))
+                REQUIRE(new_ids.insert(child.at("id").get<std::string>()).second);
+    }
+    for (const std::string &id : old_ids) {
+        CHECK(new_ids.count(id) == 0);
+        CHECK_FALSE(session->resolve_entity(id).has_value());
+    }
+    for (const std::string &id : new_ids)
+        CHECK(session->resolve_entity(id).has_value());
+
+    const Slic3r::Rest::SessionData before = session->data_snapshot().value();
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    const std::uint64_t busy_revision = session->snapshot().revision;
+    const HttpResponseMessage busy = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(busy.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(busy.body()) == replacement);
+    CHECK(session->snapshot().revision == busy_revision);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::slicing);
+    REQUIRE(session->cancel_work(work, Slic3r::Rest::SessionRegistry::Clock::now()));
+    CHECK(session->data_snapshot()->configuration.diff(before.configuration).empty());
+    CHECK(session->data_snapshot()->preferences == before.preferences);
+    CHECK(session->data_snapshot()->scene == before.scene);
+
+    CHECK(fixture.request_without_auth(http::verb::get, route + "/list_objects").result() == http::status::unauthorized);
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    CHECK(fixture.request(http::verb::get, route + "/list_objects", {}, {},
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::get, "/session/missing/list_objects").result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, route + "/list_objects").result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::get, route + "/list_objects", "{}", "application/json").result() == http::status::bad_request);
+    CHECK(fixture.request(http::verb::get, route + "/list_objects/extra").result() == http::status::not_found);
+    CHECK(fixture.work_file_count() == 0);
+
+    // An incomplete internal mapping must produce an error, not create new IDs during a read.
+    Slic3r::Rest::SessionData inconsistent = session->data_snapshot().value();
+    inconsistent.scene = std::make_shared<Slic3r::Model>();
+    inconsistent.scene->add_object("unmapped", "unmapped.stl", Slic3r::make_cube(1, 1, 1))->add_instance();
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), inconsistent, true,
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::uint64_t invalid_revision = session->snapshot().revision;
+    const HttpResponseMessage invalid = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(invalid.result() == http::status::internal_server_error);
+    CHECK(nlohmann::json::parse(invalid.body()).at("error").at("code") == "internal_error");
+    CHECK(session->snapshot().revision == invalid_revision);
+}
+
+// A client places a mesh point with the matrices of the listing alone:
+// p_platter = M_instance × M_volume × p_mesh, matrices read row by row.
+TEST_CASE("REST list_objects matrices recompose engine placements", "[rest_objects]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+
+    TempDirectory directory;
+    const std::filesystem::path path = directory.path() / "placed.3mf";
+    Slic3r::Model model;
+    Slic3r::ModelObject *object = model.add_object("placed", "placed.stl", Slic3r::make_cube(10, 10, 10));
+    Slic3r::ModelVolume *modifier = object->add_volume(
+        Slic3r::make_cube(2, 2, 2), Slic3r::ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->set_offset(Slic3r::Vec3d(1, 2, 3));
+    Slic3r::Transform3d rotation = Slic3r::Transform3d::Identity();
+    rotation.matrix()(0, 0) = 0;
+    rotation.matrix()(0, 1) = -1;
+    rotation.matrix()(1, 0) = 1;
+    rotation.matrix()(1, 1) = 0;
+    rotation.translation() = Slic3r::Vec3d(40, 50, 0);
+    object->add_instance(Slic3r::Geometry::Transformation(rotation));
+    REQUIRE(Slic3r::store_3mf(path.string().c_str(), &model, nullptr));
+    REQUIRE(object_ids(upload_model(fixture, route + "/load_project", "placed.3mf", read_file(path))).size() == 1);
+
+    const HttpResponseMessage listed = fixture.request(http::verb::get, route + "/list_objects");
+    REQUIRE(listed.result() == http::status::ok);
+    const nlohmann::json listed_object = nlohmann::json::parse(listed.body()).at("objects").at(0);
+    const auto matrix_from_json = [](const nlohmann::json &values) {
+        REQUIRE(values.size() == 16);
+        Slic3r::Transform3d matrix;
+        for (int row = 0; row < 4; ++row)
+            for (int column = 0; column < 4; ++column)
+                matrix.matrix()(row, column) = values.at(row * 4 + column).get<double>();
+        return matrix;
+    };
+    const std::shared_ptr<Slic3r::Model> scene = find_session(fixture, session_id)->data_snapshot()->scene;
+    const Slic3r::ModelObject *loaded = scene->object_ptrs().front();
+    REQUIRE(listed_object.at("parts").size() == loaded->volumes.size());
+    REQUIRE(listed_object.at("instances").size() == 1);
+    const Slic3r::Transform3d instance = matrix_from_json(listed_object.at("instances").at(0).at("matrix"));
+    const Slic3r::Vec3d mesh_point(4, 5, 6);
+    for (std::size_t index = 0; index < loaded->volumes.size(); ++index) {
+        INFO("volume " << index);
+        const nlohmann::json &part = listed_object.at("parts").at(index);
+        CHECK(part.at("name").get<std::string>().find("rest-upload-") == std::string::npos);
+        const Slic3r::Vec3d from_listing = instance * matrix_from_json(part.at("matrix")) * mesh_point;
+        const Slic3r::Vec3d from_engine =
+            loaded->instances.front()->get_matrix() * loaded->volumes[index]->get_matrix() * mesh_point;
+        CHECK(from_listing.isApprox(from_engine));
+    }
+    // The rotation must survive: the listed instance is not a pure translation.
+    CHECK(instance.linear().isApprox(rotation.linear()));
+}
+
 TEST_CASE("REST load_project replaces a modified session", "[rest_projects]")
 {
     ensure_engine_initialized();
@@ -1010,4 +1791,268 @@ TEST_CASE("REST load_project refusals leave the session intact", "[rest_projects
         http::status::conflict,
         "session_busy");
     REQUIRE(fixture.work_file_count() == 0);
+}
+
+TEST_CASE("REST clear_platter empties the scene and keeps the session settings", "[rest_platter]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+
+    // Two objects, one with several instances, local settings and preferences.
+    const std::string first_id = object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl())).front();
+    object_ids(upload_model(fixture, route + "/add_model", "other.obj", make_obj_with_padding()));
+    REQUIRE(fixture.request(http::verb::post, route + "/set_instance_count/" + first_id,
+        "{\"count\":3}", "application/json").result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, route + "/set_setting/layer_height/0.25").result() == http::status::ok);
+    {
+        Slic3r::Rest::SessionData data = session->data_snapshot().value();
+        data.preferences = nlohmann::json{{"units", "mm"}};
+        REQUIRE(session->commit_mutation(session->begin_mutation().value(), std::move(data), false,
+            Slic3r::Rest::SessionRegistry::Clock::now()));
+    }
+    const Slic3r::Rest::SessionData before = session->data_snapshot().value();
+    const nlohmann::json listed = read_objects(fixture, route);
+    std::vector<std::string> old_ids;
+    for (const nlohmann::json &object : listed.at("objects")) {
+        old_ids.push_back(object.at("id"));
+        for (const char *children : {"parts", "instances"})
+            for (const nlohmann::json &child : object.at(children))
+                old_ids.push_back(child.at("id"));
+    }
+    REQUIRE(old_ids.size() == 2 + 2 + 4);
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::string result_id = session->viewer_snapshot()->result_id;
+
+    const HttpResponseMessage cleared = fixture.request(http::verb::post, route + "/clear_platter");
+    REQUIRE(cleared.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(cleared.body()) == nlohmann::json{{"cleared_object_count", 2}});
+    CHECK(read_objects(fixture, route) == nlohmann::json{{"objects", nlohmann::json::array()}});
+    for (const std::string &id : old_ids) {
+        CAPTURE(id);
+        CHECK_FALSE(session->resolve_entity(id).has_value());
+        require_error(fixture.request(http::verb::post, route + "/transform/" + id,
+            transform_body(Slic3r::Transform3d::Identity(), "platter").dump(), "application/json"),
+            http::status::not_found, "entity_not_found");
+    }
+    require_error(fixture.request(http::verb::post, route + "/set_instance_count/" + first_id,
+        "{\"count\":2}", "application/json"), http::status::not_found, "entity_not_found");
+
+    // Settings, profiles and preferences survive; the result is outdated.
+    const Slic3r::Rest::SessionData after = session->data_snapshot().value();
+    CHECK(after.configuration.diff(before.configuration).empty());
+    CHECK(after.preferences == before.preferences);
+    CHECK(after.profiles.print == before.profiles.print);
+    CHECK(after.profiles.printer == before.profiles.printer);
+    CHECK(after.profiles.filaments == before.profiles.filaments);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::ready);
+    CHECK_FALSE(session->current_gcode().has_value());
+    REQUIRE(session->viewer_snapshot() != nullptr);
+    CHECK(session->viewer_snapshot()->result_id == result_id);
+    CHECK(session->viewer_snapshot()->outdated);
+
+    // An already empty platter is not a change: nothing is committed.
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    const HttpResponseMessage empty = fixture.request(http::verb::post, route + "/clear_platter");
+    REQUIRE(empty.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(empty.body()) == nlohmann::json{{"cleared_object_count", 0}});
+    CHECK(session->snapshot().revision == revision);
+    CHECK(session->viewer_snapshot() == viewer);
+
+    // The cleared session accepts new models with new IDs.
+    const std::vector<std::string> new_ids = object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl()));
+    REQUIRE(new_ids.size() == 1);
+    CHECK(std::find(old_ids.begin(), old_ids.end(), new_ids.front()) == old_ids.end());
+}
+
+TEST_CASE("REST clear_platter preserves an empty failed session and its error message", "[rest_platter]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    REQUIRE(session != nullptr);
+    REQUIRE(session->data_snapshot()->scene->objects().empty());
+    const std::optional<Slic3r::Rest::SessionContext::WorkToken> work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now());
+    REQUIRE(work.has_value());
+    const std::string message = "No printable objects.";
+    REQUIRE(session->fail_work(work.value(), message, Slic3r::Rest::SessionRegistry::Clock::now()));
+    const Slic3r::Rest::SessionContext::Snapshot before = session->snapshot();
+    REQUIRE(before.status == Slic3r::Rest::SessionStatus::failed);
+    REQUIRE(before.error_message == message);
+
+    const HttpResponseMessage response = fixture.request(http::verb::post, route + "/clear_platter");
+    REQUIRE(response.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(response.body()) == nlohmann::json{{"cleared_object_count", 0}});
+    const Slic3r::Rest::SessionContext::Snapshot after = session->snapshot();
+    CHECK(after.status == Slic3r::Rest::SessionStatus::failed);
+    CHECK(after.error_message == message);
+    CHECK(after.revision == before.revision);
+    CHECK(after.current_gcode == before.current_gcode);
+    CHECK(after.has_viewer == before.has_viewer);
+    CHECK(read_objects(fixture, route) == nlohmann::json{{"objects", nlohmann::json::array()}});
+}
+
+TEST_CASE("REST clear_platter refusals leave the scene intact", "[rest_platter]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::string target = route + "/clear_platter";
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl()));
+    const nlohmann::json before = read_objects(fixture, route);
+    const std::uint64_t revision = session->snapshot().revision;
+
+    require_error(fixture.request(http::verb::post, target, "{}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    CHECK(fixture.request(http::verb::get, target).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, target + "/extra").result() == http::status::not_found);
+    CHECK(fixture.request_without_auth(http::verb::post, target).result() == http::status::unauthorized);
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    CHECK(fixture.request(http::verb::post, target, {}, {},
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, "/session/missing/clear_platter").result() == http::status::not_found);
+    CHECK(session->snapshot().revision == revision);
+    CHECK(read_objects(fixture, route) == before);
+
+    // During slicing a valid request is refused; an invalid body is still a 400.
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    require_error(fixture.request(http::verb::post, target), http::status::conflict, "session_busy");
+    require_error(fixture.request(http::verb::post, target, "{}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    CHECK(read_objects(fixture, route) == before);
+    REQUIRE(session->cancel_work(active, Slic3r::Rest::SessionRegistry::Clock::now()));
+}
+
+TEST_CASE("REST session names follow the GUI project name", "[rest_session_name]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const auto read_name = [&fixture](const std::string &route) {
+        const HttpResponseMessage response = fixture.request(http::verb::get, route + "/get_name");
+        REQUIRE(response.result() == http::status::ok);
+        return nlohmann::json::parse(response.body()).at("name");
+    };
+    const auto set_name = [&fixture](const std::string &route, const nlohmann::json &name) {
+        return fixture.request(http::verb::post, route + "/set_name",
+            nlohmann::json{{"name", name}}.dump(), "application/json");
+    };
+
+    // A name given at creation, kept as given (only file names are sanitized).
+    const HttpResponseMessage created = fixture.request(http::verb::post, "/create_session",
+        nlohmann::json{{"name", u8"Pi\u00e8ce: v2/final"}}.dump(), "application/json");
+    REQUIRE(created.result() == http::status::created);
+    const nlohmann::json created_body = nlohmann::json::parse(created.body());
+    CHECK(created_body.at("name") == u8"Pi\u00e8ce: v2/final");
+    const std::string session_id = created_body.at("session_id");
+    const std::string route = "/session/" + session_id;
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    CHECK(read_name(route) == u8"Pi\u00e8ce: v2/final");
+
+    // Scene and setting changes, and clearing the platter, keep the name.
+    object_ids(upload_model(fixture, route + "/add_model", "part.stl", make_stl()));
+    REQUIRE(fixture.request(http::verb::post, route + "/set_setting/layer_height/0.25").result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, route + "/clear_platter").result() == http::status::ok);
+    CHECK(read_name(route) == u8"Pi\u00e8ce: v2/final");
+
+    // Loading a project names the session after the file, as in the GUI.
+    object_ids(upload_model(fixture, route + "/load_project", "support.bracket.3mf", make_3mf()));
+    CHECK(read_name(route) == "support.bracket");
+
+    // Renaming never touches the result: status, G-code and viewer remain.
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "result.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now()));
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    const std::uint64_t revision = session->snapshot().revision;
+    const HttpResponseMessage renamed = set_name(route, "Bracket");
+    REQUIRE(renamed.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(renamed.body()) == nlohmann::json{{"name", "Bracket"}});
+    CHECK(read_name(route) == "Bracket");
+    CHECK(session->snapshot().revision == revision + 1);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+    CHECK(session->current_gcode().has_value());
+    CHECK(session->viewer_snapshot() == viewer);
+
+    // The same name commits nothing; null removes the name.
+    REQUIRE(set_name(route, "Bracket").result() == http::status::ok);
+    CHECK(session->snapshot().revision == revision + 1);
+    const HttpResponseMessage cleared = set_name(route, nullptr);
+    REQUIRE(cleared.result() == http::status::ok);
+    CHECK(nlohmann::json::parse(cleared.body()).at("name").is_null());
+    CHECK(read_name(route).is_null());
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+}
+
+TEST_CASE("REST session name refusals leave the session untouched", "[rest_session_name]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string session_id = create_session(fixture);
+    const std::string route = "/session/" + session_id;
+    const std::string target = route + "/set_name";
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, session_id);
+    REQUIRE(fixture.request(http::verb::post, target, "{\"name\":\"Kept\"}", "application/json").result() ==
+        http::status::ok);
+    const std::uint64_t revision = session->snapshot().revision;
+
+    require_error(fixture.request(http::verb::post, target), http::status::bad_request, "invalid_request");
+    const std::vector<std::string> invalid_bodies = {
+        "{}",
+        "[]",
+        "{\"name\":\"\"}",
+        "{\"name\":3}",
+        "{\"name\":\"Kept\",\"other\":1}",
+        "{\"name\":\"tab\\there\"}",
+        nlohmann::json{{"name", std::string(256, 'a')}}.dump(),
+    };
+    for (const std::string &body : invalid_bodies) {
+        CAPTURE(body);
+        require_error(fixture.request(http::verb::post, target, body, "application/json"),
+            http::status::bad_request, "invalid_request");
+    }
+    require_error(fixture.request(http::verb::post, target, "{", "application/json"),
+        http::status::bad_request, "invalid_json");
+    for (const std::string &body : {std::string("{\"name\":\"\"}"), std::string("{\"name\":\"a\\u0007\"}")}) {
+        CAPTURE(body);
+        require_error(fixture.request(http::verb::post, "/create_session", body, "application/json"),
+            http::status::bad_request, "invalid_request");
+    }
+    CHECK(fixture.request(http::verb::get, target).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, route + "/get_name").result() == http::status::not_found);
+    require_error(fixture.request(http::verb::get, route + "/get_name", "{}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    CHECK(fixture.request(http::verb::post, target + "/extra", "{\"name\":\"x\"}", "application/json").result() ==
+        http::status::not_found);
+    CHECK(fixture.request_without_auth(http::verb::get, route + "/get_name").result() == http::status::unauthorized);
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    CHECK(fixture.request(http::verb::get, route + "/get_name", {}, {},
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, target, "{\"name\":\"x\"}", "application/json",
+        {{"Authorization", "Bearer " + bob_token}}).result() == http::status::not_found);
+    CHECK(fixture.request(http::verb::post, "/session/missing/set_name", "{\"name\":\"x\"}",
+        "application/json").result() == http::status::not_found);
+    CHECK(session->snapshot().revision == revision);
+
+    // During slicing a valid rename is refused; an invalid body is still a 400.
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    require_error(fixture.request(http::verb::post, target, "{\"name\":\"Other\"}", "application/json"),
+        http::status::conflict, "session_busy");
+    require_error(fixture.request(http::verb::post, target, "{\"name\":\"\"}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    REQUIRE(session->cancel_work(active, Slic3r::Rest::SessionRegistry::Clock::now()));
+    CHECK(session->data_snapshot()->name == std::optional<std::string>("Kept"));
 }

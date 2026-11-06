@@ -9,6 +9,7 @@
 #include "session.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <iomanip>
 #include <random>
 #include <sstream>
@@ -18,6 +19,20 @@
 namespace Slic3r::Rest {
 
 namespace {
+
+// Eigen's storage order must not determine the row-major wire representation.
+nlohmann::json matrix_json(const Transform3d &transformation)
+{
+    nlohmann::json result = nlohmann::json::array();
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column) {
+            const double coefficient = transformation.matrix()(row, column);
+            if (!std::isfinite(coefficient))
+                throw std::logic_error("The scene contains a non-finite transformation.");
+            result.push_back(coefficient);
+        }
+    return result;
+}
 
 // Opaque public identifier: randomness plus a process-wide sequence, so it is
 // unique and independent from engine indices. It is not a secret and is never
@@ -55,6 +70,29 @@ const char *session_status_name(SessionStatus status) noexcept
         return "failed";
     }
     return "failed";
+}
+
+std::vector<ModelInstance *> find_transform_instances(Model &scene, const EntityReference &entity)
+{
+    for (ModelObject *object : scene.object_ptrs()) {
+        if (entity.kind == EntityKind::object && object->id().id == entity.engine_id)
+            return object->instances;
+        if (entity.kind == EntityKind::instance)
+            for (ModelInstance *instance : object->instances)
+                if (instance->id().id == entity.engine_id)
+                    return {instance};
+    }
+    throw std::logic_error("The transform target is not in the scene snapshot.");
+}
+
+std::pair<ModelObject *, ModelVolume *> find_transform_volume(Model &scene, const EntityReference &entity)
+{
+    if (entity.kind == EntityKind::volume)
+        for (ModelObject *object : scene.object_ptrs())
+            for (ModelVolume *volume : object->volumes)
+                if (volume->id().id == entity.engine_id)
+                    return {object, volume};
+    throw std::logic_error("The transform volume is not in the scene snapshot.");
 }
 
 SessionContext::SessionContext(
@@ -116,7 +154,8 @@ bool SessionContext::commit_mutation(
     TimePoint completed_at,
     const std::vector<EntityBinding> &bindings,
     std::vector<std::string> &bound_ids,
-    bool replace_entities)
+    bool replace_entities,
+    const std::vector<EntityBinding> &unbindings)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (retired_ || active_work_generation_.has_value() || token.revision != revision_)
@@ -125,6 +164,16 @@ bool SessionContext::commit_mutation(
     if (replace_entities) {
         entity_ids_by_key_.clear();
         entity_keys_by_id_.clear();
+    }
+
+    // Remove selected mappings under the scene commit lock, never before the revision check.
+    for (const EntityBinding &binding : unbindings) {
+        const std::map<EntityKey, std::string>::iterator existing = entity_ids_by_key_.find(
+            EntityKey{binding.kind, binding.engine_id});
+        if (existing != entity_ids_by_key_.end()) {
+            entity_keys_by_id_.erase(existing->second);
+            entity_ids_by_key_.erase(existing);
+        }
     }
 
     std::vector<std::string> new_bound_ids;
@@ -227,6 +276,83 @@ std::optional<SessionData> SessionContext::data_snapshot() const
     if (retired_)
         return std::nullopt;
     return data_;
+}
+
+std::optional<std::vector<std::string>> SessionContext::instance_ids(MutationToken token, std::uint64_t object_id) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retired_ || active_work_generation_ || token.revision != revision_)
+        return std::nullopt;
+    if (data_.scene != nullptr)
+        for (const ModelObject *object : data_.scene->object_ptrs()) {
+            if (object->id().id != object_id)
+                continue;
+            std::vector<std::string> ids;
+            ids.reserve(object->instances.size());
+            for (const ModelInstance *instance : object->instances)
+                ids.push_back(entity_ids_by_key_.at(EntityKey{EntityKind::instance, instance->id().id}));
+            return ids;
+        }
+    throw std::logic_error("The instance-count target is not in the scene snapshot.");
+}
+
+// Only the scene pointer and the entity IDs are captured under the lock. A
+// published scene is never modified in place (every mutation commits a new
+// Model), so the JSON is built afterwards from a consistent snapshot without
+// blocking mutations or slicing results on a large scene.
+std::optional<nlohmann::json> SessionContext::list_objects() const
+{
+    std::shared_ptr<const Model> scene;
+    // IDs in traversal order: object, its volumes, then its instances.
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (retired_)
+            return std::nullopt;
+        scene = data_.scene;
+        if (scene != nullptr) {
+            // Missing mappings are an internal invariant violation, never a reason to mint IDs on a GET.
+            const auto entity_id = [this](EntityKind kind, const ObjectID &id) -> const std::string & {
+                return entity_ids_by_key_.at(EntityKey{kind, static_cast<std::uint64_t>(id.id)});
+            };
+            for (const ModelObject *object : scene->object_ptrs()) {
+                ids.push_back(entity_id(EntityKind::object, object->id()));
+                for (const ModelVolume *volume : object->volumes)
+                    ids.push_back(entity_id(EntityKind::volume, volume->id()));
+                for (const ModelInstance *instance : object->instances)
+                    ids.push_back(entity_id(EntityKind::instance, instance->id()));
+            }
+        }
+    }
+
+    nlohmann::json objects = nlohmann::json::array();
+    if (scene != nullptr) {
+        std::vector<std::string>::const_iterator id = ids.begin();
+        for (const ModelObject *object : scene->object_ptrs()) {
+            const std::string &object_id = *id++;
+            nlohmann::json parts = nlohmann::json::array();
+            for (const ModelVolume *volume : object->volumes)
+                parts.push_back({
+                    {"id", *id++},
+                    {"name", volume->name},
+                    {"matrix", matrix_json(volume->get_matrix())}
+                });
+            nlohmann::json instances = nlohmann::json::array();
+            for (const ModelInstance *instance : object->instances)
+                instances.push_back({
+                    {"id", *id++},
+                    {"matrix", matrix_json(instance->get_matrix())}
+                });
+            objects.push_back({
+                {"id", object_id},
+                {"name", object->name},
+                {"matrix", matrix_json(Transform3d::Identity())},
+                {"parts", std::move(parts)},
+                {"instances", std::move(instances)}
+            });
+        }
+    }
+    return nlohmann::json{{"objects", std::move(objects)}};
 }
 
 std::optional<std::filesystem::path> SessionContext::current_gcode() const

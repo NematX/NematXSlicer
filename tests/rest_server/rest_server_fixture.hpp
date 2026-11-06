@@ -87,6 +87,7 @@ public:
         std::uint64_t max_upload_bytes = 1024 * 1024;
         std::uint64_t max_header_bytes = 16 * 1024;
         std::uint32_t max_connections = 64;
+        std::uint32_t max_instances_per_object = 1000;
         std::chrono::seconds timeout{30};
         std::chrono::seconds token_ttl{24 * 60 * 60};
         std::chrono::seconds session_ttl{24 * 60 * 60};
@@ -257,6 +258,7 @@ private:
         config.max_upload_bytes = limits_.max_upload_bytes;
         config.max_header_bytes = limits_.max_header_bytes;
         config.max_connections = limits_.max_connections;
+        config.max_instances_per_object = limits_.max_instances_per_object;
         config.request_timeout = limits_.timeout;
         config.token_ttl = limits_.token_ttl;
         config.session_ttl = limits_.session_ttl;

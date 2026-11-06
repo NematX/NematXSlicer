@@ -10,6 +10,7 @@
 #include <catch_main.hpp>
 
 #include "session.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -17,6 +18,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -305,4 +307,213 @@ TEST_CASE("concurrent commits with one token elect a single commit", "[rest_sess
 
     REQUIRE(committed.load() == 1);
     REQUIRE(session->snapshot().revision == token.revision + 1);
+}
+
+TEST_CASE("scene listings capture matrices and IDs without changing session state", "[rest_session][rest_objects]")
+{
+    Registry registry(std::chrono::hours(24));
+    SessionData data;
+    data.scene = std::make_shared<Slic3r::Model>();
+    Slic3r::ModelObject *object = data.scene->add_object("pièce.stl", "source.stl", Slic3r::make_cube(10, 10, 10));
+    object->volumes.front()->name = "part";
+    Slic3r::ModelVolume *modifier = object->add_volume(
+        Slic3r::make_cube(2, 2, 2), Slic3r::ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->name = "modifier";
+    modifier->set_offset(Slic3r::Vec3d(1, 2, 3));
+    Slic3r::Transform3d transform = Slic3r::Transform3d::Identity();
+    transform.matrix()(0, 0) = 0;
+    transform.matrix()(0, 1) = -1;
+    transform.matrix()(1, 0) = 1;
+    transform.matrix()(1, 1) = 0;
+    transform.translation() = Slic3r::Vec3d(10, 20, 30);
+    object->add_instance(Slic3r::Geometry::Transformation(transform));
+    object->add_instance()->set_offset(Slic3r::Vec3d(40, 50, 60));
+    object->printable = false;
+    Slic3r::ModelObject *other = data.scene->add_object("other", "other.stl", Slic3r::make_cube(3, 3, 3));
+    other->add_instance();
+
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    std::vector<Slic3r::Rest::EntityBinding> bindings;
+    for (const Slic3r::ModelObject *model_object : data.scene->object_ptrs()) {
+        bindings.push_back({Slic3r::Rest::EntityKind::object, model_object->id().id});
+        for (const Slic3r::ModelVolume *volume : model_object->volumes)
+            bindings.push_back({Slic3r::Rest::EntityKind::volume, volume->id().id});
+        for (const Slic3r::ModelInstance *instance : model_object->instances)
+            bindings.push_back({Slic3r::Rest::EntityKind::instance, instance->id().id});
+    }
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true, at_hours(1), bindings, ids));
+    const nlohmann::json listing = session->list_objects().value();
+    REQUIRE(listing.at("objects").size() == 2);
+    const nlohmann::json &first = listing.at("objects").at(0);
+    CHECK(first.at("name") == "pièce.stl");
+    CHECK(first.at("matrix") == nlohmann::json::array({1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}));
+    REQUIRE(first.at("parts").size() == 2);
+    CHECK(first.at("parts").at(1).at("name") == "modifier");
+    CHECK(first.at("parts").at(1).at("matrix") == nlohmann::json::array({1,0,0,1,0,1,0,2,0,0,1,3,0,0,0,1}));
+    REQUIRE(first.at("instances").size() == 2);
+    CHECK(first.at("instances").at(0).at("matrix") == nlohmann::json::array({0,-1,0,10,1,0,0,20,0,0,1,30,0,0,0,1}));
+    CHECK(first.at("instances").at(1).at("matrix") == nlohmann::json::array({1,0,0,40,0,1,0,50,0,0,1,60,0,0,0,1}));
+    CHECK((transform * modifier->get_matrix() * Slic3r::Vec3d(4, 5, 6)).isApprox(Slic3r::Vec3d(3, 25, 39)));
+
+    std::size_t index = 0;
+    std::set<std::string> unique_ids;
+    for (const nlohmann::json &listed : listing.at("objects")) {
+        CHECK(listed.at("id") == ids.at(index++));
+        for (const nlohmann::json &part : listed.at("parts"))
+            CHECK(part.at("id") == ids.at(index++));
+        for (const nlohmann::json &instance : listed.at("instances"))
+            CHECK(instance.at("id") == ids.at(index++));
+    }
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        CHECK(unique_ids.insert(ids[i]).second);
+        REQUIRE(session->resolve_entity(ids[i]).has_value());
+        CHECK(session->resolve_entity(ids[i])->kind == bindings[i].kind);
+        CHECK(session->resolve_entity(ids[i])->engine_id == bindings[i].engine_id);
+    }
+
+    const Session::WorkToken work = session->begin_work(at_hours(2)).value();
+    const Session::Snapshot busy = session->snapshot();
+    CHECK(session->list_objects().value() == listing);
+    CHECK(session->snapshot().revision == busy.revision);
+    CHECK(session->snapshot().status == busy.status);
+    CHECK(session->snapshot().last_activity == busy.last_activity);
+    REQUIRE(session->finish_work(work, "result.gcode", viewer_result(), at_hours(3)));
+    const Session::Snapshot sliced = session->snapshot();
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> viewer = session->viewer_snapshot();
+    CHECK(session->list_objects().value() == listing);
+    CHECK(session->snapshot().revision == sliced.revision);
+    CHECK(session->current_gcode().value() == std::filesystem::path("result.gcode"));
+    CHECK(session->viewer_snapshot() == viewer);
+
+    const Session::WorkToken retry = session->begin_work(at_hours(4)).value();
+    REQUIRE(session->fail_work(retry, "failed", at_hours(5)));
+    const Session::Snapshot failed = session->snapshot();
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> outdated = session->viewer_snapshot();
+    CHECK(session->list_objects().value() == listing);
+    CHECK(session->snapshot().revision == failed.revision);
+    CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::failed);
+    CHECK(session->viewer_snapshot() == outdated);
+
+    const Session::MutationToken replacement = session->begin_mutation().value();
+    SessionData empty;
+    empty.scene = std::make_shared<Slic3r::Model>();
+    std::promise<void> gate;
+    const std::shared_future<void> start = gate.get_future();
+    std::vector<nlohmann::json> responses;
+    std::thread reader([&]() {
+        start.wait();
+        for (int i = 0; i < 64; ++i)
+            responses.push_back(session->list_objects().value());
+    });
+    gate.set_value();
+    const bool replaced = session->commit_mutation(replacement, empty, true, at_hours(6), {}, ids, true);
+    reader.join();
+    REQUIRE(replaced);
+    const nlohmann::json empty_listing{{"objects", nlohmann::json::array()}};
+    for (const nlohmann::json &response : responses)
+        CHECK((response == listing || response == empty_listing));
+    CHECK(session->list_objects().value() == empty_listing);
+    CHECK(listing.at("objects").size() == 2);
+    for (const std::string &id : unique_ids)
+        CHECK_FALSE(session->resolve_entity(id).has_value());
+    REQUIRE(registry.erase("alice", session->session_id()) == SessionEraseResult::erased);
+    CHECK_FALSE(session->list_objects().has_value());
+}
+
+TEST_CASE("scene listings reject missing ID mappings without repairing them", "[rest_session][rest_objects]")
+{
+    SessionData data;
+    data.scene = std::make_shared<Slic3r::Model>();
+    data.scene->add_object("part", "part.stl", Slic3r::make_cube(1, 1, 1))->add_instance();
+    Session session("session", "alice", std::chrono::hours(24), at_hours(0), data);
+    CHECK_THROWS_AS(session.list_objects(), std::out_of_range);
+    CHECK(session.snapshot().revision == 0);
+}
+
+TEST_CASE("Transform targets resolve preserved IDs only inside the scene copy", "[rest_session][rest_transform]")
+{
+    Slic3r::Model source;
+    Slic3r::ModelObject *object = source.add_object("part", "part.stl", Slic3r::make_cube(1,1,1));
+    object->add_instance();
+    object->add_instance();
+    Slic3r::Model copy(source);
+    const Slic3r::Rest::EntityReference entity{Slic3r::Rest::EntityKind::object, object->id().id};
+    const std::vector<Slic3r::ModelInstance *> targets = Slic3r::Rest::find_transform_instances(copy, entity);
+    REQUIRE(targets.size() == 2);
+    CHECK(targets.front() != object->instances.front());
+    CHECK(targets.front()->id() == object->instances.front()->id());
+    const std::vector<Slic3r::ModelInstance *> single = Slic3r::Rest::find_transform_instances(copy,
+        {Slic3r::Rest::EntityKind::instance, object->instances.back()->id().id});
+    REQUIRE(single.size() == 1);
+    CHECK(single.front() == targets.back());
+    CHECK_THROWS_AS(Slic3r::Rest::find_transform_instances(copy,
+        {Slic3r::Rest::EntityKind::volume, object->volumes.front()->id().id}), std::logic_error);
+    const std::pair<Slic3r::ModelObject *, Slic3r::ModelVolume *> volume = Slic3r::Rest::find_transform_volume(copy,
+        {Slic3r::Rest::EntityKind::volume, object->volumes.front()->id().id});
+    CHECK(volume.first == copy.object_ptrs().front());
+    CHECK(volume.second != object->volumes.front());
+    CHECK(volume.second->id() == object->volumes.front()->id());
+    CHECK_THROWS_AS(Slic3r::Rest::find_transform_volume(copy, entity), std::logic_error);
+
+    SessionData initial;
+    initial.scene = std::make_shared<Slic3r::Model>(source);
+    Session session("transform-session", "alice", std::chrono::hours(24), at_hours(0), initial);
+    const Session::MutationToken token = session.begin_mutation().value();
+    SessionData candidate = session.data_snapshot().value();
+    candidate.scene = std::make_shared<Slic3r::Model>(*candidate.scene);
+    Slic3r::Rest::find_transform_instances(*candidate.scene, entity).front()->set_offset(Slic3r::Vec3d(10,0,0));
+    SessionData competing = session.data_snapshot().value();
+    competing.preferences = {{"units", "mm"}};
+    REQUIRE(session.commit_mutation(token, competing, false, at_hours(1)));
+    CHECK_FALSE(session.commit_mutation(token, candidate, true, at_hours(2)));
+    CHECK(session.data_snapshot()->preferences == competing.preferences);
+    CHECK(session.data_snapshot()->scene->object_ptrs().front()->instances.front()->get_offset().isZero());
+}
+
+TEST_CASE("Instance ID removals share the scene commit and stale commits remove nothing", "[rest_session][rest_instances]")
+{
+    Registry registry(std::chrono::hours(24));
+    SessionData data;
+    data.scene = std::make_shared<Slic3r::Model>();
+    Slic3r::ModelObject *object = data.scene->add_object("part", "part.stl", Slic3r::make_cube(1,1,1));
+    object->add_instance();
+    object->add_instance();
+    const std::uint64_t removed_engine_id = object->instances.back()->id().id;
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const std::vector<Slic3r::Rest::EntityBinding> bindings{
+        {Slic3r::Rest::EntityKind::object, object->id().id},
+        {Slic3r::Rest::EntityKind::volume, object->volumes.front()->id().id},
+        {Slic3r::Rest::EntityKind::instance, object->instances.front()->id().id},
+        {Slic3r::Rest::EntityKind::instance, removed_engine_id}
+    };
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true, at_hours(1), bindings, ids));
+    const Session::MutationToken stale = session->begin_mutation().value();
+    REQUIRE(session->instance_ids(stale, object->id().id).has_value());
+    CHECK(session->instance_ids(stale, object->id().id).value() == std::vector<std::string>{ids[2], ids[3]});
+    SessionData reduced = session->data_snapshot().value();
+    reduced.scene = std::make_shared<Slic3r::Model>(*reduced.scene);
+    reduced.scene->object_ptrs().front()->delete_last_instance();
+    const std::vector<Slic3r::Rest::EntityBinding> removals{{Slic3r::Rest::EntityKind::instance, removed_engine_id}};
+    SessionData competing = session->data_snapshot().value();
+    competing.preferences = {{"units", "mm"}};
+    REQUIRE(session->commit_mutation(stale, competing, false, at_hours(2)));
+    std::vector<std::string> ignored{"unchanged"};
+    CHECK_FALSE(session->commit_mutation(stale, reduced, true, at_hours(3), {}, ignored, false, removals));
+    CHECK(ignored == std::vector<std::string>{"unchanged"});
+    CHECK_FALSE(session->instance_ids(stale, object->id().id));
+    CHECK(session->resolve_entity(ids[3]).has_value());
+    CHECK(session->data_snapshot()->scene->object_ptrs().front()->instances.size() == 2);
+
+    reduced.preferences = competing.preferences;
+    const Session::MutationToken current = session->begin_mutation().value();
+    REQUIRE(session->commit_mutation(current, reduced, true, at_hours(4), {}, ignored, false, removals));
+    CHECK(ignored.empty());
+    CHECK_FALSE(session->resolve_entity(ids[3]).has_value());
+    for (std::size_t index = 0; index < 3; ++index)
+        CHECK(session->resolve_entity(ids[index]).has_value());
+    CHECK(session->instance_ids(session->begin_mutation().value(), object->id().id).value() ==
+        std::vector<std::string>{ids[2]});
+    CHECK(session->data_snapshot()->scene->object_ptrs().front()->instances.size() == 1);
 }

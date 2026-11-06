@@ -285,10 +285,19 @@ TEST_CASE("REST server creates authenticated sessions through the global routes"
         "/session/" + first_id + "/get_setting/layer_height");
     REQUIRE(get_setting_uninitialized.result() == http::status::service_unavailable);
 
-    const HttpResponseMessage body_rejected = fixture.request(
+    // The body is optional and carries only the session name.
+    REQUIRE(nlohmann::json::parse(first.body()).at("name").is_null());
+    const HttpResponseMessage empty_object = fixture.request(
         http::verb::post,
         "/create_session",
         "{}",
+        "application/json");
+    REQUIRE(empty_object.result() == http::status::created);
+    REQUIRE(nlohmann::json::parse(empty_object.body()).at("name").is_null());
+    const HttpResponseMessage body_rejected = fixture.request(
+        http::verb::post,
+        "/create_session",
+        "{\"other\":1}",
         "application/json");
     REQUIRE(body_rejected.result() == http::status::bad_request);
 }
@@ -347,7 +356,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
             "work": "work",
             "accounts": "accounts.json"
         },
-        "limits": {"max_request_body_bytes": 2048, "max_upload_bytes": 4096, "max_header_bytes": 4096, "max_connections": 4, "import_threads": 3},
+        "limits": {"max_request_body_bytes": 2048, "max_upload_bytes": 4096, "max_header_bytes": 4096, "max_connections": 4, "import_threads": 3, "max_instances_per_object": 5},
         "timeouts": {"request_seconds": 5},
         "auth": {"token_ttl_seconds": 120, "login_window_seconds": 30, "max_login_attempts": 3},
         "sessions": {"expiration_seconds": 240}
@@ -364,6 +373,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
     REQUIRE(config.max_request_body_bytes == 2048);
     REQUIRE(config.max_upload_bytes == 4096);
     REQUIRE(config.import_threads == 3);
+    REQUIRE(config.max_instances_per_object == 5);
     REQUIRE(config.request_timeout == std::chrono::seconds(5));
     REQUIRE(config.token_ttl == std::chrono::seconds(120));
     REQUIRE(config.session_ttl == std::chrono::seconds(240));
@@ -379,6 +389,7 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_request_body_bytes == 16ULL * 1024ULL * 1024ULL);
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_upload_bytes == 1ULL * 1024ULL * 1024ULL * 1024ULL);
     REQUIRE(Slic3r::Rest::ServerConfig::defaults().import_threads == 2);
+    REQUIRE(Slic3r::Rest::ServerConfig::defaults().max_instances_per_object == 1000);
 
     Slic3r::Rest::ServerConfig missing_resource = valid;
     missing_resource.resource_directory = root.path() / "missing";
@@ -410,6 +421,10 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     zero_connections.max_connections = 0;
     REQUIRE_THROWS_AS(zero_connections.validate(), std::invalid_argument);
 
+    Slic3r::Rest::ServerConfig zero_instances = valid;
+    zero_instances.max_instances_per_object = 0;
+    REQUIRE_THROWS_AS(zero_instances.validate(), std::invalid_argument);
+
     Slic3r::Rest::ServerConfig zero_import_threads = valid;
     zero_import_threads.import_threads = 0;
     REQUIRE_THROWS_AS(zero_import_threads.validate(), std::invalid_argument);
@@ -433,6 +448,29 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     Slic3r::Rest::ServerConfig zero_login_attempts = valid;
     zero_login_attempts.max_login_attempts = 0;
     REQUIRE_THROWS_AS(zero_login_attempts.validate(), std::invalid_argument);
+}
+
+TEST_CASE("REST instance limit configuration rejects invalid values", "[rest_server]")
+{
+    TempDirectory root;
+    make_valid_config(root.path());
+    const std::filesystem::path config_file = root.path() / "server.json";
+    const std::vector<nlohmann::json> invalid{0, -1, true, 1.5, "2", std::uint64_t{1} << 32};
+    for (const nlohmann::json &value : invalid) {
+        CAPTURE(value.dump());
+        const nlohmann::json document{
+            {"paths", {{"resources", "resources"}, {"profiles", "profiles"},
+                       {"work", "work"}, {"accounts", "accounts.json"}}},
+            {"limits", {{"max_instances_per_object", value}}}
+        };
+        std::ofstream(config_file) << document.dump();
+        try {
+            Slic3r::Rest::load_server_config(config_file);
+            FAIL("Invalid instance limit accepted");
+        } catch (const std::invalid_argument &error) {
+            CHECK(std::string(error.what()).find("limits.max_instances_per_object") != std::string::npos);
+        }
+    }
 }
 
 TEST_CASE("REST server enforces configured body and header limits", "[rest_server]")

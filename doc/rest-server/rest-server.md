@@ -80,7 +80,8 @@ Confirmed for the initial scope:
   of other sessions.
 - A session is an isolated workspace: selected profiles, settings,
   models/project, and scene state. It is addressed by an opaque `session_id`
-  and belongs to the account that created it.
+  and belongs to the account that created it. It may carry an optional display
+  name, the equivalent of the GUI project name (§5.3.1).
 - Every session-specific route includes `session_id` in its path. This ID
   locates the session context and does not replace the authentication required
   for remote access. Global routes `/login`, `/logout`, `/list_settings`, and
@@ -121,7 +122,9 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/login` | JSON credentials; Bearer token in response |
 | `POST` | `/logout` | Revoke the current Bearer token |
 | `GET` | `/list_settings` | JSON setting definitions |
-| `POST` | `/create_session` | Return `session_id` |
+| `POST` | `/create_session` | Optional JSON name; return `session_id` and `name` |
+| `POST` | `/session/{session_id}/set_name` | JSON name to set, or `null` to remove it |
+| `GET` | `/session/{session_id}/get_name` | JSON session name |
 | `GET` | `/session/{session_id}/list_profiles` | JSON available profiles |
 | `POST` | `/session/{session_id}/set_profile` | JSON profiles to select |
 | `GET` | `/session/{session_id}/get_setting/{setting_id}` | Serialized setting value |
@@ -295,11 +298,33 @@ Example definitions:
 
 ### 5.3. `POST /create_session`
 
-No request body. Return `201 Created`:
+The body is empty or a JSON object whose only optional field is `name`, a
+string or `null` (§5.3.1). Return `201 Created`:
 
 ```json
-{"session_id":"session_opaque_id"}
+{"session_id":"session_opaque_id","name":null}
 ```
+
+### 5.3.1. Session name: `POST .../set_name` and `GET .../get_name`
+
+A session name is the equivalent of the GUI project name. It is optional,
+kept as given for display, and only sanitized when it becomes a download file
+name (§5.14). A name is valid UTF-8 of 1 to 255 bytes without control
+characters; `null` means no name, and an empty string is refused with
+`400 invalid_request`.
+
+- `set_name` takes `{"name":"Bracket"}` or `{"name":null}`; the field is
+  required and no other field is accepted. It returns `200 {"name":...}`.
+  The name never affects slicing: the revision increases, but status, G-code,
+  and viewer result are kept. Setting the current name again changes nothing.
+  An invalid body returns `400`, checked before the slicing state; a valid
+  request during slicing returns `409 session_busy`.
+- `get_name` has no body and returns `{"name":"Bracket"}` or
+  `{"name":null}`.
+- As in the GUI, `load_project` names the session after the uploaded file
+  without its last extension (`support.3mf` gives `support`; no name when the
+  result is not a valid name). `add_model`, transformations, instance counts,
+  settings, profiles, and `clear_platter` keep the name.
 
 ### 5.4. `GET .../list_profiles`
 
@@ -522,9 +547,9 @@ before any storage). The project is recomposed as in the interface: settings are
 split into print, printer, and filament profiles on a private catalog copy;
 a 3MF without configuration resets all settings to system defaults. All scene
 data read by the 3MF loader is retained (object settings, modifiers, layer ranges,
-per-height G-code, etc.). The scene, configuration, and session profile selection
-are replaced in one operation; all previous object, part, and instance IDs are
-invalidated. In the recorded selection, a profile keeps its catalog ID only if
+per-height G-code, etc.). The scene, configuration, session profile selection,
+and session name (§5.3.1) are replaced in one operation; all previous object,
+part, and instance IDs are invalidated. In the recorded selection, a profile keeps its catalog ID only if
 the project uses the installed profile unchanged; an embedded or modified profile
 has no ID. A supplied `post_process` is retained but never executed. Reject the
 project with `422 invalid_project`, without changing the session, if it is not
@@ -571,7 +596,8 @@ The route resolves `id` within the session, without an additional parent segment
 - object ID: transform all its instances;
 - instance ID: transform only that instance;
 - volume/part ID: transform that volume, shared by the object's instances.
-  Other volumes are not modified.
+  Other volumes are not modified; instances are retained unless bed placement
+  is explicitly requested.
 
 An unknown ID returns `404`. An object transformation is atomic across all
 its instances.
@@ -581,31 +607,96 @@ order: `[m00,m01,m02,m03,m10,...,m33]`, equivalent to four rows of four values.
 The homogeneous matrix acts on column vectors; translation is in millimeters
 at indices 3, 7, and 11, and the last row (indices 12 through 15) is `[0,0,0,1]`.
 `action` accepts `compose` or `replace`; omission defaults to `compose`.
-`compose` applies a relative transformation; `replace` sets an absolute
-transformation expressed in the chosen space.
+`compose` applies a relative transformation. For an object or instance,
+`replace` directly sets the instance matrix to the received matrix, regardless
+of the requested space. Optional `ensure_on_bed` is a boolean, default `false`.
+Optional `instance` is a string containing a reference instance ID and is valid
+only for volume targets. It defaults to the object's first (original) instance.
+The referenced entity must be an instance of that volume's object, even when
+the chosen space does not affect the formula. Unknown fields are refused.
 
 The required `space` field preserves the GUI's three rotation/translation
 coordinate-space choices:
 
 | `space` | Coordinate space |
 | --- | --- |
-| `platter` | Global platter space |
+| `platter` | Global platter space for instances; global axes about the reference instance origin for relative volume operations |
 | `object` | The placed object's space, i.e. its instance space |
 | `volume` | Target volume/part's local space; for an object or instance target, instance space |
 
 Space conversion must account for parent transformations. With `A` denoting
-the received matrix, `I` the instance matrix, and `V` the volume matrix,
-composition is defined as follows when the instance context is determined:
+the received matrix, `I` the instance matrix, `V` the volume matrix, and
+`L_ref` the reference instance's linear transform with zero translation,
+composition is defined as follows:
 
-- instance in `platter`: `I' = A × I`; in `object`: `I' = I × A`;
+- instance in `platter`: `I' = A × I`; in `object` or `volume`: `I' = I × A`;
 - volume in `object`: `V' = A × V`; in `volume`: `V' = V × A`;
-- volume in `platter`: `V' = I⁻¹ × A × I × V`.
+- volume in `platter`: `V' = L_ref⁻¹ × A × L_ref × V`.
 
-Parent and local spaces therefore do not use the same multiplication order.
-Pivots and the reference instance choice for a volume shared by multiple
-instances must align with GUI operations; remaining details are listed in §8
-before implementation. `replace` also requires this space conversion, not a
-blind copy of the received matrix into the engine's local matrix.
+Relative volume operations in `platter` follow the GUI convention: the instance
+offset is not part of the basis conversion. A rotation without supplied pivot
+translations rotates around the reference instance origin, not the platter
+origin. A platter pivot must therefore be expressed relative to that instance
+origin when building `A`. Translations behave as with the full-instance formula.
+No additional pivot or object recentering is applied.
+
+Volume `replace` sets `V' = A` in `object` and `volume` space. In `platter`, it
+sets `V' = I_ref⁻¹ × A` using the complete reference instance transform, including
+its offset: absolute replacement places a mesh point at `A × p` in platter
+space for that reference instance. Other instances share the resulting `V'`.
+
+For a numerical example without bed placement, let `I_ref = T(10,0,0)`,
+`V = T(2,0,0)`, and `A` be a positive 90-degree rotation around Z. For the
+mesh point `p = (0,0,0)`, both requests use `space: "platter"`:
+
+| Action | Volume-local point `V' × p` | Platter point `I_ref × V' × p` |
+| --- | --- | --- |
+| `compose` | `(0,2,0)` | `(10,2,0)` |
+| `replace` | `(-10,0,0)` | `(0,0,0)` |
+
+The relative rotation preserves the reference instance origin at `(10,0,0)`;
+absolute replacement instead places the mesh origin at `A × p = (0,0,0)`
+in platter space. Coordinates and translations in this example are in millimeters.
+
+For an object target, apply the same operation to each instance. `replace`
+therefore imposes `I' = A` on all instances and superimposes them. No implicit
+pivot is applied: to rotate around point `p`, the client supplies
+`T(p) × R × T(−p)` expressed in the chosen space.
+
+Each resulting matrix must be finite, invertible (`|det(I'.linear)| > 1e-9`),
+and shear-free: columns `cᵢ` of its linear part must be pairwise orthogonal,
+with relative tolerance `|cᵢ · cⱼ| ≤ 1e-9 × ‖cᵢ‖ × ‖cⱼ‖` for `i ≠ j`.
+The REST check compares normalized column directions, without using the
+`Geometry::Transformation::has_skew()` heuristic, which may reject a mirror
+combined with a 3D rotation. Mirrors and non-uniform scales are accepted,
+including rotations around arbitrary axes. Validate the composition result,
+since two shear-free transformations may introduce shear when composed.
+All matrices are checked before application; an error on one instance refuses
+the entire object transformation without changing the scene or its IDs.
+For a volume, validate both `V'` and every `I_k × V'` in its object before
+application. A singular or sheared combination in any instance refuses the
+whole operation without changing the revision or any scene entity.
+
+With `ensure_on_bed: true`, each targeted instance is then translated in Z to
+bring its lowest point to zero, computed by `ModelObject::get_instance_min_z()`
+on its model parts. For a volume target, every instance of its parent object
+is placed on the bed after the volume change. Placement is per instance, without XY arrangement.
+Without this option, the matrix is applied exactly. Bed placement without
+valid model geometry is refused.
+
+| Case | Response |
+| --- | --- |
+| Invalid authentication | `401` |
+| Unknown/foreign session or unknown ID | `404 session_not_found` / `404 entity_not_found` |
+| Unknown reference `instance` ID | `404 entity_not_found` |
+| Method other than POST | `404 route_not_found` |
+| Malformed JSON | `400 invalid_json`, including parser `details` |
+| Missing body or JSON content type, missing field, wrong type, unknown field | `400 invalid_request` |
+| Matrix without 16 finite numbers, invalid last row, unknown action or space | `422 invalid_transform` |
+| Singular/sheared result or instance-volume combination, invalid bed placement | `422 invalid_transform` |
+| Reference ID of another type/object, or `instance` supplied for an object/instance target | `422 invalid_transform` |
+| Valid request while the session is slicing (body errors are reported first) | `409 session_busy` |
+| Concurrent mutation before commit | `409 session_changed` |
 
 The response returns the target ID, action, space, and received matrix:
 
@@ -624,8 +715,9 @@ The body sets the total number of instances, including the original:
 {"count":3}
 ```
 
-`count` is a positive integer. The response contains the object and its instance
-IDs after the change:
+`count` is a strictly positive integer, not a boolean, string, or floating-point
+number. The body must contain only `count`. The response contains the object
+and its ordered instance IDs after the change:
 
 ```json
 {"object_id":"object-id","count":3,"instance_ids":["i0","i1","i2"]}
@@ -636,6 +728,38 @@ and receive new IDs. No automatic arrangement is performed. The client can then
 move them individually through `transform/{id}`. The original instance is first
 in the list; decreasing `count` removes instances from the end, without changing
 retained instances' IDs or transformations. `count=1` retains the original.
+
+Copies use the original instance's current transformation at index 0, even if
+it has moved since creation; they do not copy another instance's placement.
+Removed instance IDs become unusable immediately at the scene commit and return
+`404 entity_not_found` through `transform/{id}`. Adding/removing instances and
+updating their ID mappings form the same revision-checked atomic operation;
+a refused commit neither removes old IDs nor adds new ones.
+
+`limits.max_instances_per_object` is a configurable positive integer, default
+`1000`, bounding counts requested through this route. Values above this limit
+are rejected before scene copying or allocation. This route limit does not
+rewrite imported projects that already contain more instances. Every request
+must nevertheless satisfy the configured limit: requesting the same over-limit
+count returns `422 invalid_instance_count`, not an unchanged-count success.
+Reducing such an object to a positive count within the limit is allowed.
+
+A valid request matching the current count returns `200` with the current
+ordered IDs without committing: revision, G-code availability, and viewer state
+are unchanged. An effective count change returns the session to `ready`, makes
+current G-code unavailable, and retains the previous viewer as outdated.
+
+| Case | Response |
+| --- | --- |
+| Invalid authentication | `401` |
+| Unknown/foreign session or unknown entity ID | `404 session_not_found` / `404 entity_not_found` |
+| Method other than POST | `404 route_not_found` |
+| Malformed JSON | `400 invalid_json`, including parser `details` |
+| Missing body/JSON content type/count, wrong count type, extra field | `400 invalid_request` |
+| Count below 1 or above the configured limit | `422 invalid_instance_count` |
+| Instance or volume ID supplied instead of an object ID | `422 invalid_instance_count` |
+| Valid request while the session is slicing, including an otherwise unchanged count (body errors are reported first) | `409 session_busy` |
+| Concurrent mutation before commit or ID snapshot capture | `409 session_changed` |
 
 ### 5.14. `POST .../slice`, `GET .../state`, `cancel_slicing`, `get_gcode`, `clear_platter`, `save_project`, and `delete`
 
@@ -671,7 +795,15 @@ retained instances' IDs or transformations. `count=1` retains the original.
   slicing (`etat: "sliced"`). It returns `409` if no current result is available.
   `get_gcode_for_view` remains the viewer's JSON output.
 - `/clear_platter` has no body and returns `{"cleared_object_count":3}`.
-  Session profiles and settings are retained.
+  Session profiles, settings, preferences, and name are retained. Removing the
+  objects and invalidating every object, part, and instance ID form one atomic
+  commit; the previous viewer result is retained as outdated. Clearing an
+  already empty platter returns `{"cleared_object_count":0}` without any
+  change: revision, G-code, viewer, and status are untouched, so a `failed`
+  status stays `failed` until the next slicing or effective change.
+  A non-empty body returns `400 invalid_request`, checked before the slicing
+  state; a valid request during slicing returns `409 session_busy`, and a
+  concurrent mutation returns `409 session_changed`.
 - `/save_project` returns a binary 3MF file, not a JSON object.
 - `/delete` returns `204 No Content`; the session ID and data are invalidated.
 
@@ -876,9 +1008,10 @@ V1 is acceptable if:
    `SLIC3R_GUI=OFF` configuration or also in the GUI configuration.
 3. **Engine concurrency:** before enabling parallel slicing, validate and, if
    necessary, correct isolation of global `libslic3r` state between sessions.
-4. **Coordinate-space details:** specify the reference instance for a shared
-   volume transformed in global space and the GUI pivots and `replace` behavior
-   in each space. The single route and three spaces are decided; their detailed
-   mapping to GUI operations must be verified before the transformation phases.
+4. **Coordinate-space details:** resolved for objects/instances in phase 21 and
+   volumes in phase 22 (§5.12). Relative volume operations use the GUI's linear
+   reference transform; absolute platter replacement uses the full instance
+   transform. `instance` selects the reference, defaulting to the original,
+   and volume bed placement affects every parent instance.
 5. **Unknown-setting preservation:** format, provenance, and write priority are
    fixed in §5.5.1; no additional decision is required for the V1 contract.

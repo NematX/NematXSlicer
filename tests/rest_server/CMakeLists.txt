@@ -46,7 +46,9 @@ set_property(TARGET rest_profiles_tests PROPERTY FOLDER "tests")
 add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 
 add_executable(rest_models_tests
+    file_names_tests.cpp
     rest_models_tests.cpp
+    transform_tests.cpp
 )
 
 target_compile_definitions(rest_models_tests PRIVATE
