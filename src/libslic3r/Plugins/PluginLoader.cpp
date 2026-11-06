@@ -145,6 +145,7 @@ plugin settings. A plugin's own layout fragment takes precedence over generated 
 #include "libslic3r/Plugins/Slicing/StandardLayerHeightGenerator.hpp"
 #include "libslic3r/Plugins/Slicing/VaseMultiIslandConnector.hpp"
 #include "libslic3r/Plugins/Surface/CleanInfillSurfaces.hpp"
+#include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include "libslic3r/Plugins/Surface/InitialTypedSurfaceBuilder.hpp"
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
@@ -845,6 +846,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::SurfaceGeneration::InitialTypedSurfaceBuilderPlugin::register_initial_typed_surface_builder_plugin);
     register_builtin_plugin(orchestrator, "surface.solid_shells",
         slic3r_api::SurfaceGeneration::SolidShellsPlugin::register_solid_shells_plugin);
+    register_builtin_plugin(orchestrator, "surface.bridge_preparation", slic3r_api::BridgePreparation::register_surface);
+    register_builtin_plugin(orchestrator, "infill.recipe.bridge_preparation", slic3r_api::BridgePreparation::register_recipe);
     register_builtin_plugin(orchestrator, "surface.top_surface_expansion",
         slic3r_api::SurfaceGeneration::TopSurfaceExpansionPlugin::register_top_surface_expansion_plugin);
     register_builtin_plugin(orchestrator, "surface.clean_infill_surfaces",

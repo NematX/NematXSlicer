@@ -17,13 +17,14 @@
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 
 /*
 Clean infill surfaces
 =====================
 
-This STEP_SURFACE_GENERATION plugin cleans the fillable surface partition
-before infill generation. It changes only the surface type and boundaries; it
+Remove tiny isolated fill areas and turn narrow sparse areas into solid infill.
+This STEP_SURFACE_GENERATION plugin changes only surface types and boundaries; it
 does not generate infill, rebuild layer islands, or alter perimeter geometry.
 The three plugin settings are evaluated through RegionSettings, so a modifier
 can apply a different cleanup threshold to different parts of one island.
@@ -49,6 +50,8 @@ infill. The width rule resolves percentage values against the largest internal
 infill spacing in the island. Empty inputs and disabled or non-positive
 thresholds remain unchanged, while tiny isolated fragments are removed because
 they would otherwise create unreliable, negligible infill jobs.
+Prepared bridge surfaces bypass every cleanup phase and are appended with their
+complete metadata, so their canonical direction and assigned anchors stay together.
 */
 
 namespace slic3r_api { namespace SurfaceGeneration { namespace CleanInfillSurfacesPlugin {
@@ -459,9 +462,22 @@ void clean_region_island_surfaces(const run_ctx_surface_generation &ctx,
                                   const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    const SurfaceCollection input = region_island.fill_surfaces_collection();
-    if (input.empty())
+    const SurfaceCollection original = region_island.fill_surfaces_collection();
+    if (original.empty())
         return;
+
+    // Prepared geometry and metadata describe one bridge group; cleanup must
+    // neither reclassify it nor merge it with an unrelated same-type surface.
+    StoredSurfaceCollection ordinary(storage);
+    bool has_prepared=false;
+    for (const Surface surface : original) {
+        if (surface.get(BridgeSurfaceInfo::key)!=nullptr) { has_prepared=true; continue; }
+        StoredExPolygonCollection single(storage);
+        single.push_back(surface.expolygon());
+        ctx.append_surface_like(ordinary.mutable_handle(),surface.handle(),single.handle());
+    }
+    const SurfaceCollection input=has_prepared ? ordinary.readonly() : original;
+    if (input.empty()) return;
 
     RegionSettings settings(storage, island,
         {{ k_solid_infill_below_layer_area_key },
@@ -507,6 +523,13 @@ void clean_region_island_surfaces(const run_ctx_surface_generation &ctx,
     // compact partition, not a pile of fragments created by the cleanup steps.
     StoredSurfaceCollection normalized =
         normalize_same_type_surfaces(storage, after_micro_cleanup.readonly());
+    if (has_prepared)
+        for (const Surface surface : original)
+            if (surface.get(BridgeSurfaceInfo::key)!=nullptr) {
+                StoredExPolygonCollection single(storage);
+                single.push_back(surface.expolygon());
+                ctx.append_surface_like(normalized.mutable_handle(),surface.handle(),single.handle());
+            }
     throw_if_cancelled(run_ctx);
     set_region_island_surfaces(ctx, region_island, normalized);
     throw_if_cancelled(run_ctx);

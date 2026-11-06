@@ -490,6 +490,10 @@ set(SLIC3R_SOURCES
 	Plugins/PluginPackageChangelog.hpp
 	Plugins/PluginRepository.cpp
 	Plugins/PluginRepository.hpp
+	Plugins/Surface/BridgeGeometry.cpp
+	Plugins/Surface/BridgeGeometry.hpp
+	Plugins/Surface/BridgePreparation.cpp
+	Plugins/Surface/BridgePreparation.hpp
 	Plugins/Surface/CleanInfillSurfaces.cpp
 	Plugins/Surface/CleanInfillSurfaces.hpp
 	Plugins/Surface/InitialTypedSurfaceBuilder.cpp

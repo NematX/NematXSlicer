@@ -25,14 +25,20 @@
    The test reads startup provider ids, settings and UI layout fragments, excluding providers
    from the Python packages listed by python_package_provider(). ActivationGuard restores
    saved activation flags. SLIC3R_SELECTOR_SNAPSHOT names an optional output file for C++ rows.
-   Call graph:
-     TEST_CASE
-       append_group -> escaped
-       append_registered -> python_package_provider, escaped
-       append_scenarios
-         finalized_members -> python_package_provider
-         append_group
-         append_selection -> python_package_provider
+   Representative direct calls, not the order of every scenario:
+
+       TEST_CASE
+           |-- append_group()
+           |   `-- escaped()
+           |-- append_registered()
+           |   |-- python_package_provider()
+           |   `-- escaped()
+           `-- append_scenarios()
+               |-- finalized_members()
+               |   `-- python_package_provider()
+               |-- append_group()
+               `-- append_selection()
+                   `-- python_package_provider()
    Group descriptions contain pointers into their own strings; copies refresh those pointers. */
 
 namespace {
@@ -605,6 +611,7 @@ const char *const k_expected[] = {
     "ui|exclusive_group_1350_support_toolpath_bottom_interface_plugin|print.ui|support_toolpath_bottom_interface|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_bottom_interface_plugin\\nend_line\\n",
     "ui|exclusive_group_1350_support_toolpath_sparse_plugin|print.ui|support_toolpath_sparse|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_sparse_plugin\\nend_line\\n",
     "ui|exclusive_group_1350_support_toolpath_top_interface_plugin|print.ui|support_toolpath_top_interface|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_top_interface_plugin\\nend_line\\n",
+    "ui|exclusive_group_750_surface_bridge_preparation_plugin|print.ui|surface.bridge_preparation|priority=1|page:Infill\\ngroup:Advanced\\nline:insert$afterline$Anchor solid infill by X mm:Uniform bridge margin\\nsetting:bridged_infill_uniform_margin\\nend_line\\n",
     "ui|exclusive_group_700_support_demand_bridge_removal_plugin|print.ui|support.demand.bridge_removal|priority=0|page:Support material\\ngroup:Options for support material and raft\\nsetting:insert$aftersetting$support_material_xy_spacing:dont_support_bridges\\n",
     "ui|exclusive_group_1800_nozzle_cleaning_plugin|printer_fff.ui|nozzle_cleaning|priority=0|page:Custom G-code\\ngroup:Nozzle cleaning\\nsetting:nozzle_cleaning_gcode\\nsetting:nozzle_cleaning_interval_layers\\nsetting:nozzle_cleaning_interval_volume\\nsetting:nozzle_cleaning_interval_retractions\\nsetting:nozzle_cleaning_interval_toolchanges\\nsetting:nozzle_cleaning_when\\nend_group\\n",
     "ui|exclusive_group_300_max_overhang_threshold_plugin|print.ui|max_overhang_threshold|priority=1|page:Slicing\\ngroup:Modifying slices\\nline:Overhangs cut\\nsetting:overhangs_max_slope\\nsetting:overhangs_bridge_threshold\\nsetting:overhangs_bridge_upper_layers\\nend_line\\n",

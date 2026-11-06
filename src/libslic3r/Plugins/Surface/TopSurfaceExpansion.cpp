@@ -15,6 +15,7 @@
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 
 /*
 TopSurfaceExpansion
@@ -41,8 +42,9 @@ the relevant settings. The margin is computed from `external_infill_margin`
 and a conservative perimeter-width reference. In pass 1, only internal
 sparse and void surfaces are rebuilt; the projected part becomes internal
 solid and the remainder keeps its original type. In pass 2, expanded top
-areas become top solid surfaces, while every non-top surface is reduced by the
-same union so the fill-surface collection remains non-overlapping.
+areas become top solid surfaces, while ordinary non-top surfaces are reduced by
+the same union. Prepared bridge geometry is excluded from the receiving domain
+and copied with its complete source metadata in both passes.
 Each region-island owns its input fill domain. Same-layer expansion stays in
 that domain so it cannot duplicate fill assigned to another tool's region-island.
 
@@ -182,7 +184,7 @@ StoredExPolygonCollection collect_top_surfaces(storage_handle *storage,
 {
     StoredExPolygonCollection out(storage);
     for (const Surface surface : surfaces) {
-        if (!is_top_surface(surface.type()))
+        if (!is_top_surface(surface.type()) || surface.get(BridgeSurfaceInfo::key)!=nullptr)
             continue;
 
         StoredExPolygonCollection clipped = settings_clip.intersections(surface.expolygon());
@@ -367,6 +369,7 @@ StoredExPolygonCollection projected_top_margin_rings(storage_handle *storage,
 }
 
 void append_surfaces_not_rebuilt(StoredSurfaceCollection &out,
+                                 const run_ctx_surface_generation &ctx,
                                  storage_handle *storage,
                                  const SurfaceCollection &input_surfaces)
 {
@@ -376,7 +379,11 @@ void append_surfaces_not_rebuilt(StoredSurfaceCollection &out,
     for (const Surface surface : input_surfaces) {
         if (!is_rebuildable_internal_surface(surface.type())) {
             StoredExPolygonCollection single = collection_from_expolygon(storage, surface.expolygon());
-            append_surface_group(out, single.readonly(), surface.type());
+            // Prepared direction, provenance and thickness travel with the geometry.
+            if (surface.get(BridgeSurfaceInfo::key)!=nullptr)
+                ctx.append_surface_like(out.mutable_handle(),surface.handle(),single.handle());
+            else
+                append_surface_group(out, single.readonly(), surface.type());
         }
     }
 }
@@ -413,7 +420,7 @@ void propagate_top_margin_to_region_island(const run_ctx_surface_generation &ctx
 
     const coord_t shell_width = max_shell_width_reference(island);
     StoredSurfaceCollection output(storage);
-    append_surfaces_not_rebuilt(output, storage, input_surfaces);
+    append_surfaces_not_rebuilt(output, ctx, storage, input_surfaces);
 
     const RegionSettings::AreaMap &areas = settings.get_areas(k_external_infill_margin_key);
     for (const auto &[setting_value, setting_clip] : areas) {
@@ -451,6 +458,7 @@ void propagate_top_margin_to_region_island(const run_ctx_surface_generation &ctx
 }
 
 void append_same_layer_non_top_results(StoredSurfaceCollection &out,
+                                       const run_ctx_surface_generation &ctx,
                                        storage_handle *storage,
                                        const SurfaceCollection &input_surfaces,
                                        const ExPolygonCollection &expanded_top)
@@ -460,10 +468,13 @@ void append_same_layer_non_top_results(StoredSurfaceCollection &out,
     // partition for infill while allowing top infill to overlap the former
     // internal/bottom classification.
     for (const Surface surface : input_surfaces) {
+        StoredExPolygonCollection single = collection_from_expolygon(storage, surface.expolygon());
+        if (surface.get(BridgeSurfaceInfo::key)!=nullptr) {
+            ctx.append_surface_like(out.mutable_handle(),surface.handle(),single.handle());
+            continue;
+        }
         if (is_top_surface(surface.type()))
             continue;
-
-        StoredExPolygonCollection single = collection_from_expolygon(storage, surface.expolygon());
         StoredExPolygonCollection residual = diff_collection(storage, single.readonly(), expanded_top);
         append_surface_group(out, residual.readonly(), surface.type());
     }
@@ -487,6 +498,13 @@ void expand_top_surfaces_in_region_island(const run_ctx_surface_generation &ctx,
         fill_domain.push_back(surface.expolygon());
     fill_domain = union_collection(storage, fill_domain.readonly());
 
+    // Neither the prepared core nor its assigned anchors may be consumed by top expansion.
+    StoredExPolygonCollection protected_bridges(storage);
+    for (const Surface surface : input_surfaces)
+        if (surface.get(BridgeSurfaceInfo::key)!=nullptr)
+            protected_bridges.push_back(surface.expolygon());
+    fill_domain=diff_collection(storage,fill_domain.readonly(),protected_bridges.readonly());
+
     RegionSettings settings(storage, island, {{ k_external_infill_margin_key }});
     settings.segregate(island.slice());
 
@@ -506,7 +524,7 @@ void expand_top_surfaces_in_region_island(const run_ctx_surface_generation &ctx,
 
     StoredSurfaceCollection output(storage);
     append_surface_group(output, expanded_top.readonly(), k_top_solid);
-    append_same_layer_non_top_results(output, storage, input_surfaces, expanded_top.readonly());
+    append_same_layer_non_top_results(output, ctx, storage, input_surfaces, expanded_top.readonly());
 
     if (ctx.set_region_island_fill_surfaces != nullptr)
         ctx.set_region_island_fill_surfaces(
