@@ -118,14 +118,6 @@ const SettingScopeKeys &all_scope_keys()
     return keys;
 }
 
-std::size_t session_extruder_count(const DynamicPrintConfig &session)
-{
-    const ConfigOption *nozzle_diameter = session.option("nozzle_diameter");
-    if (nozzle_diameter != nullptr && nozzle_diameter->is_vector() && nozzle_diameter->size() > 0)
-        return nozzle_diameter->size();
-    return 1;
-}
-
 int range_extruder(const DynamicPrintConfig &configuration)
 {
     const ConfigOptionInt *extruder = dynamic_cast<const ConfigOptionInt *>(configuration.option("extruder"));
@@ -153,6 +145,15 @@ void validate_range_layer_height(const DynamicPrintConfig &configuration, const 
 }
 
 } // namespace
+
+// Count configured nozzle slots, defaulting to one when none are present.
+std::size_t session_extruder_count(const DynamicPrintConfig &session)
+{
+    const ConfigOption *nozzle_diameter = session.option("nozzle_diameter");
+    if (nozzle_diameter != nullptr && nozzle_diameter->is_vector() && nozzle_diameter->size() > 0)
+        return nozzle_diameter->size();
+    return 1;
+}
 
 const std::set<std::string> &scope_keys(SettingScope scope)
 {

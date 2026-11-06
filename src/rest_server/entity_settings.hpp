@@ -57,6 +57,8 @@ EntitySettingsChange write_entity_settings(
     const std::vector<std::pair<std::string, std::optional<std::string>>> &updates,
     const DynamicPrintConfig &session);
 
+// Count extruder slots in the session configuration, defaulting to one when absent.
+std::size_t session_extruder_count(const DynamicPrintConfig &session);
 // Nozzle limits are evaluated against the session's selected printer config.
 std::pair<double, double> layer_height_limits(const DynamicPrintConfig &session, int extruder);
 void validate_layer_range_bounds(

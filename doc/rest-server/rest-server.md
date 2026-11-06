@@ -4,7 +4,8 @@
 **Version:** 1.1
 
 Version 1.1 adds scene editing (§5.16), entity settings/layer ranges (§5.17),
-arrangement/orientation (§5.18), and plane cuts (§5.19); 1.0 routes and response
+arrangement/orientation (§5.18), plane cuts (§5.19), and facet painting (§5.20);
+1.0 routes and response
 meanings are unchanged. New response fields are additive.
 
 ## 1. Objective
@@ -134,6 +135,7 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/login` | JSON credentials; Bearer token in response |
 | `POST` | `/logout` | Revoke the current Bearer token |
 | `GET` | `/list_settings` | JSON setting definitions |
+| `GET` | `/list_paint_kinds` | JSON support, MMU, and facet-annotation channels |
 | `POST` | `/create_session` | Optional JSON name; return `session_id` and `name` |
 | `POST` | `/session/{session_id}/set_name` | JSON name to set, or `null` to remove it |
 | `GET` | `/session/{session_id}/get_name` | JSON session name |
@@ -149,6 +151,9 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/arrange` | Optional JSON placement settings and object/instance IDs |
 | `POST` | `/session/{session_id}/orient` | Optional JSON orientation settings and object/instance IDs |
 | `POST` | `/session/{session_id}/cut/{id}` | Cut an object or solid part by a plane |
+| `POST` | `/session/{session_id}/paint/{id}` | Paint facet states on an object or solid part |
+| `POST` | `/session/{session_id}/clear_paint/{id}` | Clear one or all paint channels |
+| `GET` | `/session/{session_id}/get_paint/{part_id}` | Read painted triangles for a solid part |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
@@ -1569,6 +1574,126 @@ non-solid target, a degenerate normal, a non-crossing plane, or an invalid
 combination return `422 invalid_cut`; and a restricted cut-group part returns
 `422 cut_object`.
 
+### 5.20. Facet painting (1.1)
+
+Painting stores per-triangle states on solid model parts. The global
+`GET /list_paint_kinds` route returns the fixed `support` and `mmu` channels,
+followed by the generic facet-annotation definitions registered by the engine.
+Generic definitions include `builtin:seam` and active plugin channels such as
+`perimeter.post_process.fuzzy_skin.painting`. Each entry has an `id`, `label`,
+and `states`; support and generic channels use `enforce` and `block`, while MMU
+uses `extruder` and reports `max_extruder: 15`.
+
+`POST /session/{session_id}/paint/{id}` accepts a closed JSON body. The target
+is either a solid `part` ID or an object ID; an object applies each resolved
+point to its nearest solid model part. The optional `instance` selects the
+reference instance used to place request coordinates and defaults to the first
+instance. It must belong to the target object (for a part target, to the part's
+object). A target part must be of type `part`; modifier and support volumes
+cannot be painted.
+
+```json
+{
+  "kind": "builtin:seam",
+  "state": "enforce",
+  "instance": "instance-id",
+  "space": "platter",
+  "tool": "circle",
+  "radius": 2.0,
+  "view_direction": [0, 0, -1],
+  "strokes": [
+    [[10, 10, 20], [12, 10, 20]],
+    [{"origin": [10, 10, 100], "direction": [0, 0, -1]}]
+  ],
+  "split_triangles": true,
+  "overhangs_only": 0,
+  "smart_fill_angle": 30,
+  "angle": 0,
+  "tolerance": 0.05
+}
+```
+
+`space` is `platter` (the default), `object`, or `volume`. Positions are
+transformed with the full reference/volume matrix for the selected space;
+directions use its linear part and are normalized, not transformed as surface
+normals. A stroke is a non-empty array of either surface points `[x,y,z]` or
+ray objects with exactly `origin` and `direction`; all points in one stroke
+must use the same form. Surface points are accepted when their closest target
+surface is within `tolerance` millimeters. A ray uses the first target hit.
+There may be at most 10,000 points in one request.
+
+`state` is `enforce`, `block`, or `erase` for support and generic channels.
+For MMU it is `{"extruder": k}`, where `0` erases and `1..min(N,15)` selects
+an extruder from the session's configured nozzle count. MMU painting requires
+at least two extruders. `radius` is in the range `0.05..2000` millimeters.
+`smart_fill_angle`, `overhangs_only`, and `angle` are degrees in `0..90`.
+`tolerance` must be finite and positive. `view_direction` overrides the
+surface-facing direction for circle brushes and replaces the ray direction for
+ray points; without it, a ray's own direction is used. The sphere ignores that
+option.
+
+The REST extension accepts every tool for every channel: `circle`, `sphere`,
+`triangle`, `smart_fill`, `bucket_fill`, and `by_angle`. Circle/sphere strokes
+paint one cursor or capsules between consecutive points on the same part.
+Triangle and bucket fill operate on each point as a seed; smart fill follows
+the GUI's surface-angle and overhang rules. `by_angle` has no strokes and
+paints every original face whose normal is within `angle` degrees of the
+downward vertical (platter `-Z`). There is no clipping plane in the REST
+request.
+
+Painting is deferred to the import worker pool because target AABB trees may be
+large. The request is fully resolved before any selector is changed, and a
+point error leaves every channel unchanged. On success the response is
+`{"changed":["part-id", ...]}` in target-part order. An unchanged request
+returns an empty `changed` array and does not advance the session revision.
+Successful changes invalidate current G-code, retain an outdated viewer, and
+return the session to `ready`. A stale revision returns `409 session_changed`;
+an active slice returns `409 session_busy`.
+
+Point resolution failures use `422 invalid_paint` with index details:
+
+```json
+{
+  "error": {
+    "code": "invalid_paint",
+    "message": "Paint point 0/1 could not be resolved: off_surface",
+    "request_id": "req_...",
+    "details": [{"stroke": 0, "point": 1, "reason": "off_surface"}]
+  }
+}
+```
+
+`POST /session/{session_id}/clear_paint/{id}` accepts only
+`{"kind":"support"}`, `{"kind":"mmu"}`, a generic channel ID, or
+`{"kind":"all"}`. It is synchronous and targets a solid part or all solid
+parts of an object. It invokes the scene-edit observer immediately before a
+real commit, returns the same `changed` response, and does not commit when no
+channel was present. `all` also removes stored generic annotation keys that
+are not currently active plugins.
+
+`GET /session/{session_id}/get_paint/{part_id}?kind=...` reads one immutable
+session snapshot and is allowed during slicing. The required `kind` and
+optional `instance` and `space` query parameters are strict; unknown or
+repeated parameters return `400 invalid_request`. The target must be a solid
+part, and the body must be empty. `platter` is the platter space of the
+reference instance, `object` is object space (`V` applied to a vertex), and
+`volume` is the part's local space; `platter` is the default. The response
+contains strict triangulated painted facets in the requested output space:
+
+```json
+{
+  "kind": "support",
+  "states": [
+    {"state":"enforce", "vertices":[[x,y,z]], "triangles":[[0,1,2]]}
+  ]
+}
+```
+
+MMU states use `{"extruder": k}`. A channel with no painted facets returns
+`"states": []`. The painting data is part of the normal 3MF project snapshot,
+so `save_project` and `load_project` preserve support, MMU, seam, and active
+plugin annotation channels.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1665,6 +1790,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 1.1 entity settings and ranges | `rest_models_tests`: `Entity setting scopes follow the GUI lists and plugin containers`, `Entity settings write atomically and remove overrides`, `Layer ranges validate bounds overlaps and nozzle height limits`, `REST list_settings publishes entity setting scopes`, `REST entity settings read and write objects parts and layer ranges`, `REST layer ranges are entities with IDs that follow their bounds`, `REST entity setting edits are refused while slicing and on concurrent changes`, `REST entity settings change the sliced result`, `REST entity settings and layer ranges survive save_project and load_project` |
 | 1.1 arrangement and orientation | `rest_models_tests`: `Arrange defaults follow the GUI distance rules`, `Arrange separates instances and keeps unselected ones fixed`, `Arrange reports virtual beds and unplaced instances`, `Orient rotates each instance from its own mesh`; `rest_placement_tests`: `REST arrange validates parameters and targets`, `REST arrange moves instances onto the bed and reports their beds`, `REST orient validates parameters and rotates instances onto the bed`, `REST arrange and orient are refused while slicing and on concurrent changes` |
 | 1.1 plane cut | `rest_models_tests`: `Part cuts keep the cut geometry in place for every instance`, `Object cuts split the geometry as the GUI does`, `Cut planes are equivalent in platter object and volume spaces`, `Part cuts replace only the cut part`, `Cut validation rejects degenerate requests`, `REST cut validates the request and the target`, `REST cut validates reference instances`, `REST cut enforces cut-group invalidation`, `REST cut replaces objects and parts with new IDs`, `REST cut can arrange the new objects`, visible `REST cut results slice`, hidden and not executed `REST cut results with two objects slice` (`[.rest_multi_object_engine]`), `REST cut is refused while slicing and on concurrent changes` |
+| 1.1 facet painting | `rest_models_tests`: `Brush strokes paint the expected area`, `Fill tools follow the GUI semantics`, `Points rays and spaces select the same paint`, `Object targets paint the nearest part`, `MMU and generic channels store their states`, `Paint validation leaves the scene unchanged`, `REST paint kinds are listed`, `REST paint validates the request and the target`, `REST paint updates parts and reports changes`, `REST get_paint returns painted triangles`, `REST paint persists in projects`, `REST paint is refused while slicing and on concurrent changes`, `REST painted parts slice`; `REST support painting reaches the support engine` is hidden and not executed (`[.rest_support_engine]`) |
 
 ## 8. Decisions
 
@@ -1715,6 +1841,9 @@ platform validation responsibility, not an in-process TLS implementation.
 - Plane cuts currently do not create connectors, grooves, dowels, or contour
   selections. An object cut clears painting data on every source part; a solid
   part cut clears it only on the selected part, as required by the engine.
+- Support facet painting is stored and exposed by REST, but this build does not
+  yet migrate painted support facets into support generation, so it has no
+  slicing effect. REST painting does not expose the GUI clipping plane.
 - The current slicing engine may crash or assert on multi-object scenes or on
   objects whose lowest point is above the bed; these plugin-pipeline limits are
   unrelated to plane cuts.

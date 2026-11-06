@@ -82,10 +82,12 @@ add_executable(rest_models_tests
     cut_tests.cpp
     entity_settings_tests.cpp
     file_names_tests.cpp
+    paint_tests.cpp
     placement_tests.cpp
     rest_entity_settings_tests.cpp
     rest_models_tests.cpp
     rest_cut_tests.cpp
+    rest_paint_tests.cpp
     rest_placement_tests.cpp
     rest_scene_edit_tests.cpp
     scene_edit_tests.cpp

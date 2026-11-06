@@ -16,6 +16,7 @@
 #include "engine.hpp"
 #include "file_names.hpp"
 #include "multipart_upload.hpp"
+#include "paint.hpp"
 #include "placement.hpp"
 #include "profiles.hpp"
 #include "progress.hpp"
@@ -881,6 +882,39 @@ if (!settings_catalog_ready())
         "The REST engine is not initialized.",
         request_id);
 return HttpResponse::json(200, settings_catalog());
+}
+
+// Build independent JSON metadata for a channel's labels and states.
+nlohmann::json paint_kind_json(const PaintKind &kind)
+{
+    nlohmann::json result = {
+        {"id", kind.id},
+        {"label", kind.label},
+        {"states", kind.extruder_states ? nlohmann::json::array({"extruder"}) :
+            nlohmann::json::array({"enforce", "block"})}
+    };
+    if (!kind.enforce_label.empty())
+        result["enforce_label"] = kind.enforce_label;
+    if (!kind.block_label.empty())
+        result["block_label"] = kind.block_label;
+    if (kind.extruder_states)
+        result["max_extruder"] = 15;
+    return result;
+}
+
+// Reject invalid GET/body requests, then serialize registered channels or an HTTP error.
+HttpResponse handle_list_paint_kinds(const HttpRequest &request, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "list_paint_kinds requires an empty body.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    nlohmann::json result = nlohmann::json::array();
+    for (const PaintKind &kind : paint_kinds())
+        result.push_back(paint_kind_json(kind));
+    return HttpResponse::json(200, result);
 }
 
 // Read the body of create_session or set_name: a JSON object whose only field
@@ -1877,6 +1911,589 @@ std::optional<HttpResponse> resolve_cut_target(
         target.instance_engine_id = references.front()->id().id;
     }
     return std::nullopt;
+}
+
+// Parse finite 3-vectors; return 400/422 errors without scene effects.
+bool read_paint_vector(const nlohmann::json &value, const std::string &field, Vec3d &result,
+    HttpResponse &error, const std::string &request_id)
+{
+    if (!value.is_array() || value.size() != 3) {
+        error = make_error_response(400, "invalid_request", field + " must be an array of three numbers.", request_id);
+        return false;
+    }
+    for (std::size_t index = 0; index < 3; ++index)
+        if (!value.at(index).is_number()) {
+            error = make_error_response(400, "invalid_request", field + " must be an array of three numbers.", request_id);
+            return false;
+        }
+    result = Vec3d(value.at(0).get<double>(), value.at(1).get<double>(), value.at(2).get<double>());
+    if (!result.allFinite()) {
+        error = make_error_response(422, "invalid_paint", field + " must contain finite numbers.", request_id);
+        return false;
+    }
+    return true;
+}
+
+// Parse one surface point or closed ray and return typed HTTP errors.
+bool read_paint_point(const nlohmann::json &value, PaintPoint &point, HttpResponse &error,
+    const std::string &request_id)
+{
+    if (value.is_array()) {
+        point.ray = false;
+        return read_paint_vector(value, "paint point", point.position, error, request_id);
+    }
+    if (!value.is_object()) {
+        error = make_error_response(400, "invalid_request", "Each paint point must be an array or ray object.", request_id);
+        return false;
+    }
+    for (nlohmann::json::const_iterator item = value.begin(); item != value.end(); ++item)
+        if (item.key() != "origin" && item.key() != "direction") {
+            error = make_error_response(400, "invalid_request", "Unknown paint point field: " + item.key(), request_id);
+            return false;
+        }
+    if (!value.contains("origin") || !value.contains("direction")) {
+        error = make_error_response(400, "invalid_request", "A paint ray requires origin and direction.", request_id);
+        return false;
+    }
+    point.ray = true;
+    if (!read_paint_vector(value.at("origin"), "paint ray origin", point.position, error, request_id))
+        return false;
+    return read_paint_vector(value.at("direction"), "paint ray direction", point.direction, error, request_id);
+}
+
+// Parse and range-check an MMU integer before enum conversion.
+bool read_paint_extruder(const nlohmann::json &value, EnforcerBlockerType &state,
+    HttpResponse &error, const std::string &request_id)
+{
+    if (!value.is_number_integer()) {
+        error = make_error_response(400, "invalid_request", "state.extruder must be an integer.", request_id);
+        return false;
+    }
+    std::int64_t extruder = 0;
+    if (value.is_number_unsigned()) {
+        const std::uint64_t unsigned_value = value.get<std::uint64_t>();
+        if (unsigned_value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+            error = make_error_response(400, "invalid_request", "state.extruder is outside the integer range.", request_id);
+            return false;
+        }
+        extruder = static_cast<std::int64_t>(unsigned_value);
+    } else {
+        extruder = value.get<std::int64_t>();
+    }
+    if (extruder < 0 || extruder > std::numeric_limits<std::int8_t>::max()) {
+        error = make_error_response(422, "invalid_paint", "state.extruder is outside the supported range.", request_id);
+        return false;
+    }
+    state = static_cast<EnforcerBlockerType>(extruder);
+    return true;
+}
+
+// Parse closed paint fields and return 400 type or 422 value errors.
+bool parse_paint_request(HttpRequest &request, PaintRequest &paint_request,
+    std::optional<std::string> &instance_id, HttpResponse &error, const std::string &request_id)
+{
+    if (std::optional<HttpResponse> body_error = read_scene_edit_body(request,
+            {"kind", "state", "instance", "space", "tool", "radius", "view_direction", "strokes",
+             "split_triangles", "overhangs_only", "smart_fill_angle", "angle", "tolerance"}, request_id)) {
+        error = std::move(body_error.value());
+        return false;
+    }
+    const nlohmann::json &body = *request.json_body;
+    if (!body.contains("kind") || !body.at("kind").is_string() ||
+        !body.contains("state")) {
+        error = make_error_response(400, "invalid_request", "The paint body requires kind and state.", request_id);
+        return false;
+    }
+    paint_request.kind = body.at("kind").get<std::string>();
+    if (body.contains("instance")) {
+        if (!body.at("instance").is_string()) {
+            error = make_error_response(400, "invalid_request", "instance must be a string.", request_id);
+            return false;
+        }
+        instance_id = body.at("instance").get<std::string>();
+    }
+    if (body.contains("space")) {
+        if (!body.at("space").is_string()) {
+            error = make_error_response(400, "invalid_request", "space must be a string.", request_id);
+            return false;
+        }
+        const std::string space = body.at("space").get<std::string>();
+        if (space == "platter") paint_request.space = PaintSpace::platter;
+        else if (space == "object") paint_request.space = PaintSpace::object;
+        else if (space == "volume") paint_request.space = PaintSpace::volume;
+        else {
+            error = make_error_response(422, "invalid_paint", "The paint space is unknown.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("tool")) {
+        if (!body.at("tool").is_string()) {
+            error = make_error_response(400, "invalid_request", "tool must be a string.", request_id);
+            return false;
+        }
+        const std::string tool = body.at("tool").get<std::string>();
+        if (tool == "circle") paint_request.tool = PaintTool::circle;
+        else if (tool == "sphere") paint_request.tool = PaintTool::sphere;
+        else if (tool == "triangle") paint_request.tool = PaintTool::triangle;
+        else if (tool == "smart_fill") paint_request.tool = PaintTool::smart_fill;
+        else if (tool == "bucket_fill") paint_request.tool = PaintTool::bucket_fill;
+        else if (tool == "by_angle") paint_request.tool = PaintTool::by_angle;
+        else {
+            error = make_error_response(422, "invalid_paint", "The paint tool is unknown.", request_id);
+            return false;
+        }
+    }
+    const nlohmann::json &state = body.at("state");
+    if (paint_request.kind == "mmu") {
+        if (!state.is_object() || state.size() != 1 || !state.contains("extruder")) {
+            error = make_error_response(400, "invalid_request", "MMU state must contain only extruder.", request_id);
+            return false;
+        }
+        if (!read_paint_extruder(state.at("extruder"), paint_request.state, error, request_id))
+            return false;
+    } else {
+        if (!state.is_string()) {
+            error = make_error_response(400, "invalid_request", "This paint channel requires a string state.", request_id);
+            return false;
+        }
+        const std::string state_name = state.get<std::string>();
+        if (state_name == "enforce") paint_request.state = EnforcerBlockerType::ENFORCER;
+        else if (state_name == "block") paint_request.state = EnforcerBlockerType::BLOCKER;
+        else if (state_name == "erase") paint_request.state = EnforcerBlockerType::NONE;
+        else {
+            error = make_error_response(422, "invalid_paint", "The paint state is unknown.", request_id);
+            return false;
+        }
+    }
+    if (body.contains("radius")) {
+        if (!body.at("radius").is_number()) {
+            error = make_error_response(400, "invalid_request", "radius must be a number.", request_id);
+            return false;
+        }
+        paint_request.radius = body.at("radius").get<double>();
+    }
+    if (body.contains("view_direction")) {
+        Vec3d direction;
+        if (!read_paint_vector(body.at("view_direction"), "view_direction", direction, error, request_id))
+            return false;
+        paint_request.view_direction = direction;
+    }
+    if (body.contains("strokes")) {
+        if (!body.at("strokes").is_array()) {
+            error = make_error_response(400, "invalid_request", "strokes must be an array.", request_id);
+            return false;
+        }
+        for (const nlohmann::json &stroke : body.at("strokes")) {
+            if (!stroke.is_array()) {
+                error = make_error_response(400, "invalid_request", "Each paint stroke must be an array.", request_id);
+                return false;
+            }
+            std::vector<PaintPoint> parsed_stroke;
+            parsed_stroke.reserve(stroke.size());
+            for (const nlohmann::json &value : stroke) {
+                PaintPoint point;
+                if (!read_paint_point(value, point, error, request_id))
+                    return false;
+                parsed_stroke.push_back(std::move(point));
+            }
+            paint_request.strokes.push_back(std::move(parsed_stroke));
+        }
+    }
+    const std::pair<const char *, bool *> booleans[] = {{"split_triangles", &paint_request.split_triangles}};
+    for (const std::pair<const char *, bool *> &entry : booleans)
+        if (body.contains(entry.first)) {
+            if (!body.at(entry.first).is_boolean()) {
+                error = make_error_response(400, "invalid_request", std::string(entry.first) + " must be a boolean.", request_id);
+                return false;
+            }
+            *entry.second = body.at(entry.first).get<bool>();
+        }
+    const std::pair<const char *, double *> numbers[] = {
+        {"overhangs_only", &paint_request.overhangs_only}, {"smart_fill_angle", &paint_request.smart_fill_angle},
+        {"angle", &paint_request.angle}, {"tolerance", &paint_request.tolerance}
+    };
+    for (const std::pair<const char *, double *> &entry : numbers)
+        if (body.contains(entry.first)) {
+            if (!body.at(entry.first).is_number()) {
+                error = make_error_response(400, "invalid_request", std::string(entry.first) + " must be a number.", request_id);
+                return false;
+            }
+            *entry.second = body.at(entry.first).get<double>();
+        }
+    return true;
+}
+
+struct PaintTargetReference {
+    EntityReference entity;
+    std::uint64_t instance_engine_id = 0;
+};
+
+// Resolve target and instance under one revision before worker dispatch.
+std::optional<HttpResponse> resolve_paint_target(
+    SessionContext &session, const SessionData &current, SessionContext::MutationToken token,
+    const std::string &target_id, const std::optional<std::string> &instance_id,
+    PaintTargetReference &target, const std::string &request_id)
+{
+    if (current.scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to paint.", request_id);
+    const std::optional<EntityReference> entity = session.resolve_entity(target_id);
+    if (session.snapshot().revision != token.revision)
+        return make_error_response(409, "session_changed", "The session changed while the paint target was resolved.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    ModelObject *object = nullptr;
+    if (entity->kind == EntityKind::object) {
+        const std::vector<ModelInstance *> instances = find_transform_instances(*current.scene, *entity);
+        if (instances.empty())
+            return make_error_response(422, "invalid_paint", "The target object has no instance.", request_id);
+        object = instances.front()->get_object();
+    } else if (entity->kind == EntityKind::volume) {
+        const std::pair<ModelObject *, ModelVolume *> volume = find_transform_volume(*current.scene, *entity);
+        if (!volume.second->is_model_part())
+            return make_error_response(422, "invalid_paint", "Only solid model parts can be painted.", request_id);
+        object = volume.first;
+    } else {
+        return make_error_response(422, "invalid_paint", "The paint target must be an object or solid part.", request_id);
+    }
+
+    target.entity = *entity;
+    target.instance_engine_id = object->instances.front()->id().id;
+    if (instance_id.has_value()) {
+        const std::optional<EntityReference> reference = session.resolve_entity(instance_id.value());
+        if (session.snapshot().revision != token.revision)
+            return make_error_response(409, "session_changed", "The paint instance was changed while it was resolved.", request_id);
+        if (!reference)
+            return make_error_response(404, "entity_not_found", "The instance does not exist.", request_id);
+        if (reference->kind != EntityKind::instance)
+            return make_error_response(422, "invalid_paint", "instance must identify an instance.", request_id);
+        const std::vector<ModelInstance *> references = find_transform_instances(*current.scene, *reference);
+        if (references.empty() || references.front()->get_object() != object)
+            return make_error_response(422, "invalid_paint", "The reference instance belongs to another object.", request_id);
+        target.instance_engine_id = references.front()->id().id;
+    }
+    return std::nullopt;
+}
+
+// Find resolved pointers in a private copy; throw 422 if an instance is absent.
+void find_paint_candidate_target(Model &scene, const PaintTargetReference &target,
+    ModelObject *&object, ModelVolume *&part, std::size_t &instance_index)
+{
+    if (target.entity.kind == EntityKind::object) {
+        object = find_transform_instances(scene, target.entity).front()->get_object();
+        part = nullptr;
+    } else {
+        const std::pair<ModelObject *, ModelVolume *> volume = find_transform_volume(scene, target.entity);
+        object = volume.first;
+        part = volume.second;
+    }
+    const std::vector<ModelInstance *> instances = object->instances;
+    const std::vector<ModelInstance *>::const_iterator selected = std::find_if(instances.begin(), instances.end(),
+        [&target](const ModelInstance *instance) { return instance->id().id == target.instance_engine_id; });
+    if (selected == instances.end())
+        throw SceneEditError(422, "invalid_paint", "The selected instance is not in the target object.");
+    instance_index = static_cast<std::size_t>(std::distance(instances.begin(), selected));
+}
+
+// Convert an indexed point failure to 422 details without scene effects.
+HttpResponse paint_point_error_response(const PaintPointError &error, const std::string &request_id)
+{
+    const nlohmann::json details = nlohmann::json::array({{
+        {"stroke", error.stroke()}, {"point", error.point()}, {"reason", error.reason()}
+    }});
+    return make_error_response(422, "invalid_paint", error.what(), request_id, &details);
+}
+
+// Queue import work and commit changed bindings only for the captured revision.
+std::optional<HttpResponse> handle_paint(
+    HttpRequest &request, const RouteServices &services, const std::string &username,
+    const std::string &request_id, const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    PaintRequest paint_request;
+    std::optional<std::string> instance_id;
+    HttpResponse parse_error;
+    if (!parse_paint_request(request, paint_request, instance_id, parse_error, request_id))
+        return parse_error;
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation.has_value())
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    try {
+        validate_paint_request(paint_request, session_extruder_count(current->configuration));
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    }
+    PaintTargetReference target;
+    if (std::optional<HttpResponse> target_error = resolve_paint_target(*session, current.value(), mutation.value(),
+            request.path_segments[3], instance_id, target, request_id))
+        return target_error;
+
+    asio::post(services.imports, [session, token = mutation.value(), data = current.value(), target,
+        paint_request, request_id, respond, observer = services.import_observer]() mutable {
+        const HttpResponse response = [&]() -> HttpResponse {
+            try {
+                if (observer)
+                    observer();
+                if (!session->data_snapshot())
+                    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                SessionData candidate = data;
+                candidate.scene = std::make_shared<Model>(*data.scene);
+                ModelObject *object = nullptr;
+                ModelVolume *part = nullptr;
+                std::size_t instance_index = 0;
+                find_paint_candidate_target(*candidate.scene, target, object, part, instance_index);
+                const PaintOutcome outcome = paint(*object, part, instance_index, paint_request);
+                std::vector<EntityBinding> bindings;
+                bindings.reserve(outcome.changed.size());
+                for (const ModelVolume *volume : outcome.changed)
+                    bindings.push_back({EntityKind::volume, volume->id().id});
+                if (!outcome.changed.empty()) {
+                    const std::optional<std::vector<std::string>> rest_ids = session->entity_ids(token, bindings);
+                    if (!rest_ids) {
+                        if (!session->data_snapshot())
+                            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+                        return make_error_response(409, "session_changed", "The session changed while painting was running.", request_id);
+                    }
+                    std::vector<std::string> ignored_bound_ids;
+                    if (!session->commit_mutation(token, std::move(candidate), true, SessionRegistry::Clock::now(),
+                            bindings, ignored_bound_ids))
+                        return !session->data_snapshot()
+                            ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                            : make_error_response(409, "session_changed", "The session changed while painting was running.", request_id);
+                    return HttpResponse::json(200, nlohmann::json{{"changed", rest_ids.value()}});
+                }
+                if (!session->entity_ids(token, {}))
+                    return !session->data_snapshot()
+                        ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                        : make_error_response(409, "session_changed", "The session changed while painting was running.", request_id);
+                return HttpResponse::json(200, nlohmann::json{{"changed", nlohmann::json::array()}});
+            } catch (const PaintPointError &error) {
+                return paint_point_error_response(error, request_id);
+            } catch (const SceneEditError &error) {
+                return scene_edit_error(error, request_id);
+            } catch (const std::exception &) {
+                return make_error_response(500, "internal_error", "The server could not paint the scene.", request_id);
+            } catch (...) {
+                return make_error_response(500, "internal_error", "The server could not paint the scene.", request_id);
+            }
+        }();
+        respond(response);
+    });
+    return std::nullopt;
+}
+
+// Parse the closed clear body and return typed HTTP errors.
+bool parse_clear_paint_request(HttpRequest &request, std::string &kind, HttpResponse &error,
+    const std::string &request_id)
+{
+    if (std::optional<HttpResponse> body_error = read_scene_edit_body(request, {"kind"}, request_id)) {
+        error = std::move(body_error.value());
+        return false;
+    }
+    if (request.json_body->size() != 1 || !request.json_body->contains("kind") ||
+        !request.json_body->at("kind").is_string()) {
+        error = make_error_response(400, "invalid_request", "The body must contain only string kind.", request_id);
+        return false;
+    }
+    kind = request.json_body->at("kind").get<std::string>();
+    if (kind.empty()) {
+        error = make_error_response(422, "invalid_paint", "The paint kind must not be empty.", request_id);
+        return false;
+    }
+    return true;
+}
+
+// Clear a private scene synchronously and commit only changed parts.
+HttpResponse handle_clear_paint(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    std::string kind;
+    HttpResponse parse_error;
+    if (!parse_clear_paint_request(request, kind, parse_error, request_id))
+        return parse_error;
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation.has_value())
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    PaintTargetReference target;
+    if (std::optional<HttpResponse> target_error = resolve_paint_target(*session, current.value(), mutation.value(),
+            request.path_segments[3], std::nullopt, target, request_id))
+        return target_error.value();
+    try {
+        SessionData candidate = current.value();
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        ModelObject *object = nullptr;
+        ModelVolume *part = nullptr;
+        std::size_t instance_index = 0;
+        find_paint_candidate_target(*candidate.scene, target, object, part, instance_index);
+        (void) instance_index;
+        const std::vector<ModelVolume *> changed = clear_paint(*object, part, kind);
+        std::vector<EntityBinding> bindings;
+        bindings.reserve(changed.size());
+        for (const ModelVolume *volume : changed)
+            bindings.push_back({EntityKind::volume, volume->id().id});
+        if (changed.empty()) {
+            if (!session->entity_ids(mutation.value(), {}))
+                return !session->data_snapshot()
+                    ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                    : make_error_response(409, "session_changed", "The session changed while paint was cleared.", request_id);
+            return HttpResponse::json(200, nlohmann::json{{"changed", nlohmann::json::array()}});
+        }
+        const std::optional<std::vector<std::string>> rest_ids = session->entity_ids(mutation.value(), bindings);
+        if (!rest_ids) {
+            if (!session->data_snapshot())
+                return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+            return make_error_response(409, "session_changed", "The session changed while paint was cleared.", request_id);
+        }
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ignored_bound_ids;
+        if (!session->commit_mutation(mutation.value(), std::move(candidate), true, SessionRegistry::Clock::now(),
+                bindings, ignored_bound_ids))
+            return !session->data_snapshot()
+                ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                : make_error_response(409, "session_changed", "The session changed while paint was cleared.", request_id);
+        return HttpResponse::json(200, nlohmann::json{{"changed", rest_ids.value()}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not clear paint.", request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not clear paint.", request_id);
+    }
+}
+
+struct PaintReadQuery {
+    std::string kind;
+    std::optional<std::string> instance;
+    PaintSpace space = PaintSpace::platter;
+};
+
+// Parse strict query fields; reject empty, repeated, or unknown values.
+bool parse_paint_read_query(const std::string &query, PaintReadQuery &result)
+{
+    std::map<std::string, std::string> parameters;
+    if (!parse_form_query(query, parameters))
+        return false;
+    for (const std::pair<const std::string, std::string> &parameter : parameters) {
+        if (parameter.first == "kind") {
+            if (parameter.second.empty())
+                return false;
+            result.kind = parameter.second;
+        } else if (parameter.first == "instance") {
+            if (parameter.second.empty())
+                return false;
+            result.instance = parameter.second;
+        } else if (parameter.first == "space") {
+            if (parameter.second == "platter") result.space = PaintSpace::platter;
+            else if (parameter.second == "object") result.space = PaintSpace::object;
+            else if (parameter.second == "volume") result.space = PaintSpace::volume;
+            else return false;
+        } else {
+            return false;
+        }
+    }
+    return !result.kind.empty();
+}
+
+// Serialize strict triangles with string or MMU extruder state JSON.
+nlohmann::json painted_state_json(const PaintedState &state, bool mmu)
+{
+    nlohmann::json vertices = nlohmann::json::array();
+    for (const Vec3f &vertex : state.triangles.vertices)
+        vertices.push_back({vertex.x(), vertex.y(), vertex.z()});
+    nlohmann::json triangles = nlohmann::json::array();
+    for (const stl_triangle_vertex_indices &face : state.triangles.indices)
+        triangles.push_back({face[0], face[1], face[2]});
+    nlohmann::json result = {
+        {"state", mmu ? nlohmann::json{{"extruder", static_cast<int>(state.state)}} :
+            nlohmann::json(state.state == EnforcerBlockerType::ENFORCER ? "enforce" : "block")},
+        {"vertices", std::move(vertices)},
+        {"triangles", std::move(triangles)}
+    };
+    return result;
+}
+
+// Read one snapshot and serialize triangles without mutation or ownership transfer.
+HttpResponse handle_get_paint(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "get_paint requires an empty body.", request_id);
+    PaintReadQuery query;
+    if (!parse_paint_read_query(request.query, query))
+        return make_error_response(400, "invalid_request", "The get_paint query is invalid.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::optional<SessionData> data = session->data_snapshot();
+    if (!data.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (data->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to read.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != revision)
+        return make_error_response(409, "session_changed", "The scene changed while paint was read.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::volume)
+        return make_error_response(422, "invalid_paint", "get_paint requires a solid part target.", request_id);
+    try {
+        const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*data->scene, *entity);
+        if (!target.second->is_model_part())
+            return make_error_response(422, "invalid_paint", "get_paint requires a solid part target.", request_id);
+        const ModelInstance *reference = target.first->instances.front();
+        if (query.instance.has_value()) {
+            const std::optional<EntityReference> reference_entity = session->resolve_entity(query.instance.value());
+            if (session->snapshot().revision != revision)
+                return make_error_response(409, "session_changed", "The scene changed while paint was read.", request_id);
+            if (!reference_entity)
+                return make_error_response(404, "entity_not_found", "The instance does not exist.", request_id);
+            if (reference_entity->kind != EntityKind::instance)
+                return make_error_response(422, "invalid_paint", "instance must identify an instance.", request_id);
+            const std::vector<ModelInstance *> references = find_transform_instances(*data->scene, *reference_entity);
+            if (references.empty() || references.front()->get_object() != target.first)
+                return make_error_response(422, "invalid_paint", "The reference instance belongs to another object.", request_id);
+            reference = references.front();
+        }
+        const std::vector<PaintedState> states = painted_triangles(*reference, *target.second, query.kind, query.space);
+        nlohmann::json body = {{"kind", query.kind}, {"states", nlohmann::json::array()}};
+        const bool mmu = query.kind == "mmu";
+        for (const PaintedState &state : states)
+            body["states"].push_back(painted_state_json(state, mmu));
+        return HttpResponse::json(200, body);
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not read paint.", request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not read paint.", request_id);
+    }
 }
 
 // Apply the cut to the private candidate and optionally arrange its new instances.
@@ -4236,6 +4853,8 @@ std::optional<HttpResponse> dispatch_request(
         return handle_logout(request, services, authentication->token, authentication->now, request_id);
     if (request.path == "/list_settings")
         return handle_list_settings(request, request_id);
+    if (request.path == "/list_paint_kinds")
+        return handle_list_paint_kinds(request, request_id);
     if (request.path == "/create_session")
         return handle_create_session(request, services, authentication->username, request_id, respond);
 
@@ -4279,6 +4898,12 @@ std::optional<HttpResponse> dispatch_request(
             return handle_arrange(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "orient")
             return handle_orient(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 4 && operation == "paint")
+            return handle_paint(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 4 && operation == "clear_paint")
+            return handle_clear_paint(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "get_paint")
+            return handle_get_paint(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "cut")
             return handle_cut(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "transform")

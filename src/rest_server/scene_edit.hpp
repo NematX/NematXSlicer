@@ -14,7 +14,7 @@
 namespace Slic3r::Rest {
 
 // A refused edit carries both the HTTP status and stable JSON error code.
-class SceneEditError final : public std::runtime_error {
+class SceneEditError : public std::runtime_error {
 public:
     SceneEditError(int status, std::string code, const std::string &message);
     int status() const noexcept { return status_; }
