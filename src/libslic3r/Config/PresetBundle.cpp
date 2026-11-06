@@ -52,6 +52,37 @@ The copy owns its vendor records. Its profile pointers must refer to those copie
 
 subset: copy required FFF profiles and their vendor records
 
+Bundle loading first reads section text and orders local parents before children. The temporary BundleDefaultsSection
+state keeps partial inherited settings, not a complete preset: source texts retain their spelling for historical value
+conversions, while resolved default_settings requests hold whole typed options cloned from collection defaults.
+Parent order and local entry order choose the surviving text or copy for each canonical name or registered simple alias.
+Cloning gives each section independent option ownership; inherited resolved defaults do not change with child technology.
+Saved system parents contribute only printer technology to this preparation; normal preset loading supplies their values.
+Surviving source texts enter normal parsing; owned default copies and invalid-value replacements precede normalization.
+Keeping these phases separate avoids serializing typed defaults back through historical text conversions. The prepared
+states and diagnostics live for one load; the bundle's collections own the resulting presets used for selection/composition.
+Unknown preset settings retain their separate preservation path after custom-setting validation and key filtering.
+
+Main loading and composition paths:
+  PresetBundle::load_configbundle - read the bundle and load its public preset sections.
+    flatten_configbundle_hierarchy - prepare each category using its collection defaults.
+      flatten_configbundle_hierarchy (category) - order inheritance and resolve text/default operations.
+        bundle_option_identity - match canonical names and registered simple aliases, retaining unknown names.
+    PrintConfigDef::handle_legacy_map - convert surviving source names and values before typed parsing.
+    validate_preset_custom_settings / preserve_unknown_preset_settings - retain valid unrecognized settings.
+    Preset::normalize - adjust parsed options after default copies and invalid-value replacements are applied.
+  PresetBundle::load_config_file_config - split an external configuration into matching presets.
+    parse_profile_sections / apply_profile_section - restore permitted project profile metadata to each copy.
+  PresetBundle::full_config - compose selected presets with the separate project configuration.
+  PresetBundle::project_profile_sections - serialize selected profile metadata alongside the flat project configuration.
+
+default_settings is a bundle entry listing option names whose values should come
+from the effective defaults of that profile category. It is a request to copy
+whole typed defaults, not a serialized replacement value. Parent order and local
+entry order determine whether a request or supplied text wins for each identity.
+Keep these default copies separate from source text until legacy conversion has
+finished, so default values do not accidentally undergo historical conversions.
+
 Operation notes:
 - load_system_presets_from
 - Sort vendor INI filenames, load each bundle, then merge profiles and update name maps
@@ -103,6 +134,32 @@ static boost::property_tree::ptree parse_profile_sections(const std::string &tex
 static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollection &presets, const boost::property_tree::ptree &sections,
                                   const std::string &original_name, ConfigSubstitutionContext &substitutions,
                                   std::set<t_config_option_key> &applied_keys);
+
+// Texts retain their source spelling for value conversions; copies own whole resolved default options.
+// An active section has resolved a request, even when a later text has replaced its last copy.
+struct BundleDefaultsSection {
+    std::map<std::string, std::pair<std::string, std::string>> texts;
+    DynamicPrintConfig copies;
+    PrinterTechnology technology = ptFFF;
+    bool technology_present = false;
+    bool active = false;
+};
+struct BundleDefaultsDiagnostic {
+    std::string section, key, value;
+    bool invalid_technology_declaration = false;
+};
+using BundleDefaultsSections = std::map<std::string, BundleDefaultsSection>;
+
+// Resolve canonical names and registered simple aliases, retaining unknown names as distinct identities.
+static std::string bundle_option_identity(const std::string &name);
+// Flatten one category with the existing inheritance graph, resolving ordered requests against collection defaults.
+// Saved system parents supply only technology in inheritance order; diagnostics retain their source section, including private parents.
+static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const std::string &group_name,
+    const PresetCollection &collection, bool saved_parents, BundleDefaultsSections &prepared,
+    std::vector<BundleDefaultsDiagnostic> &diagnostics);
+// Prepare all bundle categories; system loading still uses collection defaults but cannot inherit saved system presets.
+static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const PresetBundle &bundle,
+    bool saved_parents, BundleDefaultsSections &prepared, std::vector<BundleDefaultsDiagnostic> &diagnostics);
 
 PresetBundle::PresetBundle()
     : fff_prints(Preset::TYPE_FFF_PRINT,
@@ -1316,15 +1373,23 @@ ConfigSubstitutions PresetBundle::load_config_file_config_bundle_dont_save(
     return config_substitutions;
 }
 
-// Process the Config Bundle loaded as a Boost property tree.
-// For each print, filament and printer preset (group defined by group_name), apply the inherited presets.
-// The presets starting with '*' are considered non-terminal and they are
-// removed through the flattening process by this function.
-// This function will never fail, but it will produce error messages through boost::log.
-// system_profiles will not be flattened, and they will be kept inside the "inherits" field
-static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const std::string &group_name, const std::vector<std::string> &system_profiles)
+static std::string bundle_option_identity(const std::string &name)
+{
+    const ConfigDef &definition = PrintConfigDef::instance();
+    if (definition.get(name) == nullptr)
+        for (const auto &entry : definition.options)
+            if (entry.second.shortcut.empty() &&
+                std::find(entry.second.aliases.begin(), entry.second.aliases.end(), name) != entry.second.aliases.end())
+                return entry.first;
+    return name;
+}
+
+static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const std::string &group_name,
+    const PresetCollection &collection, bool saved_parents, BundleDefaultsSections &prepared,
+    std::vector<BundleDefaultsDiagnostic> &diagnostics)
 {
     namespace pt = boost::property_tree;
+    const std::vector<std::string> system_profiles = saved_parents ? collection.system_preset_names() : std::vector<std::string>();
 
     // 1) For the group given by group_name, initialize the presets.
     struct Prst {
@@ -1334,6 +1399,7 @@ static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, co
         const std::string           name;
         // Link to the source boost property tree node, owned by tree.
         pt::ptree                  *node;
+        pt::ptree                   local;
         // Link to the presets, from which this preset inherits.
         std::vector<Prst*>          inherits;
         // Link to the presets, for which this preset is a direct parent.
@@ -1353,6 +1419,9 @@ static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, co
             presets.emplace(section.first.substr(group_name_preset.size()), &section.second);
     // Fill in the "inherits" and "parent_of" members, report invalid inheritance fields.
     for (const Prst &prst : presets) {
+        Prst &mutable_prst = const_cast<Prst&>(prst);
+        mutable_prst.local = *prst.node;
+        prst.node->erase("default_settings");
         // Parse the list of comma separated values, possibly enclosed in quotes.
         std::vector<std::string> inherits_names;
         std::vector<std::string> inherits_system;
@@ -1423,6 +1492,118 @@ static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, co
 
     // Apply the dependencies in their topological ordering.
     for (Prst *prst : sorted) {
+        BundleDefaultsSection &state = prepared[group_name_preset + prst->name];
+        // The graph omits saved parents, so use the original list to arbitrate their sole technology contribution in place.
+        std::vector<std::string> parent_names;
+        if (!unescape_strings_cstyle(prst->local.get<std::string>("inherits", ""), parent_names))
+            parent_names.clear();
+        for (const std::string &parent_name : parent_names) {
+            const auto system = std::lower_bound(system_profiles.begin(), system_profiles.end(), parent_name);
+            if (system != system_profiles.end() && *system == parent_name) {
+                if (group_name == "printer") {
+                    const std::string *renamed = collection.get_preset_name_renamed(parent_name);
+                    if (const Preset *parent = collection.find_preset(renamed ? *renamed : parent_name, false, false)) {
+                        state.technology = parent->printer_technology();
+                        state.technology_present = true;
+                        state.texts.erase("printer_technology");
+                        state.copies.set_key_value("printer_technology", parent->config.option("printer_technology")->clone());
+                    }
+                }
+                continue;
+            }
+            const auto local = std::find_if(prst->inherits.begin(), prst->inherits.end(),
+                [&parent_name](const Prst *parent) { return parent->name == parent_name; });
+            if (local == prst->inherits.end())
+                continue;
+            const BundleDefaultsSection &inherited = prepared.at(group_name_preset + (*local)->name);
+            state.active = state.active || inherited.active;
+            if (inherited.technology_present) {
+                state.technology = inherited.technology;
+                state.technology_present = true;
+            }
+            for (const auto &entry : inherited.texts) {
+                if (entry.first == "renamed_from")
+                    continue;
+                state.copies.erase(entry.first);
+                state.texts[entry.first] = entry.second;
+            }
+            for (const std::string &key : inherited.copies.keys()) {
+                state.texts.erase(key);
+                state.copies.set_key_value(key, inherited.copies.option(key)->clone());
+            }
+        }
+        const PrinterTechnology inherited_technology = state.technology;
+        const bool has_inherited_technology = state.technology_present;
+        const boost::optional<std::string> declared = prst->local.get_optional<std::string>("printer_technology");
+        bool invalid_technology = false;
+        if (group_name == "printer" && declared) {
+            state.technology_present = true;
+            state.technology = ptFFF;
+            invalid_technology = !ConfigOptionEnum<PrinterTechnology>::from_string(*declared, state.technology);
+        }
+        DynamicPrintConfig technology_config;
+        if (group_name == "printer")
+            technology_config.opt<ConfigOptionEnumGeneric>("printer_technology", true)->value = state.technology;
+        const DynamicPrintConfig &defaults = collection.default_preset_for(technology_config).config;
+        for (const auto &operation : prst->local) {
+            if (operation.first == "inherits")
+                continue;
+            if (operation.first != "default_settings") {
+                const std::string identity = bundle_option_identity(operation.first);
+                state.copies.erase(identity);
+                state.texts[identity] = {operation.first, operation.second.data()};
+                continue;
+            }
+            const std::string list = boost::trim_copy(operation.second.data());
+            if (list.empty())
+                continue;
+            std::vector<std::string> names;
+            boost::split(names, list, boost::is_any_of(";"));
+            bool malformed = false;
+            for (std::string &name : names) {
+                boost::trim(name);
+                malformed = malformed || name.empty() || name == "all";
+            }
+            if (malformed) {
+                diagnostics.push_back({group_name_preset + prst->name, "default_settings", list});
+                continue;
+            }
+            std::set<std::string> seen;
+            for (const std::string &name : names) {
+                const std::string identity = bundle_option_identity(name);
+                if (!seen.insert(identity).second)
+                    continue;
+                const ConfigOptionDef *definition = defaults.def()->get(identity);
+                // TODO: Exclude options whose definition has nature Volatile.
+                const bool excluded = identity == "print_version" || identity == "inherits" || identity == "alias" ||
+                    identity == "renamed_from" || identity == "default_settings" || identity == "print_host" ||
+                    identity == "printhost_cafile" || identity == "printhost_apikey" || identity == "host_type" ||
+                    identity == "physical_printer_preset" || identity == "compatible_printers_condition_cummulative" ||
+                    identity == "compatible_prints_condition_cummulative" || identity == "inherits_cummulative";
+                const ConfigOption *value = defaults.option(identity);
+                if (excluded || definition == nullptr || !definition->shortcut.empty() || value == nullptr) {
+                    diagnostics.push_back({group_name_preset + prst->name, name, list});
+                    continue;
+                }
+                state.active = true;
+                state.texts.erase(identity);
+                state.copies.set_key_value(identity, value->clone());
+            }
+        }
+        // Children see the value of a resolved technology request, not the declaration that selected its default family.
+        if (group_name == "printer" && state.copies.has("printer_technology")) {
+            state.technology = static_cast<PrinterTechnology>(state.copies.option("printer_technology")->get_int());
+            state.technology_present = true;
+        }
+        if (const boost::optional<std::string> system_parent = prst->node->get_optional<std::string>("inherits"))
+            state.texts["inherits"] = {"inherits", *system_parent};
+        if (state.active && group_name == "printer") {
+            if (invalid_technology && state.copies.has("printer_technology"))
+                diagnostics.push_back({group_name_preset + prst->name, "printer_technology", *declared, true});
+            if ((!prst->inherits.empty() || has_inherited_technology) && inherited_technology != state.technology)
+                BOOST_LOG_TRIVIAL(warning) << "Bundle preset " << group_name_preset << prst->name
+                    << " changes inherited printer technology; inherited defaults remain resolved values";
+        }
         // Merge the preset nodes in their order of application.
         // Iterate in a reverse order, so the last change will be placed first in merged.
         for (auto it_inherits = prst->inherits.rbegin(); it_inherits != prst->inherits.rend(); ++ it_inherits)
@@ -1433,6 +1614,11 @@ static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, co
 			            BOOST_LOG_TRIVIAL(error) << boost::format("Nonpublic intermediate preset %1% contains a \"renamed_from\" field, which is ignored") % (*it_inherits)->name;
 				} else if (prst->node->find(it->first) == prst->node->not_found())
                     prst->node->add_child(it->first, it->second);
+        if (state.active) {
+            prst->node->clear();
+            for (const auto &entry : state.texts)
+                prst->node->push_back({entry.second.first, pt::ptree(entry.second.second)});
+        }
     }
 
     // Remove the "internal" presets from the ptree. These presets are marked with '*'.
@@ -1447,24 +1633,25 @@ static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, co
     }
 }
 
-// preset_bundle is set when loading user config bundles, which must not overwrite the system profiles.
-static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const PresetBundle *preset_bundle)
+static void flatten_configbundle_hierarchy(boost::property_tree::ptree &tree, const PresetBundle &bundle,
+    bool saved_parents, BundleDefaultsSections &prepared, std::vector<BundleDefaultsDiagnostic> &diagnostics)
 {
-    flatten_configbundle_hierarchy(tree, "print",           preset_bundle ? preset_bundle->fff_prints.system_preset_names()    : std::vector<std::string>());
-    flatten_configbundle_hierarchy(tree, "filament",        preset_bundle ? preset_bundle->filaments.system_preset_names()     : std::vector<std::string>());
-    flatten_configbundle_hierarchy(tree, "sla_print",       preset_bundle ? preset_bundle->sla_prints.system_preset_names()    : std::vector<std::string>());
-    flatten_configbundle_hierarchy(tree, "sla_material",    preset_bundle ? preset_bundle->sla_materials.system_preset_names() : std::vector<std::string>());
-    flatten_configbundle_hierarchy(tree, "printer",         preset_bundle ? preset_bundle->printers.system_preset_names()      : std::vector<std::string>());
+    flatten_configbundle_hierarchy(tree, "print", bundle.fff_prints, saved_parents, prepared, diagnostics);
+    flatten_configbundle_hierarchy(tree, "filament", bundle.filaments, saved_parents, prepared, diagnostics);
+    flatten_configbundle_hierarchy(tree, "sla_print", bundle.sla_prints, saved_parents, prepared, diagnostics);
+    flatten_configbundle_hierarchy(tree, "sla_material", bundle.sla_materials, saved_parents, prepared, diagnostics);
+    flatten_configbundle_hierarchy(tree, "printer", bundle.printers, saved_parents, prepared, diagnostics);
 }
 
-// Load a config bundle file, into presets and store the loaded presets into separate files
-// of the local configuration directory.
 std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
     const std::string &path, LoadConfigBundleAttributes flags, ForwardCompatibilitySubstitutionRule compatibility_rule)
 {
-    // Enable substitutions for user config bundle, throw an exception when loading a system profile.
+    // Unaffected sections keep the caller's policy; active sections track invalid values independently of publication.
     ConfigSubstitutionContext  substitution_context { compatibility_rule };
     PresetsConfigSubstitutions substitutions;
+    const bool strict_system = flags.has(LoadConfigBundleAttribute::LoadSystem) && compatibility_rule == Disable;
+    const bool publish_defaults = compatibility_rule == Enable || compatibility_rule == EnableSystemSilent ||
+        (compatibility_rule == Disable && !strict_system);
 
     if (flags.has(LoadConfigBundleAttribute::ResetUserProfile) || flags.has(LoadConfigBundleAttribute::LoadSystem))
         // Reset this bundle, delete user profile files if SaveImported.
@@ -1500,7 +1687,9 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
 
     // 1.5) Flatten the config bundle by applying the inheritance rules. Internal profiles (with names starting with '*') are removed.
     // If loading a user config bundle, do not flatten with the system profiles, but keep the "inherits" flag intact.
-    flatten_configbundle_hierarchy(tree, flags.has(LoadConfigBundleAttribute::LoadSystem) ? nullptr : this);
+    BundleDefaultsSections prepared;
+    std::vector<BundleDefaultsDiagnostic> request_diagnostics;
+    flatten_configbundle_hierarchy(tree, *this, !flags.has(LoadConfigBundleAttribute::LoadSystem), prepared, request_diagnostics);
 
     // 2) Parse the property_tree, extract the active preset names and the profiles, save them into local config files.
     // Parse the obsolete preset names, to be deleted when upgrading from the old configuration structure.
@@ -1595,14 +1784,18 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
             // Ignore an unknown section.
             continue;
         if (presets != nullptr) {
+            const BundleDefaultsSection &defaults_state = prepared[section.first];
+            ConfigSubstitutionContext tracked_substitutions(Enable);
+            ConfigSubstitutionContext &parse_substitutions = defaults_state.active ? tracked_substitutions : substitution_context;
             // Load the print, filament or printer preset.
             const DynamicPrintConfig *default_config = nullptr;
             DynamicPrintConfig        config;
             std::string 			  alias_name;
             std::vector<std::string>  renamed_from;
             try {
-                auto parse_config_section = [&section, &alias_name, &renamed_from, &substitution_context, &path, &flags](DynamicPrintConfig &config) {
-                    substitution_context.clear();
+                // Convert and deserialize only retained source texts, keeping printer input partial until its baseline is chosen.
+                auto parse_config_section = [&section, &alias_name, &renamed_from, &parse_substitutions, &path, &flags](DynamicPrintConfig &config) {
+                    parse_substitutions.clear();
                     std::map<t_config_option_key, std::string> opts_deleted;
                     std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict_opt;
                     for (auto &kvp : section.second) {
@@ -1616,7 +1809,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                             }
                             continue;
                         }
-                        // Throws on parsing error. For system presets, no substituion is being done, but an exception is thrown.
+                        // Only surviving texts enter legacy conversion and deserialization.
                         t_config_option_key opt_key = kvp.first;
                         std::string value =  kvp.second.data();
                         dict_opt[opt_key] = {opt_key, value};
@@ -1628,7 +1821,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                         //PrintConfigDef::handle_legacy(opt_key, value, true);
                         // don't throw for an unknown key, just ignore it
                         if (!opt_key.empty()) {
-                            config.set_deserialize(opt_key, value, substitution_context);
+                            config.set_deserialize(opt_key, value, parse_substitutions);
                         } else {
                             opts_deleted[saved_key] = value;
                         }
@@ -1641,7 +1834,12 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                     // Select the default config based on the printer_technology field extracted from kvp.
                     DynamicPrintConfig config_src;
                     parse_config_section(config_src);
-                    default_config = &presets->default_preset_for(config_src).config;
+                    if (defaults_state.active) {
+                        DynamicPrintConfig technology_config;
+                        technology_config.opt<ConfigOptionEnumGeneric>("printer_technology", true)->value = defaults_state.technology;
+                        default_config = &presets->default_preset_for(technology_config).config;
+                    } else
+                        default_config = &presets->default_preset_for(config_src).config;
                     config = *default_config;
                     config.apply(config_src);
                 } else {
@@ -1649,11 +1847,35 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                     config = *default_config;
                     parse_config_section(config);
                 }
+                if (defaults_state.active) {
+                    substitution_context.clear();
+                    // Deserialization may change flags after recording a substitution, so replace the whole option afterwards.
+                    ConfigSubstitutions tracked = std::move(tracked_substitutions).data();
+                    for (ConfigSubstitution &substitution : tracked) {
+                        std::string substituted_key = substitution.old_name;
+                        if (substitution.opt_def != nullptr)
+                            for (const std::string &key : default_config->keys())
+                                if (default_config->def()->get(key) == substitution.opt_def) {
+                                    substituted_key = key;
+                                    const ConfigOption *replacement = default_config->option(key);
+                                    config.set_key_value(key, replacement->clone());
+                                    substitution.new_value.reset(replacement->clone());
+                                    break;
+                                }
+                        if (strict_system)
+                            BOOST_LOG_TRIVIAL(warning) << "Config bundle " << path << " [" << section.first << "] invalid "
+                                << substituted_key << "=" << substitution.old_value;
+                        else if (publish_defaults)
+                            substitution_context.add(std::move(substitution));
+                    }
+                    config.apply(defaults_state.copies);
+                }
             } catch (const ConfigurationError &e) {
                 throw ConfigurationError(format("Invalid configuration bundle \"%1%\", section [%2%]: ", path, section.first) + e.what());
             }
             validate_preset_custom_settings(config);
-            Preset::normalize(config);
+            if (!defaults_state.active)
+                Preset::normalize(config);
             // Report configuration fields, which are misplaced into a wrong group.
             ConfigSubstitutions preserved_substitutions = std::move(substitution_context).data();
             std::string incorrect_keys = Preset::remove_invalid_keys(config, *default_config, &preserved_substitutions);
@@ -1661,6 +1883,9 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
             if (! incorrect_keys.empty())
                 BOOST_LOG_TRIVIAL(error) << "Error in a Vendor Config Bundle \"" << path << "\": The printer preset \"" << 
                     section.first << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
+            // A technology change can leave inherited FFF vectors in an SLA preset; filter them before resizing vectors.
+            if (defaults_state.active)
+                Preset::normalize(config);
             if (flags.has(LoadConfigBundleAttribute::LoadSystem) && presets == &printers) {
                 // Filter out printer presets, which are not mentioned in the vendor profile.
                 // These presets are considered not installed.
@@ -1751,8 +1976,11 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
             // Preserving unknown text does not replace an option value. Report only changes to known values.
             preserved_substitutions.erase(std::remove_if(preserved_substitutions.begin(), preserved_substitutions.end(),
                 [](const ConfigSubstitution &entry) { return entry.opt_def == nullptr; }), preserved_substitutions.end());
-            if ((compatibility_rule == ForwardCompatibilitySubstitutionRule::Enable ||
-                 compatibility_rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent) && !preserved_substitutions.empty())
+            // Default requests use their own publication policy, including active non-system requests under Disable.
+            const bool publish_substitutions = defaults_state.active ? publish_defaults :
+                (compatibility_rule == ForwardCompatibilitySubstitutionRule::Enable ||
+                 compatibility_rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent);
+            if (publish_substitutions && !preserved_substitutions.empty())
                 substitutions.push_back({preset_name, presets->type(), PresetConfigSubstitutions::Source::ConfigBundle,
                                          std::string(), std::move(preserved_substitutions)});
             ++ presets_loaded;
@@ -1823,6 +2051,30 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                                          PresetConfigSubstitutions::Source::ConfigBundle, std::string(),
                                          std::move(substitution_context).data()});
             ++ ph_printers_loaded;
+        }
+    }
+
+    // Requests from private parents are reported once at their source, not once per descendant.
+    for (const BundleDefaultsDiagnostic &diagnostic : request_diagnostics) {
+        if (strict_system)
+            BOOST_LOG_TRIVIAL(warning) << "Config bundle " << path << " [" << diagnostic.section << "] unapplied "
+                << diagnostic.key << "=" << diagnostic.value;
+        else if (publish_defaults) {
+            const size_t separator = diagnostic.section.find(':');
+            const std::string group = diagnostic.section.substr(0, separator);
+            const Preset::Type type = group == "print" ? Preset::TYPE_FFF_PRINT : group == "filament" ? Preset::TYPE_FFF_FILAMENT :
+                group == "sla_print" ? Preset::TYPE_SLA_PRINT : group == "sla_material" ? Preset::TYPE_SLA_MATERIAL : Preset::TYPE_PRINTER;
+            ConfigSubstitutions records;
+            if (diagnostic.invalid_technology_declaration) {
+                DynamicPrintConfig technology_config;
+                technology_config.opt<ConfigOptionEnumGeneric>("printer_technology", true)->value = prepared.at(diagnostic.section).technology;
+                const DynamicPrintConfig &defaults = printers.default_preset_for(technology_config).config;
+                records.emplace_back(defaults.def()->get(diagnostic.key), diagnostic.value,
+                    ConfigOptionUniquePtr(defaults.option(diagnostic.key)->clone()));
+            } else
+                records.emplace_back(diagnostic.key, diagnostic.value);
+            substitutions.push_back({diagnostic.section.substr(separator + 1), type,
+                PresetConfigSubstitutions::Source::ConfigBundle, std::string(), std::move(records)});
         }
     }
 

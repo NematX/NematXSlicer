@@ -171,8 +171,10 @@ public:
         ConvertFromPrusa,
     };
     using LoadConfigBundleAttributes = enum_bitmask<LoadConfigBundleAttribute>;
-    // Load the config bundle based on the flags.
-    // Don't do any config substitutions when loading a system profile, perform and report substitutions otherwise.
+    // Load presets and optionally save them, returning substitutions and the number loaded under the requested policy.
+    // Resolved default_settings requests restore collection defaults for invalid values even under Disable.
+    // For the mode received, Enable and EnableSystemSilent publish these diagnostics; EnableSilent and EnableSilentDisableSystem do not.
+    // Disable with LoadSystem logs them without returned records; other Disable calls return them.
     std::pair<PresetsConfigSubstitutions, size_t> load_configbundle(
         const std::string &path, LoadConfigBundleAttributes flags, ForwardCompatibilitySubstitutionRule compatibility_rule);
 
