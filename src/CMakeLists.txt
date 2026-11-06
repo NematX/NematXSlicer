@@ -191,6 +191,10 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated-resources/plugins")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/plugins/default_activated.ini.in"
                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}" @ONLY)
 
+if (SLIC3R_BUILD_REST_SERVER)
+    add_subdirectory(rest_server)
+endif ()
+
 if (APPLE)
 #    add_compile_options(-stdlib=libc++)
 #    add_definitions(-DBOOST_THREAD_DONT_USE_CHRONO -DBOOST_NO_CXX11_RVALUE_REFERENCES -DBOOST_THREAD_USES_MOVE)

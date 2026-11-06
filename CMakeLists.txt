@@ -101,6 +101,7 @@ endif ()
 
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
 option(SLIC3R_BUILD_TESTS       "Build unit tests" OFF)
+option(SLIC3R_BUILD_REST_SERVER "Build the standalone REST server" OFF)
 
 if (IS_CROSS_COMPILE)
     message("Detected cross compilation setup. Tests and encoding checks will be forcedly disabled!")
@@ -738,4 +739,3 @@ if (NOT WIN32)
 endif()
 
 include(CPack)
-
