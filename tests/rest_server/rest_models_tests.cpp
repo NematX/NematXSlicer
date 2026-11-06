@@ -1508,12 +1508,15 @@ TEST_CASE("REST list_objects exposes stable IDs across uploads and project repla
     CHECK(first_listing.at("objects").at(0).at("name") == "triangle.stl");
     REQUIRE(first_listing.at("objects").at(0).at("parts").size() == 1);
     REQUIRE(first_listing.at("objects").at(0).at("instances").size() == 1);
-    // Field counts are the 1.0 fields plus 1.1 cut on objects and type/painted on parts.
-    CHECK(first_listing.at("objects").at(0).size() == 6);
+    // Entity settings add override-presence and range-list fields to the object and part.
+    CHECK(first_listing.at("objects").at(0).size() == 8);
     CHECK(first_listing.at("objects").at(0).contains("cut"));
-    CHECK(first_listing.at("objects").at(0).at("parts").at(0).size() == 5);
+    CHECK(first_listing.at("objects").at(0).contains("has_settings"));
+    CHECK(first_listing.at("objects").at(0).contains("layer_ranges"));
+    CHECK(first_listing.at("objects").at(0).at("parts").at(0).size() == 6);
     CHECK(first_listing.at("objects").at(0).at("parts").at(0).contains("type"));
     CHECK(first_listing.at("objects").at(0).at("parts").at(0).contains("painted"));
+    CHECK(first_listing.at("objects").at(0).at("parts").at(0).contains("has_settings"));
     CHECK(first_listing.at("objects").at(0).at("instances").at(0).size() == 2);
     const std::uint64_t revision = session->snapshot().revision;
     CHECK(fixture.request(http::verb::get, route + "/list_objects").body() == first.body());

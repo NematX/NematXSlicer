@@ -97,6 +97,20 @@ std::pair<ModelObject *, ModelVolume *> find_transform_volume(Model &scene, cons
     throw std::logic_error("The transform volume is not in the scene snapshot.");
 }
 
+std::pair<ModelObject *, t_layer_config_ranges::iterator> find_layer_range(
+    Model &scene,
+    const EntityReference &entity)
+{
+    if (entity.kind == EntityKind::layer_range)
+        for (ModelObject *object : scene.object_ptrs())
+            if (static_cast<std::uint64_t>(object->id().id) == entity.engine_id) {
+                const t_layer_config_ranges::iterator range = object->layer_config_ranges.find(entity.range);
+                if (range != object->layer_config_ranges.end())
+                    return {object, range};
+            }
+    throw std::logic_error("The layer-range target is not in the scene snapshot.");
+}
+
 SessionContext::SessionContext(
     std::string session_id,
     std::string owner,
@@ -172,7 +186,7 @@ bool SessionContext::commit_mutation(
     // Remove selected mappings under the scene commit lock, never before the revision check.
     for (const EntityBinding &binding : unbindings) {
         const std::map<EntityKey, std::string>::iterator existing = entity_ids_by_key_.find(
-            EntityKey{binding.kind, binding.engine_id});
+            EntityKey{binding.kind, binding.engine_id, binding.range});
         if (existing != entity_ids_by_key_.end()) {
             entity_keys_by_id_.erase(existing->second);
             entity_ids_by_key_.erase(existing);
@@ -181,13 +195,13 @@ bool SessionContext::commit_mutation(
 
     // Move stable REST IDs after removals and before new keys are bound.
     for (const EntityRebinding &rebinding : rebindings) {
-        const EntityKey old_key{rebinding.kind, rebinding.from_engine_id};
+        const EntityKey old_key{rebinding.kind, rebinding.from_engine_id, rebinding.from_range};
         const std::map<EntityKey, std::string>::iterator existing = entity_ids_by_key_.find(old_key);
         if (existing == entity_ids_by_key_.end())
             continue;
         const std::string id = existing->second;
         entity_ids_by_key_.erase(existing);
-        const EntityKey new_key{rebinding.kind, rebinding.to_engine_id};
+        const EntityKey new_key{rebinding.kind, rebinding.to_engine_id, rebinding.to_range};
         entity_ids_by_key_.emplace(new_key, id);
         entity_keys_by_id_.at(id) = new_key;
     }
@@ -195,7 +209,7 @@ bool SessionContext::commit_mutation(
     std::vector<std::string> new_bound_ids;
     new_bound_ids.reserve(bindings.size());
     for (const EntityBinding &binding : bindings) {
-        const EntityKey key{binding.kind, binding.engine_id};
+        const EntityKey key{binding.kind, binding.engine_id, binding.range};
         const std::map<EntityKey, std::string>::const_iterator existing = entity_ids_by_key_.find(key);
         if (existing != entity_ids_by_key_.end()) {
             new_bound_ids.push_back(existing->second);
@@ -406,7 +420,7 @@ std::optional<std::vector<std::string>> SessionContext::entity_ids(
     std::vector<std::string> ids;
     ids.reserve(entities.size());
     for (const EntityBinding &entity : entities)
-        ids.push_back(entity_ids_by_key_.at(EntityKey{entity.kind, entity.engine_id}));
+        ids.push_back(entity_ids_by_key_.at(EntityKey{entity.kind, entity.engine_id, entity.range}));
     return ids;
 }
 
@@ -417,7 +431,7 @@ std::optional<std::vector<std::string>> SessionContext::entity_ids(
 std::optional<nlohmann::json> SessionContext::list_objects() const
 {
     std::shared_ptr<const Model> scene;
-    // IDs in traversal order: object, its volumes, then its instances.
+    // IDs in traversal order: object, volumes, instances, then layer ranges.
     std::vector<std::string> ids;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -435,6 +449,9 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                     ids.push_back(entity_id(EntityKind::volume, volume->id()));
                 for (const ModelInstance *instance : object->instances)
                     ids.push_back(entity_id(EntityKind::instance, instance->id()));
+                for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
+                    ids.push_back(entity_ids_by_key_.at(EntityKey{
+                        EntityKind::layer_range, static_cast<std::uint64_t>(object->id().id), range.first}));
             }
         }
     }
@@ -451,7 +468,8 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                     {"name", volume->name},
                     {"matrix", matrix_json(volume->get_matrix())},
                     {"type", part_type_name(volume->type())},
-                    {"painted", painted_keys(*volume)}
+                    {"painted", painted_keys(*volume)},
+                    {"has_settings", !volume->config.empty()}
                 });
             nlohmann::json instances = nlohmann::json::array();
             for (const ModelInstance *instance : object->instances)
@@ -459,13 +477,23 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                     {"id", *id++},
                     {"matrix", matrix_json(instance->get_matrix())}
                 });
+            nlohmann::json layer_ranges = nlohmann::json::array();
+            for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
+                layer_ranges.push_back({
+                    {"id", *id++},
+                    {"min", range.first.first},
+                    {"max", range.first.second},
+                    {"has_settings", !range.second.empty()}
+                });
             objects.push_back({
                 {"id", object_id},
                 {"name", object->name},
                 {"matrix", matrix_json(Transform3d::Identity())},
                 {"cut", object->is_cut()},
+                {"has_settings", !object->config.empty()},
                 {"parts", std::move(parts)},
-                {"instances", std::move(instances)}
+                {"instances", std::move(instances)},
+                {"layer_ranges", std::move(layer_ranges)}
             });
         }
     }
@@ -496,13 +524,16 @@ std::shared_ptr<const ViewerSnapshot> SessionContext::viewer_snapshot() const
     return viewer_snapshot_;
 }
 
-std::optional<std::string> SessionContext::bind_entity(EntityKind kind, std::uint64_t engine_id)
+std::optional<std::string> SessionContext::bind_entity(
+    EntityKind kind,
+    std::uint64_t engine_id,
+    t_layer_height_range range)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (retired_)
         return std::nullopt;
 
-    const EntityKey key{kind, engine_id};
+    const EntityKey key{kind, engine_id, range};
     const std::map<EntityKey, std::string>::const_iterator existing = entity_ids_by_key_.find(key);
     if (existing != entity_ids_by_key_.end())
         return existing->second;
@@ -523,7 +554,7 @@ std::optional<EntityReference> SessionContext::resolve_entity(const std::string 
         entity_keys_by_id_.find(entity_id);
     if (retired_ || iterator == entity_keys_by_id_.end())
         return std::nullopt;
-    return EntityReference{iterator->second.kind, iterator->second.engine_id};
+    return EntityReference{iterator->second.kind, iterator->second.engine_id, iterator->second.range};
 }
 
 bool SessionContext::unbind_entity(const std::string &entity_id)
@@ -544,7 +575,9 @@ bool SessionContext::EntityKey::operator<(const EntityKey &other) const noexcept
 {
     if (kind != other.kind)
         return static_cast<int>(kind) < static_cast<int>(other.kind);
-    return engine_id < other.engine_id;
+    if (engine_id != other.engine_id)
+        return engine_id < other.engine_id;
+    return range < other.range;
 }
 
 void SessionContext::mark_viewer_outdated_locked()

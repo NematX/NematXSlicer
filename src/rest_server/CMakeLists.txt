@@ -44,6 +44,8 @@ endif ()
 set_property(TARGET slic3r_rest_auth PROPERTY FOLDER "rest_server")
 
 add_library(slic3r_rest STATIC
+    entity_settings.cpp
+    entity_settings.hpp
     file_names.cpp
     file_names.hpp
     multipart_upload.cpp

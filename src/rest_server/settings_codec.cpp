@@ -585,4 +585,56 @@ void set_setting_serialized(
     validate_setting_range(definition, *option, configuration);
 }
 
+const ConfigOptionDef &require_entity_setting_definition(const std::string &key)
+{
+    if (!settings_catalog_ready())
+        throw std::logic_error("REST entity settings require finalized configuration definitions");
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    if (definition == nullptr)
+        throw std::invalid_argument("The setting is unknown: " + key);
+    return *definition;
+}
+
+nlohmann::json entity_setting_value_json(
+    const ConfigOption &option,
+    const ConfigOptionDef &definition,
+    const DynamicPrintConfig &session)
+{
+    validate_setting_option(definition, option, session, extruder_count(session));
+    validate_setting_range(definition, option, session);
+    return setting_value_json_impl(definition, option, session);
+}
+
+std::string entity_setting_json_to_serialized(
+    const ConfigOptionDef &definition,
+    const nlohmann::json &value,
+    const DynamicPrintConfig &session)
+{
+    if (definition.readonly)
+        throw std::invalid_argument("The setting is read-only: " + definition.opt_key);
+    return typed_value_serialized(definition, value, session);
+}
+
+void set_entity_setting_serialized(
+    DynamicPrintConfig &target,
+    const ConfigOptionDef &definition,
+    const std::string &serialized,
+    const DynamicPrintConfig &session)
+{
+    if (definition.readonly)
+        throw std::invalid_argument("The setting is read-only: " + definition.opt_key);
+    const std::size_t expected_extruder_count = extruder_count(session);
+    validate_serialized_indicators(definition, serialized);
+    try {
+        target.set_deserialize_strict(definition.opt_key, serialized);
+    } catch (const std::exception &error) {
+        throw std::invalid_argument("Invalid value for " + definition.opt_key + ": " + error.what());
+    }
+    const ConfigOption *option = target.option(definition.opt_key);
+    if (option == nullptr)
+        throw std::invalid_argument("The setting could not be stored: " + definition.opt_key);
+    validate_setting_option(definition, *option, session, expected_extruder_count);
+    validate_setting_range(definition, *option, session);
+}
+
 } // namespace Slic3r::Rest

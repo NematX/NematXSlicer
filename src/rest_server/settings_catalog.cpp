@@ -7,10 +7,12 @@
  * scope for V1. Two limitations are deliberate for now: a vector setting is
  * reported either as an extruder array or as a variable-length array (fixed
  * cardinalities are not emitted yet), and the preference category stays empty
- * until the headless server projects AppConfig definitions.
+ * until the headless server projects AppConfig definitions. Entity scopes are
+ * derived from the finalized object and region configuration containers.
  */
 
 #include "settings.hpp"
+#include "entity_settings.hpp"
 #include "settings_internal.hpp"
 
 #include <nlohmann/json.hpp>
@@ -231,6 +233,9 @@ Json setting_definition_json(const ConfigOptionDef &definition)
         result["max"] = definition.max;
     if ((static_cast<int>(definition.type) & static_cast<int>(coVectorType)) != 0)
         result["array"] = definition.is_vector_extruder ? "extruder" : "variable";
+    const std::vector<std::string> scopes = setting_scopes(definition.opt_key);
+    if (!scopes.empty())
+        result["scopes"] = scopes;
     if (definition.enum_def && definition.enum_def->has_values()) {
         result["choices"] = Json::array();
         const std::vector<std::string> &labels = definition.enum_def->labels();
@@ -241,6 +246,13 @@ Json setting_definition_json(const ConfigOptionDef &definition)
                 {"label", index < labels.size() ? labels[index] : values[index]}
             });
         }
+    }
+    if (definition.opt_key == "extruder") {
+        result["default"] = {{"value", 0}};
+        result["min"] = 0;
+        result["choices"] = Json::array({Json{{"value", "0"}, {"label", "default"}}});
+        for (int extruder = 1; extruder <= 9; ++extruder)
+            result["choices"].push_back({{"value", std::to_string(extruder)}, {"label", std::to_string(extruder)}});
     }
     return result;
 }
@@ -258,6 +270,7 @@ CategoryKeys category_keys(const PrintConfigDef &definition)
     categories["filament"] = definition.option_keys(RAW_PRESET_TYPE_FFF_FILAMENT);
     categories["extruder"] = definition.option_keys(RAW_PRESET_TYPE_FFF_TOOL_EXTRUDER);
     categories["printer"] = definition.option_keys(RAW_PRESET_TYPE_FFF_PRINTER);
+    categories["entity"] = {"extruder"};
     return categories;
 }
 
@@ -278,7 +291,7 @@ nlohmann::json settings_catalog()
 
     nlohmann::json result = nlohmann::json::object();
     const CategoryKeys categories = category_keys(definition);
-    for (const std::string &category_name : {"preference", "print", "filament", "extruder", "printer"}) {
+    for (const std::string &category_name : {"preference", "print", "filament", "extruder", "printer", "entity"}) {
         result[category_name] = nlohmann::json::array();
         const std::set<std::string> &keys = categories.find(category_name)->second;
         for (const std::string &key : keys) {

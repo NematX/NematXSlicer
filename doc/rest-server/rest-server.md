@@ -3,7 +3,8 @@
 **Status:** V1 contract\
 **Version:** 1.1
 
-Version 1.1 adds scene editing (§5.16); 1.0 routes and responses are unchanged.
+Version 1.1 adds scene editing (§5.16) and entity settings/layer ranges (§5.17);
+1.0 routes and response meanings are unchanged. New response fields are additive.
 
 ## 1. Objective
 
@@ -55,12 +56,13 @@ Confirmed for the initial scope:
 5. Read one or more selected session settings; modify a single setting
    or submit several settings in one request.
 6. Add a model to the session or load a 3MF project.
-7. List objects, their parts, and their instances, then transform an object,
+7. List objects, their parts, instances, and layer ranges, then transform an object,
    instance, or part, or change the instance count.
-8. Clear the platter, start slicing, save a 3MF project, and retrieve
+8. Read and modify settings on objects, parts, and layer ranges.
+9. Clear the platter, start slicing, save a 3MF project, and retrieve
    JSON data for the G-code viewer.
-9. Delete a session.
-10. Authenticate users by account and isolate their sessions.
+10. Delete a session.
+11. Authenticate users by account and isolate their sessions.
 
 ### Outside the initial scope
 
@@ -73,8 +75,9 @@ Confirmed for the initial scope:
 
 ## 4. Operating model
 
-- `GET /list_settings` describes the settings the API can expose. The requested
-  categories are `preference`, `print`, `filament`, `extruder`, and `printer`.
+- `GET /list_settings` describes the settings the API can expose. Its categories
+  are `preference`, `print`, `filament`, `extruder`, `printer`, and `entity`;
+  definitions with entity overrides also list their allowed `scopes`.
 - `get_setting` and `get_settings` read the session's effective values;
   the former uses SuperSlicer setting serialization, while the latter returns
   typed JSON values for the requested settings, as does `set_settings`.
@@ -95,9 +98,11 @@ Confirmed for the initial scope:
   Settings absent from a loaded configuration revert to system defaults;
   unknown settings are preserved as custom data without being applied to the
   engine (see §5.5.1).
-- Object, part, and instance identifiers are unique and stable within a session
+- Object, part, instance, and layer-range identifiers are unique and stable within a session
   while the entity exists. They are invalidated when the entity is removed
   or the scene is replaced; transformations do not change retained entities' IDs.
+  A layer-range ID is attached to its owning object and exact height bounds; changing
+  the bounds preserves that ID.
 - `slice` starts asynchronous slicing of the session's current state.
   `GET /session/{session_id}/state` returns its `etat` (`ready`, `slicing`,
   `sliced`, or `failed`) and the main and secondary `PrintStatus` messages
@@ -139,16 +144,22 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/set_settings` | JSON object of settings to modify |
 | `POST` | `/session/{session_id}/add_model` | Upload an STL, OBJ, or 3MF |
 | `POST` | `/session/{session_id}/load_project` | Upload a 3MF project |
-| `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, and instances |
+| `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, instances, and layer ranges |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
 | `POST` | `/session/{session_id}/rename/{id}` | Rename an object or part |
-| `POST` | `/session/{session_id}/delete_entity/{id}` | Delete an object, part, or instance |
+| `POST` | `/session/{session_id}/delete_entity/{id}` | Delete an object, part, instance, or layer range |
 | `POST` | `/session/{session_id}/add_part/{object_id}?type=...` | Upload a part into an object |
 | `POST` | `/session/{session_id}/add_shape/{object_id}` | Add a built-in shape part |
 | `POST` | `/session/{session_id}/split/{id}` | Split into objects or parts |
 | `POST` | `/session/{session_id}/merge` | Merge objects into one multipart object |
+| `GET` | `/session/{session_id}/list_entity_settings/{entity_id}` | Explicit setting IDs on an object, part, or layer range |
+| `GET` | `/session/{session_id}/get_entity_settings/{entity_id}/{setting_id}` | Typed explicit entity setting |
+| `POST` | `/session/{session_id}/set_entity_setting/{entity_id}/{setting_id}/{serialized_value}` | Set one serialized entity override |
+| `POST` | `/session/{session_id}/set_entity_settings/{entity_id}` | Atomically set/remove typed entity overrides |
+| `POST` | `/session/{session_id}/add_layer_range/{object_id}` | Add a height range with required height/extruder settings |
+| `POST` | `/session/{session_id}/set_layer_range/{range_id}` | Change bounds while preserving the range ID |
 | `POST` | `/session/{session_id}/slice` | Start asynchronous slicing and return its initial state |
 | `GET` | `/session/{session_id}/state` | `etat` and main/secondary progress |
 | `POST` | `/session/{session_id}/cancel_slicing` | Request cancellation of active slicing (`202 Accepted`) |
@@ -191,8 +202,8 @@ are UTF-8 encoded. Field names use `snake_case`.
 ### 5.2. `GET /list_settings`
 
 Return available setting definitions, not a session's current values.
-Each of the five categories `preference`, `print`, `filament`, `extruder`,
-and `printer` is a flat list of definitions.
+Each of the five original categories `preference`, `print`, `filament`, `extruder`,
+and `printer`, plus the additive `entity` category, is a flat list of definitions.
 
 ```json
 {
@@ -213,7 +224,29 @@ and `printer` is a flat list of definitions.
   "extruder": [
     {"id":"extruder_setting_id","type":"float","label":"Extruder setting","array":"extruder","default":{"value":0.4}}
   ],
-  "printer": []
+  "printer": [],
+  "entity": [
+    {
+      "id": "extruder",
+      "type": "int",
+      "label": "Extruder",
+      "default": {"value": 0},
+      "min": 0,
+      "choices": [
+        {"value": "0", "label": "default"},
+        {"value": "1", "label": "1"},
+        {"value": "2", "label": "2"},
+        {"value": "3", "label": "3"},
+        {"value": "4", "label": "4"},
+        {"value": "5", "label": "5"},
+        {"value": "6", "label": "6"},
+        {"value": "7", "label": "7"},
+        {"value": "8", "label": "8"},
+        {"value": "9", "label": "9"}
+      ],
+      "scopes": ["object", "part", "layer_range"]
+    }
+  ]
 }
 ```
 
@@ -221,9 +254,17 @@ Every definition must contain `id`, `type`, `label`, and `default`.
 `default` is a value object as described below, or `null` if no default exists.
 All settings in the `filament` and `extruder` categories have `"array":"extruder"`.
 Optional fields are `description`, `unit`, `min`, `max`, `precision`, `choices`,
-`read_only`, `can_be_disabled`, and `array`. `can_be_disabled` indicates whether
+`read_only`, `can_be_disabled`, `array`, and `scopes`. `scopes`, when present,
+lists the entity kinds that may store an override (`object`, `part`, or
+`layer_range`); it is omitted when the setting has no entity scope. `extruder` is
+the entity-only setting in V1, with `0` meaning the default extruder and `1`–`9`
+the numbered choices. The original five category definitions keep their existing
+meaning; `scopes` is their only new metadata. `can_be_disabled` indicates whether
 the setting is disableable; omission means `false`. A `choices` entry has the
-form `{"value":"...","label":"..."}`. `type` remains the element type;
+form `{"value":"...","label":"..."}`. `choices.value` is the serialized
+setting value, so integer settings use decimal text (for example `"1"`), while
+the setting's `default.value` keeps its declared JSON type. `type` remains the
+element type;
 `array`, when present, describes the number of elements in the value.
 Without `array`, the setting represents one value of its type, which may itself
 be structured, such as `point2` or `graph`.
@@ -641,15 +682,19 @@ matrix is identity; effective transformations reside on its instances and volume
       "id": "object-id",
       "name": "part.stl",
       "cut": false,
+      "has_settings": false,
       "matrix": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
       "parts": [
-        {"id":"part-id", "name":"part.stl", "type":"part", "painted":[], "matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}
+        {"id":"part-id", "name":"part.stl", "type":"part", "painted":[], "has_settings":false, "matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}
       ],
       "instances": [
         {
           "id": "instance-id",
           "matrix": [1,0,0,10,0,1,0,20,0,0,1,0,0,0,0,1]
         }
+      ],
+      "layer_ranges": [
+        {"id":"range-id", "min":2, "max":4, "has_settings":true}
       ]
     }
   ]
@@ -672,6 +717,13 @@ stable values:
 `painted` lists the painting channels present on the part. Stable channel names
 are `support` for support painting and `mmu` for multi-material painting,
 followed by annotation keys such as `builtin:seam`.
+`has_settings` reports whether that entity stores any explicit configuration
+overrides; it does not include inherited values or filter by the keys exposed by
+`list_entity_settings`. A part created by `add_part` or `add_shape` stores the
+default `extruder = 0`, so its `has_settings` is `true`. `layer_ranges` is
+ordered by height bounds and contains each range's stable ID, exact `min`/`max` bounds
+in millimeters, and override-presence flag. The ID remains stable when its bounds
+are changed through `set_layer_range`.
 
 ### 5.12. `POST .../transform/{id}`
 
@@ -1270,6 +1322,84 @@ name returns `200` without a commit. Object names affect slicing; part names do 
 | Invalid merge selection | `422 invalid_merge` |
 | Active slicing / concurrent commit | `409 session_busy` / `409 session_changed` |
 
+### 5.17. Entity settings and layer ranges (1.1)
+
+Entity settings are partial overrides stored on an object, a printable solid
+part, a parameter modifier, or a layer-height range. Reads expose only values
+explicitly stored on that entity; inherited values are not returned. A setting
+definition's optional `scopes` lists which entity kinds may store it.
+
+| Scope | Accepted settings |
+|---|---|
+| `object` | `PrintObjectConfig` and `PrintRegionConfig` settings, including FFF plugin options declared for `Object`, `Layer`, or `Region` containers, plus `extruder` |
+| `part` | Region settings, including FFF plugin options declared for `Layer` or `Region`, plus `extruder`; support-category settings are excluded |
+| `layer_range` | Region settings, including FFF plugin options declared for `Layer` or `Region`, plus required `layer_height` and `extruder`; support-category settings are excluded |
+
+Definitions with category `none` are omitted, except for the special `extruder`
+and `layer_height` settings. `extruder` is also listed in the `entity` catalog
+category. Its integer value is `0` for the default tool or `1` through `N` for
+the printer's numbered extruders. Entity-scoped vector values use the session's
+selected printer to validate their extruder cardinality. Categories such as
+`extruders` and `wipe` are not filtered on single-extruder printers.
+
+An object, solid part (`type: "part"`), modifier (`type: "modifier"`), and
+layer range can be queried with:
+
+- `GET .../list_entity_settings/{entity_id}` returns
+  `{"id":"entity-id","setting_ids":["extruder","fill_density"]}`. The
+  setting IDs are sorted and include only explicit, supported overrides.
+- `GET .../get_entity_settings/{entity_id}/{setting_id}` returns a typed value
+  in the same `value`/`enabled`/`percent` format used by `/get_settings`, for
+  example `{"id":"entity-id","setting_id":"fill_density","value":{"value":40}}`.
+  A permitted but absent override returns `404 setting_not_set`; values are
+  never inherited in this response.
+- `POST .../set_entity_setting/{entity_id}/{setting_id}/{serialized_value}`
+  accepts the same URL-encoded SuperSlicer serialization as `set_setting`, with
+  no body. It returns the accepted `serialized_value`.
+- `POST .../set_entity_settings/{entity_id}` accepts a nonempty JSON object.
+  Each setting value uses the typed value-object contract from §5.2; `null`
+  removes that entity's override. The response includes typed values actually
+  applied in `updated` and removed keys in sorted `removed`.
+
+The two entity-setting GET routes may return `409 session_changed` if the
+session revision changes while the scene snapshot and entity ID are being read;
+clients can retry the read.
+
+Validate the complete update before assigning any override. A key outside the
+entity's scope, invalid type/value/range/cardinality, read-only setting, or
+extruder outside `0..N` returns `422 invalid_setting` without a partial change.
+On a layer range, `layer_height` and `extruder` cannot be removed, and the
+stored layer height must remain within the selected extruder's minimum/maximum
+nozzle limits. Cross-setting consistency is checked by the slicer when slicing,
+as in the GUI. A no-op update returns `200` without increasing the session
+revision; a real change invalidates current G-code and publishes one new revision.
+
+Layer ranges are entities whose ID is keyed by the owning object ID and exact
+`[min,max]` bounds. Their IDs appear in `list_objects` and remain stable while
+they exist; changing bounds moves the ID to the new key. Ranges are persisted in
+3MF projects. Each range has required `layer_height` and `extruder` overrides.
+
+- `POST .../add_layer_range/{object_id}` accepts
+  `{"min":5,"max":8,"layer_height":0.3,"extruder":0}`; `extruder` is
+  optional and defaults to `0`. It returns the new `id`, `min`, and `max`.
+- `POST .../set_layer_range/{range_id}` accepts only numeric `min` and `max`.
+  Bounds must be finite, satisfy `0 <= min < max`, and not overlap another
+  range on the same object. Touching bounds are allowed. The range's settings
+  follow the new bounds and its ID is retained. Repeating the current bounds is
+  a no-op.
+- `POST .../delete_entity/{range_id}` removes a range and returns its ID in
+  `deleted`; `invalidate_cut` has no effect on a range.
+
+Invalid bounds, overlap, or a layer height outside nozzle limits return
+`422 invalid_layer_range`. The `add_layer_range` target must be an object and
+`set_layer_range` target must be a layer-range ID. Instances and non-printable
+volume types do not accept entity settings (`422 invalid_entity_settings`).
+Layer ranges cannot be transformed or renamed, and other scene-edit routes
+return their corresponding `422` target error. As with other reads, GET routes
+reject a request body with `400 invalid_request`; valid writes during slicing
+return `409 session_busy`, and a concurrent revision change returns
+`409 session_changed`.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1363,6 +1493,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 10 | `rest_e2e_tests`: `E4 post processing is inert from all configuration sources`; `rest_launch_tests`: `REST launch account writer produces a document accepted by HTTP` |
 | 11 | `rest_e2e_tests`: `E5 expiration shutdown and restart`; `rest_slice_tests`: `REST slice keeps registry work busy and restarts TTL at completion` |
 | 1.1 scene editing | `rest_models_tests`: `REST list_objects reports part types paintings and cut objects`, `REST set_part_type changes types atomically and keeps unchanged types uncommitted`, `REST rename validates names and invalidates G-code only for objects`, `REST delete_entity removes entities and keeps the retained part ID`, `REST add_part checks the target before upload and imports a part`, `REST add_shape creates default and sized shapes`, `REST split and merge replace scene entities in one commit`, `REST scene edits are refused while slicing and on concurrent changes`, `REST negative volumes and support enforcers change the sliced result` |
+| 1.1 entity settings and ranges | `rest_models_tests`: `Entity setting scopes follow the GUI lists and plugin containers`, `Entity settings write atomically and remove overrides`, `Layer ranges validate bounds overlaps and nozzle height limits`, `REST list_settings publishes entity setting scopes`, `REST entity settings read and write objects parts and layer ranges`, `REST layer ranges are entities with IDs that follow their bounds`, `REST entity setting edits are refused while slicing and on concurrent changes`, `REST entity settings change the sliced result`, `REST entity settings and layer ranges survive save_project and load_project` |
 
 ## 8. Decisions
 
@@ -1392,6 +1523,10 @@ platform validation responsibility, not an in-process TLS implementation.
 - Built-in shape defaults are fixed because the REST server has no camera.
 - Splitting into objects discards modifiers, matching the GUI operation.
 - Merging is limited to objects that each have exactly one instance.
+- Entity-setting combinations are checked by the slicer during slicing, not by
+  the REST override writer. `extruders`/`wipe` scope is not filtered for a
+  single-extruder printer, so clients may see settings the current printer does
+  not use.
 - Support enforcer and blocker parts are stored and sliced, but this build does
   not generate support from them yet: support generation is being migrated to
   the plugin pipeline.

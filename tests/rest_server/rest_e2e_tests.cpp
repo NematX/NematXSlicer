@@ -208,7 +208,8 @@ TEST_CASE("E1 complete public REST workflow", "[rest_e2e][E1]")
     fixture.start();
     const Client alice{fixture, login(fixture, "Alice")};
     const nlohmann::json catalog = json_ok(alice.get("/list_settings"));
-    REQUIRE(catalog.size() == 5);
+    REQUIRE(catalog.size() == 6);
+    REQUIRE(catalog.at("entity").is_array());
     std::size_t definitions = 0;
     for (const char *category : {"print", "printer", "filament", "extruder", "preference"}) {
         REQUIRE(catalog.at(category).is_array());

@@ -29,6 +29,7 @@
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Slicing.hpp"
 
 namespace Slic3r::Rest {
 
@@ -92,17 +93,20 @@ struct ViewerSnapshot {
 enum class EntityKind {
     object,
     volume,
-    instance
+    instance,
+    layer_range
 };
 
 struct EntityReference {
     EntityKind kind;
     std::uint64_t engine_id;
+    t_layer_height_range range{0., 0.};
 };
 
 struct EntityBinding {
     EntityKind kind;
     std::uint64_t engine_id;
+    t_layer_height_range range{0., 0.};
 };
 
 // A retained entity whose engine ID changed keeps its REST ID under the new key.
@@ -110,12 +114,16 @@ struct EntityRebinding {
     EntityKind kind;
     std::uint64_t from_engine_id;
     std::uint64_t to_engine_id;
+    t_layer_height_range from_range{0., 0.};
+    t_layer_height_range to_range{0., 0.};
 };
 
 // Resolve a preserved engine ID inside a private scene copy, not the live scene.
 std::vector<ModelInstance *> find_transform_instances(Model &scene, const EntityReference &entity);
 // Return the parent and volume inside the private scene copy, preserving shared-instance semantics.
 std::pair<ModelObject *, ModelVolume *> find_transform_volume(Model &scene, const EntityReference &entity);
+// Return the owning object and its exact layer-range entry inside a private scene copy.
+std::pair<ModelObject *, t_layer_config_ranges::iterator> find_layer_range(Model &scene, const EntityReference &entity);
 
 class SessionContext {
 public:
@@ -223,7 +231,10 @@ public:
     // returned snapshot keeps its G-code file alive while it is held.
     std::shared_ptr<const ViewerSnapshot> current_result() const;
 
-    std::optional<std::string> bind_entity(EntityKind kind, std::uint64_t engine_id);
+    std::optional<std::string> bind_entity(
+        EntityKind kind,
+        std::uint64_t engine_id,
+        t_layer_height_range range = {0., 0.});
     std::optional<EntityReference> resolve_entity(const std::string &entity_id) const;
     bool unbind_entity(const std::string &entity_id);
 
@@ -231,6 +242,7 @@ private:
     struct EntityKey {
         EntityKind kind;
         std::uint64_t engine_id;
+        t_layer_height_range range{0., 0.};
 
         bool operator<(const EntityKey &other) const noexcept;
     };

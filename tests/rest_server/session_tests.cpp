@@ -457,6 +457,62 @@ TEST_CASE("entity IDs are stable until the entity is removed", "[rest_session]")
     REQUIRE(session->bind_entity(Slic3r::Rest::EntityKind::object, 10) != object_id);
 }
 
+TEST_CASE("layer-range entity IDs follow exact owner bounds atomically", "[rest_session][rest_layer_ranges]")
+{
+    Registry registry(std::chrono::hours(24));
+    SessionData data;
+    data.scene = std::make_shared<Slic3r::Model>();
+    Slic3r::ModelObject *object = data.scene->add_object("part", "part.stl", Slic3r::make_cube(1, 1, 1));
+    object->add_instance();
+    const Slic3r::t_layer_height_range original{2., 4.};
+    const Slic3r::t_layer_height_range replacement{4., 6.};
+    object->layer_config_ranges.emplace(original, Slic3r::ModelConfig{});
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const std::vector<Slic3r::Rest::EntityBinding> bindings{
+        {Slic3r::Rest::EntityKind::object, static_cast<std::uint64_t>(object->id().id)},
+        {Slic3r::Rest::EntityKind::volume, static_cast<std::uint64_t>(object->volumes.front()->id().id)},
+        {Slic3r::Rest::EntityKind::instance, static_cast<std::uint64_t>(object->instances.front()->id().id)},
+        {Slic3r::Rest::EntityKind::layer_range, static_cast<std::uint64_t>(object->id().id), original}
+    };
+    std::vector<std::string> ids;
+    REQUIRE(session->commit_mutation(session->begin_mutation().value(), data, true, at_hours(1), bindings, ids));
+    REQUIRE(ids.size() == bindings.size());
+    const std::string range_id = ids.back();
+    const Slic3r::Rest::EntityReference resolved = session->resolve_entity(range_id).value();
+    CHECK(resolved.kind == Slic3r::Rest::EntityKind::layer_range);
+    CHECK(resolved.engine_id == static_cast<std::uint64_t>(object->id().id));
+    CHECK(resolved.range == original);
+    CHECK(session->list_objects()->at("objects").at(0).at("layer_ranges").at(0).at("id") == range_id);
+
+    const Session::MutationToken stale = session->begin_mutation().value();
+    const Session::MutationToken move = session->begin_mutation().value();
+    SessionData candidate = session->data_snapshot().value();
+    candidate.scene = std::make_shared<Slic3r::Model>(*candidate.scene);
+    Slic3r::ModelObject *candidate_object = candidate.scene->object_ptrs().front();
+    Slic3r::ModelConfig config = std::move(candidate_object->layer_config_ranges.at(original));
+    candidate_object->layer_config_ranges.erase(original);
+    candidate_object->layer_config_ranges.emplace(replacement, std::move(config));
+    const std::vector<Slic3r::Rest::EntityRebinding> rebindings{{
+        Slic3r::Rest::EntityKind::layer_range,
+        static_cast<std::uint64_t>(object->id().id),
+        static_cast<std::uint64_t>(object->id().id),
+        original,
+        replacement
+    }};
+    REQUIRE(session->commit_mutation(move, candidate, true, at_hours(2), {}, ids, false, {}, rebindings));
+    const Slic3r::Rest::EntityReference moved = session->resolve_entity(range_id).value();
+    CHECK(moved.range == replacement);
+    CHECK(moved.engine_id == resolved.engine_id);
+    CHECK_FALSE(session->commit_mutation(stale, candidate, true, at_hours(3), {}, ids, false, {}, rebindings));
+    CHECK(session->resolve_entity(range_id)->range == replacement);
+
+    const std::optional<std::string> old_key_id = session->bind_entity(
+        Slic3r::Rest::EntityKind::layer_range, resolved.engine_id, original);
+    REQUIRE(old_key_id.has_value());
+    CHECK(old_key_id.value() != range_id);
+    REQUIRE(session->unbind_entity(old_key_id.value()));
+}
+
 TEST_CASE("a mutation racing a work start is rejected", "[rest_session]")
 {
     Registry registry(std::chrono::hours(24));

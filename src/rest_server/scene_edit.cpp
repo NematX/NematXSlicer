@@ -89,6 +89,8 @@ void append_object_entities(const ModelObject &object, std::vector<EntityBinding
         out.push_back({EntityKind::volume, volume->id().id});
     for (const ModelInstance *instance : object.instances)
         out.push_back({EntityKind::instance, instance->id().id});
+    for (const std::pair<const t_layer_height_range, ModelConfig> &range : object.layer_config_ranges)
+        out.push_back({EntityKind::layer_range, object.id().id, range.first});
 }
 
 bool is_loadable_part_type(ModelVolumeType type)
@@ -360,6 +362,8 @@ SceneChange merge_objects(Model &model, const std::vector<ModelObject *> &source
         change.unbindings.push_back({EntityKind::object, source->id().id});
         for (ModelInstance *instance : source->instances)
             change.unbindings.push_back({EntityKind::instance, instance->id().id});
+        for (const std::pair<const t_layer_height_range, ModelConfig> &range : source->layer_config_ranges)
+            change.unbindings.push_back({EntityKind::layer_range, source->id().id, range.first});
     }
     for (ModelObject *source : sources)
         model.delete_object(source);

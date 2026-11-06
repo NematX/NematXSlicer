@@ -11,6 +11,7 @@
 #include "rest_server.hpp"
 
 #include "auth.hpp"
+#include "entity_settings.hpp"
 #include "engine.hpp"
 #include "file_names.hpp"
 #include "multipart_upload.hpp"
@@ -35,6 +36,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <initializer_list>
 #include <limits>
@@ -1190,6 +1192,8 @@ HttpResponse handle_transform(
         return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
     if (session->snapshot().revision != mutation->revision)
         return make_error_response(409, "session_changed", "The session changed while the transform was prepared.", request_id);
+    if (entity->kind == EntityKind::layer_range)
+        return make_error_response(422, "invalid_transform", "Layer ranges cannot be transformed.", request_id);
     try {
         if (transform.instance && entity->kind != EntityKind::volume)
             throw TransformError(422, "The instance field is only valid for a volume target.");
@@ -1712,6 +1716,399 @@ HttpResponse scene_edit_error(const SceneEditError &error, const std::string &re
     return make_error_response(error.status(), error.code(), error.what(), request_id);
 }
 
+// Parse the open-ended settings object before session-busy checks so malformed
+// request shapes receive the same 400 response during slicing.
+bool parse_entity_setting_updates(
+    HttpRequest &request,
+    std::vector<std::pair<std::string, std::optional<nlohmann::json>>> &updates,
+    HttpResponse &error,
+    const std::string &request_id)
+{
+    if (request.body.empty() || !parse_request_json(request, error, request_id)) {
+        if (request.body.empty())
+            error = make_error_response(400, "invalid_request", "The body must be a non-empty settings object.", request_id);
+        return false;
+    }
+    if (!request.json_body->is_object() || request.json_body->empty()) {
+        error = make_error_response(400, "invalid_request", "The body must be a non-empty settings object.", request_id);
+        return false;
+    }
+    for (nlohmann::json::const_iterator item = request.json_body->begin();
+         item != request.json_body->end(); ++item) {
+        if (!item.value().is_null() && !item.value().is_object()) {
+            error = make_error_response(400, "invalid_request", "Each setting must be an object or null.", request_id);
+            return false;
+        }
+        updates.emplace_back(item.key(), item.value().is_null()
+            ? std::nullopt
+            : std::optional<nlohmann::json>(item.value()));
+    }
+    return true;
+}
+
+// Read only settings explicitly stored on the resolved entity, never inherited values.
+HttpResponse handle_list_entity_settings(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The route does not accept a request body.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::optional<SessionData> data = session->data_snapshot();
+    if (!data)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != revision)
+        return make_error_response(409, "session_changed", "The scene changed while settings were read.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    try {
+        SettingsTarget target = find_settings_target(*data->scene, *entity);
+        return HttpResponse::json(200, {
+            {"id", request.path_segments[3]},
+            {"setting_ids", defined_setting_ids(target)}
+        });
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::invalid_argument &error) {
+        return invalid_setting_request(error.what(), request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not list entity settings.", request_id);
+    }
+}
+
+// Return one typed value only when the entity itself stores that override.
+HttpResponse handle_get_entity_setting(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The route does not accept a request body.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+
+    const std::uint64_t revision = session->snapshot().revision;
+    const std::optional<SessionData> data = session->data_snapshot();
+    if (!data)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (session->snapshot().revision != revision)
+        return make_error_response(409, "session_changed", "The scene changed while settings were read.", request_id);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    try {
+        SettingsTarget target = find_settings_target(*data->scene, *entity);
+        const nlohmann::json value = read_entity_setting(target, request.path_segments[4], data->configuration);
+        return HttpResponse::json(200, {
+            {"id", request.path_segments[3]},
+            {"setting_id", request.path_segments[4]},
+            {"value", value}
+        });
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::invalid_argument &error) {
+        return invalid_setting_request(error.what(), request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not read the entity setting.", request_id);
+    }
+}
+
+// Apply one serialized override to a private scene and publish it with a single revision.
+HttpResponse handle_set_entity_setting(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The route does not accept a request body.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The scene changed while the setting was prepared.", request_id);
+
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SettingsTarget target = find_settings_target(*candidate.scene, *entity);
+        const std::vector<std::pair<std::string, std::optional<std::string>>> updates{{
+            request.path_segments[4], request.path_segments[5]
+        }};
+        const EntitySettingsChange change = write_entity_settings(target, updates, current->configuration);
+        const std::string serialized = target.config->opt_serialize(request.path_segments[4]);
+        if (change.changed) {
+            if (services.scene_edit_observer)
+                services.scene_edit_observer();
+            std::vector<std::string> ids;
+            if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                    change.bindings, ids, false, change.unbindings, change.rebindings))
+                return make_error_response(409, "session_changed", "The scene changed while the setting was prepared.", request_id);
+        }
+        return HttpResponse::json(200, {
+            {"id", request.path_segments[3]},
+            {"setting_id", request.path_segments[4]},
+            {"serialized_value", serialized}
+        });
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::invalid_argument &error) {
+        return invalid_setting_request(error.what(), request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not set the entity setting.", request_id);
+    }
+}
+
+// Validate a typed partial update completely before assigning any ModelConfig.
+HttpResponse handle_set_entity_settings(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::vector<std::pair<std::string, std::optional<nlohmann::json>>> values;
+    HttpResponse parse_error;
+    if (!parse_entity_setting_updates(request, values, parse_error, request_id))
+        return parse_error;
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The scene changed while the settings were prepared.", request_id);
+
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SettingsTarget target = find_settings_target(*candidate.scene, *entity);
+        std::vector<std::pair<std::string, std::optional<std::string>>> updates;
+        std::vector<std::string> removed;
+        updates.reserve(values.size());
+        for (const std::pair<std::string, std::optional<nlohmann::json>> &value : values) {
+            if (!setting_in_scope(target.scope, value.first))
+                throw SceneEditError(422, "invalid_setting", "This setting is not available for the target entity.");
+            if (value.second.has_value()) {
+                const ConfigOptionDef &definition = require_entity_setting_definition(value.first);
+                updates.emplace_back(value.first, entity_setting_json_to_serialized(
+                    definition, value.second.value(), current->configuration));
+            } else {
+                if (target.scope == SettingScope::layer_range &&
+                    (value.first == "layer_height" || value.first == "extruder"))
+                    throw SceneEditError(422, "invalid_setting", "Layer ranges must retain layer_height and extruder.");
+                if (target.config->has(value.first))
+                    removed.push_back(value.first);
+                updates.emplace_back(value.first, std::nullopt);
+            }
+        }
+        const EntitySettingsChange change = write_entity_settings(target, updates, current->configuration);
+        nlohmann::json updated = nlohmann::json::object();
+        for (const std::pair<std::string, std::optional<nlohmann::json>> &value : values)
+            if (value.second.has_value())
+                updated[value.first] = read_entity_setting(target, value.first, current->configuration);
+        std::sort(removed.begin(), removed.end());
+        if (change.changed) {
+            if (services.scene_edit_observer)
+                services.scene_edit_observer();
+            std::vector<std::string> ids;
+            if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                    change.bindings, ids, false, change.unbindings, change.rebindings))
+                return make_error_response(409, "session_changed", "The scene changed while the settings were prepared.", request_id);
+        }
+        return HttpResponse::json(200, {
+            {"id", request.path_segments[3]},
+            {"updated", updated},
+            {"removed", removed}
+        });
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::invalid_argument &error) {
+        return invalid_setting_request(error.what(), request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not set entity settings.", request_id);
+    }
+}
+
+// Add a validated range and bind its owner/bounds key in the same scene commit.
+HttpResponse handle_add_layer_range(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"min", "max", "layer_height", "extruder"}, request_id))
+        return *error;
+    const nlohmann::json &body = *request.json_body;
+    if (!body.contains("min") || !body.at("min").is_number() ||
+        !body.contains("max") || !body.at("max").is_number() ||
+        !body.contains("layer_height") || !body.at("layer_height").is_number())
+        return make_error_response(400, "invalid_request", "The body requires numeric min, max, and layer_height fields.", request_id);
+    const double min = body.at("min").get<double>();
+    const double max = body.at("max").get<double>();
+    const double layer_height = body.at("layer_height").get<double>();
+    if (!std::isfinite(min) || !std::isfinite(max) || min < 0. || min >= max || !std::isfinite(layer_height))
+        return make_error_response(422, "invalid_layer_range", "Layer bounds and height must be finite, with 0 <= min < max.", request_id);
+    int extruder = 0;
+    if (body.contains("extruder")) {
+        if (!body.at("extruder").is_number_integer())
+            return make_error_response(400, "invalid_request", "extruder must be an integer.", request_id);
+        const nlohmann::json &value = body.at("extruder");
+        if (value.is_number_unsigned()) {
+            const std::uint64_t unsigned_value = value.get<std::uint64_t>();
+            if (unsigned_value > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+                return make_error_response(400, "invalid_request", "extruder is outside the integer range.", request_id);
+            extruder = static_cast<int>(unsigned_value);
+        } else {
+            const std::int64_t signed_value = value.get<std::int64_t>();
+            if (signed_value < std::numeric_limits<int>::min() || signed_value > std::numeric_limits<int>::max())
+                return make_error_response(400, "invalid_request", "extruder is outside the integer range.", request_id);
+            extruder = static_cast<int>(signed_value);
+        }
+    }
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The scene changed while the layer range was prepared.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_layer_range", "The target must be an object.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SettingsTarget target = find_settings_target(*candidate.scene, *entity);
+        const EntitySettingsChange change = add_layer_range(*target.object, min, max, layer_height, extruder,
+            current->configuration);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The scene changed while the layer range was prepared.", request_id);
+        return HttpResponse::json(200, {{"id", ids.at(0)}, {"min", min}, {"max", max}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not add the layer range.", request_id);
+    }
+}
+
+// Move an existing range's REST key with its exact bounds while preserving its ID.
+HttpResponse handle_set_layer_range(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"min", "max"}, request_id))
+        return *error;
+    const nlohmann::json &body = *request.json_body;
+    if (body.size() != 2 || !body.contains("min") || !body.at("min").is_number() ||
+        !body.contains("max") || !body.at("max").is_number())
+        return make_error_response(400, "invalid_request", "The body must contain only numeric min and max fields.", request_id);
+    const double min = body.at("min").get<double>();
+    const double max = body.at("max").get<double>();
+    if (!std::isfinite(min) || !std::isfinite(max) || min < 0. || min >= max)
+        return make_error_response(422, "invalid_layer_range", "Layer bounds must be finite and satisfy 0 <= min < max.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The scene changed while the layer range was prepared.", request_id);
+    if (entity->kind != EntityKind::layer_range)
+        return make_error_response(422, "invalid_layer_range", "The target must be a layer range.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        const std::pair<ModelObject *, t_layer_config_ranges::iterator> target =
+            find_layer_range(*candidate.scene, *entity);
+        const EntitySettingsChange change = set_layer_range_bounds(*target.first, entity->range, min, max);
+        if (!change.changed)
+            return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"min", min}, {"max", max}});
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The scene changed while the layer range was prepared.", request_id);
+        return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"min", min}, {"max", max}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not set the layer range.", request_id);
+    }
+}
+
 HttpResponse handle_set_part_type(HttpRequest &request, const RouteServices &services,
     const std::string &username, const std::string &request_id)
 {
@@ -1789,6 +2186,8 @@ HttpResponse handle_rename(HttpRequest &request, const RouteServices &services,
         return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
     if (entity->kind == EntityKind::instance)
         return make_error_response(422, "invalid_name", "Instances cannot be renamed.", request_id);
+    if (entity->kind == EntityKind::layer_range)
+        return make_error_response(422, "invalid_name", "Layer ranges cannot be renamed.", request_id);
     try {
         SessionData candidate = *current;
         candidate.scene = std::make_shared<Model>(*current->scene);
@@ -1848,6 +2247,11 @@ HttpResponse handle_delete_entity(HttpRequest &request, const RouteServices &ser
         if (entity->kind == EntityKind::volume) {
             const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*candidate.scene, *entity);
             change = delete_volume(*target.first, *target.second, invalidate_cut);
+        } else if (entity->kind == EntityKind::layer_range) {
+            const std::pair<ModelObject *, t_layer_config_ranges::iterator> target =
+                find_layer_range(*candidate.scene, *entity);
+            const EntitySettingsChange deleted = delete_layer_range(*target.first, target.second->first);
+            change.unbindings = deleted.unbindings;
         } else {
             std::vector<ModelInstance *> targets = find_transform_instances(*candidate.scene, *entity);
             ModelObject *object = targets.at(0)->get_object();
@@ -2217,11 +2621,7 @@ HttpResponse import_model(
             hide_upload_path(*added_object, upload);
 
             object_binding_indices.push_back(bindings.size());
-            bindings.push_back({EntityKind::object, static_cast<std::uint64_t>(added_object->id().id)});
-            for (ModelVolume *volume : added_object->volumes)
-                bindings.push_back({EntityKind::volume, static_cast<std::uint64_t>(volume->id().id)});
-            for (ModelInstance *instance : added_object->instances)
-                bindings.push_back({EntityKind::instance, static_cast<std::uint64_t>(instance->id().id)});
+            append_object_entities(*added_object, bindings);
         }
 
         SessionData candidate = current;
@@ -2497,11 +2897,7 @@ HttpResponse import_project(
         for (ModelObject *object : scene.object_ptrs()) {
             hide_upload_path(*object, upload);
             object_binding_indices.push_back(bindings.size());
-            bindings.push_back({EntityKind::object, static_cast<std::uint64_t>(object->id().id)});
-            for (ModelVolume *volume : object->volumes)
-                bindings.push_back({EntityKind::volume, static_cast<std::uint64_t>(volume->id().id)});
-            for (ModelInstance *instance : object->instances)
-                bindings.push_back({EntityKind::instance, static_cast<std::uint64_t>(instance->id().id)});
+            append_object_entities(*object, bindings);
         }
 
         SessionData candidate;
@@ -3142,6 +3538,18 @@ std::optional<HttpResponse> dispatch_request(
             return handle_merge(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "set_instance_count")
             return handle_set_instance_count(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "list_entity_settings")
+            return handle_list_entity_settings(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 5 && operation == "get_entity_settings")
+            return handle_get_entity_setting(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 6 && operation == "set_entity_setting")
+            return handle_set_entity_setting(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "set_entity_settings")
+            return handle_set_entity_settings(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "add_layer_range")
+            return handle_add_layer_range(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "set_layer_range")
+            return handle_set_layer_range(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "get_setting")
             return handle_get_setting(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_settings")
