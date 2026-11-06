@@ -52,6 +52,39 @@
 #include "PointSerialize.hpp"
 #include "TextConfiguration.hpp"
 
+/*
+This file reads and writes 3MF projects for core callers.
+Import restores meshes and project data. Export writes the model to a ZIP archive,
+with optional configuration entries inside it.
+
+Import restores meshes, object placement and the project data attached to them;
+export serializes those owned model values into ZIP entries and optional settings.
+Layer-height profiles are project data, not mesh vertices: they are restored onto
+the matching object after geometry has been read and checked.
+
+The caller owns the Model and optional configuration passed to these entry points.
+Archive readers and writers own their temporary buffers for one operation. Keep
+format parsing separate from applying profiles or configuration so malformed
+optional data cannot be mistaken for a successfully restored object property.
+
+Operation notes:
+- load_3mf: read archive entries, restore meshes and apply stored object data
+- store_3mf: serialize the model and optional settings into archive entries
+
+Representative direct calls (branches are not a timeline):
+
+    load_3mf()
+        |-- importer.load_model_from_file()
+        |-- importer.log_errors()
+        |-- handle_legacy_project_loaded()
+        |-- importer.version()
+        `-- importer.prusaslicer_generator_version()
+
+    store_3mf()
+        |-- exporter.save_model_to_file()
+        `-- exporter.log_errors()
+*/
+
 namespace pt = boost::property_tree;
 
 // Slightly faster than sprintf("%.9g"), but there is an issue with the karma floating point formatter,
@@ -1358,7 +1391,9 @@ namespace Slic3r {
 
                 std::vector<std::string> object_data_profile;
                 boost::split(object_data_profile, object_data[1], boost::is_any_of(";"), boost::token_compress_off);
-                if (object_data_profile.size() <= 4 || object_data_profile.size() % 2 != 0) {
+                // The ';'-separated list alternates Z positions and layer heights.
+                // Two points need four values. An odd number of values is invalid.
+                if (object_data_profile.size() < 4 || object_data_profile.size() % 2 != 0) {
                     add_error("Found invalid layer heights profile");
                     continue;
                 }

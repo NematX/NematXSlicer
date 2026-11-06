@@ -2469,7 +2469,10 @@ option_def_error_code Orchestrator::create_print_config_impl(const raw_config_op
         PrintConfigDef::instance_mutable().option_keys(RAW_PRESET_TYPE_FFF_TOOL_EXTRUDER).insert(out.opt_key);
         PrintConfigDef::instance_mutable().option_keys(RAW_PRESET_TYPE_FFF_PRINTER).insert(out.opt_key);
     }
-    add_to_prusa_export_to_remove_keys(out.opt_key);
+    // Keep plugin options marked comPrusa in Metadata/Slic3r_PE.config, the file read by PrusaSlicer.
+    // Destination rules still exclude local settings from this embedded configuration.
+    if ((out.mode & comPrusa) == 0)
+        add_to_prusa_export_to_remove_keys(out.opt_key);
     if (m_initializing_plugin != nullptr)
         m_config_option_owners[out.opt_key] = ConfigOptionOwner{
             m_initializing_plugin->get_id(),
