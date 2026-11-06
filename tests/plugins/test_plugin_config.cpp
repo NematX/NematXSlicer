@@ -3,30 +3,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/*
-Tests for plugin-owned temporary configurations.
-Serialization checks use options that throw or change length between calls to verify
-that C functions report failures and C++ views throw instead of returning empty text.
-Call graph for these checks:
-  TEST_CASE (serialization failures)
-    config_option_serialize -> ThrowingSerializedOption::serialize
-    config_option_vector_serialize_at
-    slic3r_api::ConfigOption::serialize -> ChangingSerializedOption::serialize
-
-The suite exercises the C ABI as a plugin sees it, then uses the C++ wrappers
-to verify buffer ownership. The core SCFG codec is covered separately
-by libslic3r tests; this suite verifies the ABI buffer and merge semantics.
-Invalidation checks compare each option's earliest consuming step with the
-checkpoint used to replay its affected pipeline suffix.
-Setting-support checks compare definition defaults with config values and read
-only provider metadata; unregistered copies model providers with no used keys.
-Definition nature checks exercise classification transport and its permission
-table; the persistence checks write configurations to files, 3MF and AMF archives
-and read the text back, to verify that each destination only receives the keys that
-the nature of their definition allows. Redefinition diagnostics are captured from
-the host log, independently of the returned registration status.
-*/
-
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -80,6 +56,44 @@ the host log, independently of the returned registration status.
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/miniz_extension.hpp"
+
+/*
+Tests for plugin-owned temporary configurations.
+Serialization checks use options that throw or change length between calls to verify
+that C functions report failures and C++ views throw instead of returning empty text.
+Call graph for these checks:
+  TEST_CASE (serialization failures)
+
+The suite exercises the C ABI as a plugin sees it, then uses the C++ wrappers
+to verify buffer ownership. The core SCFG codec is covered separately
+by libslic3r tests; this suite verifies the ABI buffer and merge semantics.
+Invalidation checks compare each option's earliest consuming step with the
+checkpoint used to replay its affected pipeline suffix.
+Setting-support checks compare definition defaults with config values and read
+only provider metadata; unregistered copies model providers with no used keys.
+Definition nature checks exercise classification transport and its permission
+table; the persistence checks write configurations to files, 3MF and AMF archives
+and read the text back, to verify that each destination only receives the keys that
+the nature of their definition allows. Redefinition diagnostics are captured from
+the host log, independently of the returned registration status.
+The Prusa checks read Metadata/Slic3r_PE.config inside the 3MF archive.
+They distinguish compatible plugin options from SuperSlicer-only options.
+
+Operation notes:
+- config_option_serialize :  ThrowingSerializedOption::serialize
+- config_option_vector_serialize_at
+- slic3r_api::ConfigOption::serialize :  ChangingSerializedOption::serialize
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Steps::checkpoint_before_step()
+        |-- Test::init_print()
+        |-- make_cube()
+        |-- Steps::StepPipeline::run_slice()
+        |-- Steps::StepPipeline::run_gcode()
+        `-- print.apply()
+*/
 
 namespace {
 
@@ -2019,8 +2033,7 @@ TEST_CASE("3MF project configuration files follow their destination",
         }
     }
 
-    // The file read by PrusaSlicer has the real keys allowed in G-code. Plugin-defined options, such as the test keys,
-    // are never exported to it by the Prusa conversion, whatever their nature.
+    // These test options do not declare Prusa support, so conversion excludes them regardless of their nature.
     const std::string prusa_text = read_archive_entry(archive, "Metadata/Slic3r_PE.config");
     REQUIRE_FALSE(prusa_text.empty());
     for (const NatureKeyExpectation &expectation : k_nature_keys) {
@@ -2038,6 +2051,51 @@ TEST_CASE("3MF project configuration files follow their destination",
     std::string loaded_sections;
     REQUIRE(Slic3r::load_3mf(archive.string().c_str(), loaded_config, substitutions, &loaded_model, false, false, &loaded_sections));
     CHECK(loaded_sections == k_profile_sections_text);
+}
+
+// In the 3MF's Prusa-compatible configuration, keep thin_walls but exclude gap_fill_extension.
+// The local printhost_apikey value must be absent. Export must leave the source config unchanged.
+TEST_CASE("3MF Prusa configuration keeps compatible plugin options",
+          "[plugins][config][project][3mf][prusa]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    const NatureKeyExpectation compatible{"thin_walls", "0", true, true, true};
+    const NatureKeyExpectation incompatible{"gap_fill_extension", "0.25", true, true, true};
+    const NatureKeyExpectation local{"printhost_apikey", "local_secret_sentinel", true, false, false};
+    const ConfigOptionDef *compatible_def = PrintConfigDef::instance().get(compatible.key);
+    const ConfigOptionDef *incompatible_def = PrintConfigDef::instance().get(incompatible.key);
+    REQUIRE(compatible_def != nullptr);
+    REQUIRE(incompatible_def != nullptr);
+    REQUIRE((compatible_def->mode & comPrusa) != 0);
+    REQUIRE((incompatible_def->mode & comPrusa) == 0);
+
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    DynamicPrintConfig config;
+    for (const NatureKeyExpectation &setting : {compatible, incompatible, local})
+        config.set_deserialize_strict(setting.key, setting.value);
+    const boost::filesystem::path archive = directory.path() / "plugin_options.3mf";
+    REQUIRE(store_3mf(archive.string().c_str(), &model, &config));
+
+    const std::string prusa_text = read_archive_entry(archive, "Metadata/Slic3r_PE.config");
+    REQUIRE_FALSE(prusa_text.empty());
+    CHECK(has_config_line(prusa_text, "; ", compatible));
+    CHECK_FALSE(has_config_key(prusa_text, "; ", incompatible));
+    CHECK_FALSE(has_config_key(prusa_text, "; ", local));
+    for (const char *entry : {"Metadata/Slic3r.config", "Metadata/SuperSlicer.config"}) {
+        CAPTURE(entry);
+        const std::string text = read_archive_entry(archive, entry);
+        REQUIRE_FALSE(text.empty());
+        CHECK(has_config_line(text, "; ", compatible));
+        CHECK(has_config_line(text, "; ", incompatible));
+        CHECK_FALSE(has_config_key(text, "; ", local));
+    }
+    CHECK(config.opt_serialize(compatible.key) == compatible.value);
+    CHECK(config.opt_serialize(incompatible.key) == incompatible.value);
+    CHECK(config.opt_serialize(local.key) == local.value);
 }
 
 // The profile sections go with the configuration: no configuration, no sections entry.
