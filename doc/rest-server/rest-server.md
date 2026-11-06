@@ -1221,13 +1221,53 @@ name returns `200` without a commit. Object names affect slicing; part names do 
   Deleting the last solid part or last instance is refused. Cut objects and their
   solid/negative parts require explicit cut invalidation. Response lists every
   removed ID in `deleted`; a retained sole part keeps its REST ID.
+- `add_part/{object_id}?type=...` uploads STL, OBJ, or 3MF. Loadable types are
+  solid, negative, modifier, support blocker/enforcer, and brim patch/negative.
+  Response: `{"part_id":...,"type":...}`.
+- `add_shape/{object_id}` requires `type` and `shape`; optional `size`, `position`,
+  and reference `instance` control dimensions and platter placement. Shapes are
+  selected by the following table. Response includes
+  `part_id`, `type`, and `shape`.
+
+  | `type` | Accepted `shape` values |
+  |---|---|
+  | `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`, `seam_position_inside` | `box`, `cylinder`, `sphere`, `slab` |
+  | `brim_patch`, `brim_negative` | `square`, `circle` |
+  | `seam_position_center` | `small_sphere`, `sphere` |
+  | `seam_position_center_z` | `small_cylinder` |
+
+  Defaults are fixed because the REST server has no camera. `size`, when
+  accepted, overrides the bounding-box dimensions in millimeters.
+
+  | `shape` | Default size |
+  |---|---|
+  | `box` | 100 × 100 × 100 mm |
+  | `cylinder` | diameter 50 mm × height 100 mm |
+  | `sphere` | diameter 100 mm |
+  | `slab` | 1.5 × instance width and depth, 0.5 × instance height; placed at the instance bottom |
+  | `square` | 100 × 100 × 0.1 mm |
+  | `circle` | diameter 10 mm × height 0.1 mm |
+  | `small_sphere` | diameter 20 mm |
+  | `small_cylinder` | diameter 20 mm × height 100 mm |
+- `split/{id}` accepts `{"to":"objects"}` or `{"to":"parts"}`. Object splitting
+  replaces the source with solid-shell objects; modifiers are discarded. Part
+  splitting replaces the source ID with new IDs. Responses contain `removed` and
+  `object_ids` or `part_ids`.
+- `merge` accepts `{"ids":["object-1","object-2"],"name":"Merged"}`. IDs must
+  identify distinct, non-cut, single-instance objects. It preserves part IDs and
+  platter geometry while replacing source object and instance IDs.
 
 | Condition | Response |
+|---|---|
 | Malformed JSON; missing, extra, or wrongly typed field; name of invalid length or with control characters | `400 invalid_json` / `400 invalid_request` |
 | Unknown or disallowed type or target | `422 invalid_part_type` |
 | Illegal filename characters, embossed part, or instance rename | `422 invalid_name` |
 | Last solid part or last instance deletion | `422 invalid_delete` |
 | Cut-dependent operation without permission | `422 cut_object` |
+| Unknown/disallowed shape or invalid dimensions/position | `422 invalid_shape` |
+| Unreadable or empty uploaded model | `422 invalid_model` |
+| Unsplittable entity | `422 not_splittable` |
+| Invalid merge selection | `422 invalid_merge` |
 | Active slicing / concurrent commit | `409 session_busy` / `409 session_changed` |
 
 ## 6. Security and remote access

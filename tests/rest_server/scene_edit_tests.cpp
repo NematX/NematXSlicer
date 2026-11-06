@@ -56,6 +56,74 @@ TEST_CASE("Scene edits delete entities with GUI cut and last-entity rules", "[sc
     CHECK_FALSE(cut_b->is_cut());
 }
 
+TEST_CASE("Scene edits add parts and shapes placed as in the GUI", "[scene_edit]")
+{
+    Model model;
+    ModelObject *target = model.add_object("target", "target.stl", make_cube(10, 10, 10));
+    target->add_instance();
+    Model imported;
+    ModelObject *source = imported.add_object("source", "client.stl", make_cube(4, 4, 4));
+    source->add_instance();
+    const SceneChange part = add_part(*target, std::move(imported), ModelVolumeType::PARAMETER_MODIFIER, "client.stl");
+    CHECK(part.bindings.size() == 1);
+    const ShapeRequest request{ModelVolumeType::SUPPORT_ENFORCER, "box", Vec3d(20, 30, 40), Vec3d(50, 60, 70)};
+    const SceneChange shape = add_shape(*target, 0, request);
+    CHECK(shape.bindings.size() == 1);
+    CHECK(target->volumes.back()->source.is_from_builtin_objects);
+}
+
+TEST_CASE("Scene edits split objects and parts with new entity IDs", "[scene_edit]")
+{
+    RestServerTest::ensure_engine_initialized();
+    TriangleMesh shells = make_cube(10, 10, 10);
+    TriangleMesh other = make_cube(5, 5, 5);
+    other.translate(Vec3f(20, 0, 0));
+    shells.merge(other);
+    Model model;
+    ModelObject *object = model.add_object("shells", "shells.stl", std::move(shells));
+    object->add_instance();
+    const std::uint64_t old_id = object->volumes.front()->id().id;
+    const SceneChange change = split_volume(*object, *object->volumes.front(), 2);
+    CHECK(change.unbindings.front().engine_id == old_id);
+    CHECK(change.bindings.size() == 2);
+    CHECK(change.bindings.front().engine_id != old_id);
+}
+
+TEST_CASE("Scene shape validation leaves the target untouched before adding a volume", "[scene_edit][rest_shape_bounds]")
+{
+    Model model;
+    ModelObject *object = model.add_object("object", "object.stl", make_cube(10, 10, 10));
+    object->add_instance();
+    const ModelVolume *solid = object->volumes.front();
+    for (double x : {1e100, 1e-300}) {
+        CAPTURE(x);
+        const ShapeRequest request{ModelVolumeType::PARAMETER_MODIFIER, "box", Vec3d(x, 20, 20)};
+        CHECK_THROWS_AS(add_shape(*object, 0, request), SceneEditError);
+        REQUIRE(object->volumes.size() == 1);
+        CHECK(object->volumes.front() == solid);
+    }
+    ModelObject *flat = model.add_object("flat", "flat.stl", make_cube(10, 10, 0));
+    flat->add_instance();
+    const ShapeRequest slab{ModelVolumeType::PARAMETER_MODIFIER, "slab"};
+    CHECK_THROWS_AS(add_shape(*flat, 0, slab), SceneEditError);
+    CHECK(flat->volumes.size() == 1);
+}
+
+TEST_CASE("Scene edits merge single-instance objects and keep part IDs", "[scene_edit]")
+{
+    Model model;
+    ModelObject *first = model.add_object("first", "first.stl", make_cube(10, 10, 10));
+    first->add_instance();
+    ModelObject *second = model.add_object("second", "second.stl", make_cube(5, 5, 5));
+    second->add_instance()->set_offset(Vec3d(20, 0, 0));
+    const std::set<std::uint64_t> part_ids{first->volumes.front()->id().id, second->volumes.front()->id().id};
+    const SceneChange change = merge_objects(model, {first, second}, "Merged");
+    REQUIRE(model.objects().size() == 1);
+    CHECK(part_ids.count(model.get_object(0).volumes[0]->id().id) == 1);
+    CHECK(part_ids.count(model.get_object(0).volumes[1]->id().id) == 1);
+    CHECK(change.unbindings.size() == 4);
+}
+
 TEST_CASE("Scene edit rebinding preserves REST IDs and rejects stale commits", "[scene_edit][rest_entities]")
 {
     SessionRegistry registry(std::chrono::hours(24));

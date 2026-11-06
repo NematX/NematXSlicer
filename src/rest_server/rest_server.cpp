@@ -1875,6 +1875,209 @@ HttpResponse handle_delete_entity(HttpRequest &request, const RouteServices &ser
     }
 }
 
+std::optional<Vec3d> read_vec3(const nlohmann::json &body, const char *field)
+{
+    if (!body.contains(field))
+        return std::nullopt;
+    const nlohmann::json &value = body.at(field);
+    if (!value.is_array() || value.size() != 3)
+        throw SceneEditError(422, "invalid_shape", std::string(field) + " must contain three numbers.");
+    Vec3d result;
+    for (size_t index = 0; index < 3; ++index) {
+        if (!value.at(index).is_number())
+            throw SceneEditError(422, "invalid_shape", std::string(field) + " must contain three numbers.");
+        result[int(index)] = value.at(index).get<double>();
+    }
+    return result;
+}
+
+HttpResponse handle_add_shape(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"type", "shape", "size", "position", "instance"}, request_id))
+        return *error;
+    const nlohmann::json &body = *request.json_body;
+    if (!body.contains("type") || !body.at("type").is_string() || !body.contains("shape") || !body.at("shape").is_string() ||
+        (body.contains("instance") && !body.at("instance").is_string()))
+        return make_error_response(400, "invalid_request", "The body requires string type and shape fields.", request_id);
+    const std::optional<ModelVolumeType> type = parse_part_type(body.at("type").get<std::string>());
+    if (!type)
+        return make_error_response(422, "invalid_shape", "The shape part type is unknown.", request_id);
+    ShapeRequest shape{*type, body.at("shape").get<std::string>()};
+    try { shape.size = read_vec3(body, "size"); shape.position = read_vec3(body, "position"); }
+    catch (const SceneEditError &error) { return scene_edit_error(error, request_id); }
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_shape", "The target must be an object.", request_id);
+    std::optional<EntityReference> reference;
+    if (body.contains("instance")) {
+        reference = session->resolve_entity(body.at("instance").get<std::string>());
+        if (!reference)
+            return make_error_response(404, "entity_not_found", "The reference instance does not exist.", request_id);
+    }
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        ModelObject *object = find_transform_instances(*candidate.scene, *entity).at(0)->get_object();
+        size_t instance_index = 0;
+        if (reference) {
+            if (reference->kind != EntityKind::instance)
+                throw SceneEditError(422, "invalid_shape", "The instance field must identify an instance of the target object.");
+            ModelInstance *instance = find_transform_instances(*candidate.scene, *reference).at(0);
+            if (instance->get_object() != object)
+                throw SceneEditError(422, "invalid_shape", "The reference instance belongs to another object.");
+            instance_index = size_t(std::find(object->instances.begin(), object->instances.end(), instance) - object->instances.begin());
+        }
+        const SceneChange change = add_shape(*object, instance_index, shape);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        return HttpResponse::json(200, {{"part_id", ids.at(0)}, {"type", part_type_name(*type)}, {"shape", shape.shape}});
+    } catch (const SceneEditError &error) { return scene_edit_error(error, request_id); }
+    catch (...) { return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id); }
+}
+
+HttpResponse handle_split(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"to"}, request_id)) return *error;
+    if (request.json_body->size() != 1 || !request.json_body->contains("to") || !request.json_body->at("to").is_string())
+        return make_error_response(400, "invalid_request", "The body must contain only the string field to.", request_id);
+    const std::string to = request.json_body->at("to").get<std::string>();
+    if (to != "objects" && to != "parts")
+        return make_error_response(422, "not_splittable", "The split target must be objects or parts.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation) return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity) return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SceneChange change;
+        if (to == "objects") {
+            if (entity->kind != EntityKind::object)
+                throw SceneEditError(422, "not_splittable", "Only an object can split into objects.");
+            ModelObject *object = find_transform_instances(*candidate.scene, *entity).at(0)->get_object();
+            change = split_object(*candidate.scene, *object);
+        } else {
+            ModelObject *object = nullptr;
+            ModelVolume *volume = nullptr;
+            if (entity->kind == EntityKind::volume) {
+                const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*candidate.scene, *entity);
+                object = target.first; volume = target.second;
+            } else if (entity->kind == EntityKind::object) {
+                object = find_transform_instances(*candidate.scene, *entity).at(0)->get_object();
+                if (object->volumes.size() != 1)
+                    throw SceneEditError(422, "not_splittable", "An object target must contain one part.");
+                volume = object->volumes.front();
+            } else throw SceneEditError(422, "not_splittable", "Instances cannot be split.");
+            const ConfigOptionFloats *nozzles = dynamic_cast<const ConfigOptionFloats *>(candidate.configuration.option("nozzle_diameter"));
+            change = split_volume(*object, *volume, nozzles == nullptr ? 1U : unsigned(nozzles->get_values().size()));
+        }
+        const std::optional<std::vector<std::string>> removed = session->entity_ids(*mutation, change.unbindings);
+        if (!removed) return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        if (to == "objects") {
+            nlohmann::json object_ids = nlohmann::json::array();
+            size_t index = 0;
+            while (index < change.bindings.size()) { object_ids.push_back(ids[index]); ++index;
+                while (index < change.bindings.size() && change.bindings[index].kind != EntityKind::object) ++index; }
+            return HttpResponse::json(200, {{"removed", *removed}, {"object_ids", object_ids}});
+        }
+        return HttpResponse::json(200, {{"removed", *removed}, {"part_ids", ids}});
+    } catch (const SceneEditError &error) { return scene_edit_error(error, request_id); }
+    catch (...) { return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id); }
+}
+
+HttpResponse handle_merge(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST") return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session) return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"ids", "name"}, request_id)) return *error;
+    const nlohmann::json &body = *request.json_body;
+    if (!body.contains("ids") || !body.at("ids").is_array() ||
+        (body.contains("name") && !body.at("name").is_string()))
+        return make_error_response(400, "invalid_request", "The body requires an ids array and an optional string name.", request_id);
+    for (const nlohmann::json &id : body.at("ids")) if (!id.is_string())
+        return make_error_response(400, "invalid_request", "Every merge ID must be a string.", request_id);
+    const std::string name = body.contains("name") ? body.at("name").get<std::string>() : "Merged";
+    try { validate_session_name(name); }
+    catch (const std::invalid_argument &error) { return make_error_response(400, "invalid_request", error.what(), request_id); }
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation) return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::vector<EntityReference> entities;
+    for (const nlohmann::json &id : body.at("ids")) {
+        const std::optional<EntityReference> entity = session->resolve_entity(id.get<std::string>());
+        if (!entity) return make_error_response(404, "entity_not_found", "An entity does not exist.", request_id);
+        entities.push_back(*entity);
+    }
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        std::vector<ModelObject *> sources;
+        for (const EntityReference &entity : entities) {
+            if (entity.kind != EntityKind::object) throw SceneEditError(422, "invalid_merge", "Only objects can be merged.");
+            sources.push_back(find_transform_instances(*candidate.scene, entity).at(0)->get_object());
+        }
+        const SceneChange change = merge_objects(*candidate.scene, sources, name);
+        const std::optional<std::vector<std::string>> removed = session->entity_ids(*mutation, change.unbindings);
+        if (!removed) return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        nlohmann::json part_ids = nlohmann::json::array();
+        for (size_t index = 0; index < change.bindings.size(); ++index)
+            if (change.bindings[index].kind == EntityKind::volume) part_ids.push_back(ids[index]);
+        return HttpResponse::json(200, {{"removed", *removed}, {"object_id", ids.at(0)}, {"part_ids", part_ids}});
+    } catch (const SceneEditError &error) { return scene_edit_error(error, request_id); }
+    catch (...) { return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id); }
+}
+
+// Reserve an upload only after authentication and session ownership have been
+// checked, so an unauthenticated client cannot make the server write a file.
 HttpResponse handle_upload_preflight(
     const HttpRequest &request,
     const RouteServices &services,
@@ -1971,7 +2174,7 @@ std::string client_visible_name(const std::string &name, const HttpUpload &uploa
 // object listing and saved projects must only see the client file name.
 void hide_upload_path(ModelObject &object, const HttpUpload &upload)
 {
-    const std::string source_path = upload.temporary_path.string();
+    const std::string source_path = upload.temporary_path.u8string();
     object.name = object.name.empty() ? upload.filename : client_visible_name(object.name, upload);
     if (object.input_file == source_path)
         object.input_file = upload.filename;
@@ -1996,7 +2199,8 @@ HttpResponse import_model(
     const HttpUpload &upload,
     const std::string &request_id)
 {
-    const std::string source_path = upload.temporary_path.string();
+    // Model readers expect UTF-8, including for Windows work directories.
+    const std::string source_path = upload.temporary_path.u8string();
     const std::string temporary_name = upload.temporary_path.filename().string();
     try {
         Model imported = Model::read_from_file(
@@ -2109,6 +2313,127 @@ std::optional<HttpResponse> handle_add_model(
 }
 
 // Import one uploaded mesh into an existing object on the import pool.
+HttpResponse import_part(SessionContext &session, SessionContext::MutationToken mutation, SessionData current,
+    EntityReference entity, ModelVolumeType type, const HttpUpload &upload, const std::string &request_id)
+{
+    // Use the same UTF-8 path for loading and for sanitizing loader errors.
+    const std::string source_path = upload.temporary_path.u8string();
+    const std::string temporary_name = upload.temporary_path.filename().string();
+    try {
+        Model imported = Model::read_from_file(source_path, nullptr, nullptr, Model::LoadAttribute::AddDefaultInstances);
+        current.scene = std::make_shared<Model>(*current.scene);
+        ModelObject *target = find_transform_instances(*current.scene, entity).at(0)->get_object();
+        const SceneChange change = add_part(*target, std::move(imported), type, upload.filename);
+        std::vector<std::string> ids;
+        if (!session.commit_mutation(mutation, std::move(current), true, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the part was imported.", request_id);
+        return HttpResponse::json(200, {{"part_id", ids.at(0)}, {"type", part_type_name(type)}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (const std::runtime_error &error) {
+        std::string message = error.what();
+        replace_all(message, source_path, upload.filename);
+        replace_all(message, temporary_name, upload.filename);
+        return make_error_response(422, "invalid_model", message, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not import the part.", request_id);
+    }
+}
+
+std::optional<HttpResponse> handle_add_part(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id, const DeferredResponder &respond)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (request.upload == nullptr)
+        return make_error_response(400, "invalid_multipart", "The request must contain one uploaded file.", request_id);
+    std::map<std::string, std::string> parameters;
+    if (!parse_form_query(request.query, parameters) || parameters.size() != 1 || parameters.count("type") == 0)
+        return make_error_response(400, "invalid_request", "The add_part query must contain only type.", request_id);
+    const std::optional<ModelVolumeType> type = parse_part_type(parameters.at("type"));
+    if (!type || !is_loadable_part_type(*type))
+        return make_error_response(422, "invalid_part_type", "This part type cannot be loaded.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (entity->kind != EntityKind::object)
+        return make_error_response(422, "invalid_part_type", "The target must be an object.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the part was prepared.", request_id);
+    ModelObject *object = find_transform_instances(*current->scene, *entity).at(0)->get_object();
+    if (object->is_cut() && (*type == ModelVolumeType::MODEL_PART || *type == ModelVolumeType::NEGATIVE_VOLUME))
+        return make_error_response(422, "cut_object", "A solid or negative part cannot be added to a cut object.", request_id);
+    asio::post(services.imports, [session, token = *mutation, data = std::move(*current), entity = *entity,
+        type = *type, upload = request.upload, request_id, respond, observer = services.import_observer]() mutable {
+        if (observer) observer();
+        if (!session->data_snapshot()) {
+            respond(make_error_response(404, "session_not_found", "The session does not exist.", request_id));
+            return;
+        }
+        respond(import_part(*session, token, std::move(data), entity, type, *upload, request_id));
+    });
+    return std::nullopt;
+}
+
+// Name the first integer extruder option ("extruder" or "*_extruder") whose
+// 1-based index exceeds the extruders of the project; 0 means "default".
+std::optional<std::string> extruder_out_of_range(
+    const DynamicPrintConfig &config,
+    std::size_t extruder_count,
+    const std::string &owner)
+{
+    for (const std::string &key : config.keys()) {
+        if (key != "extruder" && !boost::ends_with(key, "_extruder"))
+            continue;
+        const ConfigOptionInt *option = dynamic_cast<const ConfigOptionInt *>(config.option(key));
+        if (option != nullptr && option->value > 0 && static_cast<std::size_t>(option->value) > extruder_count)
+            return owner + " uses extruder " + std::to_string(option->value) + " in " + key +
+                ", but the project defines " + std::to_string(extruder_count) + " extruder(s).";
+    }
+    return std::nullopt;
+}
+
+// Check the project configuration, every object, volume and layer range
+// against the extruder count of the project. It must run on the configuration
+// as loaded: the profile recomposition clamps the global *_extruder options
+// to the extruder count and would hide an invalid index.
+std::optional<std::string> project_extruder_error(
+    const Model &scene,
+    const DynamicPrintConfig &configuration,
+    std::size_t count)
+{
+    std::optional<std::string> error = extruder_out_of_range(configuration, count, "The project configuration");
+    for (const ModelObject *object : scene.object_ptrs()) {
+        const std::string owner = "Object \"" + object->name + "\"";
+        if (!error)
+            error = extruder_out_of_range(object->config.get(), count, owner);
+        for (const ModelVolume *volume : object->volumes)
+            if (!error)
+                error = extruder_out_of_range(volume->config.get(), count, owner);
+        for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
+            if (!error)
+                error = extruder_out_of_range(range.second.get(), count, owner);
+    }
+    return error;
+}
+
+// Runs on an import thread. Load a 3MF project into a new scene and a
+// configuration recomposed from its embedded profiles, then replace the
+// session scene, configuration and profile selection in one commit that also
+// drops every previous entity ID. Session preferences are kept; the session
+// takes the project file name. Loader and
+// configuration errors are client errors (422 invalid_project); the session
+// is left untouched by any refusal.
 HttpResponse import_project(
     SessionContext &session,
     SessionContext::MutationToken mutation,
@@ -2117,7 +2442,8 @@ HttpResponse import_project(
     const ProfileCatalog &profiles,
     const std::string &request_id)
 {
-    const std::string source_path = upload.temporary_path.string();
+    // Match the model reader and hide_upload_path's UTF-8 source references.
+    const std::string source_path = upload.temporary_path.u8string();
     const std::string temporary_name = upload.temporary_path.filename().string();
     const auto invalid_project = [&request_id](const std::string &message) {
         return make_error_response(422, "invalid_project", message, request_id);
@@ -2774,6 +3100,8 @@ std::optional<HttpResponse> dispatch_request(
             return handle_set_profile(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "add_model")
             return handle_add_model(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 4 && operation == "add_part")
+            return handle_add_part(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "load_project")
             return handle_load_project(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "save_project")
@@ -2806,6 +3134,12 @@ std::optional<HttpResponse> dispatch_request(
             return handle_rename(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "delete_entity")
             return handle_delete_entity(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "add_shape")
+            return handle_add_shape(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "split")
+            return handle_split(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "merge")
+            return handle_merge(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "set_instance_count")
             return handle_set_instance_count(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "get_setting")

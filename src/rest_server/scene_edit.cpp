@@ -43,27 +43,6 @@ void validate_name(const std::string &name)
         throw SceneEditError(422, "invalid_name", "The name contains a character forbidden in file names.");
 }
 
-} // namespace
-
-void invalidate_cut_group(ModelObject &object)
-{
-    const CutObjectBase cut = object.cut_id;
-    for (ModelObject *candidate : object.get_model()->object_ptrs())
-        if (candidate->cut_id.is_equal(cut))
-            candidate->invalidate_cut();
-}
-
-void validate_name(const std::string &name)
-{
-    try {
-        validate_session_name(name);
-    } catch (const std::invalid_argument &error) {
-        throw SceneEditError(400, "invalid_request", error.what());
-    }
-    if (name.find_first_of("<>:/\\|?*\"") != std::string::npos)
-        throw SceneEditError(422, "invalid_name", "The name contains a character forbidden in file names.");
-}
-
 bool shape_allowed(ModelVolumeType type, const std::string &shape)
 {
     if (type == ModelVolumeType::BRIM_PATCH || type == ModelVolumeType::BRIM_NEGATIVE)
@@ -209,6 +188,181 @@ SceneChange delete_instance(ModelObject &object, size_t index)
     change.unbindings.push_back({EntityKind::instance, object.instances.at(index)->id().id});
     object.delete_instance(index);
     object.invalidate_bounding_box();
+    return change;
+}
+
+SceneChange add_part(ModelObject &target, Model imported, ModelVolumeType type, const std::string &client_file_name)
+{
+    if (!is_loadable_part_type(type))
+        throw SceneEditError(422, "invalid_part_type", "This part type cannot be loaded.");
+    if (target.is_cut() && (type == ModelVolumeType::MODEL_PART || type == ModelVolumeType::NEGATIVE_VOLUME))
+        throw SceneEditError(422, "cut_object", "A solid or negative part cannot be added to a cut object.");
+    if (!target.origin_translation.isZero())
+        for (ModelObject *object : imported.object_ptrs()) {
+            object->center_around_origin();
+            for (ModelVolume *volume : object->volumes)
+                volume->translate(target.origin_translation - object->origin_translation);
+        }
+    TriangleMesh mesh = imported.mesh();
+    if (mesh.empty())
+        throw SceneEditError(422, "invalid_model", "The uploaded model has no mesh.");
+    ModelVolume *volume = target.add_volume(std::move(mesh), type);
+    volume->name = client_file_name;
+    volume->config.set_key_value("extruder", new ConfigOptionInt(0));
+    volume->source.input_file = client_file_name;
+    int target_index = 0;
+    for (ModelObject *object : target.get_model()->object_ptrs()) {
+        if (object == &target)
+            break;
+        ++target_index;
+    }
+    volume->source.object_idx = target_index;
+    volume->source.volume_idx = int(target.volumes.size()) - 1;
+    if (imported.objects().size() == 1 && imported.get_object(0).volumes.size() == 1)
+        volume->source.mesh_offset = imported.get_object(0).volumes.front()->source.mesh_offset;
+    volume->set_offset(volume->source.mesh_offset - target.volumes.front()->source.mesh_offset);
+    target.sort_volumes(true);
+    target.invalidate_bounding_box();
+    SceneChange change;
+    change.bindings.push_back({EntityKind::volume, volume->id().id});
+    return change;
+}
+
+SceneChange add_shape(ModelObject &target, size_t instance_index, const ShapeRequest &request)
+{
+    if (!shape_allowed(request.type, request.shape))
+        throw SceneEditError(422, "invalid_shape", "This shape is not available for the requested part type.");
+    if (target.is_cut() && (request.type == ModelVolumeType::MODEL_PART || request.type == ModelVolumeType::NEGATIVE_VOLUME))
+        throw SceneEditError(422, "cut_object", "A solid or negative shape cannot be added to a cut object.");
+    if (request.size && (!request.size->allFinite() || (request.size->array() <= 0).any()))
+        throw SceneEditError(422, "invalid_shape", "Shape size must contain three positive finite values.");
+    if (request.position && !request.position->allFinite())
+        throw SceneEditError(422, "invalid_shape", "Shape position must contain three finite values.");
+    const BoundingBoxf3 bb = target.instance_bounding_box(instance_index);
+    const Geometry::Transformation &instance = target.instances.at(instance_index)->get_transformation();
+    indexed_triangle_set its;
+    if (request.shape == "box") its = its_make_cube(100, 100, 100);
+    else if (request.shape == "cylinder") its = its_make_cylinder(25, 100);
+    else if (request.shape == "sphere") its = its_make_sphere(50, PI / 18);
+    else if (request.shape == "slab") its = its_make_cube(1.5 * bb.size().x(), 1.5 * bb.size().y(), 0.5 * bb.size().z());
+    else if (request.shape == "square") its = its_make_cube(100, 100, 0.1);
+    else if (request.shape == "circle") its = its_make_cylinder(5, 0.1);
+    else if (request.shape == "small_sphere") its = its_make_sphere(10, PI / 18);
+    else its = its_make_cylinder(10, 100);
+    TriangleMesh mesh(std::move(its));
+    if (request.size) {
+        const Vec3f actual = mesh.bounding_box().size().cast<float>();
+        // Mesh vertices and scaling use floats. Validate the factors after that
+        // conversion: finite positive doubles may overflow or round down to zero.
+        const Vec3f factors = (request.size->cast<float>().array() / actual.array()).matrix();
+        if (!factors.allFinite() || (factors.array() <= 0).any())
+            throw SceneEditError(422, "invalid_shape", "Shape size cannot be represented by positive finite mesh scale factors.");
+        mesh.scale(factors);
+    }
+    // Check the generated mesh before adding a volume: scaling can overflow its
+    // bounds, and an instance with no height produces a degenerate default slab.
+    const BoundingBoxf3 mesh_bb = mesh.bounding_box();
+    if (!mesh_bb.min.allFinite() || !mesh_bb.max.allFinite() || !mesh_bb.size().allFinite() ||
+        (mesh_bb.size().array() <= 0).any())
+        throw SceneEditError(422, "invalid_shape", "Shape bounds must be finite and have three positive dimensions.");
+    ModelVolume *volume = target.add_volume(std::move(mesh), request.type);
+    volume->set_transformation(instance.get_matrix_no_offset().inverse());
+    Vec3d offset;
+    if (request.shape == "slab") {
+        const Vec3d center = bb.center().cast<double>() - instance.get_offset();
+        offset = Vec3d(center.x(), center.y(), 0.5 * mesh_bb.size().z() + bb.min.z() - instance.get_offset().z());
+    } else if (request.position) {
+        offset = *request.position - instance.get_offset();
+    } else {
+        offset = Vec3d(bb.max.x(), bb.min.y(), bb.min.z()) + 0.5 * mesh_bb.size().cast<double>() - instance.get_offset();
+    }
+    volume->set_offset(instance.get_matrix_no_offset().inverse() * offset);
+    std::string base = "Generic";
+    if (volume->is_seam_position()) base = "Seam";
+    else if (volume->is_brim()) base = "Brim";
+    else if (volume->is_support_enforcer()) base = "Support";
+    else if (volume->is_support_blocker()) base = "Blocker";
+    std::string display = request.shape;
+    if (display == "small_sphere") display = "sphere";
+    if (display == "small_cylinder") display = "cylinder";
+    display[0] = char(std::toupper(static_cast<unsigned char>(display[0])));
+    volume->name = base + "-" + display;
+    volume->config.set_key_value("extruder", new ConfigOptionInt(0));
+    volume->source.is_from_builtin_objects = true;
+    target.sort_volumes(true);
+    target.invalidate_bounding_box();
+    SceneChange change;
+    change.bindings.push_back({EntityKind::volume, volume->id().id});
+    return change;
+}
+
+SceneChange split_object(Model &model, ModelObject &object)
+{
+    if (object.is_cut())
+        throw SceneEditError(422, "cut_object", "Cut objects cannot be split.");
+    if (object.volumes.size() == 1 && !object.volumes[0]->is_splittable())
+        throw SceneEditError(422, "not_splittable", "The object has only one solid shell.");
+    for (ModelVolume *volume : object.volumes)
+        volume->reset_extra_facets();
+    ModelObjectPtrs created;
+    object.split(&created);
+    if (created.size() <= 1) {
+        for (ModelObject *candidate : created)
+            model.delete_object(candidate);
+        throw SceneEditError(422, "not_splittable", "The object has only one solid shell.");
+    }
+    SceneChange change;
+    for (ModelObject *candidate : created) {
+        candidate->sort_volumes(true);
+        candidate->ensure_on_bed();
+        append_object_entities(*candidate, change.bindings);
+    }
+    append_object_entities(object, change.unbindings);
+    model.delete_object(&object);
+    return change;
+}
+
+SceneChange split_volume(ModelObject &object, ModelVolume &volume, unsigned int extruders)
+{
+    if (!volume.is_splittable())
+        throw SceneEditError(422, "not_splittable", "The part has only one shell.");
+    for (ModelVolume *candidate : object.volumes)
+        candidate->reset_extra_facets();
+    SceneChange change;
+    change.unbindings.push_back({EntityKind::volume, volume.id().id});
+    const size_t index = size_t(std::find(object.volumes.begin(), object.volumes.end(), &volume) - object.volumes.begin());
+    const size_t count = volume.split(extruders);
+    std::vector<ModelVolume *> pieces(object.volumes.begin() + index, object.volumes.begin() + index + count);
+    object.input_file.clear();
+    object.sort_volumes(true);
+    for (ModelVolume *piece : pieces)
+        change.bindings.push_back({EntityKind::volume, piece->id().id});
+    object.invalidate_bounding_box();
+    return change;
+}
+
+SceneChange merge_objects(Model &model, const std::vector<ModelObject *> &sources, const std::string &name)
+{
+    validate_name(name);
+    if (sources.size() < 2)
+        throw SceneEditError(422, "invalid_merge", "At least two objects are required.");
+    std::set<ModelObject *> distinct;
+    for (ModelObject *source : sources) {
+        if (!distinct.insert(source).second || source->instances.size() != 1)
+            throw SceneEditError(422, "invalid_merge", "Merge objects must be distinct and have one instance.");
+        if (source->is_cut())
+            throw SceneEditError(422, "cut_object", "Cut objects cannot be merged.");
+    }
+    ModelObject *merged = model.merge_objects_into_multipart(sources, name, true);
+    SceneChange change;
+    append_object_entities(*merged, change.bindings);
+    for (ModelObject *source : sources) {
+        change.unbindings.push_back({EntityKind::object, source->id().id});
+        for (ModelInstance *instance : source->instances)
+            change.unbindings.push_back({EntityKind::instance, instance->id().id});
+    }
+    for (ModelObject *source : sources)
+        model.delete_object(source);
     return change;
 }
 
