@@ -1,10 +1,45 @@
+///|/ Copyright (c) SuperSlicer 2026 Durand Rémi @supermerill
+///|/
+///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
+///|/
+
 #include <catch2/catch.hpp>
 
-#include "libslic3r/Model.hpp"
-#include "libslic3r/Format/3mf.hpp"
-#include "libslic3r/Format/STL.hpp"
+#include <cmath>
+#include <string>
+#include <vector>
 
 #include <boost/filesystem/operations.hpp>
+
+#include "preset_test_helpers.hpp"
+#include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/STL.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+
+/*
+These tests check 3MF geometry, file paths and saved layer-height profiles.
+libslic3r_tests initializes plugin definitions at startup.
+PresetTest::TemporaryDirectory owns archives created by the profile tests.
+
+Geometry/path cases: load existing projects or compare geometry after saving
+Layer-height cases
+
+Operation notes:
+- store_3mf: save a two-point or three-point profile
+- load_3mf: restore it from the archive
+- Compare its values within the exporter's decimal precision
+
+Representative direct calls (branches are not a timeline):
+
+    SCENARIO()
+        |-- load_stl()
+        |-- src_model.add_default_instances()
+        |-- src_model.objects()
+        |-- src_volume_transform.set_offset()
+        |-- src_volume_transform.set_rotation()
+        `-- load_3mf()
+*/
 
 using namespace Slic3r;
 
@@ -131,3 +166,31 @@ SCENARIO("2D convex hull of sinking object", "[3mf]") {
     }
 }
 
+// Reload two-point and three-point profiles. Allow the exporter's decimal rounding when comparing values.
+TEST_CASE("3MF round-trip keeps layer height profiles", "[3mf][layer-height-profile]")
+{
+    const std::vector<std::vector<double>> profiles = {
+        {0.0, 0.2, 20.0, 0.1},
+        {0.0, 0.2, 10.0, 0.1, 20.0, 0.3}
+    };
+    PresetTest::TemporaryDirectory directory;
+    const std::string path = (directory.path() / "layer_height_profile.3mf").u8string();
+    for (const std::vector<double> &expected : profiles) {
+        CAPTURE(expected.size());
+        Model model;
+        ModelObject *object = model.add_object("cube", "cube.stl", make_cube(20, 20, 20));
+        object->add_instance();
+        object->layer_height_profile.set(expected);
+        REQUIRE(store_3mf(path.c_str(), &model, nullptr));
+
+        Model loaded;
+        DynamicPrintConfig config;
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+        REQUIRE(load_3mf(path.c_str(), config, substitutions, &loaded, false, false));
+        REQUIRE(loaded.objects().size() == 1);
+        const std::vector<double> &actual = loaded.objects().front().layer_height_profile.get();
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK(std::abs(actual[i] - expected[i]) <= 1e-6);
+    }
+}
