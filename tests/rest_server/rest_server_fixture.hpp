@@ -219,6 +219,11 @@ public:
         server_->set_import_observer(std::move(observer));
     }
 
+    void set_scene_edit_observer(std::function<void()> observer)
+    {
+        server_->set_scene_edit_observer(std::move(observer));
+    }
+
     void set_write_observer(std::function<void(std::function<void()>)> observer)
     {
         server_->set_write_observer(std::move(observer));

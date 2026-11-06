@@ -105,6 +105,13 @@ struct EntityBinding {
     std::uint64_t engine_id;
 };
 
+// A retained entity whose engine ID changed keeps its REST ID under the new key.
+struct EntityRebinding {
+    EntityKind kind;
+    std::uint64_t from_engine_id;
+    std::uint64_t to_engine_id;
+};
+
 // Resolve a preserved engine ID inside a private scene copy, not the live scene.
 std::vector<ModelInstance *> find_transform_instances(Model &scene, const EntityReference &entity);
 // Return the parent and volume inside the private scene copy, preserving shared-instance semantics.
@@ -166,7 +173,8 @@ public:
         const std::vector<EntityBinding> &bindings,
         std::vector<std::string> &bound_ids,
         bool replace_entities = false,
-        const std::vector<EntityBinding> &unbindings = {});
+        const std::vector<EntityBinding> &unbindings = {},
+        const std::vector<EntityRebinding> &rebindings = {});
 
     // Cancellation is arbitrated under the session lock:
     // - queued work (not started) ends at once in `ready`;
@@ -202,6 +210,9 @@ public:
     std::optional<SessionData> data_snapshot() const;
     // Read ordered instance IDs only if the mutation's revision still owns the snapshot.
     std::optional<std::vector<std::string>> instance_ids(MutationToken token, std::uint64_t object_id) const;
+    // Resolve a group of entity keys only while the mutation still owns the revision.
+    std::optional<std::vector<std::string>> entity_ids(
+        MutationToken token, const std::vector<EntityBinding> &entities) const;
     // List the scene with its existing IDs, both taken from one committed state.
     // Throws std::out_of_range when an entity has no ID (internal invariant).
     std::optional<nlohmann::json> list_objects() const;

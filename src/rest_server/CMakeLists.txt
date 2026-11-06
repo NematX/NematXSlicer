@@ -57,6 +57,8 @@ add_library(slic3r_rest STATIC
     rest_server.cpp
     rest_server.hpp
     rest_server_main.cpp
+    scene_edit.cpp
+    scene_edit.hpp
     settings_catalog.cpp
     settings_codec.cpp
     settings.hpp

@@ -16,6 +16,7 @@
 #include "multipart_upload.hpp"
 #include "profiles.hpp"
 #include "progress.hpp"
+#include "scene_edit.hpp"
 #include "session.hpp"
 #include "settings.hpp"
 #include "temporary_file.hpp"
@@ -735,6 +736,7 @@ struct RouteServices {
     // the session they captured, so they may outlive the request dispatch.
     asio::thread_pool &imports;
     const std::function<void()> &import_observer;
+    const std::function<void()> &scene_edit_observer;
     std::uint32_t max_instances_per_object;
     const std::filesystem::path &export_directory;
     asio::thread_pool &slices;
@@ -774,9 +776,10 @@ std::optional<AuthenticatedRequest> authenticate_request(
 // Routes whose body is a streamed multipart file instead of buffered JSON.
 bool is_upload_route(const HttpRequest &request)
 {
-    return request.path_segments.size() == 3 &&
-        request.path_segments[0] == "session" &&
-        (request.path_segments[2] == "add_model" || request.path_segments[2] == "load_project");
+    return !request.path_segments.empty() && request.path_segments[0] == "session" &&
+        ((request.path_segments.size() == 3 &&
+            (request.path_segments[2] == "add_model" || request.path_segments[2] == "load_project")) ||
+         (request.path_segments.size() == 4 && request.path_segments[2] == "add_part"));
 }
 
 // File formats accepted by an upload route: any model for add_model, only a
@@ -1688,8 +1691,190 @@ try {
 }
 }
 
-// Reserve an upload only after authentication and session ownership have been
-// checked, so an unauthenticated client cannot make the server write a file.
+// Parse a scene-edit JSON object with a closed set of fields.
+std::optional<HttpResponse> read_scene_edit_body(HttpRequest &request, std::initializer_list<const char *> fields,
+    const std::string &request_id)
+{
+    HttpResponse parse_error;
+    if (!request.body.empty() && !parse_request_json(request, parse_error, request_id))
+        return parse_error;
+    if (request.json_body == nullptr || !request.json_body->is_object())
+        return make_error_response(400, "invalid_request", "The body must be a JSON object.", request_id);
+    for (const auto &item : request.json_body->items())
+        if (std::find_if(fields.begin(), fields.end(), [&item](const char *field) { return item.key() == field; }) == fields.end())
+            return make_error_response(400, "invalid_request", "Unknown field: " + item.key(), request_id);
+    return std::nullopt;
+}
+
+// Commit one private scene edit and translate its typed exception to the public error contract.
+HttpResponse scene_edit_error(const SceneEditError &error, const std::string &request_id)
+{
+    return make_error_response(error.status(), error.code(), error.what(), request_id);
+}
+
+HttpResponse handle_set_part_type(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"type"}, request_id))
+        return *error;
+    if (request.json_body->size() != 1 || !request.json_body->contains("type") || !request.json_body->at("type").is_string())
+        return make_error_response(400, "invalid_request", "The body must contain only the string field type.", request_id);
+    const std::optional<ModelVolumeType> type = parse_part_type(request.json_body->at("type").get<std::string>());
+    if (!type)
+        return make_error_response(422, "invalid_part_type", "The part type is unknown.", request_id);
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    if (entity->kind != EntityKind::volume)
+        return make_error_response(422, "invalid_part_type", "The target must be a part.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*candidate.scene, *entity);
+        const SceneChange change = set_part_type(*target.first, *target.second, *type);
+        if (!change.changed)
+            return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"type", part_type_name(*type)}});
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), change.affects_slicing, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"type", part_type_name(*type)}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id);
+    }
+}
+
+HttpResponse handle_rename(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"name"}, request_id))
+        return *error;
+    if (request.json_body->size() != 1 || !request.json_body->contains("name") || !request.json_body->at("name").is_string())
+        return make_error_response(400, "invalid_request", "The body must contain only the string field name.", request_id);
+    const std::string name = request.json_body->at("name").get<std::string>();
+    try { validate_session_name(name); }
+    catch (const std::invalid_argument &error) { return make_error_response(400, "invalid_request", error.what(), request_id); }
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    if (entity->kind == EntityKind::instance)
+        return make_error_response(422, "invalid_name", "Instances cannot be renamed.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SceneChange change;
+        if (entity->kind == EntityKind::volume)
+            change = rename_volume(*find_transform_volume(*candidate.scene, *entity).second, name);
+        else
+            change = rename_object(*find_transform_instances(*candidate.scene, *entity).at(0)->get_object(), name);
+        if (!change.changed)
+            return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"name", name}});
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), change.affects_slicing, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        return HttpResponse::json(200, {{"id", request.path_segments[3]}, {"name", name}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id);
+    }
+}
+
+HttpResponse handle_delete_entity(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (!session)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    bool invalidate_cut = false;
+    if (!request.body.empty()) {
+        if (std::optional<HttpResponse> error = read_scene_edit_body(request, {"invalidate_cut"}, request_id))
+            return *error;
+        if (request.json_body->size() != 1 || !request.json_body->contains("invalidate_cut") ||
+            !request.json_body->at("invalidate_cut").is_boolean())
+            return make_error_response(400, "invalid_request", "The body may contain only the boolean field invalidate_cut.", request_id);
+        invalidate_cut = request.json_body->at("invalidate_cut").get<bool>();
+    }
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+    if (!entity)
+        return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+    if (session->snapshot().revision != mutation->revision)
+        return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+    try {
+        SessionData candidate = *current;
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        SceneChange change;
+        if (entity->kind == EntityKind::volume) {
+            const std::pair<ModelObject *, ModelVolume *> target = find_transform_volume(*candidate.scene, *entity);
+            change = delete_volume(*target.first, *target.second, invalidate_cut);
+        } else {
+            std::vector<ModelInstance *> targets = find_transform_instances(*candidate.scene, *entity);
+            ModelObject *object = targets.at(0)->get_object();
+            if (entity->kind == EntityKind::object)
+                change = delete_object(*candidate.scene, *object, invalidate_cut);
+            else {
+                const size_t index = size_t(std::find(object->instances.begin(), object->instances.end(), targets.at(0)) - object->instances.begin());
+                change = delete_instance(*object, index);
+            }
+        }
+        const std::optional<std::vector<std::string>> removed = session->entity_ids(*mutation, change.unbindings);
+        if (!removed)
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        std::vector<std::string> ids;
+        if (!session->commit_mutation(*mutation, std::move(candidate), change.affects_slicing, SessionRegistry::Clock::now(),
+                change.bindings, ids, false, change.unbindings, change.rebindings))
+            return make_error_response(409, "session_changed", "The session changed while the edit was prepared.", request_id);
+        return HttpResponse::json(200, {{"deleted", *removed}});
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not edit the scene.", request_id);
+    }
+}
+
 HttpResponse handle_upload_preflight(
     const HttpRequest &request,
     const RouteServices &services,
@@ -1710,6 +1895,35 @@ HttpResponse handle_upload_preflight(
         SessionRegistry::Clock::now());
     if (session == nullptr)
         return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (request.path_segments[2] == "add_part") {
+        std::map<std::string, std::string> parameters;
+        if (!parse_form_query(request.query, parameters) || parameters.size() != 1 || parameters.count("type") == 0)
+            return make_error_response(400, "invalid_request", "The add_part query must contain only type.", request_id);
+        const std::optional<ModelVolumeType> type = parse_part_type(parameters.at("type"));
+        if (!type || !is_loadable_part_type(*type))
+            return make_error_response(422, "invalid_part_type", "This part type cannot be loaded.", request_id);
+        // Snapshot first: an entity resolved afterwards may be newer than the
+        // snapshot, so a missing match is answered like an unknown entity.
+        const std::optional<SessionData> data = session->data_snapshot();
+        if (!data)
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        const std::optional<EntityReference> entity = session->resolve_entity(request.path_segments[3]);
+        if (!entity)
+            return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+        if (entity->kind != EntityKind::object)
+            return make_error_response(422, "invalid_part_type", "The target must be an object.", request_id);
+        std::vector<ModelInstance *> instances;
+        try {
+            if (data->scene != nullptr)
+                instances = find_transform_instances(*data->scene, *entity);
+        } catch (const std::logic_error &) {
+        }
+        if (instances.empty())
+            return make_error_response(404, "entity_not_found", "The entity does not exist.", request_id);
+        const ModelObject *object = instances.front()->get_object();
+        if (object->is_cut() && (*type == ModelVolumeType::MODEL_PART || *type == ModelVolumeType::NEGATIVE_VOLUME))
+            return make_error_response(422, "cut_object", "A solid or negative part cannot be added to a cut object.", request_id);
+    }
     if (!session->begin_mutation().has_value())
         return make_error_response(
             409,
@@ -1894,55 +2108,7 @@ std::optional<HttpResponse> handle_add_model(
     return std::nullopt;
 }
 
-// Name the first integer extruder option ("extruder" or "*_extruder") whose
-// 1-based index exceeds the extruders of the project; 0 means "default".
-std::optional<std::string> extruder_out_of_range(
-    const DynamicPrintConfig &config,
-    std::size_t extruder_count,
-    const std::string &owner)
-{
-    for (const std::string &key : config.keys()) {
-        if (key != "extruder" && !boost::ends_with(key, "_extruder"))
-            continue;
-        const ConfigOptionInt *option = dynamic_cast<const ConfigOptionInt *>(config.option(key));
-        if (option != nullptr && option->value > 0 && static_cast<std::size_t>(option->value) > extruder_count)
-            return owner + " uses extruder " + std::to_string(option->value) + " in " + key +
-                ", but the project defines " + std::to_string(extruder_count) + " extruder(s).";
-    }
-    return std::nullopt;
-}
-
-// Check the project configuration, every object, volume and layer range
-// against the extruder count of the project. It must run on the configuration
-// as loaded: the profile recomposition clamps the global *_extruder options
-// to the extruder count and would hide an invalid index.
-std::optional<std::string> project_extruder_error(
-    const Model &scene,
-    const DynamicPrintConfig &configuration,
-    std::size_t count)
-{
-    std::optional<std::string> error = extruder_out_of_range(configuration, count, "The project configuration");
-    for (const ModelObject *object : scene.object_ptrs()) {
-        const std::string owner = "Object \"" + object->name + "\"";
-        if (!error)
-            error = extruder_out_of_range(object->config.get(), count, owner);
-        for (const ModelVolume *volume : object->volumes)
-            if (!error)
-                error = extruder_out_of_range(volume->config.get(), count, owner);
-        for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
-            if (!error)
-                error = extruder_out_of_range(range.second.get(), count, owner);
-    }
-    return error;
-}
-
-// Runs on an import thread. Load a 3MF project into a new scene and a
-// configuration recomposed from its embedded profiles, then replace the
-// session scene, configuration and profile selection in one commit that also
-// drops every previous entity ID. Session preferences are kept; the session
-// takes the project file name. Loader and
-// configuration errors are client errors (422 invalid_project); the session
-// is left untouched by any refusal.
+// Import one uploaded mesh into an existing object on the import pool.
 HttpResponse import_project(
     SessionContext &session,
     SessionContext::MutationToken mutation,
@@ -2634,6 +2800,12 @@ std::optional<HttpResponse> dispatch_request(
             return handle_list_objects(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "transform")
             return handle_transform(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "set_part_type")
+            return handle_set_part_type(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "rename")
+            return handle_rename(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 4 && operation == "delete_entity")
+            return handle_delete_entity(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "set_instance_count")
             return handle_set_instance_count(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "get_setting")
@@ -3310,6 +3482,7 @@ public:
             private_test_handler_,
             *import_pool_,
             import_observer_,
+            scene_edit_observer_,
             config_.max_instances_per_object,
             export_directory_,
             *slice_pool_,
@@ -3325,6 +3498,13 @@ public:
         if (running_.load())
             throw std::logic_error("The import observer must be set before the REST server starts");
         import_observer_ = std::move(observer);
+    }
+
+    void set_scene_edit_observer(std::function<void()> observer)
+    {
+        if (running_.load())
+            throw std::logic_error("The scene-edit observer must be set before the REST server starts");
+        scene_edit_observer_ = std::move(observer);
     }
 
     void set_write_observer(std::function<void(std::function<void()>)> observer)
@@ -3447,6 +3627,7 @@ private:
     std::unique_ptr<SessionRegistry> session_registry_;
     RequestHandler private_test_handler_;
     std::function<void()> import_observer_;
+    std::function<void()> scene_edit_observer_;
     std::function<void(std::function<void()>)> write_observer_;
     // Created in start(), joined in stop() before the network thread stops.
     std::unique_ptr<asio::thread_pool> import_pool_;
@@ -3683,6 +3864,11 @@ SessionRegistry &RestServer::session_registry() const
 void RestServer::set_import_observer(std::function<void()> observer)
 {
     impl_->runtime_.set_import_observer(std::move(observer));
+}
+
+void RestServer::set_scene_edit_observer(std::function<void()> observer)
+{
+    impl_->runtime_.set_scene_edit_observer(std::move(observer));
 }
 
 void RestServer::set_write_observer(std::function<void(std::function<void()>)> observer)

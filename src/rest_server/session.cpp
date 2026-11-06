@@ -7,6 +7,7 @@
  */
 
 #include "session.hpp"
+#include "scene_edit.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -156,7 +157,8 @@ bool SessionContext::commit_mutation(
     const std::vector<EntityBinding> &bindings,
     std::vector<std::string> &bound_ids,
     bool replace_entities,
-    const std::vector<EntityBinding> &unbindings)
+    const std::vector<EntityBinding> &unbindings,
+    const std::vector<EntityRebinding> &rebindings)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (retired_ || active_work_generation_.has_value() || token.revision != revision_)
@@ -175,6 +177,19 @@ bool SessionContext::commit_mutation(
             entity_keys_by_id_.erase(existing->second);
             entity_ids_by_key_.erase(existing);
         }
+    }
+
+    // Move stable REST IDs after removals and before new keys are bound.
+    for (const EntityRebinding &rebinding : rebindings) {
+        const EntityKey old_key{rebinding.kind, rebinding.from_engine_id};
+        const std::map<EntityKey, std::string>::iterator existing = entity_ids_by_key_.find(old_key);
+        if (existing == entity_ids_by_key_.end())
+            continue;
+        const std::string id = existing->second;
+        entity_ids_by_key_.erase(existing);
+        const EntityKey new_key{rebinding.kind, rebinding.to_engine_id};
+        entity_ids_by_key_.emplace(new_key, id);
+        entity_keys_by_id_.at(id) = new_key;
     }
 
     std::vector<std::string> new_bound_ids;
@@ -382,6 +397,19 @@ std::optional<std::vector<std::string>> SessionContext::instance_ids(MutationTok
     throw std::logic_error("The instance-count target is not in the scene snapshot.");
 }
 
+std::optional<std::vector<std::string>> SessionContext::entity_ids(
+    MutationToken token, const std::vector<EntityBinding> &entities) const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retired_ || active_work_generation_ || token.revision != revision_)
+        return std::nullopt;
+    std::vector<std::string> ids;
+    ids.reserve(entities.size());
+    for (const EntityBinding &entity : entities)
+        ids.push_back(entity_ids_by_key_.at(EntityKey{entity.kind, entity.engine_id}));
+    return ids;
+}
+
 // Only the scene pointer and the entity IDs are captured under the lock. A
 // published scene is never modified in place (every mutation commits a new
 // Model), so the JSON is built afterwards from a consistent snapshot without
@@ -421,7 +449,9 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                 parts.push_back({
                     {"id", *id++},
                     {"name", volume->name},
-                    {"matrix", matrix_json(volume->get_matrix())}
+                    {"matrix", matrix_json(volume->get_matrix())},
+                    {"type", part_type_name(volume->type())},
+                    {"painted", painted_keys(*volume)}
                 });
             nlohmann::json instances = nlohmann::json::array();
             for (const ModelInstance *instance : object->instances)
@@ -433,6 +463,7 @@ std::optional<nlohmann::json> SessionContext::list_objects() const
                 {"id", object_id},
                 {"name", object->name},
                 {"matrix", matrix_json(Transform3d::Identity())},
+                {"cut", object->is_cut()},
                 {"parts", std::move(parts)},
                 {"instances", std::move(instances)}
             });

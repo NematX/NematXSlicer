@@ -143,6 +143,9 @@ public:
     // test can block in it to prove the network thread keeps serving requests.
     // Must be set before start().
     void set_import_observer(std::function<void()> observer);
+    // Test hook called on the network thread immediately before a synchronous
+    // scene edit commits. Must be set before start().
+    void set_scene_edit_observer(std::function<void()> observer);
     // After opening a file response, a test may retain resume to delay writing.
     // Resume posts back to the network thread; never block that thread in the hook.
     // Must be set before start().

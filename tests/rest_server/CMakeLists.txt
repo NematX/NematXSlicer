@@ -81,6 +81,8 @@ add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 add_executable(rest_models_tests
     file_names_tests.cpp
     rest_models_tests.cpp
+    rest_scene_edit_tests.cpp
+    scene_edit_tests.cpp
     transform_tests.cpp
     viewer_json_tests.cpp
 )

@@ -1,7 +1,9 @@
 # Specification — SuperSlicer REST Server
 
 **Status:** V1 contract\
-**Version:** 1.0
+**Version:** 1.1
+
+Version 1.1 adds scene editing (§5.16); 1.0 routes and responses are unchanged.
 
 ## 1. Objective
 
@@ -140,6 +142,13 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `GET` | `/session/{session_id}/list_objects` | JSON objects, parts, and instances |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
+| `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
+| `POST` | `/session/{session_id}/rename/{id}` | Rename an object or part |
+| `POST` | `/session/{session_id}/delete_entity/{id}` | Delete an object, part, or instance |
+| `POST` | `/session/{session_id}/add_part/{object_id}?type=...` | Upload a part into an object |
+| `POST` | `/session/{session_id}/add_shape/{object_id}` | Add a built-in shape part |
+| `POST` | `/session/{session_id}/split/{id}` | Split into objects or parts |
+| `POST` | `/session/{session_id}/merge` | Merge objects into one multipart object |
 | `POST` | `/session/{session_id}/slice` | Start asynchronous slicing and return its initial state |
 | `GET` | `/session/{session_id}/state` | `etat` and main/secondary progress |
 | `POST` | `/session/{session_id}/cancel_slicing` | Request cancellation of active slicing (`202 Accepted`) |
@@ -631,9 +640,10 @@ matrix is identity; effective transformations reside on its instances and volume
     {
       "id": "object-id",
       "name": "part.stl",
+      "cut": false,
       "matrix": [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1],
       "parts": [
-        {"id":"part-id", "name":"part.stl", "matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}
+        {"id":"part-id", "name":"part.stl", "type":"part", "painted":[], "matrix":[1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]}
       ],
       "instances": [
         {
@@ -645,6 +655,23 @@ matrix is identity; effective transformations reside on its instances and volume
   ]
 }
 ```
+
+`cut` is `true` when the object belongs to a cut-object group whose dependent
+objects must be invalidated together before restricted edits. `type` has these
+stable values:
+
+| `type` | Meaning |
+|---|---|
+| `part` | Printable solid part |
+| `negative_volume` | Volume subtracted from solid geometry |
+| `modifier` | Parameter modifier |
+| `support_blocker` / `support_enforcer` | Support-demand blocker or enforcer |
+| `seam_position_center` / `seam_position_center_z` / `seam_position_inside` | Seam helper volume |
+| `brim_patch` / `brim_negative` | Brim enforcer or blocker |
+
+`painted` lists the painting channels present on the part. Stable channel names
+are `support` for support painting and `mmu` for multi-material painting,
+followed by annotation keys such as `builtin:seam`.
 
 ### 5.12. `POST .../transform/{id}`
 
@@ -1173,6 +1200,36 @@ complete even when its move is the first on a page.
 without a role. `color_change_id` is the color-print index in use for the move (`0` before the first color change).
 Arrays may be empty. `next_offset` is `null` when the final page is reached.
 
+### 5.16. Scene editing (1.1)
+
+All scene edits use `POST`, validate the body before checking whether slicing is
+active, and publish the scene plus entity-ID changes in one revision-checked
+commit. Effective geometry edits invalidate current G-code. An unchanged type or
+name returns `200` without a commit. Object names affect slicing; part names do not.
+
+- `set_part_type/{part_id}` accepts `{"type":"modifier"}`. Writable values are
+  `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`,
+  `seam_position_center`, `seam_position_center_z`, `seam_position_inside`,
+  `brim_patch`, and `brim_negative`. The last solid part cannot change type;
+  cut and embossed-object restrictions apply. Response: `{"id":...,"type":...}`.
+- `rename/{id}` accepts `{"name":"Bracket"}` for an object or part. A name is
+  1–255 UTF-8 bytes without control characters, as a session name (§5.3.1;
+  otherwise `400 invalid_request`), and contains none of `<>:/\|?*"`
+  (`422 invalid_name`). Embossed parts and instances cannot be renamed.
+  Response: `{"id":...,"name":...}`.
+- `delete_entity/{id}` accepts an empty body or `{"invalidate_cut":true}`.
+  Deleting the last solid part or last instance is refused. Cut objects and their
+  solid/negative parts require explicit cut invalidation. Response lists every
+  removed ID in `deleted`; a retained sole part keeps its REST ID.
+
+| Condition | Response |
+| Malformed JSON; missing, extra, or wrongly typed field; name of invalid length or with control characters | `400 invalid_json` / `400 invalid_request` |
+| Unknown or disallowed type or target | `422 invalid_part_type` |
+| Illegal filename characters, embossed part, or instance rename | `422 invalid_name` |
+| Last solid part or last instance deletion | `422 invalid_delete` |
+| Cut-dependent operation without permission | `422 cut_object` |
+| Active slicing / concurrent commit | `409 session_busy` / `409 session_changed` |
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1265,6 +1322,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 9 | `rest_e2e_tests`: `E2 accounts authentication and ownership`; actual encrypted proxy checks: platform-validation.md |
 | 10 | `rest_e2e_tests`: `E4 post processing is inert from all configuration sources`; `rest_launch_tests`: `REST launch account writer produces a document accepted by HTTP` |
 | 11 | `rest_e2e_tests`: `E5 expiration shutdown and restart`; `rest_slice_tests`: `REST slice keeps registry work busy and restarts TTL at completion` |
+| 1.1 scene editing | `rest_models_tests`: `REST list_objects reports part types paintings and cut objects`, `REST set_part_type changes types atomically and keeps unchanged types uncommitted`, `REST rename validates names and invalidates G-code only for objects`, `REST delete_entity removes entities and keeps the retained part ID`, `REST add_part checks the target before upload and imports a part`, `REST add_shape creates default and sized shapes`, `REST split and merge replace scene entities in one commit`, `REST scene edits are refused while slicing and on concurrent changes`, `REST negative volumes and support enforcers change the sliced result` |
 
 ## 8. Decisions
 
@@ -1291,6 +1349,12 @@ platform validation responsibility, not an in-process TLS implementation.
 - No crash recovery or persistent sessions/results/tokens. Graceful shutdown
   cleans owned artifacts; a later startup removes stale work files.
 - Accounts and profile catalogs are read only at startup; edits require restart.
+- Built-in shape defaults are fixed because the REST server has no camera.
+- Splitting into objects discards modifiers, matching the GUI operation.
+- Merging is limited to objects that each have exactly one instance.
+- Support enforcer and blocker parts are stored and sliced, but this build does
+  not generate support from them yet: support generation is being migrated to
+  the plugin pipeline.
 - Defaults/selection copy only the presets they can read, but filament
   compatibility is still evaluated over the whole catalog once per distinct
   printer tool, so multi-tool printers in large catalogs cost more. These run on
