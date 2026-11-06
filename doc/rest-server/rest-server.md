@@ -1,7 +1,7 @@
 # Specification — SuperSlicer REST Server
 
 **Status:** proposed JSON contract, pending validation\
-**Version:** 0.70
+**Version:** 0.72
 
 ## 1. Objective
 
@@ -26,7 +26,8 @@ Confirmed for the initial scope:
 - HTTP transport uses Boost.Beast/Asio, already available through Boost in the repository;
 - JSON data uses the `nlohmann` library already present in the repository;
 - the CMake option `SLIC3R_BUILD_REST_SERVER`, disabled by default, adds the
-  internal library `slic3r_rest` and the standalone executable `slic3r_rest_server`;
+  internal library `slic3r_rest` and a REST launch mode of the application
+  executable (§9), without requiring the GUI;
 - different sessions may slice simultaneously, with at most one active
   slicing operation per session;
 - accounts are stored in a file administered outside the API; a local tool
@@ -106,7 +107,10 @@ Confirmed for the initial scope:
   configurable, and every authorized session request resets it. A session
   cannot expire during slicing, including G-code export and the effective
   stopping period after cancellation. The inactivity period restarts when
-  work finishes. Recovery after a server crash is outside the V1 scope.
+  work finishes. An expired session returns `404 session_not_found` as soon as
+  its inactivity deadline is reached, even before the next cleanup sweep; a late
+  request never extends its lifetime. Sweeping reclaims untouched expired sessions.
+  Recovery after a server crash is outside the V1 scope.
 - A change affecting slicing invalidates the current G-code and returns the
   session to `ready`. Data from the last successful viewer result is retained
   with `outdated: true`; it remains readable, including in the `ready` state.
@@ -143,7 +147,7 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/clear_platter` | Clear the platter; JSON response |
 | `GET` | `/session/{session_id}/save_project` | Binary 3MF snapshot download; optional `file_name` query |
 | `GET` | `/session/{session_id}/get_gcode_for_view` | Paginated viewer JSON (`offset`, `limit`, `result_id`) with an `outdated` flag |
-| `DELETE` | `/session/{session_id}/delete` | Destroy the session; no response body |
+| `DELETE` | `/session/{session_id}/delete` | Destroy the session: `204` with no body; `409 session_busy` during active work |
 
 ### 5.1. General data rules
 
@@ -870,9 +874,23 @@ current G-code unavailable, and retains the previous viewer as outdated.
   method/path (`404 route_not_found`), body (`400 invalid_request` for any
   nonempty body), owning session (`404 session_not_found`), then state
   (`409 not_slicing`). Engine initialization never produces a `503` here.
-- `GET .../get_gcode` has no body and downloads the `.gcode` file after successful
-  slicing (`etat: "sliced"`). It returns `409` if no current result is available.
-  `get_gcode_for_view` remains the viewer's JSON output.
+- `GET .../get_gcode` has no body and streams the `.gcode` file of the current
+  result (`Content-Type: text/x.gcode`, `Cache-Control: no-store`,
+  `Content-Disposition: attachment`). `get_gcode_for_view` remains the viewer's
+  JSON output.
+  - A result is current only in `etat: "sliced"` with no invalidation since:
+    before any success, during slicing, after an effective change, a failure, or
+    a cancellation it returns `409 no_gcode`.
+  - A download already started keeps the published file until it completes or
+    is abandoned, even if the session is changed, resliced, or deleted meanwhile.
+  - The optional `file_name` query and the portable naming rules are those of
+    `save_project`, with the `.gcode` extension: the requested name, else the
+    session name, else `project.gcode`.
+  - Refusal order is authentication (`401`), method/path
+    (`404 route_not_found`), body and query (`400 invalid_request`), owning
+    session (`404 session_not_found`), then `409 no_gcode`. Engine
+    initialization never produces a `503` here. A file that cannot be opened
+    for sending returns `500 internal_error`.
 - `/clear_platter` has no body and returns `{"cleared_object_count":3}`.
   Session profiles, settings, preferences, and name are retained. Removing the
   objects and invalidating every object, part, and instance ID form one atomic
@@ -928,7 +946,13 @@ current G-code unavailable, and retains the previous viewer as outdated.
   unrelated files and results still owned across an in-process restart.
   A failed replacement retains the prior outdated viewer and
   its one old result directory without leaving a new result directory.
-- `/delete` returns `204 No Content`; the session ID and data are invalidated.
+- `DELETE .../delete` has no body and returns `204 No Content`; the session ID
+  and data are invalidated, and retained results are released once no viewer
+  page or download in progress still uses them. A session that is slicing,
+  including a cancellation still stopping, cannot be deleted: `409 session_busy`.
+  Refusal order is authentication (`401`), method/path (`404 route_not_found`),
+  body (`400 invalid_request`), owning session (`404 session_not_found`), then
+  `409 session_busy`. Inactive sessions are also removed by a periodic sweep.
 
 #### Slice errors
 
@@ -963,9 +987,15 @@ current G-code unavailable, and retains the previous viewer as outdated.
 Return versioned JSON with metadata, layers, and one page of moves from the
 session's last successful slicing result, even if stale. The request accepts
 `offset` (zero-based, default `0`), `limit` (default `10000`, between `1` and
-`100000`), and `result_id`. The route returns `409` if no successful result
-has been retained. Metadata and layers are included in every page;
-only `moves` is paginated.
+`100000`), and `result_id`, as decimal query parameters; any other key, a
+repeated key, a non-numeric or out-of-range value, or `offset>0` without
+`result_id` returns `400 invalid_request`. The route returns
+`409 no_viewer_result` if no successful result has been retained. Metadata and
+layers are included in every page; only `moves` is paginated. An `offset` at or
+beyond `total_moves` returns an empty `moves` list with `next_offset: null`.
+The route only reads the session (no `503`). Refusal order is authentication,
+method/path, body, query, owning session, then `409`. An internal failure while
+building a page returns `500 internal_error`.
 
 Every response contains an opaque `result_id` and an `outdated` boolean.
 The first request at `offset=0` may omit `result_id` to retrieve the latest
@@ -975,11 +1005,39 @@ without supplying a page from another slicing operation. Invalidation changes
 `outdated` but not the retained result's ID, moves, metadata, or layers;
 a new success produces a new ID and `outdated: false`.
 
-Units are explicit in field names. `object_id` is a zero-based index into
-`metadata.objects`, or `null` for a move outside an object. `layer_id` is
-zero-based. Move types use the names `noop`, `retract`, `unretract`, `seam`,
-`tool_change`, `color_change`, `pause_print`, `custom_gcode`, `travel`, `wipe`,
-and `extrude`.
+Units are explicit in field names. Numbers are the shortest decimal that
+represents the engine value exactly (`0.2`, not `0.20000000298023224`).
+`object_id` is a zero-based index into `metadata.objects`, or `null` for a move
+outside an object; it is unrelated to the opaque REST object IDs of the scene.
+Each `metadata.objects` entry is an object instance as labelled in the G-code by
+the engine, and its `name` is that label (for example `part_stl id:0 copy 0`).
+`layer_id` is zero-based and indexes `layers`. As in the GUI preview, only
+layers containing an extrusion are listed, each at the height (`z_mm`) of its
+first extrusion; a move between layers (start G-code, layer change) belongs to
+the next listed layer, or to the last one after the end. When no move extrudes,
+`layers` is empty and `layer_id` is `null`. `statistics.estimated_time_s.stealth`
+is `null` when the stealth time estimate is disabled. Move types use
+the names `noop`, `retract`, `unretract`, `seam`, `tool_change`, `color_change`,
+`pause_print`, `custom_gcode`, `travel`, `wipe`, and `extrude`. Roles use the
+names `perimeter`, `external_perimeter`, `overhang_perimeter`,
+`internal_infill`, `internal_bridge_infill`, `solid_infill`, `top_solid_infill`,
+`ironing`, `bridge_infill`, `thin_wall`, `gap_fill`, `skirt`,
+`support_material`, `support_material_interface`, `wipe_tower`, `milling`,
+`custom`, and `travel`. `metadata.filename` is a file name, never a server path.
+
+**Sparse moves.** To reduce the response size, moves are delta-encoded inside
+a page:
+
+- the first move of every page carries every field, so each page can be decoded
+  on its own;
+- every later move always carries `points`, and carries any other field only
+  when its value differs from the same field of the previous move of the page;
+  an omitted field keeps the previous move's value;
+- `null` is a value: a field changing to `null` (for example `object_id` leaving
+  an object) is sent explicitly as `null`, never omitted;
+- equality is exact equality of the serialized JSON value.
+
+The example below shows a first move, which is therefore complete.
 
 Each `move` contains `points`, an ordered list of `[x,y,z]` coordinates in
 millimeters describing its entire 3D path from start to end. Intermediate
@@ -1019,7 +1077,7 @@ complete even when its move is the first on a page.
     "extruders": [
       {"id":0,"extruder_color":"#ffffff","filament_color":"#ff0000","filament_diameter_mm":1.75,"filament_density_g_cm3":1.24}
     ],
-    "objects": [{"id":0,"name":"part.stl"}],
+    "objects": [{"id":0,"name":"part_stl id:0 copy 0"}],
     "statistics": {
       "estimated_time_s": {"normal":120,"stealth":150},
       "filament_volume_mm3_by_extruder": [1200]
@@ -1032,7 +1090,7 @@ complete even when its move is the first on a page.
       "type": "extrude",
       "role": "perimeter",
       "extruder_id": 0,
-      "color_change_id": null,
+      "color_change_id": 0,
       "object_id": 0,
       "position_mm": [12.4,12.5,0.2],
       "extrusion_delta_mm": 0.05,
@@ -1059,7 +1117,7 @@ complete even when its move is the first on a page.
 ```
 
 `role` is a stable string identifying the extrusion role, or `null` for moves
-without a role. `color_change_id` is null outside color changes.
+without a role. `color_change_id` is the color-print index in use for the move (`0` before the first color change).
 Arrays may be empty. `next_offset` is `null` when the final page is reached.
 
 ## 6. Security and remote access
@@ -1103,7 +1161,8 @@ This tool is not a functionality already available.
 
 V1 is acceptable if:
 
-1. The server starts as a standalone process and works without launching the GUI.
+1. The server starts in its own process from the application executable's REST
+   mode (§9) and works without launching or building the GUI.
 2. `/list_settings` returns settings grouped by category; `/create_session`
    returns a `session_id` usable for session routes.
 3. A session can list and select profiles, read one or more selected settings,
@@ -1139,8 +1198,8 @@ V1 is acceptable if:
 
 1. **Accounts:** determine the path and JSON schema of the administrator-managed
    file used by the server.
-2. **Headless build:** confirm whether the server builds only in a dedicated
-   `SLIC3R_GUI=OFF` configuration or also in the GUI configuration.
+2. **Headless build:** resolved in §9. The REST mode builds with or without the
+   GUI; without the GUI, no GUI executable is produced.
 3. **Engine concurrency:** before enabling parallel slicing, validate and, if
    necessary, correct isolation of global `libslic3r` state between sessions.
 4. **Coordinate-space details:** resolved for objects/instances in phase 21 and
@@ -1150,3 +1209,36 @@ V1 is acceptable if:
    and volume bed placement affects every parent instance.
 5. **Unknown-setting preservation:** format, provenance, and write priority are
    fixed in §5.5.1; no additional decision is required for the V1 contract.
+
+## 9. Executables and launch modes
+
+The REST server is not a separate application: it is a launch mode of the
+SuperSlicer executable, built when `SLIC3R_BUILD_REST_SERVER` is enabled, with
+or without the GUI (`SLIC3R_GUI`). In the names below, `<app>` is the
+application command name (`SLIC3R_APP_CMD`).
+
+- **Windows.** The application is a library loaded by small launchers placed
+  side by side: `<app>.exe` (GUI, only built with the GUI), `<app>_console.exe`
+  (command line), and `<app>_rest.exe`, a console launcher that starts the REST
+  server. Without the GUI, only the console and REST launchers exist.
+- **Linux and macOS.** There is a single executable (inside the application
+  bundle on macOS). `<app> --rest-server [options]` starts the REST server; a
+  `<app>-rest` symbolic link next to it, created at build and install like the
+  G-code viewer link, starts it the same way. Without the GUI, the executable
+  runs either the command line or the REST server.
+- **Options.** The REST mode accepts only its own options, after `--rest-server`
+  or directly with the dedicated launcher/link: `--config PATH`,
+  `--bind-address VALUE`, `--port VALUE` (`0` selects a free port),
+  `--resources-dir PATH`, `--profiles-dir PATH`, `--work-dir PATH`,
+  `--accounts-file PATH`, and `--help`. Command-line slicing actions and GUI
+  options cannot be combined with it. The process runs until `SIGINT`/`SIGTERM`
+  (Ctrl+C), then cancels running slices and stops cleanly.
+- **Accounts tool.** The Argon2id provisioning tool (§6) is also a launch mode of
+  the same executable: `--rest-hash-password --username NAME` (Windows: through
+  `<app>_console.exe`) reads the password without echo and prints the accounts
+  JSON, as the standalone tool does.
+- **Standalone executables.** The build also provides two standalone targets,
+  `slic3r_rest_server` (REST mode only) and `slic3r_rest_password` (accounts
+  tool only), with the same options and behavior, for deployments that do not
+  need the application executable. The application modes and the standalone
+  executables share one implementation.

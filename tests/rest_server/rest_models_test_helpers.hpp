@@ -8,6 +8,8 @@
 #include "engine.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/miniz_extension.hpp"
 #include "rest_server_fixture.hpp"
 #include "session.hpp"
 
@@ -202,6 +204,64 @@ inline std::string make_cube_stl()
     Slic3r::TriangleMesh mesh = Slic3r::make_cube(20.0, 20.0, 20.0);
     REQUIRE(mesh.write_binary(path.string().c_str()));
     return read_file(path);
+}
+
+// Build a project with optional settings and extruder assignment for import tests.
+inline std::string make_3mf(std::size_t object_count = 1,
+    const Slic3r::DynamicPrintConfig *config = nullptr, int first_object_extruder = 0)
+{
+    TempDirectory directory;
+    const std::filesystem::path path = directory.path() / "model.3mf";
+    const std::vector<Slic3r::Vec3f> vertices = {
+        Slic3r::Vec3f(0.f, 0.f, 0.f), Slic3r::Vec3f(20.f, 0.f, 0.f), Slic3r::Vec3f(0.f, 20.f, 0.f)};
+    const std::vector<Slic3r::Vec3i32> faces = {Slic3r::Vec3i32(0, 1, 2)};
+    Slic3r::Model model;
+    for (std::size_t index = 0; index < object_count; ++index)
+        model.add_object(("triangle" + std::to_string(index)).c_str(), "triangle.stl",
+            Slic3r::TriangleMesh(vertices, faces));
+    REQUIRE(model.add_default_instances());
+    if (first_object_extruder > 0)
+        model.object_ptrs().front()->config.set_key_value("extruder", new Slic3r::ConfigOptionInt(first_object_extruder));
+    REQUIRE(Slic3r::store_3mf(path.string().c_str(), &model, config));
+    return read_file(path);
+}
+
+// Append foreign config keys which the engine's typed writer cannot produce.
+inline std::string add_project_config_lines(const std::string &archive_bytes, const std::string &lines)
+{
+    TempDirectory directory;
+    const std::filesystem::path input = directory.path() / "input.3mf";
+    const std::filesystem::path output = directory.path() / "output.3mf";
+    {
+        std::ofstream stream(input, std::ios::binary);
+        stream.write(archive_bytes.data(), static_cast<std::streamsize>(archive_bytes.size()));
+    }
+    mz_zip_archive reader;
+    mz_zip_zero_struct(&reader);
+    REQUIRE(Slic3r::open_zip_reader(&reader, input.string()));
+    mz_zip_archive writer;
+    mz_zip_zero_struct(&writer);
+    REQUIRE(Slic3r::open_zip_writer(&writer, output.string()));
+    bool config_found = false;
+    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&reader); ++index) {
+        mz_zip_archive_file_stat stat;
+        REQUIRE(mz_zip_reader_file_stat(&reader, index, &stat));
+        std::size_t size = 0;
+        void *data = mz_zip_reader_extract_to_heap(&reader, index, &size, 0);
+        REQUIRE(data != nullptr);
+        std::string content(static_cast<const char *>(data), size);
+        mz_free(data);
+        if (std::string(stat.m_filename) == "Metadata/Slic3r.config") {
+            content += lines;
+            config_found = true;
+        }
+        REQUIRE(mz_zip_writer_add_mem(&writer, stat.m_filename, content.data(), content.size(), MZ_DEFAULT_COMPRESSION));
+    }
+    REQUIRE(config_found);
+    REQUIRE(mz_zip_writer_finalize_archive(&writer));
+    Slic3r::close_zip_writer(&writer);
+    Slic3r::close_zip_reader(&reader);
+    return read_file(output);
 }
 
 inline std::shared_ptr<Slic3r::Rest::SessionContext> find_session(

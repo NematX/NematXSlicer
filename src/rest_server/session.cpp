@@ -256,8 +256,9 @@ SessionContext::CancelResult SessionContext::request_cancel(TimePoint now)
             // later finds its token stale and skips the run.
             GCodeProcessorResult no_viewer;
             std::shared_ptr<const void> no_owner;
+            std::shared_ptr<const ViewerHeader> no_header;
             finish_work_locked(WorkToken{*active_work_generation_}, SessionStatus::ready, {}, no_viewer, {}, now,
-                discarded_viewer, no_owner);
+                discarded_viewer, no_owner, no_header);
             return CancelResult::cancelled;
         }
         if (cancel_requested_)
@@ -290,10 +291,11 @@ bool SessionContext::finish_work(
     GCodeProcessorResult viewer,
     TimePoint finished_at,
     std::shared_ptr<const void> gcode_owner,
-    std::shared_ptr<const ViewerSnapshot> *discarded_viewer)
+    std::shared_ptr<const ViewerSnapshot> *discarded_viewer,
+    std::shared_ptr<const ViewerHeader> header)
 {
-    // `viewer` and `gcode_owner` stay owned by this frame when the result is
-    // discarded (cancelled work), so they are destroyed after the lock.
+    // `viewer`, `gcode_owner` and `header` stay owned by this frame when the
+    // result is discarded (cancelled work), so they are destroyed after the lock.
     std::shared_ptr<const ViewerSnapshot> previous_viewer;
     bool committed;
     {
@@ -306,7 +308,8 @@ bool SessionContext::finish_work(
             {},
             finished_at,
             previous_viewer,
-            gcode_owner);
+            gcode_owner,
+            header);
     }
     if (discarded_viewer != nullptr)
         *discarded_viewer = std::move(previous_viewer);
@@ -318,9 +321,10 @@ bool SessionContext::fail_work(WorkToken token, std::string message, TimePoint f
     std::shared_ptr<const ViewerSnapshot> discarded_viewer;
     GCodeProcessorResult no_viewer;
     std::shared_ptr<const void> no_owner;
+    std::shared_ptr<const ViewerHeader> no_header;
     std::lock_guard<std::mutex> lock(mutex_);
     return finish_work_locked(token, SessionStatus::failed, {}, no_viewer, std::move(message), finished_at,
-        discarded_viewer, no_owner);
+        discarded_viewer, no_owner, no_header);
 }
 
 bool SessionContext::cancel_work(WorkToken token, TimePoint finished_at)
@@ -328,8 +332,10 @@ bool SessionContext::cancel_work(WorkToken token, TimePoint finished_at)
     std::shared_ptr<const ViewerSnapshot> discarded_viewer;
     GCodeProcessorResult no_viewer;
     std::shared_ptr<const void> no_owner;
+    std::shared_ptr<const ViewerHeader> no_header;
     std::lock_guard<std::mutex> lock(mutex_);
-    return finish_work_locked(token, SessionStatus::ready, {}, no_viewer, {}, finished_at, discarded_viewer, no_owner);
+    return finish_work_locked(token, SessionStatus::ready, {}, no_viewer, {}, finished_at, discarded_viewer, no_owner,
+        no_header);
 }
 
 SessionContext::Snapshot SessionContext::snapshot() const
@@ -443,6 +449,14 @@ std::optional<std::filesystem::path> SessionContext::current_gcode() const
     return current_gcode_;
 }
 
+std::shared_ptr<const ViewerSnapshot> SessionContext::current_result() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (retired_ || !current_gcode_.has_value())
+        return nullptr;
+    return viewer_snapshot_;
+}
+
 std::shared_ptr<const ViewerSnapshot> SessionContext::viewer_snapshot() const
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -519,7 +533,8 @@ bool SessionContext::finish_work_locked(
     std::string error_message,
     TimePoint completed_at,
     std::shared_ptr<const ViewerSnapshot> &discarded_viewer,
-    std::shared_ptr<const void> &gcode_owner)
+    std::shared_ptr<const void> &gcode_owner,
+    std::shared_ptr<const ViewerHeader> &header)
 {
     if (retired_ || !active_work_generation_.has_value() ||
         active_work_generation_.value() != token.generation)
@@ -547,6 +562,7 @@ bool SessionContext::finish_work_locked(
         result->gcode_file = std::move(gcode_file);
         result->gcode_owner = std::move(gcode_owner);
         result->viewer = std::make_shared<GCodeProcessorResult>(std::move(viewer));
+        result->header = std::move(header);
         result->outdated = false;
         discarded_viewer = std::move(viewer_snapshot_);
         viewer_snapshot_ = std::move(result);
@@ -568,35 +584,20 @@ bool SessionContext::touch(TimePoint accessed_at)
     return true;
 }
 
-bool SessionContext::is_expired(TimePoint now) const
+bool SessionContext::retire(RetiredData &discarded, std::optional<TimePoint> expired_at)
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (retired_ || active_work_generation_.has_value() || now < last_activity_)
+    if (retired_ || active_work_generation_.has_value())
         return false;
-    return now - last_activity_ >= expiration_;
-}
-
-bool SessionContext::retire()
-{
-    // Move the heavy members into locals declared outside the lock scope so
-    // any last-reference destruction (scene meshes included) happens after the
-    // session mutex is released.
-    SessionData discarded_data;
-    std::shared_ptr<const ViewerSnapshot> discarded_viewer;
-    std::map<EntityKey, std::string> discarded_ids;
-    std::unordered_map<std::string, EntityKey> discarded_keys;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (retired_ || active_work_generation_.has_value())
-            return false;
-        retired_ = true;
-        progress_ = {};
-        current_gcode_.reset();
-        discarded_viewer = std::move(viewer_snapshot_);
-        discarded_data = std::move(data_);
-        discarded_ids = std::move(entity_ids_by_key_);
-        discarded_keys = std::move(entity_keys_by_id_);
-    }
+    if (expired_at && (*expired_at < last_activity_ || *expired_at - last_activity_ < expiration_))
+        return false;
+    retired_ = true;
+    progress_ = {};
+    current_gcode_.reset();
+    discarded.viewer = std::move(viewer_snapshot_);
+    discarded.data = std::move(data_);
+    discarded.ids = std::move(entity_ids_by_key_);
+    discarded.keys = std::move(entity_keys_by_id_);
     return true;
 }
 
@@ -628,6 +629,8 @@ std::shared_ptr<SessionContext> SessionRegistry::find(
     const std::string &session_id,
     TimePoint accessed_at)
 {
+    // Late requests cannot revive expired sessions; sweeping only reclaims untouched sessions.
+    SessionContext::RetiredData discarded;
     std::shared_ptr<SessionContext> session;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -636,6 +639,10 @@ std::shared_ptr<SessionContext> SessionRegistry::find(
         if (iterator == sessions_.end() || iterator->second->owner() != owner)
             return nullptr;
         session = iterator->second;
+        if (session->retire(discarded, accessed_at)) {
+            sessions_.erase(iterator);
+            return nullptr;
+        }
     }
     return session->touch(accessed_at) ? session : nullptr;
 }
@@ -644,6 +651,7 @@ SessionEraseResult SessionRegistry::erase(const std::string &owner, const std::s
 {
     // Keep the removed session alive until the registry mutex is released, so
     // its destruction cannot run under the lock.
+    SessionContext::RetiredData discarded;
     std::shared_ptr<SessionContext> removed;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -651,7 +659,7 @@ SessionEraseResult SessionRegistry::erase(const std::string &owner, const std::s
             sessions_.find(session_id);
         if (iterator == sessions_.end() || iterator->second->owner() != owner)
             return SessionEraseResult::not_found;
-        if (!iterator->second->retire())
+        if (!iterator->second->retire(discarded))
             return SessionEraseResult::busy;
         removed = iterator->second;
         sessions_.erase(iterator);
@@ -663,13 +671,16 @@ SessionEraseResult SessionRegistry::erase(const std::string &owner, const std::s
 // work is never expired; its delay restarts when the work finishes.
 std::size_t SessionRegistry::expire(TimePoint now)
 {
+    SessionContext::RetiredData candidate;
+    std::vector<SessionContext::RetiredData> discarded;
     std::vector<std::shared_ptr<SessionContext>> removed;
     std::size_t expired_count = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (std::unordered_map<std::string, std::shared_ptr<SessionContext>>::iterator iterator = sessions_.begin();
              iterator != sessions_.end();) {
-            if (iterator->second->is_expired(now) && iterator->second->retire()) {
+            if (iterator->second->retire(candidate, now)) {
+                discarded.push_back(std::move(candidate));
                 removed.push_back(iterator->second);
                 iterator = sessions_.erase(iterator);
                 ++expired_count;

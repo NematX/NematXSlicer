@@ -267,10 +267,14 @@ ViewerPage make_viewer_page(
     if (offset >= result.moves.size() || limit == 0)
         return page;
 
+    // The last spatial move before the page is found backward, so a page costs
+    // its own size and reading a result page by page stays linear.
     Vec3f previous_position = Vec3f::Zero();
-    for (std::size_t index = 0; index < offset; ++index) {
-        if (is_spatial_move(result.moves[index].type))
-            previous_position = result.moves[index].position;
+    for (std::size_t index = offset; index > 0; --index) {
+        if (is_spatial_move(result.moves[index - 1].type)) {
+            previous_position = result.moves[index - 1].position;
+            break;
+        }
     }
 
     const std::size_t remaining = result.moves.size() - offset;

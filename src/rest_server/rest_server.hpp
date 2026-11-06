@@ -140,10 +140,16 @@ public:
     // test can block in it to prove the network thread keeps serving requests.
     // Must be set before start().
     void set_import_observer(std::function<void()> observer);
+    // After opening a file response, a test may retain resume to delay writing.
+    // Resume posts back to the network thread; never block that thread in the hook.
+    // Must be set before start().
+    void set_write_observer(std::function<void(std::function<void()>)> observer);
     // Test hook on the slicing worker before the engine starts; set before start().
     void set_slice_observer(std::function<void()> observer);
-    // Test hook after a run accepts progress, outside the session lock; set before start().
-    void set_progress_observer(std::function<void()> observer);
+    // Test hook after accepted progress, outside the session lock. The session
+    // ID identifies the run even when callbacks come from different TBB threads.
+    // Set before start().
+    void set_progress_observer(std::function<void(const std::string &)> observer);
 
 private:
     class Impl;

@@ -447,6 +447,44 @@ TEST_CASE("viewer pages retain complete paths and engine speed semantics", "[res
     REQUIRE(page.moves[1].time_s == 2.0f);
 }
 
+// The backward search of the previous position must give exactly the paths of
+// a full forward scan, whatever runs of non-spatial moves precede the page.
+TEST_CASE("viewer pages find the previous position without scanning from the start", "[rest_engine][rest_viewer]")
+{
+    using Slic3r::EMoveType;
+    Slic3r::GCodeProcessorResult result;
+    const EMoveType types[] = {EMoveType::Retract, EMoveType::Travel, EMoveType::Retract, EMoveType::Unretract,
+        EMoveType::Extrude, EMoveType::Seam, EMoveType::Wipe, EMoveType::Color_change, EMoveType::Extrude};
+    std::uint32_t id = 0;
+    for (EMoveType type : types)
+        result.moves.emplace_back(++id, type, Slic3r::GCodeExtrusionRole::None, 0, 0,
+            Slic3r::GCodeProcessorResult::OBJECT_INSTANCE_ID_NONE,
+            Slic3r::Vec3f(float(id), float(2 * id), 0.2f), 0.0f, 30.0f, 0.0f, 0.0f, 0.1f,
+            0.0f, 0.0f, float(id), 0, false);
+    const auto spatial = [](EMoveType type) {
+        return type == EMoveType::Travel || type == EMoveType::Wipe || type == EMoveType::Extrude;
+    };
+    for (std::size_t offset = 0; offset <= result.moves.size(); ++offset) {
+        CAPTURE(offset);
+        Slic3r::Vec3f previous = Slic3r::Vec3f::Zero();
+        for (std::size_t index = 0; index < offset; ++index)
+            if (spatial(result.moves[index].type))
+                previous = result.moves[index].position;
+        const Slic3r::Rest::ViewerPage page = Slic3r::Rest::make_viewer_page(result, offset, result.moves.size());
+        REQUIRE(page.moves.size() == result.moves.size() - offset);
+        for (const Slic3r::Rest::ViewerMove &move : page.moves) {
+            if (!spatial(move.source.type)) {
+                CHECK(move.points.empty());
+                continue;
+            }
+            REQUIRE(move.points.size() == 2);
+            CHECK(move.points.front() == previous);
+            CHECK(move.points.back() == move.source.position);
+            previous = move.source.position;
+        }
+    }
+}
+
 // A cancellation requested before the print exists must not be lost: the
 // slice stops as soon as the print is attached and publishes no output.
 TEST_CASE("a slice cancelled before it starts is not run", "[rest_engine]")

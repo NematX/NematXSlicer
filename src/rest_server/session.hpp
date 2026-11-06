@@ -67,6 +67,16 @@ struct SessionData {
     std::string profile_sections;
 };
 
+// Viewer data computed once when a result is published (see viewer_json.hpp)
+// and shared by every outdated copy of the snapshot, so each page only
+// serializes its own moves.
+struct ViewerHeader {
+    nlohmann::json metadata;
+    nlohmann::json layers;
+    // Engine processor layer_id -> REST layer id (index into `layers`).
+    std::vector<std::uint32_t> layer_index;
+};
+
 struct ViewerSnapshot {
     std::string result_id;
     std::filesystem::path gcode_file;
@@ -75,6 +85,7 @@ struct ViewerSnapshot {
     // The move list is shared and never mutated: marking a snapshot outdated
     // only copies this small header, not the whole GCodeProcessorResult.
     std::shared_ptr<const GCodeProcessorResult> viewer;
+    std::shared_ptr<const ViewerHeader> header;
     bool outdated = false;
 };
 
@@ -182,7 +193,8 @@ public:
         GCodeProcessorResult viewer,
         TimePoint finished_at,
         std::shared_ptr<const void> gcode_owner = {},
-        std::shared_ptr<const ViewerSnapshot> *discarded_viewer = nullptr);
+        std::shared_ptr<const ViewerSnapshot> *discarded_viewer = nullptr,
+        std::shared_ptr<const ViewerHeader> header = {});
     bool fail_work(WorkToken token, std::string message, TimePoint finished_at);
     bool cancel_work(WorkToken token, TimePoint finished_at);
 
@@ -195,6 +207,10 @@ public:
     std::optional<nlohmann::json> list_objects() const;
     std::optional<std::filesystem::path> current_gcode() const;
     std::shared_ptr<const ViewerSnapshot> viewer_snapshot() const;
+    // The published result only while its G-code is current (status sliced,
+    // no invalidation since), read under one lock; null otherwise. The
+    // returned snapshot keeps its G-code file alive while it is held.
+    std::shared_ptr<const ViewerSnapshot> current_result() const;
 
     std::optional<std::string> bind_entity(EntityKind kind, std::uint64_t engine_id);
     std::optional<EntityReference> resolve_entity(const std::string &entity_id) const;
@@ -208,6 +224,14 @@ private:
         bool operator<(const EntityKey &other) const noexcept;
     };
 
+    // Retain heavy payloads until both session and registry locks have been released.
+    struct RetiredData {
+        SessionData data;
+        std::shared_ptr<const ViewerSnapshot> viewer;
+        std::map<EntityKey, std::string> ids;
+        std::unordered_map<std::string, EntityKey> keys;
+    };
+
     void mark_viewer_outdated_locked();
     // Transfer the old result without destroying its moves or directory under the session lock.
     bool finish_work_locked(
@@ -218,10 +242,11 @@ private:
         std::string error_message,
         TimePoint completed_at,
         std::shared_ptr<const ViewerSnapshot> &discarded_viewer,
-        std::shared_ptr<const void> &gcode_owner);
+        std::shared_ptr<const void> &gcode_owner,
+        std::shared_ptr<const ViewerHeader> &header);
     bool touch(TimePoint accessed_at);
-    bool is_expired(TimePoint now) const;
-    bool retire();
+    // Check optional expiration and retire in one locked step, without releasing heavy payloads.
+    bool retire(RetiredData &discarded, std::optional<TimePoint> expired_at = {});
 
     mutable std::mutex mutex_;
     std::string session_id_;

@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <limits>
 #include <memory>
@@ -315,6 +316,101 @@ TEST_CASE("expiration restarts when work completes", "[rest_session]")
     REQUIRE(registry.expire(at_hours(25)) == 0);
     REQUIRE(registry.expire(at_hours(27)) == 1);
     REQUIRE(registry.size() == 0);
+}
+
+TEST_CASE("session lookup expires exactly at the inactivity deadline", "[rest_session][rest_delete]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    CHECK(registry.find("alice", session->session_id(), at_hours(24)) == nullptr);
+    CHECK(registry.size() == 0);
+    CHECK(session->snapshot().retired);
+    CHECK(registry.find("alice", session->session_id(), at_hours(25)) == nullptr);
+}
+
+TEST_CASE("session lookup suspends expiration until work has ended", "[rest_session][rest_delete]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+    REQUIRE(registry.find("alice", session->session_id(), at_hours(48)) == session);
+    REQUIRE(session->cancel_work(work, at_hours(49)));
+    CHECK(registry.find("alice", session->session_id(), at_hours(73)) == nullptr);
+    CHECK(registry.size() == 0);
+}
+
+TEST_CASE("foreign session lookup cannot remove an expired session", "[rest_session][rest_delete]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    CHECK(registry.find("bob", session->session_id(), at_hours(24)) == nullptr);
+    CHECK(registry.size() == 1);
+    CHECK_FALSE(session->snapshot().retired);
+    CHECK(session->snapshot().last_activity == at_hours(0));
+    CHECK(registry.find("alice", session->session_id(), at_hours(24)) == nullptr);
+    CHECK(registry.size() == 0);
+}
+
+TEST_CASE("expiration releases every result in a mixed session batch", "[rest_session][rest_delete]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<std::atomic<int>> released = std::make_shared<std::atomic<int>>(0);
+    for (int index = 0; index < 3; ++index) {
+        const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+        const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+        std::shared_ptr<const void> owner(new int(index), [released](const void *value) {
+            released->fetch_add(1);
+            delete static_cast<const int *>(value);
+        });
+        REQUIRE(session->finish_work(work, "result.gcode", viewer_result(), at_hours(1), std::move(owner)));
+    }
+    const std::shared_ptr<Session> recent = registry.create("alice", at_hours(24));
+    CHECK(registry.expire(at_hours(25)) == 3);
+    CHECK(released->load() == 3);
+    CHECK(registry.size() == 1);
+    CHECK(registry.find("alice", recent->session_id(), at_hours(25)) == recent);
+    CHECK_FALSE(recent->snapshot().retired);
+}
+
+TEST_CASE("retired result cleanup does not hold the registry lock", "[rest_session][rest_delete]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const std::shared_ptr<std::promise<void>> entered = std::make_shared<std::promise<void>>();
+    const std::shared_ptr<std::promise<void>> release = std::make_shared<std::promise<void>>();
+    const std::shared_future<void> released = release->get_future().share();
+    const std::shared_future<void> cleaning = entered->get_future().share();
+    const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+    std::shared_ptr<const void> owner(new int(0), [entered, released](const void *value) {
+        entered->set_value();
+        released.wait_for(std::chrono::seconds(10));
+        delete static_cast<const int *>(value);
+    });
+    REQUIRE(session->finish_work(work, "result.gcode", viewer_result(), at_hours(2), std::move(owner)));
+    std::function<void()> retire;
+    SECTION("explicit deletion")
+    {
+        retire = [&]() { registry.erase("alice", session->session_id()); };
+    }
+    SECTION("expired lookup")
+    {
+        retire = [&]() { registry.find("alice", session->session_id(), at_hours(26)); };
+    }
+    SECTION("expiration sweep")
+    {
+        retire = [&]() { registry.expire(at_hours(26)); };
+    }
+    std::future<void> retired = std::async(std::launch::async, retire);
+    const bool cleanup_started = cleaning.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    std::future<std::size_t> size = std::async(std::launch::async, [&]() { return registry.size(); });
+    const bool readable = size.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    release->set_value();
+    retired.get();
+    const std::size_t remaining = size.get();
+    REQUIRE(cleanup_started);
+    CHECK(readable);
+    CHECK(remaining == 0);
+    CHECK(session->snapshot().retired);
 }
 
 TEST_CASE("a held viewer snapshot survives session deletion", "[rest_session]")
@@ -750,4 +846,30 @@ TEST_CASE("the cancellation hook runs outside the session lock", "[rest_session]
     REQUIRE(result.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
     CHECK(result.get() == Session::CancelResult::stopping);
     CHECK(seen == Slic3r::Rest::SessionStatus::slicing);
+}
+
+TEST_CASE("a result discarded by cancellation releases its viewer header outside the lock", "[rest_session][rest_cancel]")
+{
+    Registry registry(std::chrono::hours(24));
+    const std::shared_ptr<Session> session = registry.create("alice", at_hours(0));
+    const Session::WorkToken work = session->begin_work(at_hours(1)).value();
+    REQUIRE(session->start_work(work));
+    REQUIRE(session->request_cancel(at_hours(2)) == Session::CancelResult::stopping);
+
+    // The deleter reads the session: under the session lock it would deadlock.
+    std::optional<Slic3r::Rest::SessionStatus> seen;
+    std::shared_ptr<const Slic3r::Rest::ViewerHeader> header(new Slic3r::Rest::ViewerHeader,
+        [&seen, &session](const Slic3r::Rest::ViewerHeader *released) {
+            seen = session->snapshot().status;
+            delete released;
+        });
+    std::weak_ptr<const Slic3r::Rest::ViewerHeader> watched = header;
+    std::future<bool> finished = std::async(std::launch::async, [&]() {
+        return session->finish_work(work, "late.gcode", viewer_result(), at_hours(3), {}, nullptr, std::move(header));
+    });
+    REQUIRE(finished.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    CHECK(finished.get());
+    CHECK(watched.expired());
+    CHECK(seen == Slic3r::Rest::SessionStatus::ready);
+    CHECK(session->viewer_snapshot() == nullptr);
 }

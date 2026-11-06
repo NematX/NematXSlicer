@@ -20,6 +20,7 @@
 #include "settings.hpp"
 #include "temporary_file.hpp"
 #include "transform.hpp"
+#include "viewer_json.hpp"
 #include "libslic3r/Format/3mf.hpp"
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -87,6 +88,14 @@ constexpr std::int64_t default_token_ttl_seconds = 24 * 60 * 60;
 constexpr std::int64_t default_session_ttl_seconds = 24 * 60 * 60;
 constexpr std::int64_t default_login_window_seconds = 60;
 constexpr std::uint32_t default_max_login_attempts = 5;
+
+// Clamp cleanup cadence without overflowing milliseconds when the configured TTL is very long.
+std::chrono::milliseconds session_expiration_interval(std::chrono::seconds ttl)
+{
+    const std::chrono::seconds capped = std::min(ttl, std::chrono::seconds(240));
+    return std::clamp(std::chrono::duration_cast<std::chrono::milliseconds>(capped) / 4,
+        std::chrono::milliseconds(100), std::chrono::milliseconds(60000));
+}
 
 struct ParsedTarget {
     std::string path;
@@ -706,7 +715,7 @@ struct RouteServices {
     asio::thread_pool &slices;
     SliceJobs &slice_jobs;
     const std::function<void()> &slice_observer;
-    const std::function<void()> &progress_observer;
+    const std::function<void(const std::string &)> &progress_observer;
     const std::filesystem::path &result_directory;
     const std::filesystem::path &work_directory;
 };
@@ -2042,6 +2051,33 @@ bool parse_form_query(const std::string &query, std::map<std::string, std::strin
     return true;
 }
 
+// The only accepted query of a download route is an optional, nonempty
+// `file_name`. False for any other key, a repeated or malformed one.
+bool read_file_name_query(const std::string &query, std::optional<std::string> &requested_name)
+{
+    std::map<std::string, std::string> parameters;
+    if (!parse_form_query(query, parameters) || parameters.size() > 1 ||
+        (!parameters.empty() && (parameters.begin()->first != "file_name" || parameters.begin()->second.empty())))
+        return false;
+    requested_name.reset();
+    if (!parameters.empty())
+        requested_name = parameters.begin()->second;
+    return true;
+}
+
+// Download name: the requested name, else the session name, else "project",
+// each made portable; a name with nothing usable left falls back to the next.
+std::string download_file_name(const std::optional<std::string> &requested_name,
+    const std::optional<std::string> &session_name, const std::string &extension)
+{
+    std::optional<std::string> name;
+    if (requested_name)
+        name = portable_file_name(*requested_name, extension);
+    if (!name && session_name)
+        name = portable_file_name(*session_name, extension);
+    return name.value_or("project" + extension);
+}
+
 // The response owns its private archive until the asynchronous transport releases it.
 HttpResponse export_project(const SessionData &data, const std::filesystem::path &directory,
     const std::string &filename, const std::string &request_id)
@@ -2079,9 +2115,8 @@ std::optional<HttpResponse> handle_save_project(const HttpRequest &request, cons
         return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
     if (!request.body.empty())
         return make_error_response(400, "invalid_request", "The save_project route does not accept a request body.", request_id);
-    std::map<std::string, std::string> parameters;
-    if (!parse_form_query(request.query, parameters) || parameters.size() > 1 ||
-        (!parameters.empty() && (parameters.begin()->first != "file_name" || parameters.begin()->second.empty())))
+    std::optional<std::string> requested_name;
+    if (!read_file_name_query(request.query, requested_name))
         return make_error_response(400, "invalid_request", "The save_project query is invalid.", request_id);
     const std::shared_ptr<SessionContext> session = services.sessions.find(
         username, request.path_segments[1], SessionRegistry::Clock::now());
@@ -2092,13 +2127,9 @@ std::optional<HttpResponse> handle_save_project(const HttpRequest &request, cons
         return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
     if (data->scene == nullptr || data->scene->object_ptrs().empty())
         return make_error_response(409, "empty_scene", "The session contains no objects.", request_id);
-    std::optional<std::string> filename;
-    if (!parameters.empty())
-        filename = portable_file_name(parameters.begin()->second, ".3mf");
-    if (!filename && data->name)
-        filename = portable_file_name(*data->name, ".3mf");
+    std::string filename = download_file_name(requested_name, data->name, ".3mf");
     asio::post(services.imports, [data = std::move(*data), directory = services.export_directory,
-        filename = filename.value_or("project.3mf"), request_id, respond, observer = services.import_observer]() {
+        filename = std::move(filename), request_id, respond, observer = services.import_observer]() {
         try {
             if (observer)
                 observer();
@@ -2155,8 +2186,10 @@ void run_slice(const std::shared_ptr<SessionContext> &session, SessionContext::W
         // Engine apply and extruder assignment must never mutate the committed shared scene.
         SliceResult result = Engine::instance().slice(Model(*data.scene), std::move(data.configuration),
             directory->path / "output.gcode", control.get());
+        // Built here, off the network thread, once per result for every page.
+        std::shared_ptr<const ViewerHeader> header = make_viewer_header(result.viewer);
         session->finish_work(token, std::move(result.output_file), std::move(result.viewer),
-            SessionRegistry::Clock::now(), directory, &discarded_viewer);
+            SessionRegistry::Clock::now(), directory, &discarded_viewer, std::move(header));
     } catch (const std::exception &error) {
         session->fail_work(token, sanitized_slice_error(error.what(), directory->path, work),
             SessionRegistry::Clock::now());
@@ -2205,13 +2238,14 @@ HttpResponse handle_slice(const HttpRequest &request, const RouteServices &servi
     }
     try {
         control->set_progress_callback([session, token = *token, directory_path = directory->path,
-            work = services.work_directory, observer = services.progress_observer](const PrintStatus::SlicingStatus &status) {
+            work = services.work_directory, session_id = request.path_segments[1],
+            observer = services.progress_observer](const PrintStatus::SlicingStatus &status) {
             // TODO(progress rework): forward legacy callbacks without GUI coalescing until the progress model is replaced.
             std::optional<ProgressUpdate> update = progress_update(status, directory_path, work);
             if (!update)
                 return;
             if (session->update_progress(token, update->secondary, std::move(update->message), update->percentage) && observer)
-                observer();
+                observer(session_id);
         });
         // Capture the accepted state before a fast worker can publish its completed result.
         HttpResponse response = HttpResponse::json(202, slice_state_json(session->snapshot()));
@@ -2231,6 +2265,158 @@ HttpResponse handle_slice(const HttpRequest &request, const RouteServices &servi
     }
 }
 
+// Stream the current G-code. The published snapshot owns the result
+// directory, so a transfer already started keeps its file even if the session
+// is mutated, resliced or deleted meanwhile. A read of the session: no 503.
+HttpResponse handle_get_gcode(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The get_gcode route does not accept a request body.", request_id);
+    std::optional<std::string> requested_name;
+    if (!read_file_name_query(request.query, requested_name))
+        return make_error_response(400, "invalid_request", "The get_gcode query is invalid.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const std::shared_ptr<const ViewerSnapshot> result = session->current_result();
+    if (result == nullptr) {
+        // A deletion between lookup and read reports the missing session, not a missing result.
+        if (session->snapshot().retired)
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        return make_error_response(409, "no_gcode", "No current G-code is available.", request_id);
+    }
+    // The name is cosmetic: reading it apart from the result is harmless.
+    const std::optional<SessionData> data = session->data_snapshot();
+    HttpResponse response;
+    response.content_type = "text/x.gcode";
+    response.body_file = result->gcode_file;
+    response.body_file_owner = result;
+    response.headers.emplace("Content-Disposition", content_disposition_attachment(
+        download_file_name(requested_name, data ? data->name : std::nullopt, ".gcode")));
+    response.headers.emplace("Cache-Control", "no-store");
+    return response;
+}
+
+// Parse a decimal query value made of digits only (no sign, no space),
+// rejecting values that do not fit.
+bool parse_query_count(const std::string &text, std::size_t &value)
+{
+    if (text.empty() || text.size() > 19)
+        return false;
+    std::uint64_t parsed = 0;
+    for (char character : text) {
+        if (character < '0' || character > '9')
+            return false;
+        parsed = parsed * 10 + static_cast<std::uint64_t>(character - '0');
+    }
+    if (parsed > std::numeric_limits<std::size_t>::max())
+        return false;
+    value = static_cast<std::size_t>(parsed);
+    return true;
+}
+
+struct ViewerQuery {
+    std::size_t offset = 0;
+    std::size_t limit = 10000;
+    std::optional<std::string> result_id;
+};
+
+// Accepted keys are offset, limit (1..100000) and result_id, each at most
+// once; a later page (offset > 0) must name the result it continues.
+bool read_viewer_query(const std::string &query, ViewerQuery &parsed)
+{
+    std::map<std::string, std::string> parameters;
+    if (!parse_form_query(query, parameters))
+        return false;
+    for (const std::pair<const std::string, std::string> &parameter : parameters) {
+        if (parameter.first == "offset") {
+            if (!parse_query_count(parameter.second, parsed.offset))
+                return false;
+        } else if (parameter.first == "limit") {
+            if (!parse_query_count(parameter.second, parsed.limit) || parsed.limit < 1 || parsed.limit > 100000)
+                return false;
+        } else if (parameter.first == "result_id") {
+            if (parameter.second.empty())
+                return false;
+            parsed.result_id = parameter.second;
+        } else {
+            return false;
+        }
+    }
+    return parsed.offset == 0 || parsed.result_id.has_value();
+}
+
+// Runs on an import thread: a page of up to 100000 moves is built and
+// serialized away from the network thread, from the captured immutable
+// snapshot, so a page never mixes two results.
+HttpResponse viewer_page_response(const ViewerSnapshot &snapshot, const ViewerQuery &query,
+    const std::string &request_id)
+{
+    try {
+        const ViewerPage page = make_viewer_page(*snapshot.viewer, query.offset, query.limit);
+        const std::size_t end = std::min(page.total_moves, query.offset + page.moves.size());
+        const ViewerHeader empty_header{nlohmann::json::object(), nlohmann::json::array(), {}};
+        const ViewerHeader &header = snapshot.header != nullptr ? *snapshot.header : empty_header;
+        return HttpResponse::json(200, nlohmann::json{
+            {"schema_version", 1},
+            {"result_id", snapshot.result_id},
+            {"outdated", snapshot.outdated},
+            {"metadata", header.metadata},
+            {"layers", header.layers},
+            {"moves", viewer_moves_json(page, header)},
+            {"pagination", {
+                {"offset", query.offset},
+                {"limit", query.limit},
+                {"total_moves", page.total_moves},
+                {"next_offset", query.offset < page.total_moves && end < page.total_moves ?
+                    nlohmann::json(end) : nlohmann::json(nullptr)}}}});
+    } catch (const std::exception &) {
+        return make_error_response(500, "internal_error", "The server could not build the viewer page.", request_id);
+    }
+}
+
+// Read one page of the last retained result, current or outdated. A read of
+// the session: no 503.
+std::optional<HttpResponse> handle_get_gcode_for_view(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id, const DeferredResponder &respond)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The get_gcode_for_view route does not accept a request body.", request_id);
+    ViewerQuery query;
+    if (!read_viewer_query(request.query, query))
+        return make_error_response(400, "invalid_request", "The get_gcode_for_view query is invalid.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    std::shared_ptr<const ViewerSnapshot> snapshot = session->viewer_snapshot();
+    if (snapshot == nullptr) {
+        // A deletion between lookup and read reports the missing session.
+        if (session->snapshot().retired)
+            return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+        return make_error_response(409, "no_viewer_result", "No slicing result has been retained.", request_id);
+    }
+    if (query.result_id && *query.result_id != snapshot->result_id)
+        return make_error_response(409, "result_replaced", "The requested result has been replaced.", request_id);
+    asio::post(services.imports, [snapshot = std::move(snapshot), query, request_id, respond,
+        observer = services.import_observer]() {
+        try {
+            if (observer)
+                observer();
+            respond(viewer_page_response(*snapshot, query, request_id));
+        } catch (...) {
+            respond(make_error_response(500, "internal_error", "The server could not build the viewer page.", request_id));
+        }
+    });
+    return std::nullopt;
+}
+
 // Request that the session's slicing stop. Queued work ends at once in
 // `ready`; started work keeps `slicing` until the engine stops. A repeated
 // request during the stop is accepted again. Without active work: 409.
@@ -2248,6 +2434,25 @@ HttpResponse handle_cancel_slicing(const HttpRequest &request, const RouteServic
     if (session->request_cancel(SessionRegistry::Clock::now()) == SessionContext::CancelResult::not_active)
         return make_error_response(409, "not_slicing", "No slicing operation is active.", request_id);
     return HttpResponse::json(202, slice_state_json(session->snapshot()));
+}
+
+// Retained downloads survive retirement; synchronous DELETE cleanup may occupy the request thread in V1.
+HttpResponse handle_delete_session(const HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "DELETE")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty())
+        return make_error_response(400, "invalid_request", "The delete route does not accept a request body.", request_id);
+    // Apply expiration first so a late DELETE gets 404 before erase arbitrates busy versus erased.
+    if (services.sessions.find(username, request.path_segments[1], SessionRegistry::Clock::now()) == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    const SessionEraseResult result = services.sessions.erase(username, request.path_segments[1]);
+    if (result == SessionEraseResult::not_found)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (result == SessionEraseResult::busy)
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    return HttpResponse::empty(204);
 }
 
 // Route injected by tests only; it is never registered in the standalone
@@ -2324,10 +2529,16 @@ std::optional<HttpResponse> dispatch_request(
             return handle_save_project(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 3 && operation == "slice")
             return handle_slice(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "get_gcode_for_view")
+            return handle_get_gcode_for_view(request, services, authentication->username, request_id, respond);
+        if (request.path_segments.size() == 3 && operation == "get_gcode")
+            return handle_get_gcode(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "cancel_slicing")
             return handle_cancel_slicing(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "state")
             return handle_state(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "delete")
+            return handle_delete_session(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "set_name")
             return handle_set_name(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 3 && operation == "get_name")
@@ -2390,10 +2601,12 @@ public:
         Tcp::socket socket,
         std::shared_ptr<const ServerConfig> config,
         RestRouter router,
+        std::function<void(std::function<void()>)> write_observer,
         CloseCallback close_callback)
         : socket_(std::move(socket)),
           config_(std::move(config)),
           router_(std::move(router)),
+          write_observer_(std::move(write_observer)),
           close_callback_(std::move(close_callback)),
           timer_(socket_.get_executor())
     {
@@ -2717,11 +2930,25 @@ private:
             }
             set_response_fields(*file_response_message_, response);
             file_response_message_->prepare_payload();
+            file_serializer_.emplace(*file_response_message_);
+            file_serializer_->limit(64 * 1024);
+            if (write_observer_) {
+                // Retain the open file and owner while a test delays the first
+                // write. A weak continuation cannot outlive server shutdown.
+                const std::weak_ptr<HttpSession> weak = shared_from_this();
+                write_observer_([weak]() {
+                    if (const auto session = weak.lock())
+                        asio::post(session->socket_.get_executor(), [session]() {
+                            if (!session->closed_) {
+                                session->arm_timeout(session->config_->request_timeout);
+                                session->write_file_chunk();
+                            }
+                        });
+                });
+                return;
+            }
             arm_timeout(config_->request_timeout);
-            const std::shared_ptr<HttpSession> self = shared_from_this();
-            http::async_write(socket_, *file_response_message_, [self](const ErrorCode &error, std::size_t bytes) {
-                self->handle_write(error, bytes);
-            });
+            write_file_chunk();
             return;
         }
         response_message_.emplace(static_cast<http::status>(status), 11);
@@ -2736,9 +2963,27 @@ private:
         });
     }
 
+    // Each progressing write gets a fresh idle budget; a blocked socket still expires.
+    void write_file_chunk()
+    {
+        const std::shared_ptr<HttpSession> self = shared_from_this();
+        http::async_write_some(socket_, *file_serializer_, [self](const ErrorCode &error, std::size_t bytes) {
+            if (error || self->closed_ || self->file_serializer_->is_done()) {
+                self->handle_write(error, bytes);
+                return;
+            }
+            if (bytes != 0)
+                self->arm_timeout(self->config_->request_timeout);
+            self->write_file_chunk();
+        });
+    }
+
+    std::function<void(std::function<void()>)> write_observer_;
+
     void handle_write(const ErrorCode &error, std::size_t)
     {
         cancel_timeout();
+        file_serializer_.reset();
         file_response_message_.reset();
         file_response_owner_.reset();
         if (error || parser_.is_done()) {
@@ -2793,6 +3038,7 @@ private:
     // Reverse destruction closes the read handle before the temporary file is deleted on Windows.
     std::shared_ptr<const void> file_response_owner_;
     std::optional<http::response<http::file_body>> file_response_message_;
+    std::optional<http::response_serializer<http::file_body>> file_serializer_;
     // True once an upload is accepted: the timeout becomes an idle limit.
     bool idle_timeout_ = false;
     std::size_t drained_bytes_ = 0;
@@ -2897,6 +3143,7 @@ public:
         running_.store(true);
         const std::uint64_t generation = ++run_generation_;
         accept_next(generation);
+        schedule_expiration(generation);
         worker_ = std::thread([this]() {
             io_context_.run();
         });
@@ -2913,6 +3160,10 @@ public:
         ++run_generation_;
         ErrorCode ignored;
         accept_retry_timer_.cancel(ignored);
+        {
+            std::lock_guard<std::mutex> lock(expiration_mutex_);
+            expiration_timer_.cancel(ignored);
+        }
         acceptor_.cancel(ignored);
         acceptor_.close(ignored);
 
@@ -2985,6 +3236,13 @@ public:
         import_observer_ = std::move(observer);
     }
 
+    void set_write_observer(std::function<void(std::function<void()>)> observer)
+    {
+        if (running_.load())
+            throw std::logic_error("The write observer must be set before the REST server starts");
+        write_observer_ = std::move(observer);
+    }
+
     void set_slice_observer(std::function<void()> observer)
     {
         if (running_.load())
@@ -2992,7 +3250,7 @@ public:
         slice_observer_ = std::move(observer);
     }
 
-    void set_progress_observer(std::function<void()> observer)
+    void set_progress_observer(std::function<void(const std::string &)> observer)
     {
         if (running_.load())
             throw std::logic_error("The progress observer must be set before the REST server starts");
@@ -3007,6 +3265,25 @@ public:
     }
 
 private:
+    // Serialize timer submission with stop so no sweep can enter the import pool after joining starts.
+    void schedule_expiration(std::uint64_t generation)
+    {
+        std::lock_guard<std::mutex> lock(expiration_mutex_);
+        if (!running_.load() || generation != run_generation_.load())
+            return;
+        expiration_timer_.expires_after(session_expiration_interval(config_.session_ttl));
+        expiration_timer_.async_wait([this, generation](const ErrorCode &error) {
+            {
+                std::lock_guard<std::mutex> lock(expiration_mutex_);
+                if (error || !running_.load() || generation != run_generation_.load())
+                    return;
+                SessionRegistry *registry = session_registry_.get();
+                asio::post(*import_pool_, [registry]() { registry->expire(SessionRegistry::Clock::now()); });
+            }
+            schedule_expiration(generation);
+        });
+    }
+
     void accept_next(std::uint64_t generation)
     {
         if (!running_.load() || generation != run_generation_.load())
@@ -3037,6 +3314,7 @@ private:
                     std::move(socket),
                     config_shared_,
                     router_,
+                    write_observer_,
                     [this](HttpSession *closed_session) {
                         remove_session(closed_session);
                     });
@@ -3078,15 +3356,18 @@ private:
     std::unique_ptr<SessionRegistry> session_registry_;
     RequestHandler private_test_handler_;
     std::function<void()> import_observer_;
+    std::function<void(std::function<void()>)> write_observer_;
     // Created in start(), joined in stop() before the network thread stops.
     std::unique_ptr<asio::thread_pool> import_pool_;
     std::unique_ptr<asio::thread_pool> slice_pool_;
     SliceJobs slice_jobs_;
     std::function<void()> slice_observer_;
-    std::function<void()> progress_observer_;
+    std::function<void(const std::string &)> progress_observer_;
     asio::io_context io_context_;
     Tcp::acceptor acceptor_;
     asio::steady_timer accept_retry_timer_{io_context_};
+    asio::steady_timer expiration_timer_{io_context_};
+    std::mutex expiration_mutex_;
     std::thread worker_;
     std::atomic<bool> running_{false};
     // Bumped on every start/stop so accept handlers and retry timers queued by
@@ -3304,12 +3585,17 @@ void RestServer::set_import_observer(std::function<void()> observer)
     impl_->runtime_.set_import_observer(std::move(observer));
 }
 
+void RestServer::set_write_observer(std::function<void(std::function<void()>)> observer)
+{
+    impl_->runtime_.set_write_observer(std::move(observer));
+}
+
 void RestServer::set_slice_observer(std::function<void()> observer)
 {
     impl_->runtime_.set_slice_observer(std::move(observer));
 }
 
-void RestServer::set_progress_observer(std::function<void()> observer)
+void RestServer::set_progress_observer(std::function<void(const std::string &)> observer)
 {
     impl_->runtime_.set_progress_observer(std::move(observer));
 }

@@ -1,9 +1,11 @@
 // Real slices and bounded worker gates verify asynchronous state and result ownership.
 
-#include <catch2/catch.hpp>
+#include <catch_main.hpp>
 #include <nlohmann/json.hpp>
 
+#include "file_names.hpp"
 #include "progress.hpp"
+#include "viewer_json.hpp"
 #include "rest_models_test_helpers.hpp"
 
 #include <array>
@@ -26,8 +28,9 @@ using namespace RestServerTest;
 
 namespace {
 
-constexpr std::chrono::seconds async_timeout{60};
-constexpr std::chrono::seconds gate_timeout{10};
+// Generous liveness limits also allow real slices on busy Debug build machines.
+constexpr std::chrono::seconds async_timeout{300};
+constexpr std::chrono::seconds gate_timeout{120};
 
 struct SessionRoute {
     std::string id;
@@ -53,9 +56,9 @@ public:
         release_ready_.wait_for(gate_timeout);
     }
 
-    bool wait_for_entries() const
+    bool wait_for_entries(std::chrono::seconds timeout = gate_timeout) const
     {
-        return entries_ready_.wait_for(gate_timeout) == std::future_status::ready;
+        return entries_ready_.wait_for(timeout) == std::future_status::ready;
     }
 
     void release()
@@ -90,10 +93,10 @@ private:
     std::shared_ptr<ObserverGate> gate_;
 };
 
-bool wait_until(const std::function<bool()> &predicate)
+bool wait_until(const std::function<bool()> &predicate, std::chrono::seconds timeout = async_timeout)
 {
     const std::chrono::steady_clock::time_point deadline =
-        std::chrono::steady_clock::now() + async_timeout;
+        std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         if (predicate())
             return true;
@@ -413,7 +416,7 @@ TEST_CASE("REST real slice publishes readable sanitized progress outside the ses
     const std::shared_ptr<ObserverGate> gate = std::make_shared<ObserverGate>(1);
     const std::shared_ptr<std::atomic<unsigned int>> calls = std::make_shared<std::atomic<unsigned int>>(0);
     ObserverRelease release(gate);
-    fixture.set_progress_observer([gate, calls]() {
+    fixture.set_progress_observer([gate, calls](const std::string &) {
         if (calls->fetch_add(1) == 0)
             gate->enter();
     });
@@ -654,7 +657,8 @@ TEST_CASE("REST slice destroys a displaced result outside session and job locks"
     const HttpResponseMessage first_accepted = fixture.request(http::verb::post, first.route + "/slice");
     REQUIRE(first_accepted.result() == http::status::accepted);
     require_accepted_state(response_json(first_accepted));
-    REQUIRE(owner_gate->wait_for_entries());
+    // Result destruction follows the complete slice, not the worker's initial entry.
+    REQUIRE(owner_gate->wait_for_entries(async_timeout));
 
     const std::shared_ptr<Slic3r::Rest::SessionContext> first_session = first.session;
     snapshot_probe = std::async(std::launch::async, [first_session]() {
@@ -1050,7 +1054,7 @@ TEST_CASE("REST cancel_slicing stops a running engine and allows a new slice", "
     // Shared like the gate: workers may still call the observer while a failed
     // test unwinds, after the test's own locals are gone.
     const std::shared_ptr<std::atomic<bool>> hold = std::make_shared<std::atomic<bool>>(true);
-    fixture.set_progress_observer([gate, hold]() {
+    fixture.set_progress_observer([gate, hold](const std::string &) {
         if (hold->exchange(false))
             gate->enter();
     });
@@ -1205,4 +1209,675 @@ TEST_CASE("REST cancel_slicing refuses requests without active work", "[rest_can
     require_error(fixture.request(http::verb::post, "/session/missing/cancel_slicing"),
         http::status::not_found, "session_not_found");
     CHECK(session->snapshot().status == Slic3r::Rest::SessionStatus::failed);
+}
+TEST_CASE("REST get_gcode streams the current published G-code", "[rest_gcode]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    const std::string target = session_route.route + "/get_gcode";
+    run_successful_slice(fixture, session_route);
+    const std::string published = read_file(session_route.session->current_gcode().value());
+    REQUIRE_FALSE(published.empty());
+
+    const HttpResponseMessage downloaded = fixture.request(http::verb::get, target);
+    REQUIRE(downloaded.result() == http::status::ok);
+    CHECK(downloaded.body() == published);
+    CHECK(downloaded[http::field::content_type] == "text/x.gcode");
+    CHECK(downloaded[http::field::cache_control] == "no-store");
+    CHECK(downloaded[http::field::content_length] == std::to_string(published.size()));
+    CHECK(downloaded[http::field::content_disposition] ==
+        Slic3r::Rest::content_disposition_attachment("project.gcode"));
+
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/set_name", R"({"name":"Bracket"})",
+        "application/json").result() == http::status::ok);
+    CHECK(fixture.request(http::verb::get, target)[http::field::content_disposition] ==
+        Slic3r::Rest::content_disposition_attachment("Bracket.gcode"));
+    CHECK(fixture.request(http::verb::get, target + "?file_name=part%3Av2")[http::field::content_disposition] ==
+        Slic3r::Rest::content_disposition_attachment("part_v2.gcode"));
+    CHECK(fixture.request(http::verb::get, target + "?file_name=...")[http::field::content_disposition] ==
+        Slic3r::Rest::content_disposition_attachment("Bracket.gcode"));
+    // Reading never changes the session or its result.
+    CHECK(session_route.session->snapshot().status == Slic3r::Rest::SessionStatus::sliced);
+    CHECK(wait_for_result_count(fixture, 1));
+}
+
+TEST_CASE("REST file downloads use an idle deadline and release retired results", "[rest_gcode][rest_download_idle]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.timeout = std::chrono::seconds(5);
+    // Export includes both executable start code and the serialized settings.
+    limits.max_body_bytes = 64 * 1024 * 1024;
+    RestServerFixture fixture(limits, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    // Real settings create a result larger than TCP buffers without injecting files.
+    std::string padding;
+    const std::string comment = ";" + std::string(1022, 'x') + "\n";
+    for (int line = 0; line < 16384; ++line)
+        padding += comment;
+    const nlohmann::json settings{{"start_gcode", {{"value", padding}}}};
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/set_settings",
+        settings.dump(), "application/json").result() == http::status::ok);
+    run_successful_slice(fixture, session_route);
+    const HttpResponseMessage expected = fixture.request(http::verb::get, session_route.route + "/get_gcode");
+    REQUIRE(expected.result() == http::status::ok);
+    REQUIRE(expected.body().size() > 16 * 1024 * 1024);
+
+    asio::io_context context;
+    Tcp::socket socket(context);
+    socket.open(Tcp::v4());
+    // Configure the window before connecting so Windows negotiates scaling.
+    socket.set_option(asio::socket_base::receive_buffer_size(256 * 1024));
+    socket.connect(Tcp::endpoint(asio::ip::make_address("127.0.0.1"), fixture.bound_port()));
+    const std::string request = "GET " + session_route.route + "/get_gcode HTTP/1.1\r\nHost: localhost\r\n"
+        "Authorization: Bearer " + fixture.token() + "\r\nConnection: close\r\n\r\n";
+    asio::write(socket, asio::buffer(request));
+    socket.non_blocking(true);
+    std::string received;
+    std::array<char, 256 * 1024> chunk{};
+    ErrorCode error;
+    const std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+    const std::chrono::steady_clock::time_point deadline = started + std::chrono::seconds(300);
+    // Preserve the complete header before stalling: Windows may discard unread
+    // socket bytes when the server shuts down a blocked transfer.
+    while (received.find("\r\n\r\n") == std::string::npos) {
+        const std::size_t bytes = socket.read_some(asio::buffer(chunk.data(), 4096), error);
+        received.append(chunk.data(), bytes);
+        if (error == asio::error::would_block || error == asio::error::try_again) {
+            REQUIRE(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } else {
+            REQUIRE_FALSE(error);
+        }
+    }
+    REQUIRE(fixture.request(http::verb::delete_, session_route.route + "/delete").result() == http::status::no_content);
+    REQUIRE(result_directories(fixture).size() == 1);
+    bool slow = false;
+    SECTION("an advancing slow client receives every byte") { slow = true; }
+    SECTION("a stalled client loses its result owner") { slow = false; }
+    if (!slow) {
+        // Do not close the client: only the server's idle expiry can release the file.
+        REQUIRE(wait_for_result_count(fixture, 0));
+    }
+    for (;;) {
+        const std::size_t bytes = socket.read_some(asio::buffer(chunk), error);
+        received.append(chunk.data(), bytes);
+        if (error == asio::error::would_block || error == asio::error::try_again) {
+            REQUIRE(std::chrono::steady_clock::now() < deadline);
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        if (error)
+            break;
+        if (slow)
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    const std::size_t header_end = received.find("\r\n\r\n");
+    REQUIRE(header_end != std::string::npos);
+    CHECK(received.compare(0, 12, "HTTP/1.1 200") == 0);
+    CHECK((error == asio::error::eof || error == asio::error::connection_reset));
+    if (slow) {
+        CHECK(error == asio::error::eof);
+        CHECK(std::chrono::steady_clock::now() - started > limits.timeout);
+        CHECK(received.substr(header_end + 4) == expected.body());
+        CHECK(wait_for_result_count(fixture, 0));
+    } else {
+        CHECK(received.size() - header_end - 4 < expected.body().size());
+    }
+}
+
+TEST_CASE("REST get_gcode refuses results that are not current", "[rest_gcode]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = session_route.session;
+    const std::string target = session_route.route + "/get_gcode";
+    const auto now = []() { return Slic3r::Rest::SessionRegistry::Clock::now(); };
+
+    // Never sliced.
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+    // During slicing, then after its cancellation.
+    const Slic3r::Rest::SessionContext::WorkToken active = session->begin_work(now()).value();
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+    REQUIRE(session->cancel_work(active, now()));
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+
+    // After an effective change.
+    run_successful_slice(fixture, session_route);
+    REQUIRE(fixture.request(http::verb::get, target).result() == http::status::ok);
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/set_setting/layer_height/0.25").result() ==
+        http::status::ok);
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+
+    // After a new slice starts, and after it fails.
+    run_successful_slice(fixture, session_route);
+    const Slic3r::Rest::SessionContext::WorkToken failing = session->begin_work(now()).value();
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+    REQUIRE(session->fail_work(failing, "failed", now()));
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_gcode");
+
+    // A renaming has no slicing effect: a new success stays downloadable.
+    run_successful_slice(fixture, session_route);
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/set_name", R"({"name":"Other"})",
+        "application/json").result() == http::status::ok);
+    CHECK(fixture.request(http::verb::get, target).result() == http::status::ok);
+}
+
+TEST_CASE("REST get_gcode validates the request before the session state", "[rest_gcode]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    const std::string target = session_route.route + "/get_gcode";
+
+    require_error(fixture.request(http::verb::post, target), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, target + "/extra"), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, target, "{}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    for (const std::string &query : {"?other=1", "?file_name=", "?file_name=a&file_name=b", "?file_name=%ZZ"}) {
+        CAPTURE(query);
+        require_error(fixture.request(http::verb::get, target + query), http::status::bad_request, "invalid_request");
+    }
+    require_error(fixture.request_without_auth(http::verb::get, target), http::status::unauthorized, "unauthorized");
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    require_error(fixture.request(http::verb::get, target, {}, {}, {{"Authorization", "Bearer " + bob_token}}),
+        http::status::not_found, "session_not_found");
+    require_error(fixture.request(http::verb::get, "/session/missing/get_gcode"),
+        http::status::not_found, "session_not_found");
+}
+
+// Checks that a download started before the session deletion is delivered
+// complete and that the result directory goes away afterwards. On loopback the
+// small G-code may already sit in socket buffers when the session is erased,
+// so this does not prove the owner is held during an active write; that
+// transport guarantee is shared with save_project (body_file_owner).
+TEST_CASE("REST get_gcode delivers a started download despite session deletion", "[rest_gcode][rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    run_successful_slice(fixture, session_route);
+    const std::string published = read_file(session_route.session->current_gcode().value());
+
+    asio::io_context context;
+    Tcp::socket socket = fixture.connect_socket(context);
+    const std::string request = "GET " + session_route.route + "/get_gcode HTTP/1.1\r\nHost: localhost\r\n"
+        "Authorization: Bearer " + fixture.token() + "\r\nConnection: close\r\n\r\n";
+    asio::write(socket, asio::buffer(request));
+    std::string received(1, '\0');
+    socket.read_some(asio::buffer(&received[0], 1));
+
+    // The transfer has started: deleting the session must not cut it short.
+    CHECK(fixture.request(http::verb::delete_, session_route.route + "/delete").result() == http::status::no_content);
+    std::array<char, 64 * 1024> chunk{};
+    ErrorCode error;
+    for (;;) {
+        const std::size_t bytes = socket.read_some(asio::buffer(chunk), error);
+        received.append(chunk.data(), bytes);
+        if (error)
+            break;
+    }
+    const std::size_t header_end = received.find("\r\n\r\n");
+    REQUIRE(header_end != std::string::npos);
+    CHECK(received.compare(0, 12, "HTTP/1.1 200") == 0);
+    CHECK(received.substr(header_end + 4) == published);
+    socket.close(error);
+    // Once the transfer and the session are gone, so is the result directory.
+    CHECK(wait_for_result_count(fixture, 0));
+}
+
+TEST_CASE("REST delete removes only the owned session and its unreferenced result", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute removed = create_cube_session(fixture);
+    const SessionRoute kept = create_cube_session(fixture);
+    run_successful_slice(fixture, removed);
+    const HttpResponseMessage response = fixture.request(http::verb::delete_, removed.route + "/delete");
+    REQUIRE(response.result() == http::status::no_content);
+    CHECK(response.body().empty());
+    CHECK(response[http::field::content_type].empty());
+    for (const char *operation : {"state", "list_objects", "get_gcode"}) {
+        CAPTURE(operation);
+        require_error(fixture.request(http::verb::get, removed.route + "/" + operation),
+            http::status::not_found, "session_not_found");
+    }
+    require_error(fixture.request(http::verb::delete_, removed.route + "/delete"),
+        http::status::not_found, "session_not_found");
+    CHECK(wait_for_result_count(fixture, 0));
+    CHECK(removed.session->snapshot().retired);
+    CHECK_FALSE(kept.session->snapshot().retired);
+    CHECK(fixture.request(http::verb::get, kept.route + "/list_objects").result() == http::status::ok);
+}
+
+TEST_CASE("REST open G-code transfer retains its file through deletion replacement and disconnect", "[rest_file_lifetime]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    fixture.stop();
+    auto opened = std::make_shared<std::promise<std::function<void()>>>();
+    auto ready = opened->get_future();
+    fixture.set_write_observer([opened](std::function<void()> resume) {
+        opened->set_value(std::move(resume));
+    });
+    fixture.start();
+    const SessionRoute source = create_cube_session(fixture);
+    run_successful_slice(fixture, source);
+    const auto path = source.session->current_gcode().value();
+    const std::string published = read_file(path);
+    asio::io_context context;
+    Tcp::socket socket = fixture.connect_socket(context);
+    const std::string request = "GET " + source.route + "/get_gcode HTTP/1.1\r\nHost: localhost\r\n"
+        "Authorization: Bearer " + fixture.token() + "\r\nConnection: close\r\n\r\n";
+    asio::write(socket, asio::buffer(request));
+    REQUIRE(ready.wait_for(std::chrono::seconds(30)) == std::future_status::ready);
+    std::function<void()> resume = ready.get();
+    bool disconnected = false;
+    SECTION("deletion delivers the complete open file") {
+        REQUIRE(fixture.request(http::verb::delete_, source.route + "/delete").result() == http::status::no_content);
+    }
+    SECTION("replacement delivers the previous open file") {
+        run_successful_slice(fixture, source);
+        REQUIRE(source.session->current_gcode().value() != path);
+    }
+    SECTION("disconnected client releases the deleted file") {
+        REQUIRE(fixture.request(http::verb::delete_, source.route + "/delete").result() == http::status::no_content);
+        ErrorCode ignored;
+        socket.set_option(asio::socket_base::linger(true, 0), ignored);
+        socket.close(ignored);
+        disconnected = true;
+    }
+    // The hook fired after file_body::open, before any bytes were written.
+    REQUIRE(std::filesystem::is_regular_file(path));
+    resume();
+    if (!disconnected) {
+        beast::flat_buffer buffer;
+        HttpResponseMessage response;
+        http::read(socket, buffer, response);
+        CHECK(response.result() == http::status::ok);
+        CHECK(response.body() == published);
+    }
+    CHECK(wait_until([&]() { return !std::filesystem::exists(path.parent_path()); }));
+}
+
+TEST_CASE("REST delete keeps externally retained result snapshots alive", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    run_successful_slice(fixture, session_route);
+    std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> held = session_route.session->viewer_snapshot();
+    REQUIRE(held != nullptr);
+    const std::filesystem::path directory = held->gcode_file.parent_path();
+    REQUIRE(fixture.request(http::verb::delete_, session_route.route + "/delete").result() == http::status::no_content);
+    CHECK(std::filesystem::is_directory(directory));
+    CHECK(read_file(held->gcode_file).find("G1") != std::string::npos);
+    held.reset();
+    CHECK(wait_for_result_count(fixture, 0));
+}
+
+TEST_CASE("REST delete refuses started work until cancellation has effectively stopped", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    fixture.stop();
+    const std::shared_ptr<ObserverGate> gate = std::make_shared<ObserverGate>(1);
+    ObserverRelease release(gate);
+    fixture.set_slice_observer([gate]() { gate->enter(); });
+    fixture.start();
+    const SessionRoute session_route = create_cube_session(fixture);
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/slice").result() == http::status::accepted);
+    REQUIRE(gate->wait_for_entries());
+    require_error(fixture.request(http::verb::delete_, session_route.route + "/delete"),
+        http::status::conflict, "session_busy");
+    CHECK(cancel_state(fixture, session_route.route).at("etat") == "slicing");
+    require_error(fixture.request(http::verb::delete_, session_route.route + "/delete"),
+        http::status::conflict, "session_busy");
+    gate->release();
+    REQUIRE(wait_for_status(session_route.session, Slic3r::Rest::SessionStatus::ready));
+    CHECK(fixture.request(http::verb::delete_, session_route.route + "/delete").result() == http::status::no_content);
+    CHECK(wait_for_result_count(fixture, 0));
+}
+
+TEST_CASE("REST delete accepts work already cancelled while queued", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.slice_threads = 1;
+    RestServerFixture fixture(limits, true, true);
+    fixture.stop();
+    const std::shared_ptr<ObserverGate> gate = std::make_shared<ObserverGate>(1);
+    ObserverRelease release(gate);
+    fixture.set_slice_observer([gate]() { gate->enter(); });
+    fixture.start();
+    const SessionRoute running = create_cube_session(fixture);
+    const SessionRoute queued = create_cube_session(fixture);
+    REQUIRE(fixture.request(http::verb::post, running.route + "/slice").result() == http::status::accepted);
+    REQUIRE(gate->wait_for_entries());
+    REQUIRE(fixture.request(http::verb::post, queued.route + "/slice").result() == http::status::accepted);
+    CHECK(cancel_state(fixture, queued.route).at("etat") == "ready");
+    REQUIRE(fixture.request(http::verb::delete_, queued.route + "/delete").result() == http::status::no_content);
+    require_error(fixture.request(http::verb::get, queued.route + "/state"),
+        http::status::not_found, "session_not_found");
+    gate->release();
+    REQUIRE(wait_for_status(running.session, Slic3r::Rest::SessionStatus::sliced));
+    CHECK(wait_for_result_count(fixture, 1));
+    CHECK(gate->entry_count() == 1);
+}
+
+TEST_CASE("REST delete validates authentication method body and ownership", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string id = create_session(fixture);
+    const std::string route = "/session/" + id;
+    const std::string target = route + "/delete";
+    for (const http::verb method : {http::verb::get, http::verb::post})
+        require_error(fixture.request(method, target), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::delete_, target + "/extra"), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::delete_, target, "{", "application/json"),
+        http::status::bad_request, "invalid_request");
+    require_error(fixture.request_without_auth(http::verb::delete_, target, "{", "application/json"),
+        http::status::unauthorized, "unauthorized");
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    require_error(fixture.request(http::verb::delete_, target, {}, {}, {{"Authorization", "Bearer " + bob_token}}),
+        http::status::not_found, "session_not_found");
+    require_error(fixture.request(http::verb::delete_, "/session/missing/delete"),
+        http::status::not_found, "session_not_found");
+    CHECK(fixture.request(http::verb::get, route + "/state").result() == http::status::ok);
+    CHECK(fixture.sessions().size() == 1);
+}
+
+TEST_CASE("REST expiration sweeps reclaim inactive sessions without requests", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.session_ttl = std::chrono::seconds(1);
+    RestServerFixture fixture(limits, true, true);
+    const std::string id = create_session(fixture);
+    REQUIRE(fixture.sessions().size() == 1);
+    REQUIRE(wait_until([&]() { return fixture.sessions().size() == 0; }, std::chrono::seconds(10)));
+    require_error(fixture.request(http::verb::get, "/session/" + id + "/state"),
+        http::status::not_found, "session_not_found");
+    require_error(fixture.request(http::verb::delete_, "/session/" + id + "/delete"),
+        http::status::not_found, "session_not_found");
+}
+
+TEST_CASE("REST expiration suspends during work and restarts on completion", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.session_ttl = std::chrono::seconds(1);
+    RestServerFixture fixture(limits, true, true);
+    const std::string id = create_session(fixture);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    REQUIRE(session != nullptr);
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    CHECK(fixture.sessions().size() == 1);
+    CHECK(fixture.request(http::verb::get, "/session/" + id + "/state").result() == http::status::ok);
+    REQUIRE(session->cancel_work(work, Slic3r::Rest::SessionRegistry::Clock::now()));
+    REQUIRE(wait_until([&]() { return fixture.sessions().size() == 0; }, std::chrono::seconds(10)));
+}
+
+TEST_CASE("REST expiration cleanup does not block new network requests", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.session_ttl = std::chrono::seconds(1);
+    RestServerFixture fixture(limits, true, true);
+    const std::string id = create_session(fixture);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = find_session(fixture, id);
+    const std::shared_ptr<ObserverGate> gate = std::make_shared<ObserverGate>(1);
+    ObserverRelease release(gate);
+    std::shared_ptr<const void> owner(new int(0), [gate](const void *value) {
+        gate->enter();
+        delete static_cast<const int *>(value);
+    });
+    const Slic3r::Rest::SessionContext::WorkToken work = session->begin_work(
+        Slic3r::Rest::SessionRegistry::Clock::now()).value();
+    REQUIRE(session->finish_work(work, "synthetic.gcode", Slic3r::GCodeProcessorResult(),
+        Slic3r::Rest::SessionRegistry::Clock::now(), std::move(owner)));
+    REQUIRE(gate->wait_for_entries());
+    std::future<HttpResponseMessage> created = std::async(std::launch::async, [&fixture]() {
+        return fixture.request(http::verb::post, "/create_session");
+    });
+    const bool served = created.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    gate->release();
+    const HttpResponseMessage response = created.get();
+    CHECK(served);
+    CHECK(response.result() == http::status::created);
+    CHECK(session->snapshot().retired);
+}
+
+TEST_CASE("REST expiration timer resumes after repeated server restarts", "[rest_delete]")
+{
+    ensure_engine_initialized();
+    RestServerFixture::Limits limits;
+    limits.session_ttl = std::chrono::seconds(1);
+    RestServerFixture fixture(limits, true, true);
+    for (int restart = 0; restart < 3; ++restart) {
+        CAPTURE(restart);
+        create_session(fixture);
+        fixture.stop();
+        fixture.start();
+        create_session(fixture);
+        REQUIRE(wait_until([&]() { return fixture.sessions().size() == 0; }, std::chrono::seconds(10)));
+    }
+}
+
+namespace {
+
+nlohmann::json viewer_page(const RestServerFixture &fixture, const std::string &route, const std::string &query = {})
+{
+    const HttpResponseMessage response = fixture.request(http::verb::get, route + "/get_gcode_for_view" + query);
+    REQUIRE(response.result() == http::status::ok);
+    return response_json(response);
+}
+
+// Reverse the sparse encoding of one page: omitted fields keep the previous value.
+std::vector<nlohmann::json> decode_moves(const nlohmann::json &moves)
+{
+    std::vector<nlohmann::json> decoded;
+    for (const nlohmann::json &move : moves) {
+        nlohmann::json full = decoded.empty() ? nlohmann::json::object() : decoded.back();
+        for (auto item = move.begin(); item != move.end(); ++item)
+            full[item.key()] = item.value();
+        decoded.push_back(std::move(full));
+    }
+    return decoded;
+}
+
+// Read every move of one result with pages of `limit`, following next_offset.
+std::vector<nlohmann::json> read_all_moves(const RestServerFixture &fixture, const std::string &route,
+    std::size_t limit, std::string &result_id)
+{
+    std::vector<nlohmann::json> moves;
+    nlohmann::json page = viewer_page(fixture, route, "?limit=" + std::to_string(limit));
+    result_id = page.at("result_id");
+    for (;;) {
+        REQUIRE(page.at("result_id") == result_id);
+        // Every page starts with a complete move.
+        if (!page.at("moves").empty())
+            CHECK(page.at("moves")[0].size() == 19);
+        for (nlohmann::json &move : decode_moves(page.at("moves")))
+            moves.push_back(std::move(move));
+        if (page.at("pagination").at("next_offset").is_null())
+            break;
+        const std::size_t next = page.at("pagination").at("next_offset");
+        CHECK(next == moves.size());
+        page = viewer_page(fixture, route,
+            "?offset=" + std::to_string(next) + "&limit=" + std::to_string(limit) + "&result_id=" + result_id);
+    }
+    return moves;
+}
+
+} // namespace
+
+TEST_CASE("REST viewer pages decode to the same moves whatever the page size", "[rest_viewer]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    run_successful_slice(fixture, session_route);
+    const std::shared_ptr<const Slic3r::Rest::ViewerSnapshot> snapshot = session_route.session->viewer_snapshot();
+    const std::size_t total = snapshot->viewer->moves.size();
+    REQUIRE(total > 10);
+
+    const nlohmann::json first = viewer_page(fixture, session_route.route, "?limit=100000");
+    CHECK(first.at("schema_version") == 1);
+    CHECK(first.at("outdated") == false);
+    CHECK(first.at("pagination").at("total_moves") == total);
+    CHECK(first.at("pagination").at("next_offset").is_null());
+    CHECK(first.at("metadata").at("filename") == "output.gcode");
+    // Names are the engine's object labels written in the G-code.
+    const nlohmann::json &objects = first.at("metadata").at("objects");
+    REQUIRE(objects.size() == 1);
+    CHECK(objects[0].at("id") == 0);
+    CHECK(objects[0].at("name").get<std::string>().find("cube") != std::string::npos);
+    const std::vector<nlohmann::json> full = decode_moves(first.at("moves"));
+    REQUIRE(full.size() == total);
+
+    // Moves follow the engine data; layers index the first extrusion heights.
+    const nlohmann::json &layers = first.at("layers");
+    REQUIRE_FALSE(layers.empty());
+    double previous_time = 0.0;
+    bool first_extrusion = true;
+    for (std::size_t index = 0; index < total; ++index) {
+        CAPTURE(index);
+        const nlohmann::json &move = full[index];
+        const Slic3r::GCodeProcessorResult::MoveVertex &source = snapshot->viewer->moves[index];
+        CHECK(move.at("gcode_id") == source.gcode_id);
+        CHECK(move.at("type") == Slic3r::Rest::viewer_move_type_name(source.type));
+        CHECK(float(move.at("position_mm")[2].get<double>()) == source.position.z());
+        CHECK(move.at("time_s").get<double>() >= previous_time);
+        previous_time = move.at("time_s");
+        CHECK((move.at("object_id").is_null() || move.at("object_id") == 0));
+        REQUIRE(move.at("layer_id").get<std::size_t>() < layers.size());
+        if (!move.at("points").empty())
+            CHECK(move.at("points").back() == move.at("position_mm"));
+        if (first_extrusion && move.at("type") == "extrude") {
+            first_extrusion = false;
+            CHECK(move.at("layer_id") == 0);
+            CHECK(move.at("position_mm")[2] == layers[0].at("z_mm"));
+        }
+    }
+    for (std::size_t index = 1; index < layers.size(); ++index)
+        CHECK(layers[index].at("z_mm").get<double>() > layers[index - 1].at("z_mm").get<double>());
+
+    // Chained pages and single-move pages decode to the full read.
+    std::string result_id;
+    CHECK(read_all_moves(fixture, session_route.route, 1000, result_id) == full);
+    CHECK(result_id == first.at("result_id"));
+    for (std::size_t offset = 0; offset < 5; ++offset) {
+        const nlohmann::json single = viewer_page(fixture, session_route.route,
+            "?limit=1&offset=" + std::to_string(offset) + "&result_id=" + result_id);
+        REQUIRE(single.at("moves").size() == 1);
+        CHECK(decode_moves(single.at("moves"))[0] == full[offset]);
+    }
+
+    // Default page size and the end of the list.
+    CHECK(viewer_page(fixture, session_route.route).at("moves").size() == std::min<std::size_t>(10000, total));
+    const nlohmann::json end = viewer_page(fixture, session_route.route,
+        "?offset=" + std::to_string(total) + "&result_id=" + result_id);
+    CHECK(end.at("moves").empty());
+    CHECK(end.at("pagination").at("next_offset").is_null());
+}
+
+TEST_CASE("REST viewer keeps the last result across invalidations and refuses replaced IDs", "[rest_viewer]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    const std::shared_ptr<Slic3r::Rest::SessionContext> session = session_route.session;
+    const std::string target = session_route.route + "/get_gcode_for_view";
+    const auto now = []() { return Slic3r::Rest::SessionRegistry::Clock::now(); };
+
+    require_error(fixture.request(http::verb::get, target), http::status::conflict, "no_viewer_result");
+    run_successful_slice(fixture, session_route);
+    const nlohmann::json current = viewer_page(fixture, session_route.route, "?limit=50");
+    const std::string first_id = current.at("result_id");
+
+    // Invalidation keeps the result, its ID and its content, only outdated.
+    REQUIRE(fixture.request(http::verb::post, session_route.route + "/set_setting/layer_height/0.25").result() ==
+        http::status::ok);
+    nlohmann::json outdated = viewer_page(fixture, session_route.route, "?limit=50&result_id=" + first_id);
+    CHECK(outdated.at("outdated") == true);
+    CHECK(outdated.at("moves") == current.at("moves"));
+
+    // Still readable during a new slicing, after its failure or cancellation.
+    const Slic3r::Rest::SessionContext::WorkToken failing = session->begin_work(now()).value();
+    CHECK(viewer_page(fixture, session_route.route).at("result_id") == first_id);
+    REQUIRE(session->fail_work(failing, "failed", now()));
+    CHECK(viewer_page(fixture, session_route.route).at("result_id") == first_id);
+    const Slic3r::Rest::SessionContext::WorkToken cancelled = session->begin_work(now()).value();
+    REQUIRE(session->cancel_work(cancelled, now()));
+    CHECK(viewer_page(fixture, session_route.route).at("outdated") == true);
+
+    // A new success replaces the result: the old ID is refused.
+    run_successful_slice(fixture, session_route);
+    const nlohmann::json replaced = viewer_page(fixture, session_route.route);
+    CHECK(replaced.at("result_id") != first_id);
+    CHECK(replaced.at("outdated") == false);
+    require_error(fixture.request(http::verb::get, target + "?offset=10&result_id=" + first_id),
+        http::status::conflict, "result_replaced");
+    require_error(fixture.request(http::verb::get, target + "?result_id=" + first_id),
+        http::status::conflict, "result_replaced");
+}
+
+TEST_CASE("REST viewer validates the request before the session state", "[rest_viewer]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const SessionRoute session_route = create_cube_session(fixture);
+    const std::string target = session_route.route + "/get_gcode_for_view";
+
+    for (const std::string &query : {"?limit=0", "?limit=100001", "?offset=-1", "?offset=%2B1", "?offset=1",
+            "?offset=1&result_id=", "?other=1", "?limit=ten", "?limit=1&limit=2", "?limit=1%201",
+            "?offset=99999999999999999999&result_id=x"}) {
+        CAPTURE(query);
+        require_error(fixture.request(http::verb::get, target + query), http::status::bad_request, "invalid_request");
+    }
+    require_error(fixture.request(http::verb::post, target), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, target + "/extra"), http::status::not_found, "route_not_found");
+    require_error(fixture.request(http::verb::get, target, "{}", "application/json"),
+        http::status::bad_request, "invalid_request");
+    require_error(fixture.request_without_auth(http::verb::get, target), http::status::unauthorized, "unauthorized");
+    const std::string bob_token = fixture.login_token("Bob", "secret");
+    require_error(fixture.request(http::verb::get, target, {}, {}, {{"Authorization", "Bearer " + bob_token}}),
+        http::status::not_found, "session_not_found");
+    require_error(fixture.request(http::verb::get, "/session/missing/get_gcode_for_view"),
+        http::status::not_found, "session_not_found");
+}
+
+TEST_CASE("REST viewer pages are built away from the network thread", "[rest_viewer]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    fixture.stop();
+    const std::shared_ptr<ObserverGate> gate = std::make_shared<ObserverGate>(1);
+    ObserverRelease release(gate);
+    // Shared with the observer for the unwinding reason of the cancel tests;
+    // uploads before the slice must not be held.
+    const std::shared_ptr<std::atomic<bool>> hold = std::make_shared<std::atomic<bool>>(false);
+    fixture.set_import_observer([gate, hold]() {
+        if (hold->load())
+            gate->enter();
+    });
+    fixture.start();
+    const SessionRoute session_route = create_cube_session(fixture);
+    run_successful_slice(fixture, session_route);
+
+    hold->store(true);
+    std::future<HttpResponseMessage> page = std::async(std::launch::async, [&fixture, &session_route]() {
+        return fixture.request(http::verb::get, session_route.route + "/get_gcode_for_view");
+    });
+    REQUIRE(gate->wait_for_entries());
+    CHECK(fixture.request(http::verb::get, session_route.route + "/state").result() == http::status::ok);
+    gate->release();
+    REQUIRE(page.wait_for(gate_timeout) == std::future_status::ready);
+    CHECK(page.get().result() == http::status::ok);
 }

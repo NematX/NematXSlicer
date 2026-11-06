@@ -54,6 +54,20 @@ TEST_CASE("REST state reads registry sessions without engine initialization", "[
     CHECK(nlohmann::json::parse(state.body()) == expected);
 }
 
+TEST_CASE("REST delete works without engine initialization", "[rest_server][rest_delete]")
+{
+    RestServerFixture fixture;
+    const HttpResponseMessage created = fixture.request(http::verb::post, "/create_session");
+    REQUIRE(created.result() == http::status::created);
+    const std::string id = nlohmann::json::parse(created.body()).at("session_id");
+    const HttpResponseMessage deleted = fixture.request(http::verb::delete_, "/session/" + id + "/delete");
+    REQUIRE(deleted.result() == http::status::no_content);
+    CHECK(deleted.body().empty());
+    const HttpResponseMessage absent = fixture.request(http::verb::get, "/session/" + id + "/state");
+    CHECK(absent.result() == http::status::not_found);
+    CHECK(nlohmann::json::parse(absent.body()).at("error").at("code") == "session_not_found");
+}
+
 TEST_CASE("REST server handles loopback JSON and route errors", "[rest_server]")
 {
     RestServerFixture fixture;

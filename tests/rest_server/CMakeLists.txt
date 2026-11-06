@@ -48,8 +48,8 @@ add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 add_executable(rest_models_tests
     file_names_tests.cpp
     rest_models_tests.cpp
-    rest_slice_tests.cpp
     transform_tests.cpp
+    viewer_json_tests.cpp
 )
 
 target_compile_definitions(rest_models_tests PRIVATE
@@ -158,6 +158,26 @@ set_tests_properties(
     rest_engine_tests
     rest_session_tests
     rest_auth_tests
-    PROPERTIES TIMEOUT 120)
+    PROPERTIES TIMEOUT 600)
 
-set_tests_properties(rest_models_tests PROPERTIES TIMEOUT 300)
+set_tests_properties(rest_models_tests PROPERTIES TIMEOUT 600)
+
+# Separate real slicing and workflow suites so their time budgets are independent.
+foreach(_REST_SUITE IN ITEMS rest_slice rest_e2e)
+    add_executable(${_REST_SUITE}_tests ${_REST_SUITE}_tests.cpp)
+    target_compile_definitions(${_REST_SUITE}_tests PRIVATE
+        SLIC3R_REST_RESOURCE_DIRECTORY=R"\(${SLIC3R_BUILD_RESOURCES_DIR}\)")
+    target_link_libraries(${_REST_SUITE}_tests test_common slic3r_rest slic3r_rest_engine boost_libs)
+    if (WIN32)
+        target_compile_definitions(${_REST_SUITE}_tests PRIVATE _WIN32_WINNT=0x0601)
+        prusaslicer_copy_dlls(${_REST_SUITE}_tests)
+    endif ()
+    set_property(TARGET ${_REST_SUITE}_tests PROPERTY FOLDER "tests")
+    add_test(${_REST_SUITE}_tests ${_REST_SUITE}_tests ${CATCH_EXTRA_ARGS})
+endforeach()
+# Liveness guards, not performance thresholds: allow concurrent external builds.
+set_tests_properties(rest_slice_tests rest_e2e_tests PROPERTIES TIMEOUT 1800)
+# Real-engine suites already exercise concurrent slices internally. Avoid CPU
+# oversubscription between executables while transport/settings tests run in parallel.
+set_tests_properties(rest_engine_tests rest_slice_tests rest_e2e_tests
+    PROPERTIES RESOURCE_LOCK rest_slicing)

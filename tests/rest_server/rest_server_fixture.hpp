@@ -14,6 +14,8 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include <nlohmann/json.hpp>
+#include <boost/uuid/random_generator.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 #include "auth.hpp"
 #include "rest_server.hpp"
@@ -46,9 +48,9 @@ class TempDirectory {
 public:
     TempDirectory()
     {
-        static std::atomic<std::uint64_t> next_id{1};
+        // CTest runs multiple executables: process-local counters would collide.
         root_ = std::filesystem::temp_directory_path() /
-            ("superslicer_rest_" + std::to_string(next_id.fetch_add(1)));
+            ("superslicer_rest_" + boost::uuids::to_string(boost::uuids::random_generator()()));
         std::filesystem::create_directories(root_);
     }
 
@@ -89,7 +91,7 @@ public:
         std::uint32_t max_connections = 64;
         std::uint32_t max_instances_per_object = 1000;
         std::uint32_t slice_threads = 2;
-        std::chrono::seconds timeout{30};
+        std::chrono::seconds timeout{300};
         std::chrono::seconds token_ttl{24 * 60 * 60};
         std::chrono::seconds session_ttl{24 * 60 * 60};
     };
@@ -151,8 +153,12 @@ public:
         http::write(socket, message);
 
         beast::flat_buffer buffer;
-        HttpResponseMessage response;
-        http::read(socket, buffer, response);
+        http::response_parser<http::string_body> parser;
+        // Generated files include serialized settings as well as their output;
+        // their size is independent of the upload/request-body limit.
+        parser.body_limit(128 * 1024 * 1024);
+        http::read(socket, buffer, parser);
+        HttpResponseMessage response = parser.release();
         ErrorCode ignored;
         socket.shutdown(Tcp::socket::shutdown_both, ignored);
         return response;
@@ -209,6 +215,11 @@ public:
         server_->set_import_observer(std::move(observer));
     }
 
+    void set_write_observer(std::function<void(std::function<void()>)> observer)
+    {
+        server_->set_write_observer(std::move(observer));
+    }
+
     // The slice hook follows the same stopped-only lifecycle as the import hook.
     void set_slice_observer(std::function<void()> observer)
     {
@@ -216,7 +227,7 @@ public:
     }
 
     // The progress hook follows the same stopped-only lifecycle as the worker hooks.
-    void set_progress_observer(std::function<void()> observer)
+    void set_progress_observer(std::function<void(const std::string &)> observer)
     {
         server_->set_progress_observer(std::move(observer));
     }
@@ -229,6 +240,12 @@ public:
     std::filesystem::path work_directory() const
     {
         return root_directory_.path() / work_directory_name_;
+    }
+
+    // Tests install additional INIs only while the listener is stopped.
+    std::filesystem::path profiles_directory() const
+    {
+        return root_directory_.path() / "profiles";
     }
 
     std::size_t work_file_count() const

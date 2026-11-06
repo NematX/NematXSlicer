@@ -59,6 +59,8 @@ add_library(slic3r_rest STATIC
     temporary_file.hpp
     transform.cpp
     transform.hpp
+    viewer_json.cpp
+    viewer_json.hpp
 )
 
 target_include_directories(slic3r_rest
