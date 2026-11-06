@@ -9,7 +9,38 @@
 #include "Api/internal/ExtrusionPropertyAccess.hpp"
 #include "Flow.hpp"
 
+/* Implement physical extrusion attributes and their native property storage.
+   Typed constructors adapt Flow values and command metadata to the C payloads.
+   ExtrusionPropertyContainer owns payload slots and aligned auxiliary resources,
+   including the text/configuration data referred to by custom-G-code properties.
+
+   Copying duplicates owned resources. Removing a property releases its associated
+   resources; clearing walks every stored property. swap_properties() exchanges
+   slots, resources and the next resource id together, so payload ids continue to
+   identify the data that travelled with them. It performs no allocation.
+
+       ExtrusionPropertyContainer::clear_properties()
+           `-- release_property_resources()
+
+       ExtrusionPropertyContainer::swap_properties()
+           |-- m_properties.swap()
+           |-- m_data_resources.swap()
+           `-- std::swap() [next resource id]
+
+   Returned payload/data pointers are borrowed from the container; reacquire them
+   after replacing their storage. Callers own synchronization for shared mutation.
+*/
+
 namespace Slic3r {
+
+void ExtrusionPropertyContainer::swap_properties(ExtrusionPropertyContainer &other) noexcept
+{
+    static_assert(noexcept(m_properties.swap(other.m_properties)));
+    static_assert(noexcept(m_data_resources.swap(other.m_data_resources)));
+    m_properties.swap(other.m_properties);
+    m_data_resources.swap(other.m_data_resources);
+    std::swap(m_next_data_resource_id, other.m_next_data_resource_id);
+}
 
 ExtrusionFlow::ExtrusionFlow(const Flow &flow)
     : c_extrusion_flow{ flow.mm3_per_mm(), flow.width(), flow.height() }

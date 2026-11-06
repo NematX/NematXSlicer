@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 1u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 2u
 
 /*
 Data-tree access for a sliced Print.
@@ -636,6 +636,13 @@ SLIC3R_HOST_API const layer_island_handle *layer_island_get_upper_island(const l
 SLIC3R_HOST_API extruder_index_t layer_region_island_extruder_id(const layer_region_island_handle *me);
 /* Null handles report no extrusions. */
 SLIC3R_HOST_API int32_t layer_region_island_has_extrusions(const layer_region_island_handle *me);
+/* Count the published role buckets without allocating or changing them; null
+   returns 0. Enumerate indices with extrusion_role_at(), then read each root with
+   layer_region_island_get_extrusion(). Keep the bucket map unchanged while reading. */
+SLIC3R_HOST_API uint32_t layer_region_island_extrusion_count(const layer_region_island_handle *me);
+/* Return the role at this position in the borrowed bucket map, or 0 for null or
+   an out-of-range index. The role is a value, not an owned extrusion handle. */
+SLIC3R_HOST_API raw_extrusion_role layer_region_island_extrusion_role_at(const layer_region_island_handle *me, uint32_t idx);
 /* Report whether this bucket contains an extrusion root for role. */
 SLIC3R_HOST_API int32_t layer_region_island_has_extrusion(const layer_region_island_handle *me, raw_extrusion_role role);
 /*

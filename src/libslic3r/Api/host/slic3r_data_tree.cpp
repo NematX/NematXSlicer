@@ -1004,6 +1004,20 @@ int32_t layer_region_island_has_extrusions(const layer_region_island_handle *me)
     return me != nullptr && Slic3r::to_layer_region_island(me)->has_extrusions();
 }
 
+uint32_t layer_region_island_extrusion_count(const layer_region_island_handle *me)
+{
+    return me==nullptr ? 0u : uint32_t(Slic3r::to_layer_region_island(me)->extrusion_buckets().size());
+}
+raw_extrusion_role layer_region_island_extrusion_role_at(const layer_region_island_handle *me,uint32_t idx)
+{
+    if (me==nullptr) return 0;
+    const std::map<Slic3r::ExtrusionRole,Slic3r::ExtrusionEntityCollection> &buckets=Slic3r::to_layer_region_island(me)->extrusion_buckets();
+    if (idx>=buckets.size()) return 0;
+    std::map<Slic3r::ExtrusionRole,Slic3r::ExtrusionEntityCollection>::const_iterator it=buckets.begin();
+    std::advance(it,idx);
+    return raw_extrusion_role(it->first());
+}
+
 int32_t layer_region_island_has_extrusion(const layer_region_island_handle *me, raw_extrusion_role role)
 {
     return me != nullptr && Slic3r::to_layer_region_island(me)->has_extrusion(Slic3r::to_extrusion_role(role));

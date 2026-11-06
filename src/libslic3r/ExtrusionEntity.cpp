@@ -22,7 +22,37 @@
 #include "ExtrusionEntityVisitors.hpp"
 #include "Flow.hpp"
 
+/* Implement native extrusion-tree manipulation for slicing and print planning.
+   A node owns either a path, child nodes or no geometry, together with properties
+   such as physical flow. Geometry queries, traversal, splitting and simplification
+   must preserve the effective properties inherited by printable leaves.
+
+   swap_content() supports checked publication of prepared infill trees. It exchanges
+   geometry, properties and ordering permissions without allocation, while leaving
+   both outer node identities unchanged. The publication caller validates the whole
+   batch first; this primitive does not validate ownership or provide a transaction
+   across several calls. Earlier descendant views must be discarded after exchange.
+
+       ExtrusionEntity::swap_content()
+           |-- m_content.swap()
+           |-- ExtrusionPropertyContainer::swap_properties()
+           `-- std::swap() [sorting and reversal permissions]
+
+   Owned child trees and property resources travel with the exchanged content.
+   The surrounding slicing/ordering step is responsible for excluding concurrent
+   edits; these operations do not make a shared tree safe for concurrent mutation.
+*/
+
 namespace Slic3r {
+
+void ExtrusionEntity::swap_content(ExtrusionEntity &other) noexcept
+{
+    static_assert(std::is_nothrow_swappable<Content>::value);
+    m_content.swap(other.m_content);
+    swap_properties(other);
+    std::swap(m_can_sort, other.m_can_sort);
+    std::swap(m_can_reverse, other.m_can_reverse);
+}
 
 static_assert(std::is_nothrow_move_assignable<ExtrusionEntity::Content>::value,
               "Ordered extrusion publication requires non-throwing content moves.");

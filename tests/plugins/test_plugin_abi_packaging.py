@@ -498,7 +498,7 @@ class AbiPackagingTests(unittest.TestCase):
         """Surface writes and object flow bindings declare the current data-tree API."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 1])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 2])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
                              "object_get_support_flow_mm", "object_get_region_flow_mm",

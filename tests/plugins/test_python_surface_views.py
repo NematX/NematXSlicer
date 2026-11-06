@@ -1,19 +1,19 @@
-"""Test Python surface ownership, type edits and canonical bridge angles.
+"""Test Python Surface ownership, angle access and finalization callback transport.
 
 The fake host invalidates element addresses on structural changes and records
-collection ownership. StoredSurfaceCollection forwards scratch capabilities
-and metadata writes; read-only views cannot modify their source collections.
+collection ownership. Bridge-angle tests use its local metadata; finalization
+tests use generated ctypes callbacks with synthetic addresses, not a live slicer.
 
-Selected direct calls in the angle test:
+Selected direct calls from the finalization transport test:
 
-    test_bridge_angle_is_canonical_and_only_scratch_exposes_the_setter()
-        |-- StoredSurfaceCollection.append()
-        |-- Surface.bridge_angle()
-        `-- StoredSurfaceCollection.set_bridge_angle()
+    test_finalize_payload_preserves_both_callbacks_and_passes_the_batch()
+        |-- FinalizeSlicingContext.from_finalize_slicing_run_context()
+        |-- FinalizeSlicingContext.requested_support_areas()
+        `-- FinalizeSlicingContext.replace_infill_buckets()
 
-The stored collection supplies the storage capability to the fake host. The
-read-only element can query its angle but exposes no setter. These tests check
-wrapper transport and controlled fake ownership, not native geometry execution.
+The wrappers invoke typed ctypes callbacks stored in the synthetic payload. Its
+request lambda returns a fake address; the replace callback records the borrowed
+batch synchronously and returns success without validating native geometry.
 """
 
 import copy
@@ -258,6 +258,41 @@ class PythonSurfaceViewTests(unittest.TestCase):
         self.assertFalse(collection.set_type(1, 20))
         self.assertFalse(host.surface_collection_set_type(2, collection.c_handle(), 0, 20))
         collection.free_from_storage()
+
+    def test_finalize_payload_preserves_both_callbacks_and_passes_the_batch(self):
+        """Check generated callback fields and synchronous argument transport without a host."""
+        import slic3r_api_generated as generated
+        from steps.execution import FinalizeSlicingContext
+
+        fields = dict(generated.RunCtxFinalizeSlicing._fields_)
+        self.assertIn("get_requested_support_areas", fields)
+        calls = []
+
+        def replace(_context, storage, entries, count):
+            """Record the borrowed batch immediately; return success without geometry checks."""
+            calls.append((storage, [(entries[index].destination, entries[index].prepared) for index in range(count)]))
+            return 1
+
+        request = fields["get_requested_support_areas"](lambda _island: 700)
+        batch = fields["replace_infill_buckets"](replace)
+        payload = generated.RunCtxFinalizeSlicing()
+        payload.print = 10
+        payload.object = 20
+        payload.support_demand_computed = 1
+        payload.support_material_generated = 0
+        payload.get_requested_support_areas = request
+        payload.replace_infill_buckets = batch
+        common = generated.PluginRunContext()
+        common.step = generated.STEP_FINALIZE_SLICING
+        common.data = ctypes.addressof(payload)
+        api = type("Api", (), {"host": ReallocatingSurfaceHost()})()
+        context = FinalizeSlicingContext.from_finalize_slicing_run_context(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertTrue(context.support_demand_computed())
+        self.assertFalse(context.support_material_generated())
+        self.assertEqual(context.requested_support_areas(self.datatree.LayerIsland(api, 30)).address, 700)
+        self.assertTrue(context.replace_infill_buckets(40, [(50, 60), (51, 61)]))
+        self.assertEqual(calls, [(40, [(50, 60), (51, 61)])])
 
     def test_support_surface_type_builder_and_predicate(self):
         """Support membership composes with density, position and bridge modifiers."""

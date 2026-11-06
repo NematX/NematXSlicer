@@ -27,6 +27,22 @@
 #include "Polygon.hpp"
 #include "Polyline.hpp"
 
+/* Describe native printable extrusion trees for slicing and print planning.
+   ExtrusionEntity holds a path, owned child entities, or no geometry. Properties
+   carry the role, flow and other metadata; traversal resolves inherited values
+   rather than assuming every leaf stores a complete copy.
+
+   Use read-only path/child accessors for inspection and the mutation helpers for
+   structural changes. Mutable child access may turn a leaf into a collection.
+   swap_content() exchanges geometry, properties and ordering permissions while
+   keeping both outer identities; the donor then owns the destination's old data.
+   References to descendants or property storage must not survive replacement.
+
+   Example after a publication caller has validated its destination and donor:
+       destination.swap_content(prepared);
+   This single nonthrowing exchange is not itself a multi-root transaction.
+*/
+
 namespace Slic3r {
 
 class ExPolygon;
@@ -125,6 +141,8 @@ protected:
 
 public:
     uint64_t get_id() const { return m_id; }
+    // Exchange printable content, flags and owned properties, preserving both root identities.
+    void swap_content(ExtrusionEntity &other) noexcept;
     bool has_polyline() const;
     bool is_leaf() const;
     bool is_nop() const;
