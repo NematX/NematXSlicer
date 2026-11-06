@@ -1,13 +1,18 @@
 /*
  * REST configuration, HTTP transport and request pipeline.
  *
- * Configuration is validated before the listener binds. Each connection reads
- * one bounded HTTP request, decodes its path once, validates JSON when declared,
- * passes only private test routes to the injected handler, and closes cleanly.
- * Business routes and authentication are added by later implementation phases.
+ * Configuration and accounts are validated before the listener binds. Each
+ * connection reads one bounded HTTP request, decodes its path once, and closes
+ * after one response. `/login` is public; every other route requires a bearer
+ * token before route resolution, then dispatches to logout, the global
+ * settings/session routes, or the private test routes injected by the fixture.
  */
 
 #include "rest_server.hpp"
+
+#include "auth.hpp"
+#include "session.hpp"
+#include "settings.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -48,6 +53,10 @@ constexpr std::uint64_t default_max_request_body_bytes = 16ULL * 1024ULL * 1024U
 constexpr std::uint64_t default_max_header_bytes = 16ULL * 1024ULL;
 constexpr std::uint32_t default_max_connections = 64;
 constexpr std::int64_t default_request_timeout_seconds = 30;
+constexpr std::int64_t default_token_ttl_seconds = 24 * 60 * 60;
+constexpr std::int64_t default_session_ttl_seconds = 24 * 60 * 60;
+constexpr std::int64_t default_login_window_seconds = 60;
+constexpr std::uint32_t default_max_login_attempts = 5;
 
 struct ParsedTarget {
     std::string path;
@@ -87,6 +96,19 @@ HttpResponse make_error_response(
     const nlohmann::json *details = nullptr)
 {
     return HttpResponse::error(status, code, message, request_id, details);
+}
+
+// One response for absent, invalid, expired and revoked tokens, so a caller
+// cannot tell those cases apart.
+HttpResponse make_unauthorized_response(const std::string &request_id)
+{
+    HttpResponse response = make_error_response(
+        401,
+        "unauthorized",
+        "A valid Bearer token is required.",
+        request_id);
+    response.headers.emplace("WWW-Authenticate", "Bearer");
+    return response;
 }
 
 std::uint64_t read_unsigned_json(const nlohmann::json &value, const std::string &field)
@@ -189,6 +211,46 @@ void apply_json_config(
             if (seconds > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
                 throw std::invalid_argument("timeouts.request_seconds is too large");
             config.request_timeout = std::chrono::seconds(static_cast<std::int64_t>(seconds));
+        }
+    }
+
+    if (document.contains("auth")) {
+        const nlohmann::json &auth = document.at("auth");
+        if (!auth.is_object())
+            throw std::invalid_argument("auth must be a JSON object");
+        if (auth.contains("token_ttl_seconds")) {
+            const std::uint64_t seconds = read_unsigned_json(
+                auth.at("token_ttl_seconds"), "auth.token_ttl_seconds");
+            if (seconds > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                throw std::invalid_argument("auth.token_ttl_seconds is too large");
+            config.token_ttl = std::chrono::seconds(static_cast<std::int64_t>(seconds));
+        }
+        if (auth.contains("login_window_seconds")) {
+            const std::uint64_t seconds = read_unsigned_json(
+                auth.at("login_window_seconds"), "auth.login_window_seconds");
+            if (seconds > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                throw std::invalid_argument("auth.login_window_seconds is too large");
+            config.login_window = std::chrono::seconds(static_cast<std::int64_t>(seconds));
+        }
+        if (auth.contains("max_login_attempts")) {
+            const std::uint64_t attempts = read_unsigned_json(
+                auth.at("max_login_attempts"), "auth.max_login_attempts");
+            if (attempts > std::numeric_limits<std::uint32_t>::max())
+                throw std::invalid_argument("auth.max_login_attempts is too large");
+            config.max_login_attempts = static_cast<std::uint32_t>(attempts);
+        }
+    }
+
+    if (document.contains("sessions")) {
+        const nlohmann::json &sessions = document.at("sessions");
+        if (!sessions.is_object())
+            throw std::invalid_argument("sessions must be a JSON object");
+        if (sessions.contains("expiration_seconds")) {
+            const std::uint64_t seconds = read_unsigned_json(
+                sessions.at("expiration_seconds"), "sessions.expiration_seconds");
+            if (seconds > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+                throw std::invalid_argument("sessions.expiration_seconds is too large");
+            config.session_ttl = std::chrono::seconds(static_cast<std::int64_t>(seconds));
         }
     }
 }
@@ -308,6 +370,48 @@ std::string header_value(const HttpRequest &request, const std::string &name)
     return iterator->second;
 }
 
+// Extract the token from a `Bearer <token>` header. The scheme is matched
+// case-insensitively and any whitespace after the token is refused.
+std::optional<std::string> bearer_token(const HttpRequest &request)
+{
+    const std::string authorization = header_value(request, "authorization");
+    if (authorization.size() < 7 ||
+        lower_ascii(authorization.substr(0, 6)) != "bearer" ||
+        authorization[6] != ' ')
+        return std::nullopt;
+    const std::string token = authorization.substr(7);
+    if (token.empty() || token.find_first_of(" \t\r\n") != std::string::npos)
+        return std::nullopt;
+    return token;
+}
+
+// Parse the body only when the caller declared a JSON media type; other
+// requests keep json_body null and are handled by their route.
+bool parse_request_json(
+    HttpRequest &request,
+    HttpResponse &error_response,
+    const std::string &request_id)
+{
+    if (json_media_type(header_value(request, "content-type")) != "application/json")
+        return true;
+    try {
+        request.json_body = std::make_shared<const nlohmann::json>(
+            nlohmann::json::parse(request.body));
+    } catch (const nlohmann::json::parse_error &) {
+        const nlohmann::json details = nlohmann::json::array({
+            nlohmann::json{{"reason", "invalid_json"}}
+        });
+        error_response = make_error_response(
+            400,
+            "invalid_json",
+            "The request body is not valid JSON.",
+            request_id,
+            &details);
+        return false;
+    }
+    return true;
+}
+
 // Copy method, target, headers and buffered body out of the parser. The target
 // is decoded once here; JSON is parsed later by the route that declares it.
 bool build_request_context(
@@ -342,38 +446,129 @@ bool build_request_context(
             std::string(value_view.data(), value_view.size()));
     }
 
-    const std::string content_type = json_media_type(header_value(request, "content-type"));
-    if (content_type == "application/json") {
-        try {
-            request.json_body = std::make_shared<const nlohmann::json>(
-                nlohmann::json::parse(request.body));
-        } catch (const nlohmann::json::parse_error &) {
-            const nlohmann::json details = nlohmann::json::array({
-                nlohmann::json{{"reason", "invalid_json"}}
-            });
-            error_response = make_error_response(
-                400,
-                "invalid_json",
-                "The request body is not valid JSON.",
-                request_id,
-                &details);
-            return false;
-        }
-    }
     return true;
 }
 
 HttpResponse dispatch_request(
-    const HttpRequest &request,
+    HttpRequest &request,
     const RequestHandler &private_test_handler,
+    const std::shared_ptr<AuthService> &auth_service,
+    SessionRegistry &session_registry,
     const std::string &request_id)
 {
-    // Production business routes and their authentication arrive in later
-    // phases. Until then only the private test routes injected by the test
-    // fixture are reachable, so every other path stays denied with 404.
+    if (request.path == "/login") {
+        if (request.method != "POST")
+            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+        HttpResponse parse_error;
+        if (!parse_request_json(request, parse_error, request_id))
+            return parse_error;
+        if (request.json_body == nullptr || !request.json_body->is_object() ||
+            !request.json_body->contains("username") ||
+            !request.json_body->contains("password") ||
+            !request.json_body->at("username").is_string() ||
+            !request.json_body->at("password").is_string())
+            return make_error_response(
+                400,
+                "invalid_request",
+                "The login body must contain string username and password fields.",
+                request_id);
+
+        const std::string username = request.json_body->at("username").get<std::string>();
+        std::string password = request.json_body->at("password").get<std::string>();
+        const AuthTimePoint now = std::chrono::system_clock::now();
+        const LoginResult result = auth_service->login(username, password, now);
+        clear_secret(password);
+        if (result.status == LoginStatus::rate_limited) {
+            HttpResponse response = make_error_response(
+                429,
+                "login_rate_limited",
+                "Too many login attempts.",
+                request_id);
+            response.headers.emplace(
+                "Retry-After",
+                std::to_string(auth_service->login_window().count()));
+            return response;
+        }
+        // An unknown account and a wrong password return the same response.
+        if (result.status == LoginStatus::invalid_credentials)
+            return make_error_response(
+                401,
+                "invalid_credentials",
+                "The username or password is incorrect.",
+                request_id);
+
+        const IssuedToken &token = *result.token;
+        const std::int64_t expires_in = std::chrono::duration_cast<std::chrono::seconds>(
+            token.expires_at - now).count();
+        HttpResponse response = HttpResponse::json(200, nlohmann::json{
+            {"access_token", token.value},
+            {"token_type", "Bearer"},
+            {"expires_in", expires_in}
+        });
+        response.headers.emplace("Cache-Control", "no-store");
+        response.headers.emplace("Pragma", "no-cache");
+        return response;
+    }
+
+    // Every route except /login requires a valid bearer token before route
+    // resolution, so an unknown path cannot be probed without credentials.
+    const std::optional<std::string> token = bearer_token(request);
+    if (!token.has_value())
+        return make_unauthorized_response(request_id);
+
+    const AuthTimePoint now = std::chrono::system_clock::now();
+    const std::optional<std::string> username = auth_service->username_for_token(*token, now);
+    if (!username.has_value())
+        return make_unauthorized_response(request_id);
+
+    if (request.path == "/logout") {
+        if (request.method != "POST")
+            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+        if (!auth_service->revoke_token(*token, now))
+            return make_unauthorized_response(request_id);
+        return HttpResponse::empty(204);
+    }
+
+    // Public global route: the catalog is only available once the engine has
+    // finalized the configuration definitions.
+    if (request.path == "/list_settings") {
+        if (request.method != "GET")
+            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+        if (!settings_catalog_ready())
+            return make_error_response(
+                503,
+                "engine_not_initialized",
+                "The REST engine is not initialized.",
+                request_id);
+        return HttpResponse::json(200, settings_catalog());
+    }
+
+    // Sessions start with an empty scene and configuration on purpose; defaults
+    // and profiles arrive with the settings and profile routes. No request body
+    // is accepted.
+    if (request.path == "/create_session") {
+        if (request.method != "POST")
+            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+        if (!request.body.empty())
+            return make_error_response(
+                400,
+                "invalid_request",
+                "The create_session route does not accept a request body.",
+                request_id);
+        const std::shared_ptr<SessionContext> session = session_registry.create(
+            username.value(),
+            SessionRegistry::Clock::now(),
+            SessionData{std::make_shared<Model>(), {}, nlohmann::json::object()});
+        return HttpResponse::json(201, nlohmann::json{{"session_id", session->session_id()}});
+    }
+
     const bool test_route = private_test_handler && request.path.rfind("/__test__/", 0) == 0;
     if (!test_route)
         return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+
+    HttpResponse parse_error;
+    if (!parse_request_json(request, parse_error, request_id))
+        return parse_error;
 
     try {
         return private_test_handler(request);
@@ -393,11 +588,15 @@ public:
     HttpSession(
         Tcp::socket socket,
         std::shared_ptr<const ServerConfig> config,
+        std::shared_ptr<AuthService> auth_service,
         RequestHandler private_test_handler,
+        SessionRegistry &session_registry,
         CloseCallback close_callback)
         : socket_(std::move(socket)),
           config_(std::move(config)),
+          auth_service_(std::move(auth_service)),
           private_test_handler_(std::move(private_test_handler)),
+          session_registry_(session_registry),
           close_callback_(std::move(close_callback)),
           timer_(socket_.get_executor())
     {
@@ -498,7 +697,15 @@ private:
             write_response(response);
             return;
         }
-        response = dispatch_request(request, private_test_handler_, request_id);
+        response = dispatch_request(
+            request,
+            private_test_handler_,
+            auth_service_,
+            session_registry_,
+            request_id);
+        // Credentials must not stay in the request buffers after routing.
+        request.json_body.reset();
+        clear_secret(request.body);
         write_response(response);
     }
 
@@ -516,6 +723,8 @@ private:
         response_message_->body() = response.no_body ? std::string() : response.body;
         if (!response.no_body && !response.content_type.empty())
             response_message_->set(http::field::content_type, response.content_type);
+        for (const std::pair<const std::string, std::string> &header : response.headers)
+            response_message_->set(header.first, header.second);
         response_message_->prepare_payload();
         arm_timeout();
         const std::shared_ptr<HttpSession> self = shared_from_this();
@@ -535,7 +744,9 @@ private:
     beast::flat_buffer buffer_;
     HttpRequestParser parser_;
     std::shared_ptr<const ServerConfig> config_;
+    std::shared_ptr<AuthService> auth_service_;
     RequestHandler private_test_handler_;
+    SessionRegistry &session_registry_;
     CloseCallback close_callback_;
     asio::steady_timer timer_;
     std::optional<HttpResponseMessage> response_message_;
@@ -563,6 +774,12 @@ public:
             throw std::logic_error("REST server is already running");
 
         config_.validate();
+        session_registry_ = std::make_unique<SessionRegistry>(config_.session_ttl);
+        AuthConfig auth_config;
+        auth_config.token_ttl = config_.token_ttl;
+        auth_config.login_window = config_.login_window;
+        auth_config.max_login_attempts = config_.max_login_attempts;
+        auth_service_ = std::make_shared<AuthService>(config_.accounts_file, auth_config);
         std::error_code filesystem_error;
         std::filesystem::create_directories(config_.work_directory, filesystem_error);
         if (filesystem_error)
@@ -639,6 +856,8 @@ public:
 
         std::lock_guard<std::mutex> lock(sessions_mutex_);
         sessions_.clear();
+        auth_service_.reset();
+        session_registry_.reset();
         bound_port_ = 0;
     }
 
@@ -682,7 +901,9 @@ private:
                 const std::shared_ptr<HttpSession> session = std::make_shared<HttpSession>(
                     std::move(socket),
                     config_shared_,
+                    auth_service_,
                     private_test_handler_,
+                    *session_registry_,
                     [this](HttpSession *closed_session) {
                         remove_session(closed_session);
                     });
@@ -714,6 +935,10 @@ private:
 
     ServerConfig config_;
     std::shared_ptr<const ServerConfig> config_shared_;
+    std::shared_ptr<AuthService> auth_service_;
+    // Created in start(), released in stop() after the sessions are closed;
+    // HttpSession borrows it.
+    std::unique_ptr<SessionRegistry> session_registry_;
     RequestHandler private_test_handler_;
     asio::io_context io_context_;
     Tcp::acceptor acceptor_;
@@ -744,6 +969,10 @@ ServerConfig ServerConfig::defaults()
     config.max_header_bytes = default_max_header_bytes;
     config.max_connections = default_max_connections;
     config.request_timeout = std::chrono::seconds(default_request_timeout_seconds);
+    config.token_ttl = std::chrono::seconds(default_token_ttl_seconds);
+    config.session_ttl = std::chrono::seconds(default_session_ttl_seconds);
+    config.login_window = std::chrono::seconds(default_login_window_seconds);
+    config.max_login_attempts = default_max_login_attempts;
     return config;
 }
 
@@ -780,6 +1009,8 @@ void ServerConfig::validate() const
             throw std::invalid_argument(json_error_message("paths.accounts", filesystem_error.message()));
         if (!accounts_is_file)
             throw std::invalid_argument("paths.accounts must be a regular file");
+    } else {
+        throw std::invalid_argument("paths.accounts must be an existing file");
     }
 
     if (max_request_body_bytes == 0)
@@ -790,6 +1021,14 @@ void ServerConfig::validate() const
         throw std::invalid_argument("limits.max_connections must be positive");
     if (request_timeout.count() <= 0)
         throw std::invalid_argument("timeouts.request_seconds must be positive");
+    if (token_ttl.count() <= 0)
+        throw std::invalid_argument("auth.token_ttl_seconds must be positive");
+    if (session_ttl.count() <= 0)
+        throw std::invalid_argument("sessions.expiration_seconds must be positive");
+    if (login_window.count() <= 0)
+        throw std::invalid_argument("auth.login_window_seconds must be positive");
+    if (max_login_attempts == 0)
+        throw std::invalid_argument("auth.max_login_attempts must be positive");
 }
 
 ServerConfig load_server_config(

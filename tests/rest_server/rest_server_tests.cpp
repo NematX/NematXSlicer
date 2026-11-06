@@ -1,5 +1,5 @@
 /*
- * Loopback tests for the phase-two REST transport.
+ * Loopback tests for the REST transport, the login route and bearer middleware.
  *
  * The fixture injects private routes into the library and never adds those
  * routes to the standalone executable. Configuration, size limits, timeouts,
@@ -14,6 +14,7 @@
 #include <catch_main.hpp>
 #include <nlohmann/json.hpp>
 
+#include "auth.hpp"
 #include "rest_server.hpp"
 
 #include <array>
@@ -24,6 +25,7 @@
 #include <fstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -71,6 +73,7 @@ Slic3r::Rest::ServerConfig make_valid_config(const std::filesystem::path &root)
     std::filesystem::create_directories(config.resource_directory);
     std::filesystem::create_directories(config.profiles_directory);
     std::filesystem::create_directories(config.work_directory);
+    std::ofstream(config.accounts_file) << R"({"users":{}})";
     return config;
 }
 
@@ -81,14 +84,19 @@ public:
         std::uint64_t max_header_bytes = 16 * 1024;
         std::uint32_t max_connections = 64;
         std::chrono::seconds timeout{30};
+        std::chrono::seconds token_ttl{24 * 60 * 60};
+        std::chrono::seconds session_ttl{24 * 60 * 60};
     };
 
-    explicit RestServerFixture(Limits limits = {})
+    explicit RestServerFixture(Limits limits = {}, bool with_account = true)
         : root_directory_(),
           limits_(limits),
+          with_account_(with_account),
           server_(create_server())
     {
         server_->start();
+        if (with_account_)
+            refresh_token();
     }
 
     ~RestServerFixture()
@@ -99,7 +107,12 @@ public:
     RestServerFixture(const RestServerFixture &) = delete;
     RestServerFixture &operator=(const RestServerFixture &) = delete;
 
-    void start() { server_->start(); }
+    void start()
+    {
+        server_->start();
+        if (with_account_)
+            refresh_token();
+    }
     void stop() { server_->stop(); }
     bool running() const { return server_->running(); }
     std::uint16_t bound_port() const { return server_->bound_port(); }
@@ -109,7 +122,8 @@ public:
         const std::string &target,
         const std::string &body = {},
         const std::string &content_type = {},
-        const std::vector<std::pair<std::string, std::string>> &extra_headers = {}) const
+        const std::vector<std::pair<std::string, std::string>> &extra_headers = {},
+        bool authenticate = true) const
     {
         asio::io_context context;
         Tcp::socket socket = connect_socket(context);
@@ -117,6 +131,8 @@ public:
         http::request<http::string_body> message(method, target, 11);
         message.set(http::field::host, "127.0.0.1");
         message.set(http::field::user_agent, "rest_server_tests");
+        if (authenticate && !default_token_.empty())
+            message.set(http::field::authorization, "Bearer " + default_token_);
         for (const std::pair<std::string, std::string> &header : extra_headers)
             message.set(header.first, header.second);
         if (!content_type.empty())
@@ -131,6 +147,16 @@ public:
         ErrorCode ignored;
         socket.shutdown(Tcp::socket::shutdown_both, ignored);
         return response;
+    }
+
+    HttpResponseMessage request_without_auth(
+        http::verb method,
+        const std::string &target,
+        const std::string &body = {},
+        const std::string &content_type = {},
+        const std::vector<std::pair<std::string, std::string>> &extra_headers = {}) const
+    {
+        return request(method, target, body, content_type, extra_headers, false);
     }
 
     Tcp::socket connect_socket(asio::io_context &context) const
@@ -163,9 +189,25 @@ private:
         config.max_header_bytes = limits_.max_header_bytes;
         config.max_connections = limits_.max_connections;
         config.request_timeout = limits_.timeout;
+        config.token_ttl = limits_.token_ttl;
+        config.session_ttl = limits_.session_ttl;
         std::filesystem::create_directories(config.resource_directory);
         std::filesystem::create_directories(config.profiles_directory);
         std::filesystem::create_directories(config.work_directory);
+        if (with_account_) {
+            Slic3r::Rest::Argon2Parameters parameters;
+            parameters.memory_kib = 8U * 1024U;
+            parameters.time_cost = 2;
+            parameters.parallelism = 1;
+            parameters.hash_bytes = 16;
+            parameters.salt_bytes = 16;
+            const nlohmann::json accounts = {
+                {"users", {{"Alice", {{"password_hash", Slic3r::Rest::hash_password("secret", parameters)}}}}}
+            };
+            std::ofstream(config.accounts_file) << accounts.dump();
+        } else {
+            std::ofstream(config.accounts_file) << R"({"users":{}})";
+        }
 
         Slic3r::Rest::RequestHandler handler = [this](const Slic3r::Rest::HttpRequest &request) {
             handler_calls_.fetch_add(1);
@@ -189,9 +231,23 @@ private:
         return std::make_unique<Slic3r::Rest::RestServer>(std::move(config), std::move(handler));
     }
 
+    void refresh_token()
+    {
+        const HttpResponseMessage response = request(
+            http::verb::post,
+            "/login",
+            R"({"username":"Alice","password":"secret"})",
+            "application/json",
+            {},
+            false);
+        default_token_ = nlohmann::json::parse(response.body()).at("access_token").get<std::string>();
+    }
+
     TempDirectory root_directory_;
     Limits limits_;
+    bool with_account_;
     std::unique_ptr<Slic3r::Rest::RestServer> server_;
+    std::string default_token_;
     std::atomic<std::uint32_t> handler_calls_{0};
 };
 
@@ -225,11 +281,228 @@ TEST_CASE("REST server handles loopback JSON and route errors", "[rest_server]")
     REQUIRE(unknown.result() == http::status::not_found);
     REQUIRE(nlohmann::json::parse(unknown.body()).at("error").at("code") == "route_not_found");
 
-    // Business routes are denied until the authentication phase wires them: a
-    // business-looking path must not reach any handler yet.
-    const HttpResponseMessage login = fixture.request(http::verb::post, "/login", "{}", "application/json");
-    REQUIRE(login.result() == http::status::not_found);
-    REQUIRE(nlohmann::json::parse(login.body()).at("error").at("code") == "route_not_found");
+}
+
+TEST_CASE("REST server handles login success and authentication errors", "[rest_server]")
+{
+    RestServerFixture fixture({}, true);
+
+    const HttpResponseMessage success = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"ALICE","password":"secret"})",
+        "application/json; charset=utf-8");
+    REQUIRE(success.result() == http::status::ok);
+    const nlohmann::json success_body = nlohmann::json::parse(success.body());
+    REQUIRE(success_body.at("access_token").is_string());
+    REQUIRE(!success_body.at("access_token").get<std::string>().empty());
+    REQUIRE(success_body.at("token_type") == "Bearer");
+    REQUIRE(success_body.at("expires_in") == 24 * 60 * 60);
+    REQUIRE(success.body().find("secret") == std::string::npos);
+    REQUIRE(success[http::field::cache_control] == "no-store");
+    REQUIRE(success[http::field::pragma] == "no-cache");
+
+    const HttpResponseMessage invalid_password = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"alice","password":"wrong"})",
+        "application/json");
+    const HttpResponseMessage unknown_user = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"unknown","password":"wrong"})",
+        "application/json");
+    REQUIRE(invalid_password.result() == http::status::unauthorized);
+    REQUIRE(unknown_user.result() == http::status::unauthorized);
+    const nlohmann::json invalid_password_body = nlohmann::json::parse(invalid_password.body());
+    const nlohmann::json unknown_user_body = nlohmann::json::parse(unknown_user.body());
+    REQUIRE(invalid_password_body.at("error").at("code") == "invalid_credentials");
+    REQUIRE(unknown_user_body.at("error").at("code") == "invalid_credentials");
+    REQUIRE(invalid_password_body.at("error").at("message") ==
+        unknown_user_body.at("error").at("message"));
+    REQUIRE(invalid_password.body().find("wrong") == std::string::npos);
+    REQUIRE(unknown_user.body().find("unknown") == std::string::npos);
+}
+
+TEST_CASE("REST server validates login JSON and limits attempts", "[rest_server]")
+{
+    RestServerFixture fixture({}, true);
+
+    const HttpResponseMessage malformed_json = fixture.request(
+        http::verb::post,
+        "/login",
+        "{invalid",
+        "application/json");
+    REQUIRE(malformed_json.result() == http::status::bad_request);
+    REQUIRE(nlohmann::json::parse(malformed_json.body()).at("error").at("code") == "invalid_json");
+
+    const HttpResponseMessage missing_password = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"alice"})",
+        "application/json");
+    REQUIRE(missing_password.result() == http::status::bad_request);
+    REQUIRE(nlohmann::json::parse(missing_password.body()).at("error").at("code") == "invalid_request");
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        const HttpResponseMessage response = fixture.request(
+            http::verb::post,
+            "/login",
+            R"({"username":"limited","password":"wrong"})",
+            "application/json");
+        REQUIRE(response.result() == http::status::unauthorized);
+    }
+    const HttpResponseMessage rate_limited = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"limited","password":"wrong"})",
+        "application/json");
+    REQUIRE(rate_limited.result() == http::status::too_many_requests);
+    REQUIRE(nlohmann::json::parse(rate_limited.body()).at("error").at("code") == "login_rate_limited");
+    REQUIRE(rate_limited.body().find("wrong") == std::string::npos);
+    REQUIRE(rate_limited[http::field::retry_after] == "60");
+}
+
+TEST_CASE("REST server requires a valid Bearer token on protected routes", "[rest_server]")
+{
+    RestServerFixture fixture;
+    const std::uint32_t calls_before = fixture.handler_calls();
+
+    const HttpResponseMessage missing = fixture.request_without_auth(
+        http::verb::get, "/__test__/json");
+    const HttpResponseMessage missing_with_invalid_json = fixture.request_without_auth(
+        http::verb::post,
+        "/__test__/json",
+        "{invalid",
+        "application/json");
+    const HttpResponseMessage invalid = fixture.request(
+        http::verb::get,
+        "/__test__/json",
+        {},
+        {},
+        {{"Authorization", "Bearer invalid-token"}});
+    const HttpResponseMessage malformed = fixture.request(
+        http::verb::get,
+        "/__test__/json",
+        {},
+        {},
+        {{"Authorization", "Basic credentials"}});
+    const HttpResponseMessage unknown_without_token = fixture.request_without_auth(
+        http::verb::post,
+        "/not-a-route",
+        "{invalid",
+        "application/json");
+    const HttpResponseMessage unknown_with_token = fixture.request(
+        http::verb::post,
+        "/not-a-route",
+        "{invalid",
+        "application/json");
+
+    REQUIRE(missing.result() == http::status::unauthorized);
+    REQUIRE(missing_with_invalid_json.result() == http::status::unauthorized);
+    REQUIRE(invalid.result() == http::status::unauthorized);
+    REQUIRE(malformed.result() == http::status::unauthorized);
+    REQUIRE(unknown_without_token.result() == http::status::unauthorized);
+    REQUIRE(unknown_with_token.result() == http::status::not_found);
+    REQUIRE(nlohmann::json::parse(unknown_with_token.body()).at("error").at("code") == "route_not_found");
+    const nlohmann::json missing_body = nlohmann::json::parse(missing.body());
+    const nlohmann::json invalid_body = nlohmann::json::parse(invalid.body());
+    const nlohmann::json malformed_body = nlohmann::json::parse(malformed.body());
+    REQUIRE(missing_body.at("error").at("code") == invalid_body.at("error").at("code"));
+    REQUIRE(missing_body.at("error").at("code") == malformed_body.at("error").at("code"));
+    REQUIRE(missing_body.at("error").at("message") == invalid_body.at("error").at("message"));
+    REQUIRE(missing_body.at("error").at("message") == malformed_body.at("error").at("message"));
+    REQUIRE(missing[http::field::www_authenticate] == "Bearer");
+    REQUIRE(fixture.handler_calls() == calls_before);
+
+    const HttpResponseMessage logout_without_token = fixture.request_without_auth(
+        http::verb::post, "/logout");
+    REQUIRE(logout_without_token.result() == http::status::unauthorized);
+}
+
+TEST_CASE("REST server rejects expired Bearer tokens", "[rest_server]")
+{
+    RestServerFixture::Limits limits;
+    limits.token_ttl = std::chrono::seconds(1);
+    RestServerFixture fixture(limits);
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    const HttpResponseMessage expired = fixture.request(http::verb::get, "/__test__/json");
+    REQUIRE(expired.result() == http::status::unauthorized);
+}
+
+TEST_CASE("REST server logout revokes only the presented token", "[rest_server]")
+{
+    RestServerFixture fixture;
+
+    const HttpResponseMessage second_login = fixture.request(
+        http::verb::post,
+        "/login",
+        R"({"username":"Alice","password":"secret"})",
+        "application/json");
+    REQUIRE(second_login.result() == http::status::ok);
+    const std::string second_token = nlohmann::json::parse(second_login.body()).at("access_token");
+
+    const HttpResponseMessage logout = fixture.request(http::verb::post, "/logout");
+    REQUIRE(logout.result() == http::status::no_content);
+    REQUIRE(logout.body().empty());
+
+    const HttpResponseMessage revoked = fixture.request(http::verb::get, "/__test__/json");
+    REQUIRE(revoked.result() == http::status::unauthorized);
+
+    const HttpResponseMessage second_token_request = fixture.request(
+        http::verb::get,
+        "/__test__/json",
+        {},
+        {},
+        {{"Authorization", "Bearer " + second_token}});
+    REQUIRE(second_token_request.result() == http::status::ok);
+
+    const HttpResponseMessage lowercase_scheme_request = fixture.request(
+        http::verb::get,
+        "/__test__/json",
+        {},
+        {},
+        {{"Authorization", "bearer " + second_token}});
+    REQUIRE(lowercase_scheme_request.result() == http::status::ok);
+}
+
+TEST_CASE("REST server creates authenticated sessions through the global routes", "[rest_server]")
+{
+    RestServerFixture fixture;
+
+    const HttpResponseMessage settings_without_token = fixture.request_without_auth(
+        http::verb::get, "/list_settings");
+    REQUIRE(settings_without_token.result() == http::status::unauthorized);
+
+    const HttpResponseMessage settings_wrong_method = fixture.request(
+        http::verb::post, "/list_settings");
+    REQUIRE(settings_wrong_method.result() == http::status::not_found);
+
+    // This fixture never initializes the engine, so the catalog reports that the
+    // definitions are not finalized yet.
+    const HttpResponseMessage settings_uninitialized = fixture.request(
+        http::verb::get, "/list_settings");
+    REQUIRE(settings_uninitialized.result() == http::status::service_unavailable);
+    REQUIRE(nlohmann::json::parse(settings_uninitialized.body()).at("error").at("code") ==
+        "engine_not_initialized");
+
+    const HttpResponseMessage first = fixture.request(http::verb::post, "/create_session");
+    const HttpResponseMessage second = fixture.request(http::verb::post, "/create_session");
+    REQUIRE(first.result() == http::status::created);
+    REQUIRE(second.result() == http::status::created);
+    const std::string first_id = nlohmann::json::parse(first.body()).at("session_id");
+    const std::string second_id = nlohmann::json::parse(second.body()).at("session_id");
+    REQUIRE(first_id.rfind("session_", 0) == 0);
+    REQUIRE(second_id.rfind("session_", 0) == 0);
+    REQUIRE(first_id != second_id);
+
+    const HttpResponseMessage body_rejected = fixture.request(
+        http::verb::post,
+        "/create_session",
+        "{}",
+        "application/json");
+    REQUIRE(body_rejected.result() == http::status::bad_request);
 }
 
 TEST_CASE("REST server decodes URL paths once without form plus conversion", "[rest_server]")
@@ -274,6 +547,7 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
     std::filesystem::create_directories(root.path() / "resources");
     std::filesystem::create_directories(root.path() / "profiles");
     std::filesystem::create_directories(root.path() / "work");
+    std::ofstream(root.path() / "accounts.json") << R"({"users":{}})";
 
     const std::filesystem::path config_file = root.path() / "server.json";
     std::ofstream output(config_file);
@@ -286,7 +560,9 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
             "accounts": "accounts.json"
         },
         "limits": {"max_request_body_bytes": 2048, "max_header_bytes": 4096, "max_connections": 4},
-        "timeouts": {"request_seconds": 5}
+        "timeouts": {"request_seconds": 5},
+        "auth": {"token_ttl_seconds": 120, "login_window_seconds": 30, "max_login_attempts": 3},
+        "sessions": {"expiration_seconds": 240}
     })";
     output.close();
 
@@ -299,6 +575,10 @@ TEST_CASE("REST server loads JSON configuration and applies CLI overrides", "[re
     REQUIRE(config.profiles_directory == root.path() / "profiles");
     REQUIRE(config.max_request_body_bytes == 2048);
     REQUIRE(config.request_timeout == std::chrono::seconds(5));
+    REQUIRE(config.token_ttl == std::chrono::seconds(120));
+    REQUIRE(config.session_ttl == std::chrono::seconds(240));
+    REQUIRE(config.login_window == std::chrono::seconds(30));
+    REQUIRE(config.max_login_attempts == 3);
 }
 
 TEST_CASE("REST server configuration validation rejects bad paths and limits", "[rest_server]")
@@ -337,6 +617,22 @@ TEST_CASE("REST server configuration validation rejects bad paths and limits", "
     Slic3r::Rest::ServerConfig zero_timeout = valid;
     zero_timeout.request_timeout = std::chrono::seconds(0);
     REQUIRE_THROWS_AS(zero_timeout.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig missing_accounts = valid;
+    missing_accounts.accounts_file = root.path() / "missing_accounts.json";
+    REQUIRE_THROWS_AS(missing_accounts.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig zero_token_ttl = valid;
+    zero_token_ttl.token_ttl = std::chrono::seconds(0);
+    REQUIRE_THROWS_AS(zero_token_ttl.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig zero_session_ttl = valid;
+    zero_session_ttl.session_ttl = std::chrono::seconds(0);
+    REQUIRE_THROWS_AS(zero_session_ttl.validate(), std::invalid_argument);
+
+    Slic3r::Rest::ServerConfig zero_login_attempts = valid;
+    zero_login_attempts.max_login_attempts = 0;
+    REQUIRE_THROWS_AS(zero_login_attempts.validate(), std::invalid_argument);
 }
 
 TEST_CASE("REST server enforces configured body and header limits", "[rest_server]")

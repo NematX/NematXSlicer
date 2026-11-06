@@ -11,7 +11,9 @@
 #include <catch_main.hpp>
 
 #include "engine.hpp"
+#include "settings.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -26,6 +28,8 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -256,6 +260,75 @@ TEST_CASE("headless engine performs a real FFF export", "[rest_engine]")
         has_spatial_move = has_spatial_move || spatial(move.type);
     }
     REQUIRE(has_spatial_move);
+}
+
+TEST_CASE("settings catalog exposes finalized definitions", "[rest_engine]")
+{
+    ensure_engine_initialized();
+
+    const nlohmann::json catalog = Slic3r::Rest::settings_catalog();
+    for (const char *category : {"preference", "print", "filament", "extruder", "printer"}) {
+        REQUIRE(catalog.contains(category));
+        REQUIRE(catalog.at(category).is_array());
+        for (const nlohmann::json &setting : catalog.at(category)) {
+            REQUIRE(setting.contains("id"));
+            REQUIRE(setting.contains("type"));
+            REQUIRE(setting.contains("label"));
+            REQUIRE(setting.contains("default"));
+        }
+    }
+
+    const nlohmann::json::const_iterator printer_setting = std::find_if(
+        catalog.at("printer").begin(),
+        catalog.at("printer").end(),
+        [](const nlohmann::json &setting) { return setting.at("id") == "nozzle_diameter"; });
+    REQUIRE(printer_setting != catalog.at("printer").end());
+    REQUIRE(printer_setting->at("array") == "extruder");
+    REQUIRE(!printer_setting->at("default").at("value").is_array());
+
+    // Preferences come from AppConfig, which the headless test engine does not
+    // project yet.
+    REQUIRE(catalog.at("preference").empty());
+
+    // The catalog reports extruder-sized vectors and leaves every other vector
+    // variable; fixed cardinalities are not emitted yet.
+    for (const char *category : {"preference", "print", "filament", "extruder", "printer"}) {
+        for (const nlohmann::json &setting : catalog.at(category)) {
+            INFO(setting.at("id"));
+            if (setting.contains("array")) {
+                const std::string array = setting.at("array");
+                CHECK((array == "extruder" || array == "variable"));
+            }
+        }
+    }
+
+    const nlohmann::json::const_iterator filament_diameter = std::find_if(
+        catalog.at("filament").begin(),
+        catalog.at("filament").end(),
+        [](const nlohmann::json &setting) { return setting.at("id") == "filament_diameter"; });
+    REQUIRE(filament_diameter != catalog.at("filament").end());
+    REQUIRE(filament_diameter->at("array") == "extruder");
+    REQUIRE(!filament_diameter->at("default").at("value").is_array());
+
+    // Profile metadata is exposed as a variable array. Scalar-like overrides
+    // generated for filament presets inherit the host generator's type and are
+    // reported as variable because that generator does not mark them as
+    // extruder-sized; this is a core-side limitation, not a REST one.
+    const nlohmann::json::const_iterator compatible_printers = std::find_if(
+        catalog.at("filament").begin(),
+        catalog.at("filament").end(),
+        [](const nlohmann::json &setting) { return setting.at("id") == "compatible_printers"; });
+    REQUIRE(compatible_printers != catalog.at("filament").end());
+    REQUIRE(compatible_printers->at("array") == "variable");
+
+    // Variable-length vectors are reported as variable until fixed cardinalities
+    // are emitted.
+    const nlohmann::json::const_iterator thumbnails = std::find_if(
+        catalog.at("printer").begin(),
+        catalog.at("printer").end(),
+        [](const nlohmann::json &setting) { return setting.at("id") == "thumbnails"; });
+    REQUIRE(thumbnails != catalog.at("printer").end());
+    REQUIRE(thumbnails->at("array") == "variable");
 }
 
 TEST_CASE("headless runs isolate concurrent cancellation and restart", "[rest_engine]")

@@ -82,6 +82,7 @@ if (SLIC3R_STATIC)
 endif ()
 
 # Dependency build management
+option(SLIC3R_BUILD_REST_SERVER "Build the standalone REST server" OFF)
 option(${PROJECT_NAME}_BUILD_DEPS "Build dependencies before the project" OFF)
 option(${PROJECT_NAME}_DEPS_OUTPUT_QUIET "Don't print build output for dependencies" OFF)
 set(${PROJECT_NAME}_DEPS_PRESET "default" CACHE STRING "Preset of the dependencies when ${PROJECT_NAME}_BUILD_DEPS is ON")
@@ -101,7 +102,6 @@ endif ()
 
 option(SLIC3R_BUILD_SANDBOXES   "Build development sandboxes" OFF)
 option(SLIC3R_BUILD_TESTS       "Build unit tests" OFF)
-option(SLIC3R_BUILD_REST_SERVER "Build the standalone REST server" OFF)
 
 if (IS_CROSS_COMPILE)
     message("Detected cross compilation setup. Tests and encoding checks will be forcedly disabled!")

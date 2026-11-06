@@ -32,6 +32,7 @@ target_compile_definitions(rest_engine_tests PRIVATE
 
 target_link_libraries(rest_engine_tests
     test_common
+    slic3r_rest
     slic3r_rest_engine
 )
 
@@ -60,4 +61,27 @@ endif ()
 set_property(TARGET rest_session_tests PROPERTY FOLDER "tests")
 add_test(rest_session_tests rest_session_tests ${CATCH_EXTRA_ARGS})
 
-set_tests_properties(rest_server_tests rest_engine_tests rest_session_tests PROPERTIES TIMEOUT 120)
+add_executable(rest_auth_tests
+    auth_tests.cpp
+)
+
+target_link_libraries(rest_auth_tests
+    test_common
+    slic3r_rest_auth
+    boost_libs
+)
+
+if (WIN32)
+    target_compile_definitions(rest_auth_tests PRIVATE _WIN32_WINNT=0x0601)
+    prusaslicer_copy_dlls(rest_auth_tests)
+endif ()
+
+set_property(TARGET rest_auth_tests PROPERTY FOLDER "tests")
+add_test(rest_auth_tests rest_auth_tests ${CATCH_EXTRA_ARGS})
+
+set_tests_properties(
+    rest_server_tests
+    rest_engine_tests
+    rest_session_tests
+    rest_auth_tests
+    PROPERTIES TIMEOUT 120)

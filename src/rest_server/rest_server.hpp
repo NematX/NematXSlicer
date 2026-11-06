@@ -32,6 +32,11 @@ struct ServerConfig {
     std::uint64_t max_header_bytes;
     std::uint32_t max_connections;
     std::chrono::seconds request_timeout;
+    std::chrono::seconds token_ttl;
+    // Session inactivity delay; distinct from the bearer token TTL.
+    std::chrono::seconds session_ttl;
+    std::chrono::seconds login_window;
+    std::uint32_t max_login_attempts;
 
     static ServerConfig defaults();
     void validate() const;
@@ -70,6 +75,9 @@ struct HttpResponse {
     std::string body;
     std::string content_type = "application/json; charset=utf-8";
     bool no_body = false;
+    // Extra headers set verbatim on the wire, for example Cache-Control on a
+    // credential response.
+    std::map<std::string, std::string> headers;
 
     static HttpResponse json(unsigned int status, const nlohmann::json &payload);
     static HttpResponse error(

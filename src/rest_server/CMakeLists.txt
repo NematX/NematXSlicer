@@ -1,5 +1,8 @@
 # REST server targets are kept separate from the GUI so they can be built headless.
 
+# Provided by the deps/+Argon2 project; only REST builds require it.
+find_package(Argon2 CONFIG REQUIRED)
+
 # copy_directory_if_different avoids rewriting the whole 90 MB resource tree on
 # every incremental REST build; keep the unconditional copy on older CMake.
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.26)
@@ -20,9 +23,28 @@ add_custom_target(slic3r_rest_resources
     VERBATIM
 )
 
+add_library(slic3r_rest_auth STATIC
+    auth.cpp
+    auth.hpp
+)
+
+target_include_directories(slic3r_rest_auth
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/..
+)
+target_link_libraries(slic3r_rest_auth PRIVATE boost_libs Argon2::argon2)
+target_compile_definitions(slic3r_rest_auth PRIVATE NOMINMAX)
+if (WIN32)
+    target_link_libraries(slic3r_rest_auth PRIVATE bcrypt.lib)
+endif ()
+set_property(TARGET slic3r_rest_auth PROPERTY FOLDER "rest_server")
+
 add_library(slic3r_rest STATIC
     rest_server.cpp
     rest_server.hpp
+    settings.cpp
+    settings.hpp
 )
 
 target_include_directories(slic3r_rest
@@ -31,7 +53,14 @@ target_include_directories(slic3r_rest
         ${CMAKE_CURRENT_SOURCE_DIR}/..
 )
 
-target_link_libraries(slic3r_rest PRIVATE boost_libs)
+target_link_libraries(slic3r_rest PRIVATE boost_libs slic3r_rest_auth slic3r_rest_session libslic3r)
+target_compile_definitions(slic3r_rest PRIVATE NOMINMAX)
+
+add_executable(slic3r_rest_password
+    password_tool.cpp
+)
+target_link_libraries(slic3r_rest_password PRIVATE slic3r_rest_auth boost_libs)
+set_property(TARGET slic3r_rest_password PROPERTY FOLDER "rest_server")
 
 if (WIN32)
     target_compile_definitions(slic3r_rest PRIVATE _WIN32_WINNT=0x0601)

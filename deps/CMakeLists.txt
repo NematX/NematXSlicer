@@ -26,6 +26,8 @@
 cmake_minimum_required(VERSION 3.12)
 project(Slic3r-deps)
 
+option(SLIC3R_BUILD_REST_SERVER "Build dependencies for the standalone REST server" OFF)
+
 # timestamp of the extracted content from archive set to the extraction date. OLD to set to the timestamp from the archive.
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
     cmake_policy(SET CMP0135 NEW)
@@ -139,6 +141,7 @@ dep_message(STATUS "Found external package definitions: ${FOUND_PACKAGES}")
 # Current list of all required dependencies for PS (top level)
 set(REQUIRED_PACKAGES
     Boost
+    Argon2
     Catch2
     Cereal
     CURL
@@ -154,6 +157,10 @@ set(REQUIRED_PACKAGES
     ZLIB
     LibBGCode
 )
+
+if (NOT SLIC3R_BUILD_REST_SERVER)
+    list(REMOVE_ITEM REQUIRED_PACKAGES Argon2)
+endif ()
 
 set(${PROJECT_NAME}_PLATFORM_PACKAGES "" CACHE STRING "Select packages which are provided by the platform" )
 set(SYSTEM_PROVIDED_PACKAGES OpenGL)
