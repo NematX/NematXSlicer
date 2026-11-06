@@ -11,6 +11,7 @@
  */
 
 #include "settings.hpp"
+#include "settings_internal.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -21,80 +22,20 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
-#include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_config_types.h"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
-#include "libslic3r/Api/plugin/c/slic3r_config_types.h"
 
 namespace Slic3r::Rest {
 
 namespace {
 
 using Json = nlohmann::json;
-
-// Wire names match the specification; COUNT is an internal sentinel and keeps
-// the linear fallback.
-const char *graph_type_name(GraphData::GraphType type)
-{
-    switch (type) {
-    case GraphData::SQUARE:
-        return "square";
-    case GraphData::LINEAR:
-        return "linear";
-    case GraphData::SPLINE:
-        return "spline";
-    case GraphData::COUNT:
-        break;
-    }
-    return "linear";
-}
-
-// Config values converted to the JSON primitives used by the catalog: scalars,
-// points and graphs.
-Json json_value(const std::string &value)
-{
-    return value;
-}
-
-Json json_value(bool value)
-{
-    return value;
-}
-
-Json json_value(unsigned char value)
-{
-    return value != 0;
-}
-
-Json json_value(std::int32_t value)
-{
-    return value;
-}
-
-Json json_value(double value)
-{
-    return value;
-}
-
-Json json_value(const Vec2d &value)
-{
-    return Json::array({value.x(), value.y()});
-}
-
-Json json_value(const Vec3d &value)
-{
-    return Json::array({value.x(), value.y(), value.z()});
-}
-
-Json json_value(const GraphData &value)
-{
-    Json points = Json::array();
-    for (const Vec2d &point : value.data())
-        points.push_back(Json::array({point.x(), point.y()}));
-    return Json{{"type", graph_type_name(value.type)}, {"points", std::move(points)}};
-}
+using detail::graph_type_name;
+using detail::json_value;
+using detail::scalar_type;
 
 // Vector elements converted one by one, in index order.
 template<typename T>
@@ -117,15 +58,6 @@ Json default_vector_value(const ConfigOptionVector<T> &option, bool extruder_arr
     // A definition without a default element keeps a null default instead of
     // reading past the vector.
     return option.get_values().empty() ? Json() : json_value(option.get_at(0));
-}
-
-// The vector flag is stored in the type value; the catalog exposes the element
-// type.
-ConfigOptionType scalar_type(ConfigOptionType type)
-{
-    if ((static_cast<int>(type) & static_cast<int>(coVectorType)) == 0)
-        return type;
-    return static_cast<ConfigOptionType>(static_cast<int>(type) - static_cast<int>(coVectorType));
 }
 
 const char *setting_type_name(ConfigOptionType type)
@@ -277,7 +209,7 @@ Json default_value(const ConfigOptionDef &definition)
 // because catalog clients have no GUI context. Vector settings are reported as
 // an extruder array or a variable-length array; fixed cardinalities are not
 // emitted yet.
-Json setting_definition(const ConfigOptionDef &definition)
+Json setting_definition_json(const ConfigOptionDef &definition)
 {
     Json result{
         {"id", definition.opt_key},
@@ -352,7 +284,7 @@ nlohmann::json settings_catalog()
         for (const std::string &key : keys) {
             const ConfigOptionDef *option = definition.get(key);
             if (option != nullptr)
-                result[category_name].push_back(setting_definition(*option));
+                result[category_name].push_back(setting_definition_json(*option));
         }
     }
     return result;

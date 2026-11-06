@@ -13,6 +13,7 @@
 #include "auth.hpp"
 #include "profiles.hpp"
 #include "session.hpp"
+#include "settings.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
@@ -46,6 +47,8 @@ using Tcp = asio::ip::tcp;
 using HttpRequestMessage = http::request<http::string_body>;
 using HttpResponseMessage = http::response<http::string_body>;
 using HttpRequestParser = http::request_parser<http::string_body>;
+// Resolves one parsed request to a response; the transport owns no routing.
+using RestRouter = std::function<HttpResponse(HttpRequest &, const std::string &request_id)>;
 
 // Default buffered JSON body limit. The specification's 1 GiB upload limit
 // belongs to the streamed multipart route, not to buffered JSON bodies.
@@ -524,67 +527,603 @@ nlohmann::json profile_selection_json(const ProfileSelection &selection)
     };
 }
 
-HttpResponse dispatch_request(
+// Normalize setting failures into the route's client-correctable error shape.
+HttpResponse invalid_setting_request(const std::string &message, const std::string &request_id)
+{
+    // Setting IDs, types, ranges and cardinalities are all client-correctable.
+    return make_error_response(422, "invalid_setting", message, request_id);
+}
+
+// Parse the explicit ID list while preserving the distinction from malformed JSON.
+bool parse_setting_ids(
     HttpRequest &request,
-    const RequestHandler &private_test_handler,
-    const std::shared_ptr<AuthService> &auth_service,
-    SessionRegistry &session_registry,
-    const ProfileCatalog *profile_catalog,
+    std::vector<std::string> &setting_ids,
+    HttpResponse &error_response,
     const std::string &request_id)
 {
-    if (request.path == "/login") {
-        if (request.method != "POST")
-            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-        HttpResponse parse_error;
-        if (!parse_request_json(request, parse_error, request_id))
-            return parse_error;
-        if (request.json_body == nullptr || !request.json_body->is_object() ||
-            !request.json_body->contains("username") ||
-            !request.json_body->contains("password") ||
-            !request.json_body->at("username").is_string() ||
-            !request.json_body->at("password").is_string())
-            return make_error_response(
+    if (!parse_request_json(request, error_response, request_id))
+        return false;
+    if (request.json_body == nullptr || !request.json_body->is_object() ||
+        !request.json_body->contains("setting_ids") ||
+        !request.json_body->at("setting_ids").is_array() ||
+        request.json_body->at("setting_ids").empty()) {
+        error_response = make_error_response(
+            400,
+            "invalid_request",
+            "The get_settings body must contain a non-empty setting_ids array.",
+            request_id);
+        return false;
+    }
+    for (const nlohmann::json &setting_id : request.json_body->at("setting_ids")) {
+        if (!setting_id.is_string()) {
+            error_response = make_error_response(
                 400,
                 "invalid_request",
-                "The login body must contain string username and password fields.",
+                "setting_ids must contain strings.",
                 request_id);
-
-        const std::string username = request.json_body->at("username").get<std::string>();
-        std::string password = request.json_body->at("password").get<std::string>();
-        const AuthTimePoint now = std::chrono::system_clock::now();
-        const LoginResult result = auth_service->login(username, password, now);
-        clear_secret(password);
-        if (result.status == LoginStatus::rate_limited) {
-            HttpResponse response = make_error_response(
-                429,
-                "login_rate_limited",
-                "Too many login attempts.",
-                request_id);
-            response.headers.emplace(
-                "Retry-After",
-                std::to_string(auth_service->login_window().count()));
-            return response;
+            return false;
         }
-        // An unknown account and a wrong password return the same response.
-        if (result.status == LoginStatus::invalid_credentials)
-            return make_error_response(
-                401,
-                "invalid_credentials",
-                "The username or password is incorrect.",
-                request_id);
-
-        const IssuedToken &token = *result.token;
-        const std::int64_t expires_in = std::chrono::duration_cast<std::chrono::seconds>(
-            token.expires_at - now).count();
-        HttpResponse response = HttpResponse::json(200, nlohmann::json{
-            {"access_token", token.value},
-            {"token_type", "Bearer"},
-            {"expires_in", expires_in}
-        });
-        response.headers.emplace("Cache-Control", "no-store");
-        response.headers.emplace("Pragma", "no-cache");
-        return response;
+        setting_ids.push_back(setting_id.get<std::string>());
     }
+    return true;
+}
+
+// Preserve object order-independent updates for one atomic candidate mutation.
+bool parse_setting_updates(
+    HttpRequest &request,
+    std::vector<std::pair<std::string, nlohmann::json>> &updates,
+    HttpResponse &error_response,
+    const std::string &request_id)
+{
+    if (!parse_request_json(request, error_response, request_id))
+        return false;
+    if (request.json_body == nullptr || !request.json_body->is_object()) {
+        error_response = make_error_response(
+            400,
+            "invalid_request",
+            "The set_settings body must be a JSON object.",
+            request_id);
+        return false;
+    }
+    for (nlohmann::json::const_iterator setting = request.json_body->begin();
+         setting != request.json_body->end(); ++setting)
+        updates.emplace_back(setting.key(), setting.value());
+    return true;
+}
+
+
+// Services shared by every authenticated route for one request.
+struct RouteServices {
+    AuthService &auth;
+    SessionRegistry &sessions;
+    const ProfileCatalog *profiles;
+    const RequestHandler &private_test_handler;
+};
+
+
+// Public login route. An unknown account and a wrong password return the same
+// response, and the local password copy is wiped before returning.
+HttpResponse handle_login(HttpRequest &request, const RouteServices &services, const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+HttpResponse parse_error;
+if (!parse_request_json(request, parse_error, request_id))
+    return parse_error;
+if (request.json_body == nullptr || !request.json_body->is_object() ||
+    !request.json_body->contains("username") ||
+    !request.json_body->contains("password") ||
+    !request.json_body->at("username").is_string() ||
+    !request.json_body->at("password").is_string())
+    return make_error_response(
+        400,
+        "invalid_request",
+        "The login body must contain string username and password fields.",
+        request_id);
+
+const std::string username = request.json_body->at("username").get<std::string>();
+std::string password = request.json_body->at("password").get<std::string>();
+const AuthTimePoint now = std::chrono::system_clock::now();
+const LoginResult result = services.auth.login(username, password, now);
+clear_secret(password);
+if (result.status == LoginStatus::rate_limited) {
+    HttpResponse response = make_error_response(
+        429,
+        "login_rate_limited",
+        "Too many login attempts.",
+        request_id);
+    response.headers.emplace(
+        "Retry-After",
+        std::to_string(services.auth.login_window().count()));
+    return response;
+}
+// An unknown account and a wrong password return the same response.
+if (result.status == LoginStatus::invalid_credentials)
+    return make_error_response(
+        401,
+        "invalid_credentials",
+        "The username or password is incorrect.",
+        request_id);
+
+const IssuedToken &token = *result.token;
+const std::int64_t expires_in = std::chrono::duration_cast<std::chrono::seconds>(
+    token.expires_at - now).count();
+HttpResponse response = HttpResponse::json(200, nlohmann::json{
+    {"access_token", token.value},
+    {"token_type", "Bearer"},
+    {"expires_in", expires_in}
+});
+response.headers.emplace("Cache-Control", "no-store");
+response.headers.emplace("Pragma", "no-cache");
+return response;
+}
+
+// Revoke only the bearer token that authenticated this request.
+HttpResponse handle_logout(
+    const HttpRequest &request,
+    const RouteServices &services,
+    const std::string &token,
+    AuthTimePoint now,
+    const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!services.auth.revoke_token(token, now))
+    return make_unauthorized_response(request_id);
+return HttpResponse::empty(204);
+}
+
+// Public catalog of finalized setting definitions.
+HttpResponse handle_list_settings(const HttpRequest &request, const std::string &request_id)
+{
+if (request.method != "GET")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+if (!settings_catalog_ready())
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+return HttpResponse::json(200, settings_catalog());
+}
+
+// Create an owned session, seeded from the profile catalog defaults when the
+// engine catalog is available. The route accepts no request body.
+HttpResponse handle_create_session(
+    const HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+if (!request.body.empty())
+    return make_error_response(
+        400,
+        "invalid_request",
+        "The create_session route does not accept a request body.",
+        request_id);
+SessionData session_data{std::make_shared<Model>(), {}, nlohmann::json::object()};
+if (services.profiles != nullptr) {
+    // Defaults are built before the session is published; a broken
+    // server-side catalog becomes an internal error, not a worker crash.
+    ProfileApplication initial;
+    try {
+        initial = services.profiles->defaults();
+    } catch (const std::exception &) {
+        return make_error_response(
+            500,
+            "internal_error",
+            "The server profile catalog could not provide defaults.",
+            request_id);
+    } catch (...) {
+        return make_error_response(
+            500,
+            "internal_error",
+            "The server profile catalog could not provide defaults.",
+            request_id);
+    }
+    session_data.configuration = initial.configuration;
+    session_data.profiles = initial.selection;
+}
+const std::shared_ptr<SessionContext> session = services.sessions.create(
+    username,
+    SessionRegistry::Clock::now(),
+    std::move(session_data));
+return HttpResponse::json(201, nlohmann::json{{"session_id", session->session_id()}});
+}
+
+// List the installed profiles visible to one session. The shared catalog is
+// only read here.
+HttpResponse handle_list_profiles(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    const std::string &session_id = request.path_segments[1];
+if (request.method != "GET")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+if (services.sessions.find(username, session_id, SessionRegistry::Clock::now()) == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (services.profiles == nullptr)
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+return HttpResponse::json(200, services.profiles->list_profiles());
+}
+
+// Apply a full profile selection on a candidate configuration outside the
+// session lock, then commit it under the session revision.
+HttpResponse handle_set_profile(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+    const std::string &session_id = request.path_segments[1];
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(
+    username,
+    session_id,
+    SessionRegistry::Clock::now());
+if (session == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (services.profiles == nullptr)
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+
+ProfileSelection requested;
+HttpResponse parse_error;
+if (!parse_profile_selection(request, requested, parse_error, request_id))
+    return parse_error;
+
+ProfileApplication application;
+try {
+    application = services.profiles->select(requested);
+} catch (const std::invalid_argument &error) {
+    return invalid_profile_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server profile catalog could not apply the selection.",
+        request_id);
+} catch (...) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server profile catalog could not apply the selection.",
+        request_id);
+}
+
+const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+if (!mutation.has_value())
+    return make_error_response(
+        409,
+        "session_busy",
+        "The session is currently slicing.",
+        request_id);
+const std::optional<SessionData> current = session->data_snapshot();
+if (!current.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+const nlohmann::json response_body = profile_selection_json(application.selection);
+SessionData candidate = current.value();
+candidate.configuration = std::move(application.configuration);
+candidate.profiles = std::move(application.selection);
+if (!session->commit_mutation(
+        mutation.value(),
+        std::move(candidate),
+        true,
+        SessionRegistry::Clock::now()))
+    return make_error_response(
+        409,
+        "session_changed",
+        "The session changed while the profile selection was prepared.",
+        request_id);
+return HttpResponse::json(200, response_body);
+}
+
+// Read one setting from an owned session without mutating it.
+HttpResponse handle_get_setting(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+if (request.method != "GET")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+if (!request.body.empty())
+    return make_error_response(
+        400,
+        "invalid_request",
+        "The get_setting route does not accept a request body.",
+        request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(
+    username,
+    request.path_segments[1],
+    SessionRegistry::Clock::now());
+if (session == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (!settings_catalog_ready())
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+const std::optional<SessionData> data = session->data_snapshot();
+if (!data.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+try {
+    return HttpResponse::json(200, nlohmann::json{
+        {"setting_id", request.path_segments[3]},
+        {"serialized_value", setting_value_serialized(
+            data.value().configuration, request.path_segments[3])}
+    });
+} catch (const std::invalid_argument &error) {
+    return invalid_setting_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not read the setting.",
+        request_id);
+}
+}
+
+// Read several settings from one snapshot; the response is completed before it
+// is sent.
+HttpResponse handle_get_settings(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(
+    username,
+    request.path_segments[1],
+    SessionRegistry::Clock::now());
+if (session == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (!settings_catalog_ready())
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+std::vector<std::string> setting_ids;
+HttpResponse parse_error;
+if (!parse_setting_ids(request, setting_ids, parse_error, request_id))
+    return parse_error;
+const std::optional<SessionData> data = session->data_snapshot();
+if (!data.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+try {
+    nlohmann::json values = nlohmann::json::object();
+    for (const std::string &setting_id : setting_ids)
+        values[setting_id] = setting_value_json(data.value().configuration, setting_id);
+    return HttpResponse::json(200, values);
+} catch (const std::invalid_argument &error) {
+    return invalid_setting_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not read the settings.",
+        request_id);
+}
+}
+
+// Replace one setting through its serialized SuperSlicer value on a candidate
+// session, then commit it under the session revision.
+HttpResponse handle_set_setting(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+if (!request.body.empty())
+    return make_error_response(
+        400,
+        "invalid_request",
+        "The set_setting route does not accept a request body.",
+        request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(
+    username,
+    request.path_segments[1],
+    SessionRegistry::Clock::now());
+if (session == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (!settings_catalog_ready())
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+
+const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+if (!mutation.has_value())
+    return make_error_response(
+        409,
+        "session_busy",
+        "The session is currently slicing.",
+        request_id);
+const std::optional<SessionData> current = session->data_snapshot();
+if (!current.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+
+SessionData candidate = current.value();
+std::string serialized_response;
+try {
+    set_setting_serialized(
+        candidate.configuration,
+        request.path_segments[3],
+        request.path_segments[4]);
+    validate_setting_configuration(current->configuration, candidate.configuration);
+    serialized_response = setting_value_serialized(
+        candidate.configuration,
+        request.path_segments[3]);
+} catch (const std::invalid_argument &error) {
+    return invalid_setting_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not apply the setting.",
+        request_id);
+}
+if (!session->commit_mutation(
+        mutation.value(),
+        std::move(candidate),
+        setting_affects_slicing(request.path_segments[3]),
+        SessionRegistry::Clock::now()))
+    return make_error_response(
+        409,
+        "session_changed",
+        "The session changed while the setting was prepared.",
+        request_id);
+try {
+    return HttpResponse::json(200, nlohmann::json{
+        {"setting_id", request.path_segments[3]},
+        {"serialized_value", serialized_response}
+    });
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not serialize the setting response.",
+        request_id);
+}
+}
+
+// Apply several typed setting updates atomically on a candidate session.
+HttpResponse handle_set_settings(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id)
+{
+if (request.method != "POST")
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+const std::shared_ptr<SessionContext> session = services.sessions.find(
+    username,
+    request.path_segments[1],
+    SessionRegistry::Clock::now());
+if (session == nullptr)
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+if (!settings_catalog_ready())
+    return make_error_response(
+        503,
+        "engine_not_initialized",
+        "The REST engine is not initialized.",
+        request_id);
+
+std::vector<std::pair<std::string, nlohmann::json>> updates;
+HttpResponse parse_error;
+if (!parse_setting_updates(request, updates, parse_error, request_id))
+    return parse_error;
+if (updates.empty())
+    return HttpResponse::json(200, nlohmann::json{{"updated", nlohmann::json::object()}});
+
+const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+if (!mutation.has_value())
+    return make_error_response(
+        409,
+        "session_busy",
+        "The session is currently slicing.",
+        request_id);
+const std::optional<SessionData> current = session->data_snapshot();
+if (!current.has_value())
+    return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+
+SessionData candidate = current.value();
+bool affects_slicing = false;
+nlohmann::json response_values = nlohmann::json::object();
+try {
+    for (const std::pair<std::string, nlohmann::json> &update : updates) {
+        const std::string serialized = setting_json_to_serialized(
+            candidate.configuration, update.first, update.second);
+        set_setting_serialized(candidate.configuration, update.first, serialized);
+        affects_slicing = affects_slicing || setting_affects_slicing(update.first);
+    }
+    validate_setting_configuration(current->configuration, candidate.configuration);
+    for (const std::pair<std::string, nlohmann::json> &update : updates)
+        response_values[update.first] = setting_value_json(candidate.configuration, update.first);
+} catch (const std::invalid_argument &error) {
+    return invalid_setting_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not apply the settings.",
+        request_id);
+}
+if (!session->commit_mutation(
+        mutation.value(),
+        std::move(candidate),
+        affects_slicing,
+        SessionRegistry::Clock::now()))
+    return make_error_response(
+        409,
+        "session_changed",
+        "The session changed while the settings were prepared.",
+        request_id);
+
+try {
+    return HttpResponse::json(200, nlohmann::json{{"updated", response_values}});
+} catch (const std::invalid_argument &error) {
+    return invalid_setting_request(error.what(), request_id);
+} catch (const std::exception &) {
+    return make_error_response(
+        500,
+        "internal_error",
+        "The server could not serialize the settings response.",
+        request_id);
+}
+}
+
+// Route injected by tests only; it is never registered in the standalone
+// executable.
+HttpResponse handle_private_test(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &request_id)
+{
+const bool test_route = services.private_test_handler && request.path.rfind("/__test__/", 0) == 0;
+if (!test_route)
+    return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+
+HttpResponse parse_error;
+if (!parse_request_json(request, parse_error, request_id))
+    return parse_error;
+
+try {
+    return services.private_test_handler(request);
+} catch (const std::exception &) {
+    return make_error_response(500, "internal_error", "An internal server error occurred.", request_id);
+} catch (...) {
+    return make_error_response(500, "internal_error", "An internal server error occurred.", request_id);
+}
+}
+
+
+HttpResponse dispatch_request(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &request_id)
+{
+    if (request.path == "/login")
+        return handle_login(request, services, request_id);
 
     // Every route except /login requires a valid bearer token before route
     // resolution, so an unknown path cannot be probed without credentials.
@@ -593,177 +1132,38 @@ HttpResponse dispatch_request(
         return make_unauthorized_response(request_id);
 
     const AuthTimePoint now = std::chrono::system_clock::now();
-    const std::optional<std::string> username = auth_service->username_for_token(*token, now);
+    const std::optional<std::string> username = services.auth.username_for_token(*token, now);
     if (!username.has_value())
         return make_unauthorized_response(request_id);
 
-    if (request.path == "/logout") {
-        if (request.method != "POST")
-            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-        if (!auth_service->revoke_token(*token, now))
-            return make_unauthorized_response(request_id);
-        return HttpResponse::empty(204);
-    }
+    if (request.path == "/logout")
+        return handle_logout(request, services, *token, now, request_id);
+    if (request.path == "/list_settings")
+        return handle_list_settings(request, request_id);
+    if (request.path == "/create_session")
+        return handle_create_session(request, services, *username, request_id);
 
-    // Public global route: the catalog is only available once the engine has
-    // finalized the configuration definitions.
-    if (request.path == "/list_settings") {
-        if (request.method != "GET")
-            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-        if (!settings_catalog_ready())
-            return make_error_response(
-                503,
-                "engine_not_initialized",
-                "The REST engine is not initialized.",
-                request_id);
-        return HttpResponse::json(200, settings_catalog());
-    }
-
-    // Sessions start with an empty scene and configuration on purpose; defaults
-    // and profiles arrive with the settings and profile routes. No request body
-    // is accepted.
-    if (request.path == "/create_session") {
-        if (request.method != "POST")
-            return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-        if (!request.body.empty())
-            return make_error_response(
-                400,
-                "invalid_request",
-                "The create_session route does not accept a request body.",
-                request_id);
-        SessionData session_data{std::make_shared<Model>(), {}, nlohmann::json::object()};
-        if (profile_catalog != nullptr) {
-            // Defaults are built before the session is published; a broken
-            // server-side catalog becomes an internal error, not a worker crash.
-            ProfileApplication initial;
-            try {
-                initial = profile_catalog->defaults();
-            } catch (const std::exception &) {
-                return make_error_response(
-                    500,
-                    "internal_error",
-                    "The server profile catalog could not provide defaults.",
-                    request_id);
-            } catch (...) {
-                return make_error_response(
-                    500,
-                    "internal_error",
-                    "The server profile catalog could not provide defaults.",
-                    request_id);
-            }
-            session_data.configuration = initial.configuration;
-            session_data.profiles = initial.selection;
-        }
-        const std::shared_ptr<SessionContext> session = session_registry.create(
-            username.value(),
-            SessionRegistry::Clock::now(),
-            std::move(session_data));
-        return HttpResponse::json(201, nlohmann::json{{"session_id", session->session_id()}});
-    }
-
-    // Session routes match decoded segments, validate ownership first, then
-    // prepare profile state outside the session lock before the revisioned commit.
-    if (request.path_segments.size() == 3 && request.path_segments[0] == "session") {
-        const std::string &session_id = request.path_segments[1];
+    // Session routes match decoded segments and resolve the owning account before
+    // their handler reads or mutates the session.
+    if (request.path_segments.size() >= 3 && request.path_segments[0] == "session") {
         const std::string &operation = request.path_segments[2];
-        if (operation == "list_profiles") {
-            if (request.method != "GET")
-                return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-            if (session_registry.find(username.value(), session_id, SessionRegistry::Clock::now()) == nullptr)
-                return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
-            if (profile_catalog == nullptr)
-                return make_error_response(
-                    503,
-                    "engine_not_initialized",
-                    "The REST engine is not initialized.",
-                    request_id);
-            return HttpResponse::json(200, profile_catalog->list_profiles());
-        }
-
-        if (operation == "set_profile") {
-            if (request.method != "POST")
-                return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-            const std::shared_ptr<SessionContext> session = session_registry.find(
-                username.value(),
-                session_id,
-                SessionRegistry::Clock::now());
-            if (session == nullptr)
-                return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
-            if (profile_catalog == nullptr)
-                return make_error_response(
-                    503,
-                    "engine_not_initialized",
-                    "The REST engine is not initialized.",
-                    request_id);
-
-            ProfileSelection requested;
-            HttpResponse parse_error;
-            if (!parse_profile_selection(request, requested, parse_error, request_id))
-                return parse_error;
-
-            ProfileApplication application;
-            try {
-                application = profile_catalog->select(requested);
-            } catch (const std::invalid_argument &error) {
-                return invalid_profile_request(error.what(), request_id);
-            } catch (const std::exception &) {
-                return make_error_response(
-                    500,
-                    "internal_error",
-                    "The server profile catalog could not apply the selection.",
-                    request_id);
-            } catch (...) {
-                return make_error_response(
-                    500,
-                    "internal_error",
-                    "The server profile catalog could not apply the selection.",
-                    request_id);
-            }
-
-            const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
-            if (!mutation.has_value())
-                return make_error_response(
-                    409,
-                    "session_busy",
-                    "The session is currently slicing.",
-                    request_id);
-            const std::optional<SessionData> current = session->data_snapshot();
-            if (!current.has_value())
-                return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
-            const nlohmann::json response_body = profile_selection_json(application.selection);
-            SessionData candidate = current.value();
-            candidate.configuration = std::move(application.configuration);
-            candidate.profiles = std::move(application.selection);
-            if (!session->commit_mutation(
-                    mutation.value(),
-                    std::move(candidate),
-                    true,
-                    SessionRegistry::Clock::now()))
-                return make_error_response(
-                    409,
-                    "session_changed",
-                    "The session changed while the profile selection was prepared.",
-                    request_id);
-            return HttpResponse::json(200, response_body);
-        }
+        if (request.path_segments.size() == 3 && operation == "list_profiles")
+            return handle_list_profiles(request, services, *username, request_id);
+        if (request.path_segments.size() == 3 && operation == "set_profile")
+            return handle_set_profile(request, services, *username, request_id);
+        if (request.path_segments.size() == 4 && operation == "get_setting")
+            return handle_get_setting(request, services, *username, request_id);
+        if (request.path_segments.size() == 3 && operation == "get_settings")
+            return handle_get_settings(request, services, *username, request_id);
+        if (request.path_segments.size() == 5 && operation == "set_setting")
+            return handle_set_setting(request, services, *username, request_id);
+        if (request.path_segments.size() == 3 && operation == "set_settings")
+            return handle_set_settings(request, services, *username, request_id);
     }
 
-    const bool test_route = private_test_handler && request.path.rfind("/__test__/", 0) == 0;
-    if (!test_route)
-        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
-
-    HttpResponse parse_error;
-    if (!parse_request_json(request, parse_error, request_id))
-        return parse_error;
-
-    try {
-        return private_test_handler(request);
-    } catch (const std::exception &) {
-        return make_error_response(500, "internal_error", "An internal server error occurred.", request_id);
-    } catch (...) {
-        return make_error_response(500, "internal_error", "An internal server error occurred.", request_id);
-    }
+    return handle_private_test(request, services, request_id);
 }
+
 
 class HttpSession;
 
@@ -774,17 +1174,11 @@ public:
     HttpSession(
         Tcp::socket socket,
         std::shared_ptr<const ServerConfig> config,
-        std::shared_ptr<AuthService> auth_service,
-        RequestHandler private_test_handler,
-        SessionRegistry &session_registry,
-        const ProfileCatalog *profile_catalog,
+        RestRouter router,
         CloseCallback close_callback)
         : socket_(std::move(socket)),
           config_(std::move(config)),
-          auth_service_(std::move(auth_service)),
-          private_test_handler_(std::move(private_test_handler)),
-          session_registry_(session_registry),
-          profile_catalog_(profile_catalog),
+          router_(std::move(router)),
           close_callback_(std::move(close_callback)),
           timer_(socket_.get_executor())
     {
@@ -886,13 +1280,7 @@ private:
             return;
         }
         try {
-            response = dispatch_request(
-                request,
-                private_test_handler_,
-                auth_service_,
-                session_registry_,
-                profile_catalog_,
-                request_id);
+            response = router_(request, request_id);
         } catch (const std::exception &) {
             response = make_error_response(
                 500,
@@ -947,10 +1335,7 @@ private:
     beast::flat_buffer buffer_;
     HttpRequestParser parser_;
     std::shared_ptr<const ServerConfig> config_;
-    std::shared_ptr<AuthService> auth_service_;
-    RequestHandler private_test_handler_;
-    SessionRegistry &session_registry_;
-    const ProfileCatalog *profile_catalog_;
+    RestRouter router_;
     CloseCallback close_callback_;
     asio::steady_timer timer_;
     std::optional<HttpResponseMessage> response_message_;
@@ -959,9 +1344,10 @@ private:
 
 class ServerRuntime {
 public:
-    ServerRuntime(ServerConfig config, RequestHandler private_test_handler)
+    ServerRuntime(ServerConfig config, RestRouter router, RequestHandler private_test_handler)
         : config_(std::move(config)),
           config_shared_(std::make_shared<const ServerConfig>(config_)),
+          router_(std::move(router)),
           private_test_handler_(std::move(private_test_handler)),
           acceptor_(io_context_)
     {
@@ -1080,6 +1466,20 @@ public:
         return bound_port_;
     }
 
+    // Services addressed by the routes for one request; valid while the runtime
+    // is running and the worker has not been joined.
+    RouteServices route_services() const
+    {
+        return RouteServices{*auth_service_, *session_registry_, profile_catalog_.get(), private_test_handler_};
+    }
+
+    SessionRegistry &session_registry() const
+    {
+        if (session_registry_ == nullptr)
+            throw std::logic_error("REST sessions are only available while the server is running");
+        return *session_registry_;
+    }
+
 private:
     void accept_next(std::uint64_t generation)
     {
@@ -1110,10 +1510,7 @@ private:
                 const std::shared_ptr<HttpSession> session = std::make_shared<HttpSession>(
                     std::move(socket),
                     config_shared_,
-                    auth_service_,
-                    private_test_handler_,
-                    *session_registry_,
-                    profile_catalog_.get(),
+                    router_,
                     [this](HttpSession *closed_session) {
                         remove_session(closed_session);
                     });
@@ -1147,6 +1544,7 @@ private:
     std::shared_ptr<const ServerConfig> config_shared_;
     std::shared_ptr<AuthService> auth_service_;
     std::unique_ptr<ProfileCatalog> profile_catalog_;
+    RestRouter router_;
     // Created in start(), released in stop() after the sessions are closed;
     // HttpSession borrows it.
     std::unique_ptr<SessionRegistry> session_registry_;
@@ -1306,7 +1704,12 @@ HttpResponse HttpResponse::empty(unsigned int response_status)
 class RestServer::Impl {
 public:
     Impl(ServerConfig config, RequestHandler private_test_handler)
-        : runtime_(std::move(config), std::move(private_test_handler))
+        : runtime_(
+              std::move(config),
+              [this](HttpRequest &request, const std::string &request_id) {
+                  return dispatch_request(request, runtime_.route_services(), request_id);
+              },
+              std::move(private_test_handler))
     {
     }
 
@@ -1338,6 +1741,11 @@ bool RestServer::running() const noexcept
 std::uint16_t RestServer::bound_port() const noexcept
 {
     return impl_->runtime_.bound_port();
+}
+
+SessionRegistry &RestServer::session_registry() const
+{
+    return impl_->runtime_.session_registry();
 }
 
 } // namespace Slic3r::Rest

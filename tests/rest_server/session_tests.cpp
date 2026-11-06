@@ -106,6 +106,7 @@ TEST_CASE("stale work cannot publish after a later generation", "[rest_session]"
     const std::optional<Session::WorkToken> first = session->begin_work(at_hours(1));
     REQUIRE(first.has_value());
     REQUIRE(!session->begin_work(at_hours(2)).has_value());
+    REQUIRE(!session->begin_mutation().has_value());
     REQUIRE(session->cancel_work(first.value(), at_hours(3)));
 
     const std::optional<Session::WorkToken> second = session->begin_work(at_hours(4));

@@ -280,6 +280,11 @@ TEST_CASE("REST server creates authenticated sessions through the global routes"
         "{}",
         "application/json");
     REQUIRE(set_profile_uninitialized.result() == http::status::service_unavailable);
+    const HttpResponseMessage get_setting_uninitialized = fixture.request(
+        http::verb::get,
+        "/session/" + first_id + "/get_setting/layer_height");
+    REQUIRE(get_setting_uninitialized.result() == http::status::service_unavailable);
+
     const HttpResponseMessage body_rejected = fixture.request(
         http::verb::post,
         "/create_session",

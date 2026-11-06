@@ -189,6 +189,13 @@ public:
         return handler_calls_.load();
     }
 
+    // Live registry of the running server, used to drive session states such
+    // as an active slicing job that the HTTP routes cannot produce yet.
+    Slic3r::Rest::SessionRegistry &sessions() const
+    {
+        return server_->session_registry();
+    }
+
     std::map<std::string, std::string> profile_files() const
     {
         std::map<std::string, std::string> files;

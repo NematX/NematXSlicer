@@ -229,6 +229,11 @@ Types and representations of the `value` field:
 | `point3` | Three-number array `[x,y,z]` |
 | `graph` | `{"type":"linear","points":[[x,y],...]}`; type `linear`, `square`, or `spline` |
 
+For a graph, the V1 API exposes only usable points and the type.
+Any points retained by the engine outside this range, and its
+`begin_idx`/`end_idx` indices, are not representable; writing a graph therefore
+reconstructs a complete range over the supplied points.
+
 For `point2` and `point3`, components follow the indicated order;
 the definition's `unit` field specifies their unit when applicable.
 

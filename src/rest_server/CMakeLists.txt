@@ -45,8 +45,10 @@ add_library(slic3r_rest STATIC
     profiles.hpp
     rest_server.cpp
     rest_server.hpp
-    settings.cpp
+    settings_catalog.cpp
+    settings_codec.cpp
     settings.hpp
+    settings_internal.hpp
 )
 
 target_include_directories(slic3r_rest

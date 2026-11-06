@@ -21,6 +21,8 @@
 
 namespace Slic3r::Rest {
 
+class SessionRegistry;
+
 struct ServerConfig {
     std::string bind_address;
     std::uint16_t port;
@@ -103,6 +105,10 @@ public:
     void stop() noexcept;
     bool running() const noexcept;
     std::uint16_t bound_port() const noexcept;
+    // In-process access to the live sessions, used by integration tests to put
+    // a session in a state no public route can reach yet (for example a
+    // running slicing job). Valid only while the server is running.
+    SessionRegistry &session_registry() const;
 
 private:
     class Impl;
