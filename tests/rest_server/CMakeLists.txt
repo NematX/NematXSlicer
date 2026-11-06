@@ -79,6 +79,7 @@ set_property(TARGET rest_profiles_tests PROPERTY FOLDER "tests")
 add_test(rest_profiles_tests rest_profiles_tests ${CATCH_EXTRA_ARGS})
 
 add_executable(rest_models_tests
+    custom_gcodes_tests.cpp
     cut_tests.cpp
     entity_settings_tests.cpp
     file_names_tests.cpp
@@ -86,6 +87,7 @@ add_executable(rest_models_tests
     placement_tests.cpp
     rest_entity_settings_tests.cpp
     rest_models_tests.cpp
+    rest_custom_gcodes_tests.cpp
     rest_cut_tests.cpp
     rest_paint_tests.cpp
     rest_placement_tests.cpp

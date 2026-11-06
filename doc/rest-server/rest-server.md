@@ -154,6 +154,8 @@ are UTF-8 encoded. Field names use `snake_case`.
 | `POST` | `/session/{session_id}/paint/{id}` | Paint facet states on an object or solid part |
 | `POST` | `/session/{session_id}/clear_paint/{id}` | Clear one or all paint channels |
 | `GET` | `/session/{session_id}/get_paint/{part_id}` | Read painted triangles for a solid part |
+| `GET` | `/session/{session_id}/get_custom_gcodes` | Read the custom G-code list (color changes, pauses, templates, custom G-code per height) |
+| `POST` | `/session/{session_id}/set_custom_gcodes` | Replace the whole custom G-code list |
 | `POST` | `/session/{session_id}/transform/{id}` | JSON matrix applied to an object, instance, or volume/part ID |
 | `POST` | `/session/{session_id}/set_instance_count/{object_id}` | JSON target instance count |
 | `POST` | `/session/{session_id}/set_part_type/{part_id}` | Change a part type |
@@ -1694,6 +1696,113 @@ MMU states use `{"extruder": k}`. A channel with no painted facets returns
 so `save_project` and `load_project` preserve support, MMU, seam, and active
 plugin annotation channels.
 
+### 5.21. Custom G-code per height (1.1)
+
+The scene stores one list of height-based actions (`Model::custom_gcode_per_print_z`),
+the data behind the GUI layer slider. It is saved in and restored from the 3MF
+project and is applied when slicing. `clear_platter` erases it, as in the GUI;
+`add_model` does not touch it.
+
+`GET /session/{session_id}/get_custom_gcodes` takes no body or query, reads one
+immutable session snapshot, and is allowed during slicing:
+
+```json
+{
+  "mode": "single_extruder",
+  "current_mode": "single_extruder",
+  "items": [
+    {"z": 2.4, "type": "color_change", "extruder": 1, "color": "#FF0000"},
+    {"z": 5.0, "type": "pause", "message": "Insert nuts"},
+    {"z": 6.0, "type": "template"},
+    {"z": 7.2, "type": "custom", "gcode": "M117 Hello"},
+    {"z": 9.0, "type": "tool_change", "extruder": 2, "color": "#00FF00"}
+  ],
+  "warnings": []
+}
+```
+
+`POST /session/{session_id}/set_custom_gcodes` takes a closed
+`{"items": [...]}` body holding the complete list: it replaces the stored list
+atomically, and `[]` empties it. The response has the shape of
+`get_custom_gcodes`. Each item is a closed object whose fields depend on `type`
+(any other field is `400 invalid_request`):
+
+| `type` | Fields |
+|---|---|
+| `color_change` | `z`, optional `extruder` (defaults to the unique extruder, or 1), optional `color` |
+| `tool_change` | `z`, required `extruder`, optional `color` |
+| `pause` | `z`, non-empty `message` |
+| `template` | `z` |
+| `custom` | `z`, non-empty `gcode` |
+
+`z` is a number in millimeters (the print height of the layer at which the
+action is applied). `extruder` is a 1-based integer in `[1, N]`, `N` being the
+session extruder count. `color` is `#RRGGBB` (any case, stored upper case); when
+absent it is the color of the target extruder, as in the GUI: `extruder_colour`
+of that extruder when not empty, otherwise `filament_colour`. If neither is a valid
+color, the item is stored without color and `color` is omitted from the JSON. An
+unknown `type` is `422`, reported after the 400 checks of `type` and `z`, which
+every item needs.
+
+**Modes.** The mode is computed at the time of the call with the slicing engine's
+own rule (`ToolOrdering::assign_custom_gcodes`) and stored with the list: a `Print`
+is applied on a copy of the scene and the session configuration, without slicing.
+It is `single_extruder` when the session has one extruder or the scene is empty;
+`multi_as_single` when exactly one extruder prints the whole model; otherwise
+`multi_extruder`. The engine counts every print region of each object, including
+its fallback region (which keeps the default extruder), plus modifiers, height
+ranges and MMU painting; so `multi_as_single` is reached only when every printing
+region uses the same extruder, in practice the default one, and a part or object
+assigned to another extruder gives `multi_extruder`. `tool_change` is accepted only in
+`multi_as_single`; in `single_extruder`, `extruder` must be 1. Items without a
+color or extruder choice use the unique extruder of `multi_as_single` (1
+otherwise); pauses, templates and custom items carry it for information only.
+`current_mode` is the mode recomputed from the current scene and configuration on
+every read. `mode` is `undefined` for the list of a fresh session and for an empty
+list stored by an older project.
+
+**Validation** (`422 invalid_custom_gcode`, with
+`details: [{"item": i, "reason": r}]` for an item error). `reason` is
+`unknown_type`, `invalid_z` (not finite, not above 0, or rounding to 0 on the layer
+grid),
+`empty_scene`, `above_objects` (`z` above the top of the tallest object once
+both are rounded to the engine's layer grid of 0.0001 mm, so a `z` returned by
+the API is always accepted again on the same scene), `mode_tool_change`,
+`extruder_range`, `invalid_color`, `empty_message`, `empty_gcode`, or
+`duplicate_z` (two items fall at the same rounded `z`; `item` is the later
+one). `z` is bounded by the scene height and must stay below 10000 mm once rounded; a scene
+top of 10000 mm or more refuses every item. With sequential printing (`complete_objects`) a
+non-empty list is refused with no `details`; an empty list is always accepted. The
+stored list is sorted by `z`.
+
+**Warnings.** Accepted values that need attention are reported by both routes in
+`warnings`, each `{"item": i, "reason": r}` or a bare `{"reason": r}`:
+`empty_printer_gcode` (the G-code the engine would emit for the item is empty,
+in every mode: for `color_change` and `pause`, the `color_change_gcode` or
+`pause_print_gcode` option when set, otherwise the default of the printer's G-code
+flavor (for example `M600` and `M601` for Marlin); for `template`, the raw
+`template_custom_gcode`; an empty value is accepted),
+`above_objects` (the scene changed and now ends below the item),
+`sequential_print` (sequential printing was enabled after the list was set;
+the engine ignores it), and `mode_mismatch` (the list holds a color or tool change
+and its stored mode and the current mode differ on whether the print is
+`multi_extruder`: this is exactly when the engine ignores the color and tool
+changes of the list).
+
+`set_custom_gcodes` is synchronous. A list equal to the stored one (an
+empty list is equal to any empty list, whatever its mode) is not a new revision. A real
+change invalidates current G-code, retains an outdated viewer, and returns the
+session to `ready`; it invokes the scene-edit observer immediately before the commit.
+An active slice returns `409 session_busy` and a concurrent session change
+`409 session_changed`.
+
+The engine applies an item to the first layer whose `print_z` is at or above its
+`z`. In the current engine **only one color change, pause, template or custom
+G-code applies per layer**: when several such items fall in the same layer, only
+the highest one is emitted. A `tool_change` is processed separately and applies
+in addition to it. Layers are only known when slicing, so this is not reported by
+the API.
+
 ## 6. Security and remote access
 
 Remote access is a functional requirement, not an anonymous deployment mode.
@@ -1791,6 +1900,7 @@ platform validation responsibility, not an in-process TLS implementation.
 | 1.1 arrangement and orientation | `rest_models_tests`: `Arrange defaults follow the GUI distance rules`, `Arrange separates instances and keeps unselected ones fixed`, `Arrange reports virtual beds and unplaced instances`, `Orient rotates each instance from its own mesh`; `rest_placement_tests`: `REST arrange validates parameters and targets`, `REST arrange moves instances onto the bed and reports their beds`, `REST orient validates parameters and rotates instances onto the bed`, `REST arrange and orient are refused while slicing and on concurrent changes` |
 | 1.1 plane cut | `rest_models_tests`: `Part cuts keep the cut geometry in place for every instance`, `Object cuts split the geometry as the GUI does`, `Cut planes are equivalent in platter object and volume spaces`, `Part cuts replace only the cut part`, `Cut validation rejects degenerate requests`, `REST cut validates the request and the target`, `REST cut validates reference instances`, `REST cut enforces cut-group invalidation`, `REST cut replaces objects and parts with new IDs`, `REST cut can arrange the new objects`, visible `REST cut results slice`, hidden and not executed `REST cut results with two objects slice` (`[.rest_multi_object_engine]`), `REST cut is refused while slicing and on concurrent changes` |
 | 1.1 facet painting | `rest_models_tests`: `Brush strokes paint the expected area`, `Fill tools follow the GUI semantics`, `Points rays and spaces select the same paint`, `Object targets paint the nearest part`, `MMU and generic channels store their states`, `Paint validation leaves the scene unchanged`, `REST paint kinds are listed`, `REST paint validates the request and the target`, `REST paint updates parts and reports changes`, `REST get_paint returns painted triangles`, `REST paint persists in projects`, `REST paint is refused while slicing and on concurrent changes`, `REST painted parts slice`; `REST support painting reaches the support engine` is hidden and not executed (`[.rest_support_engine]`) |
+| 1.1 custom G-code per height | `rest_models_tests`: `Custom G-code mode follows the engine rule`, `Custom G-code entries are validated and sorted`, `Custom G-code JSON reports modes and warnings`, `REST custom G-codes validate requests`, `REST custom G-codes replace the whole list`, `REST custom G-codes persist in projects`, `REST custom G-codes are refused while slicing and on concurrent changes`, `REST custom G-codes reach the G-code`, `REST custom G-code tool changes reach the G-code` |
 
 ## 8. Decisions
 
@@ -1844,6 +1954,24 @@ platform validation responsibility, not an in-process TLS implementation.
 - Support facet painting is stored and exposed by REST, but this build does not
   yet migrate painted support facets into support generation, so it has no
   slicing effect. REST painting does not expose the GUI clipping plane.
+- Custom G-code applies one color change, pause, template or custom item per
+  layer in the current engine: items that fall in the same layer are accepted,
+  and only the highest is emitted; a tool change applies in addition. Color and
+  tool changes of a list are ignored by the engine when its stored mode and the
+  current mode differ on the multi-extruder axis (`mode_mismatch`). Assigning any part or
+  object to a non-default extruder makes the current mode `multi_extruder`, because
+  the engine also counts each object's fallback region (default extruder). The API does
+  not reproduce the GUI's other conflict icons (color of an unused extruder,
+  redundant tool change).
+- Debug builds of the engine assert on custom G-code heights of 10000 mm or more
+  (`scale_to_layer_coord`) and on items at or above 1000 mm when slicing
+  (`ToolOrdering::assign_custom_gcodes`). These are engine limits, distinct from
+  the REST bound (the scene height); REST refuses 10000 mm or more. Slicing a layer
+  range that reaches 10000 mm still hits the Debug assert (the mode computation
+  clamps such ranges on its private copy).
+- On multi-extruder sessions, `get_custom_gcodes` and `set_custom_gcodes` apply a
+  `Print` to compute the mode, so session configurations that make `Print::apply`
+  hit a Debug assert also abort these routes, as they do slice and arrange.
 - The current slicing engine may crash or assert on multi-object scenes or on
   objects whose lowest point is above the bed; these plugin-pipeline limits are
   unrelated to plane cuts.

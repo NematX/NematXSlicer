@@ -46,6 +46,8 @@ set_property(TARGET slic3r_rest_auth PROPERTY FOLDER "rest_server")
 add_library(slic3r_rest STATIC
     cut.cpp
     cut.hpp
+    custom_gcodes.cpp
+    custom_gcodes.hpp
     entity_settings.cpp
     entity_settings.hpp
     file_names.cpp

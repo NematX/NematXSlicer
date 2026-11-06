@@ -12,6 +12,7 @@
 
 #include "auth.hpp"
 #include "cut.hpp"
+#include "custom_gcodes.hpp"
 #include "entity_settings.hpp"
 #include "engine.hpp"
 #include "file_names.hpp"
@@ -2496,6 +2497,185 @@ HttpResponse handle_get_paint(HttpRequest &request, const RouteServices &service
     }
 }
 
+// Read one custom G-code element's closed fields; returns false after storing the 400 or, for an
+// unknown type, the 422 with the item index in error.
+bool read_custom_gcode_entry(const nlohmann::json &value, std::size_t index, CustomGCodeEntry &entry,
+    HttpResponse &error, const std::string &request_id)
+{
+    const auto invalid = [&](const std::string &message) {
+        error = make_error_response(400, "invalid_request", message, request_id);
+        return false;
+    };
+    if (!value.is_object() || !value.contains("type") || !value.at("type").is_string())
+        return invalid("Each custom G-code item must be an object with a string type.");
+    if (!value.contains("z") || !value.at("z").is_number())
+        return invalid("Each custom G-code item requires a numeric z.");
+    const std::string type = value.at("type").get<std::string>();
+    std::set<std::string> allowed = {"type", "z"};
+    std::set<std::string> required;
+    if (type == "color_change") {
+        entry.type = CustomGCode::ColorChange;
+        allowed.insert({"extruder", "color"});
+    } else if (type == "tool_change") {
+        entry.type = CustomGCode::ToolChange;
+        allowed.insert({"extruder", "color"});
+        required.insert("extruder");
+    } else if (type == "pause") {
+        entry.type = CustomGCode::PausePrint;
+        allowed.insert("message");
+        required.insert("message");
+    } else if (type == "template") {
+        entry.type = CustomGCode::Template;
+    } else if (type == "custom") {
+        entry.type = CustomGCode::Custom;
+        allowed.insert("gcode");
+        required.insert("gcode");
+    } else {
+        const nlohmann::json details = nlohmann::json::array({{{"item", index}, {"reason", "unknown_type"}}});
+        error = make_error_response(422, "invalid_custom_gcode", "A custom G-code type is unknown.", request_id,
+            &details);
+        return false;
+    }
+    for (const auto &field : value.items())
+        if (allowed.count(field.key()) == 0)
+            return invalid("Unknown field for " + type + ": " + field.key());
+    for (const std::string &field : required)
+        if (!value.contains(field))
+            return invalid("The " + type + " item requires " + field + ".");
+    entry.z = value.at("z").get<double>();
+    if (value.contains("extruder")) {
+        const nlohmann::json &extruder = value.at("extruder");
+        if (extruder.is_number_unsigned()) {
+            if (extruder.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+                return invalid("extruder is outside the integer range.");
+            entry.extruder = static_cast<int>(extruder.get<std::uint64_t>());
+        } else if (extruder.is_number_integer()) {
+            const std::int64_t signed_value = extruder.get<std::int64_t>();
+            if (signed_value < std::numeric_limits<int>::min())
+                return invalid("extruder is outside the integer range.");
+            entry.extruder = static_cast<int>(signed_value);
+        } else {
+            return invalid("extruder must be an integer.");
+        }
+    }
+    if (value.contains("color")) {
+        if (!value.at("color").is_string())
+            return invalid("color must be a string.");
+        entry.color = value.at("color").get<std::string>();
+    }
+    for (const char *field : {"message", "gcode"})
+        if (value.contains(field)) {
+            if (!value.at(field).is_string())
+                return invalid(std::string(field) + " must be a string.");
+            entry.text = value.at(field).get<std::string>();
+        }
+    return true;
+}
+
+// Parse the closed {"items": [...]} body, stopping at the first invalid item.
+bool parse_custom_gcodes_request(HttpRequest &request, std::vector<CustomGCodeEntry> &entries, HttpResponse &error,
+    const std::string &request_id)
+{
+    if (std::optional<HttpResponse> body_error = read_scene_edit_body(request, {"items"}, request_id)) {
+        error = std::move(body_error.value());
+        return false;
+    }
+    if (!request.json_body->contains("items") || !request.json_body->at("items").is_array()) {
+        error = make_error_response(400, "invalid_request", "The body must contain an items array.", request_id);
+        return false;
+    }
+    for (const nlohmann::json &value : request.json_body->at("items")) {
+        CustomGCodeEntry entry;
+        if (!read_custom_gcode_entry(value, entries.size(), entry, error, request_id))
+            return false;
+        entries.push_back(std::move(entry));
+    }
+    return true;
+}
+
+// Read one snapshot and serialize the stored list with its modes and warnings.
+HttpResponse handle_get_custom_gcodes(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "GET")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    if (!request.body.empty() || !request.query.empty())
+        return make_error_response(400, "invalid_request", "get_custom_gcodes accepts no body or query.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    const std::optional<SessionData> data = session->data_snapshot();
+    if (!data.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (data->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to read.", request_id);
+    try {
+        return HttpResponse::json(200, custom_gcodes_json(data->scene->custom_gcode_per_print_z, *data->scene,
+            data->configuration));
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not read custom G-codes.", request_id);
+    }
+}
+
+// Replace the whole list on a private scene copy and commit only when it differs.
+HttpResponse handle_set_custom_gcodes(HttpRequest &request, const RouteServices &services,
+    const std::string &username, const std::string &request_id)
+{
+    if (request.method != "POST")
+        return make_error_response(404, "route_not_found", "The route does not exist.", request_id);
+    const std::shared_ptr<SessionContext> session = services.sessions.find(
+        username, request.path_segments[1], SessionRegistry::Clock::now());
+    if (session == nullptr)
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (!settings_catalog_ready())
+        return make_error_response(503, "engine_not_initialized", "The REST engine is not initialized.", request_id);
+    std::vector<CustomGCodeEntry> entries;
+    HttpResponse parse_error;
+    if (!parse_custom_gcodes_request(request, entries, parse_error, request_id))
+        return parse_error;
+    const std::optional<SessionContext::MutationToken> mutation = session->begin_mutation();
+    if (!mutation.has_value())
+        return make_error_response(409, "session_busy", "The session is currently slicing.", request_id);
+    const std::optional<SessionData> current = session->data_snapshot();
+    if (!current.has_value())
+        return make_error_response(404, "session_not_found", "The session does not exist.", request_id);
+    if (current->scene == nullptr)
+        return make_error_response(500, "internal_error", "The session has no scene to edit.", request_id);
+    try {
+        const CustomGCode::Info info = make_custom_gcodes(entries, *current->scene, current->configuration);
+        const CustomGCode::Info &stored = current->scene->custom_gcode_per_print_z;
+        if (info == stored) {
+            if (!session->entity_ids(mutation.value(), {}))
+                return !session->data_snapshot()
+                    ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                    : make_error_response(409, "session_changed", "The session changed while custom G-codes were prepared.", request_id);
+            return HttpResponse::json(200, custom_gcodes_json(stored, *current->scene, current->configuration,
+                info.mode));
+        }
+        SessionData candidate = current.value();
+        candidate.scene = std::make_shared<Model>(*current->scene);
+        candidate.scene->custom_gcode_per_print_z = info;
+        const nlohmann::json body = custom_gcodes_json(info, *candidate.scene, candidate.configuration, info.mode);
+        if (services.scene_edit_observer)
+            services.scene_edit_observer();
+        if (!session->commit_mutation(mutation.value(), std::move(candidate), true, SessionRegistry::Clock::now()))
+            return !session->data_snapshot()
+                ? make_error_response(404, "session_not_found", "The session does not exist.", request_id)
+                : make_error_response(409, "session_changed", "The session changed while custom G-codes were prepared.", request_id);
+        return HttpResponse::json(200, body);
+    } catch (const CustomGCodeItemError &error) {
+        const nlohmann::json details = nlohmann::json::array({{{"item", error.item()}, {"reason", error.reason()}}});
+        return make_error_response(422, "invalid_custom_gcode", error.what(), request_id, &details);
+    } catch (const SceneEditError &error) {
+        return scene_edit_error(error, request_id);
+    } catch (...) {
+        return make_error_response(500, "internal_error", "The server could not set custom G-codes.", request_id);
+    }
+}
+
 // Apply the cut to the private candidate and optionally arrange its new instances.
 CutWorkOutcome perform_cut_request(SessionData &candidate, const CutTarget &target, const CutRequest &request)
 {
@@ -4904,6 +5084,10 @@ std::optional<HttpResponse> dispatch_request(
             return handle_clear_paint(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "get_paint")
             return handle_get_paint(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "get_custom_gcodes")
+            return handle_get_custom_gcodes(request, services, authentication->username, request_id);
+        if (request.path_segments.size() == 3 && operation == "set_custom_gcodes")
+            return handle_set_custom_gcodes(request, services, authentication->username, request_id);
         if (request.path_segments.size() == 4 && operation == "cut")
             return handle_cut(request, services, authentication->username, request_id, respond);
         if (request.path_segments.size() == 4 && operation == "transform")
