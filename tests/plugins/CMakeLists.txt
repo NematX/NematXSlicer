@@ -169,6 +169,7 @@ test_support_tree_family.cpp
     test_tool_change_wipe.cpp
     test_tree_geometry.cpp
     test_vase_multi_island_connector.cpp
+    test_vendor_config.cpp
     test_wipe_tower_footprint.cpp
     test_wipe_tower_layout.cpp
     test_wipe_tower_manager.cpp

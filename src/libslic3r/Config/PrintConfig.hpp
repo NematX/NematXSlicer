@@ -19,32 +19,44 @@
 #ifndef slic3r_PrintConfig_hpp_
 #define slic3r_PrintConfig_hpp_
 
-// Configuration store of Slic3r.
-//
-// The configuration store is either static or dynamic.
-// DynamicPrintConfig is used mainly at the user interface. while the StaticPrintConfig is used
-// during the slicing and the g-code generation.
-//
-// The classes derived from StaticPrintConfig form a following hierarchy.
-//
-//  class ConfigBase
-//    class StaticConfig : public virtual ConfigBase
-//        class StaticPrintConfig : public StaticConfig
-//            class PrintObjectConfig : public StaticPrintConfig
-//            class PrintRegionConfig : public StaticPrintConfig
-//            class MachineEnvelopeConfig : public StaticPrintConfig
-//            class GCodeConfig : public StaticPrintConfig
-//                  class  : public MachineEnvelopeConfig, public GCodeConfig
-//                          class FullPrintConfig : PrintObjectConfig,PrintRegionConfig,PrintConfig
-//            class SLAPrintObjectConfig : public StaticPrintConfig
-//            class SLAMaterialConfig : public StaticPrintConfig
-//            class SLAPrinterConfig : public StaticPrintConfig
-//                  class SLAFullPrintConfig : public SLAPrinterConfig, public SLAPrintConfig, public SLAPrintObjectConfig, public SLAMaterialConfig
-//    class DynamicConfig : public virtual ConfigBase
-//        class DynamicPrintConfig : public DynamicConfig
-//            class DynamicPrintAndCLIConfig : public DynamicPrintConfig
-//
-//
+/*
+PrintConfigDef describes options; DynamicPrintConfig stores a selected subset
+of typed values, and StaticPrintConfig supplies the common base for compiled
+configuration classes. FFF-specific classes are declared in FFFPrintConfig.hpp;
+the SLA equivalents live in SLA/SLAPrintConfig.hpp. Include the technology-specific
+header when the caller needs those concrete types rather than only common values.
+
+When reading historical text, call handle_legacy_map() before storing converted
+typed options, then normalize the resulting configuration for its intended use.
+Conversion changes serialized names/values; normalization enforces constraints
+on an already-typed option set, which may be only a partial object override.
+
+Configuration store of Slic3r.
+Use handle_legacy_map to convert historical setting names and their values together.
+
+The configuration store is either static or dynamic.
+DynamicPrintConfig is used mainly at the user interface. while the StaticPrintConfig is used
+during the slicing and the g-code generation.
+
+The classes derived from StaticPrintConfig form a following hierarchy.
+
+ class ConfigBase
+   class StaticConfig : public virtual ConfigBase
+       class StaticPrintConfig : public StaticConfig
+           class PrintObjectConfig : public StaticPrintConfig
+           class PrintRegionConfig : public StaticPrintConfig
+           class MachineEnvelopeConfig : public StaticPrintConfig
+           class GCodeConfig : public StaticPrintConfig
+                 class PrintConfig : public MachineEnvelopeConfig, public GCodeConfig
+                         class FullPrintConfig : PrintObjectConfig,PrintRegionConfig,PrintConfig
+           class SLAPrintObjectConfig : public StaticPrintConfig
+           class SLAMaterialConfig : public StaticPrintConfig
+           class SLAPrinterConfig : public StaticPrintConfig
+                 class SLAFullPrintConfig : public SLAPrinterConfig, public SLAPrintConfig, public SLAPrintObjectConfig, public SLAMaterialConfig
+   class DynamicConfig : public virtual ConfigBase
+       class DynamicPrintConfig : public DynamicConfig
+           class DynamicPrintAndCLIConfig : public DynamicPrintConfig
+*/
 #include <algorithm>
 #include <cstdint>
 #include <unordered_map>

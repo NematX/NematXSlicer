@@ -591,6 +591,10 @@ static std::set<t_config_option_key> PrintConfigDef_ignore = {
 };
 namespace Handle_legacy_tools {
 
+// Rewrite destination names and serialized values in place, optionally clearing unknown destinations.
+// Numeric conversions may throw on invalid text; existing map keys are not renamed, but conversions may add entries.
+void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> &dict, bool remove_unkown_keys);
+
 std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>>::iterator last_search_result;
 
 typedef std::pair<t_config_option_key, std::string> KVEntry;
