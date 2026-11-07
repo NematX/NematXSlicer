@@ -7893,10 +7893,10 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
                                     continue;
                             }
                             // fill represents infill extrusions of a single island.
-                            const ExtrusionEntityCollection &fill = region_island.extrusion(
+                            const ExtrusionEntity &fill = region_island.extrusion(
                                 LayerRegionIsland::INFILLS);
-                            if (!fill.entities().empty()) {
-                                bool has_solid_infill = HasRoleVisitor::search(fill.entities(),
+                            if (fill.child_count() > 0) {
+                                bool has_solid_infill = HasRoleVisitor::search(fill,
                                                                                HasSolidInfillVisitor{});
                                 _3DScene::extrusionentity_to_verts(
                                     fill, float(layer->unscaled_print_z()), copy,
@@ -7918,10 +7918,10 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
                                     continue;
                             }
                             // fill represents infill extrusions of a single island.
-                            const ExtrusionEntityCollection &fill = region_island.extrusion(
+                            const ExtrusionEntity &fill = region_island.extrusion(
                                 LayerRegionIsland::SUPPORT);
-                            if (!fill.entities().empty()) {
-                                bool has_solid_infill = HasRoleVisitor::search(fill.entities(),
+                            if (fill.child_count() > 0) {
+                                bool has_solid_infill = HasRoleVisitor::search(fill,
                                                                                HasSolidInfillVisitor{});
                                 _3DScene::extrusionentity_to_verts(
                                     fill, float(layer->unscaled_print_z()), copy,
@@ -7940,10 +7940,10 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
                                     continue;
                             }
                             // fill represents infill extrusions of a single island.
-                            const ExtrusionEntityCollection &fill = region_island.extrusion(
+                            const ExtrusionEntity &fill = region_island.extrusion(
                                 LayerRegionIsland::SUPPORT_INTERFACE);
-                            if (!fill.entities().empty()) {
-                                bool has_solid_infill = HasRoleVisitor::search(fill.entities(),
+                            if (fill.child_count() > 0) {
+                                bool has_solid_infill = HasRoleVisitor::search(fill,
                                                                                HasSolidInfillVisitor{});
                                 _3DScene::extrusionentity_to_verts(
                                     fill, float(layer->unscaled_print_z()), copy,

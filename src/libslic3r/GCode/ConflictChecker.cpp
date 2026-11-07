@@ -6,9 +6,18 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* Collision queries collect object and support paths, translate them for each
+/* Collision queries collect stored paths with inherited attributes, translate them for each
    instance and rasterize their segments into grid cells. Shared cells limit the
-   pairwise intersection search; only different instances are compared. */
+    pairwise intersection search; only different instances are compared. Geometry
+    extraction owns independent path values with effective attributes and copied
+    local properties. The borrowed source tree and sibling scopes stay unchanged;
+    property-only commands and paths without segment-bearing attributed geometry
+    contribute no collision segment. Allocation errors propagate to the caller.
+
+        getExtrusionPathsFromLayer() / getExtrusionPathsFromSupportLayer()
+            `-- getExtrusionPathsFromEntity()
+                `-- collect_extrusion_geometry_units() [resolve inherited attributes]
+*/
 #include "ConflictChecker.hpp"
 
 #include <atomic>
@@ -19,6 +28,7 @@
 #include <oneapi/tbb/parallel_for.h>
 
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/PointUtils.hpp"
 #include "libslic3r/PrintObject.hpp"
 
@@ -153,22 +163,18 @@ LineWithIDs LinesBucketQueue::getCurLines() const
     return lines;
 }
 
-void getExtrusionPathsFromEntity(const ExtrusionEntityCollection *entity, ExtrusionPaths &paths)
+void getExtrusionPathsFromEntity(const ExtrusionEntity &entity, ExtrusionPaths &paths)
 {
-    std::function<void(const ExtrusionEntityCollection *, ExtrusionPaths &)> getExtrusionPathImpl = [&](const ExtrusionEntityCollection *entity, ExtrusionPaths &paths) {
-        for (auto entityPtr : entity->entities()) {
-            if (const ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(entityPtr)) {
-                getExtrusionPathImpl(collection, paths);
-            } else if (const ExtrusionPath *path = dynamic_cast<ExtrusionPath *>(entityPtr)) {
-                paths.push_back(*path);
-            } else if (const ExtrusionMultiPath *multipath = dynamic_cast<ExtrusionMultiPath *>(entityPtr)) {
-                for (const ExtrusionPath &path : multipath->paths()) { paths.push_back(path); }
-            } else if (const ExtrusionLoop *loop = dynamic_cast<ExtrusionLoop *>(entityPtr)) {
-                for (const ExtrusionPath &path : loop->paths()) { paths.push_back(path); }
-            }
+    for (const ExtrusionGeometryUnit &unit : collect_extrusion_geometry_units(entity)) {
+        for (const ExtrusionGeometryLeaf &leaf : unit.leaves) {
+            if (leaf.attributes == nullptr || leaf.polyline->size() < 2)
+                continue;
+            ExtrusionPath copy(*leaf.attributes);
+            copy.ExtrusionEntity::operator=(*leaf.entity);
+            copy.add_property(*leaf.attributes);
+            paths.emplace_back(std::move(copy));
         }
-    };
-    getExtrusionPathImpl(entity, paths);
+    }
 }
 
 ExtrusionPaths getExtrusionPathsFromLayer(LayerSliceIslandCRefs layer_islands)
@@ -177,9 +183,9 @@ ExtrusionPaths getExtrusionPathsFromLayer(LayerSliceIslandCRefs layer_islands)
     for (const LayerSliceIsland &layer_island_ptr : layer_islands) {
         for (const LayerRegionIsland &region_island_ptr : layer_island_ptr.regions_islands()) {
             if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS)) {
-                getExtrusionPathsFromEntity(&region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS), paths);
+                getExtrusionPathsFromEntity(region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS), paths);
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::INFILLS)) {
-                    getExtrusionPathsFromEntity(&region_island_ptr.extrusion(LayerRegionIsland::INFILLS), paths);
+                    getExtrusionPathsFromEntity(region_island_ptr.extrusion(LayerRegionIsland::INFILLS), paths);
                 }
             }
         }
@@ -196,10 +202,10 @@ ExtrusionPaths getExtrusionPathsFromSupportLayer(const Layer *layer)
     for (const LayerSliceIsland &island : layer->islands()) {
         for (const LayerRegionIsland &region_island : island.regions_islands()) {
             if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                getExtrusionPathsFromEntity(&region_island.extrusion(LayerRegionIsland::SUPPORT), paths);
+                getExtrusionPathsFromEntity(region_island.extrusion(LayerRegionIsland::SUPPORT), paths);
             }
             if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                getExtrusionPathsFromEntity(&region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), paths);
+                getExtrusionPathsFromEntity(region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), paths);
             }
         }
     }

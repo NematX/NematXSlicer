@@ -18,13 +18,22 @@
 
 #include "DataTreeFwd.hpp"
 #include "ExPolygon.hpp"
+#include "ExtrusionRole.hpp"
 #include "Config/FFFPrintConfig.hpp"
 #include "Line.hpp"
+
+/* Analyze support needs and stability from borrowed layer extrusion trees.
+   ObjectPart integrates stored planar paths using their effective inherited
+   widths. ExtrusionLine retains the role resolved during analysis, so later
+   external-perimeter tests need not query a source ancestor. The original tree
+   must outlive borrowed origin pointers and must not change during analysis.
+   Generated support points, line projections and integral accumulators are owned
+   results; malformed or unsupported geometry is handled by each analysis rule.
+*/
 
 namespace Slic3r {
 
 class ExtrusionEntity;
-class ExtrusionEntityCollection;
 class PrintTryCancel;
 
 namespace SupportSpotsGenerator {
@@ -194,15 +203,18 @@ class ExtrusionLine
 {
 public:
     ExtrusionLine();
-    ExtrusionLine(const Vec2f &a, const Vec2f &b, float len, const ExtrusionEntity *origin_entity);
+    // Keep the role resolved for this analysis, even when the source inherits attributes.
+    ExtrusionLine(const Vec2f &a, const Vec2f &b, float len, const ExtrusionEntity *origin_entity, ExtrusionRole origin_role);
     ExtrusionLine(const Vec2f &a, const Vec2f &b);
 
+    // Classify the resolved analysis role without querying a source ancestor.
     bool is_external_perimeter() const;
 
     Vec2f                  a;
     Vec2f                  b;
     float                  len;
     const ExtrusionEntity *origin_entity;
+    ExtrusionRole          origin_role = ExtrusionRole::None;
 
     std::optional<SupportSpotsGenerator::SupportPointCause> support_point_generated = {};
     float form_quality            = 1.0f;
@@ -237,8 +249,9 @@ public:
     float sticking_second_moment_of_area_covariance_accumulator{};
     bool  connected_to_bed = false;
 
+    // Integrate stored paths with their effective widths; roots are borrowed and unchanged.
     ObjectPart(
-        const std::vector<const ExtrusionEntityCollection*>& extrusion_collections,
+        const std::vector<const ExtrusionEntity*>& extrusion_collections,
         const bool connected_to_bed,
         const coordf_t print_head_z,
         const coordf_t layer_height,

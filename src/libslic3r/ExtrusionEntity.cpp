@@ -7,6 +7,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionGeometryUnits.hpp"
 
 #include <cmath>
 #include <iterator>
@@ -952,33 +953,9 @@ void ExtrusionPath::polygons_covered_by_spacing(Polygons &out, const float spaci
     }
 }
 
-//note: don't suppport arc
 double ExtrusionLoop::area() const
 {
-    double a = 0;
-    for (const ExtrusionPath &path : this->paths()) {
-        assert(path.size() >= 2);
-        if (path.size() >= 2) {
-            if (path.polyline().has_arc()) {
-                Polyline poly = path.polyline().to_polyline();
-                Point prev = poly.front();
-                for (size_t idx = 1; idx < poly.size(); ++idx) {
-                    const Point &curr = poly[idx];
-                    a += cross2(prev.cast<double>(), curr.cast<double>());
-                    prev = curr;
-                }
-            } else {
-                // Assumming that the last point of one path segment is repeated at the start of the following path segment.
-                Point prev = path.polyline().front();
-                for (size_t idx = 1; idx < path.polyline().size(); ++idx) {
-                    const Point &curr = path.polyline().get_point(idx);
-                    a += cross2(prev.cast<double>(), curr.cast<double>());
-                    prev = curr;
-                }
-            }
-        }
-    }
-    return a * 0.5;
+    return extrusion_geometry_area(*this);
 }
 
 bool ExtrusionLoop::is_counter_clockwise() const {

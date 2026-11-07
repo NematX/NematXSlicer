@@ -129,7 +129,7 @@ struct ObjectPartFixture {
     coordf_t layer_height = 0.2;
     ExtrusionAttributes attributes;
     ExtrusionEntityCollection collection;
-    std::vector<const ExtrusionEntityCollection*> extrusions{};
+    std::vector<const ExtrusionEntity*> extrusions{};
     Polygon expected_polygon{
         Point{scale_p(Vec2f{0, -width / 2})},
         Point{scale_p(Vec2f{1, -width / 2})},

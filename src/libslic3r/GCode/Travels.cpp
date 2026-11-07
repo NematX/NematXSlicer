@@ -5,10 +5,12 @@
 
 #include "Travels.hpp"
 
+#include <algorithm>
+
 #include <boost/functional/hash.hpp>
 #include <boost/math/special_functions/pow.hpp>
 
-#include "libslic3r/ExtrusionEntityVisitors.hpp"
+#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/PointUtils.hpp"
@@ -16,7 +18,50 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 
+/* Prepare travel obstacles from stored exterior paths with inherited attributes.
+   Each segment carries the outer continuous unit's ID, layer index and instance
+   index. Registration and marking inspect the same source domain; marking an
+   emitted copy requires the complete source unit's retained ID. The source owns
+   all borrowed geometry and properties and stays unchanged while queried. Line
+   projections and tracker sets own their values; allocation failures propagate.
+   The remaining travel helpers calculate intersections, splits and elevations.
+
+       TravelObstacleTracker::init_layer()
+           `-- get_external_perimeter_distancer()
+               `-- external_perimeter_lines()
+                   `-- collect_extrusion_geometry_units() [resolve inherited exterior roles]
+       TravelObstacleTracker::mark_extruded()
+           |-- collect_extrusion_geometry_units() [same source identity domain]
+           `-- contains_extrusion_id() [match a complete unit in emitted storage]
+*/
+
 namespace Slic3r::GCode {
+
+namespace {
+
+// Use the same segment selection for obstacle registration and extrusion marking.
+bool is_external_geometry_leaf(const ExtrusionGeometryLeaf &leaf);
+
+// Copies made by the native exporter retain IDs even when grouping nodes differ.
+bool contains_extrusion_id(const ExtrusionEntity &root, uint64_t id);
+
+bool is_external_geometry_leaf(const ExtrusionGeometryLeaf &leaf)
+{
+    return leaf.attributes != nullptr && leaf.polyline->size() >= 2 &&
+        leaf.attributes->extrusion_role().is_external_perimeter();
+}
+
+bool contains_extrusion_id(const ExtrusionEntity &root, uint64_t id)
+{
+    if (root.get_id() == id)
+        return true;
+    for (const ExtrusionEntityUPtr &child : root.children())
+        if (child && contains_extrusion_id(*child, id))
+            return true;
+    return false;
+}
+
+} // namespace
     
 ObjectOrExtrusionLinef::ObjectOrExtrusionLinef(const Vec2d &a, const Vec2d &b, size_t object_layer_idx, size_t instance_idx, const ExtrusionEntity *ee)
         : Linef(a, b), object_layer_idx(int(object_layer_idx)), instance_idx(int(instance_idx)), extrusion_entity_id(ee->get_id()) {}
@@ -36,49 +81,21 @@ size_t ExtrudedExtrusionEntityHash::operator()(const ExtrudedExtrusionEntity &ee
     return seed;
 }
 
-class ExtPeriExtrusionToLines : public ExtrusionVisitorConst {
-public:
-#ifdef _DEBUG
-    std::unordered_set<ExtrudedExtrusionEntity, ExtrudedExtrusionEntityHash> *registered_extrusion;
-    std::map<size_t, std::set<uint64_t>> all_ee_id_per_instance;
-#endif
+std::vector<ObjectOrExtrusionLinef> external_perimeter_lines(const ExtrusionEntity &root, const Point &shift,
+                                                          size_t object_layer_idx, size_t instance_idx)
+{
     std::vector<ObjectOrExtrusionLinef> lines;
-    size_t object_layer_idx;
-    size_t instance_idx;
-    const PrintInstance *instance;
-    const ExtrusionEntity* root_extrusion;
-    void default_use(const ExtrusionEntity &entity) override {
-        if (!entity.is_leaf()) {
-            const ExtrusionEntity *saved_root = root_extrusion;
-            if (entity.is_continuous())
-                root_extrusion = &entity;
-            for (const ExtrusionEntityUPtr &child : entity.children())
-                if (child)
-                    child->visit(*this);
-            root_extrusion = saved_root;
-            return;
-        }
-        if (entity.role().is_external_perimeter()) {
-            for (const Line &line : to_lines(entity.as_polyline().to_polyline())) {
-                lines.emplace_back(unscale_p(Point{line.a + instance->shift}), unscale_p(Point{line.b + instance->shift}),
-                                   object_layer_idx, instance_idx, root_extrusion ? root_extrusion : &entity);
-#ifdef _DEBUG
-                if (all_ee_id_per_instance[instance_idx].find(root_extrusion ? root_extrusion->get_id() : entity.get_id()) ==
-                    all_ee_id_per_instance[instance_idx].end()) {
-                    ExtrudedExtrusionEntity eee = {int(object_layer_idx), int(instance_idx), root_extrusion ? root_extrusion->get_id() : entity.get_id()};
-                    this->registered_extrusion->insert(eee);
-                    all_ee_id_per_instance[instance_idx].insert(root_extrusion ? root_extrusion->get_id() :
-                                                                                 entity.get_id());
-                }
-#endif
-            }
+    for (const ExtrusionGeometryUnit &unit : collect_extrusion_geometry_units(root)) {
+        for (const ExtrusionGeometryLeaf &leaf : unit.leaves) {
+            if (!is_external_geometry_leaf(leaf))
+                continue;
+            for (const Line &line : to_lines(leaf.polyline->to_polyline()))
+                lines.emplace_back(unscale_p(Point(line.a + shift)), unscale_p(Point(line.b + shift)),
+                                   object_layer_idx, instance_idx, unit.root);
         }
     }
-    void process(const ExtrusionEntity *root) {
-        root_extrusion = nullptr;
-        root->visit(*this);
-    }
-};
+    return lines;
+}
 
 AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef> get_previous_layer_distancer(
     const GCodeGenerator::ObjectsLayerToPrint &objects_to_print, const ExPolygons &slices
@@ -103,24 +120,23 @@ std::pair<AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef>, size_t> TravelO
 {
     std::vector<ObjectOrExtrusionLinef> lines;
     size_t extrusion_entity_cnt = 0;
-    ExtPeriExtrusionToLines visitor;
-#ifdef _DEBUG
-    visitor.registered_extrusion = &this->m_registered_extrusion;
-#endif
     for (const ObjectLayerToPrint &object_to_print : objects_to_print) {
-        visitor.object_layer_idx = &object_to_print - &objects_to_print.front();
+        const size_t object_layer_idx = &object_to_print - &objects_to_print.front();
         if (const Layer *layer = object_to_print.object_layer; layer) {
             for (const PrintInstance &instance : layer->object()->instances()) {
-                visitor.instance = &instance;
-                visitor.instance_idx = &instance - &layer->object()->instances().front();
+                const size_t instance_idx = &instance - &layer->object()->instances().front();
                 for (const LayerSliceIsland &layer_island_ptr : layer->islands()) {
                     for (const LayerRegionIsland &region_island_ptr : layer_island_ptr.regions_islands()) {
-                        const LayerRegion &layerm = **region_island_ptr.regions().begin(); // FIXME multiple regions
                         if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS)) {
-                            for (const ExtrusionEntity *ee : region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS)) {
-                                visitor.process(ee);
-                                ++extrusion_entity_cnt;
-                            }
+                            const ExtrusionEntity &root = region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS);
+                            std::vector<ObjectOrExtrusionLinef> local = external_perimeter_lines(root, instance.shift, object_layer_idx, instance_idx);
+#ifdef _DEBUG
+                            for (const ObjectOrExtrusionLinef &line : local)
+                                m_registered_extrusion.insert({line.object_layer_idx, line.instance_idx, line.extrusion_entity_id});
+#endif
+                            extrusion_entity_cnt += root.child_count();
+                            for (ObjectOrExtrusionLinef &line : local)
+                                lines.emplace_back(std::move(line));
                         }
                     }
                 }
@@ -128,7 +144,7 @@ std::pair<AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef>, size_t> TravelO
         }
     }
 
-    return {AABBTreeLines::LinesDistancer{std::move(visitor.lines)}, extrusion_entity_cnt};
+    return {AABBTreeLines::LinesDistancer{std::move(lines)}, extrusion_entity_cnt};
 }
 
 void TravelObstacleTracker::init_layer(const Layer &layer, const ObjectsLayerToPrint &objects_to_print)
@@ -143,56 +159,19 @@ void TravelObstacleTracker::init_layer(const Layer &layer, const ObjectsLayerToP
     m_extruded_extrusion.reserve(extrusion_entity_cnt);
 }
 
-class InsertExternalPeriExtruded : public ExtrusionVisitorConst {
-public:
-#ifdef _DEBUG
-    std::unordered_set<ExtrudedExtrusionEntity, ExtrudedExtrusionEntityHash> *registered_extrusion;
-    TravelObstacleTracker *tracker;
-#endif
-    std::unordered_set<ExtrudedExtrusionEntity, ExtrudedExtrusionEntityHash> &extruded_extrusion;
-    size_t object_layer_idx;
-    size_t instance_idx;
-    InsertExternalPeriExtruded(std::unordered_set<ExtrudedExtrusionEntity, ExtrudedExtrusionEntityHash> &extr_extr,
-                               size_t object_layer_idx,
-                               size_t instance_idx)
-        : extruded_extrusion(extr_extr), object_layer_idx(object_layer_idx), instance_idx(instance_idx) {}
-    void default_use(const ExtrusionEntity &entity) override {
-        if (!entity.is_leaf()) {
-            if (entity.is_continuous()) {
-                if (entity.has_role(ExtrusionRole::ExternalPerimeter)) {
-#ifdef _DEBUG
-                    assert(registered_extrusion->find({int(object_layer_idx), int(instance_idx), entity.get_id()}) != registered_extrusion->end());
-#endif
-                    this->extruded_extrusion.insert({int(object_layer_idx), int(instance_idx), entity.get_id()});
-                }
-                return;
-            }
-            for (const ExtrusionEntityUPtr &child : entity.children())
-                if (child)
-                    child->visit(*this);
-            return;
-        }
-        if (entity.role().is_external_perimeter()) {
-#ifdef _DEBUG
-            assert(registered_extrusion->find({int(object_layer_idx), int(instance_idx), entity.get_id()}) != registered_extrusion->end());
-#endif
-            this->extruded_extrusion.insert({int(object_layer_idx), int(instance_idx), entity.get_id()});
-        }
-    }
-    void process(const ExtrusionEntity *root) {
-        root->visit(*this);
-    }
-};
-
-void TravelObstacleTracker::mark_extruded(const ExtrusionEntity *extrusion_entity, size_t object_layer_idx, size_t instance_idx)
+void TravelObstacleTracker::mark_extruded(const ExtrusionEntity &domain, const ExtrusionEntity &emitted,
+                                         size_t object_layer_idx, size_t instance_idx)
 {
-    assert(extrusion_entity);
-    InsertExternalPeriExtruded visitor(this->m_extruded_extrusion, object_layer_idx, instance_idx);
+    for (const ExtrusionGeometryUnit &unit : collect_extrusion_geometry_units(domain)) {
+        if (!contains_extrusion_id(emitted, unit.root->get_id()) ||
+            !std::any_of(unit.leaves.begin(), unit.leaves.end(), is_external_geometry_leaf))
+            continue;
+        const ExtrudedExtrusionEntity key{int(object_layer_idx), int(instance_idx), unit.root->get_id()};
 #ifdef _DEBUG
-    visitor.registered_extrusion = &this->m_registered_extrusion;
-    visitor.tracker = this;
+        assert(m_registered_extrusion.find(key) != m_registered_extrusion.end());
 #endif
-    visitor.process(extrusion_entity);
+        m_extruded_extrusion.insert(key);
+    }
 }
 
 bool TravelObstacleTracker::is_extruded(const ObjectOrExtrusionLinef &line) const

@@ -27,14 +27,17 @@
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
+#include "libslic3r/GCode/PrintExtents.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/PointUtils.hpp"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Printing/PrintingPlan.hpp"
@@ -53,6 +56,8 @@ Finalization probes run each tree orderer, inspect every event scope and restore
 checkpoints. A late provider observes live permissions, appends work and can fail;
 only a successful complete chain freezes the resulting plan. Reversal probes
 verify the full authorized unit, including fixed descendants and command phases.
+Native-reader probes preserve warmed child-pointer views and stable identities
+through ordering, and compare extents using inherited widths across siblings.
 */
 namespace {
 using namespace Slic3r;
@@ -731,6 +736,179 @@ TEST_CASE("STEP_ORDERING post validation rejects a source whose regions are on d
     INFO(single_error);
     CHECK(single_error.find("region island is invalid") == std::string::npos);
     print.mutable_printing_plan().groups.clear();
+}
+
+TEST_CASE("Native ordering reorders owned children without relying on a collection adapter",
+          "[plugins][printing][plan][native-retirement]")
+{
+    for (const bool collection : {false, true}) {
+        CAPTURE(collection);
+        ExtrusionEntityUPtr root = collection ? ExtrusionEntityUPtr(new ExtrusionEntityCollection(true, false)) :
+            std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), true, false, false);
+        root->add_property(ExtrusionPropertyCustomGcodeText("M117 retained owner"));
+        const uint64_t root_id = root->get_id();
+        std::vector<const ExtrusionEntity *> original;
+        std::vector<uint64_t> ids;
+        for (const coord_t x : {100, 20, 60}) {
+            ExtrusionEntityUPtr path = test_path({Point(x, 0), Point(x + 10, 0)}, false);
+            path->set_can_rotate(false);
+            path->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+            original.push_back(path.get());
+            ids.push_back(path->get_id());
+            root->append_child(std::move(path));
+        }
+        if (collection) {
+            const ExtrusionEntitiesPtr &view = static_cast<const ExtrusionEntityCollection &>(*root).entities();
+            REQUIRE(view.size() == 3);
+            for (size_t i = 0; i < view.size(); ++i) CHECK(view[i] == original[i]);
+        }
+        order_extrusion_tree(*root, Point(0, 0));
+        REQUIRE(root->child_count() == 3);
+        const std::vector<size_t> expected{1, 2, 0};
+        for (size_t i = 0; i < expected.size(); ++i) {
+            const ExtrusionEntity &child = root->child(i);
+            CHECK(&child == original[expected[i]]);
+            CHECK(child.get_id() == ids[expected[i]]);
+            CHECK_FALSE(child.can_reverse());
+            CHECK_FALSE(child.can_rotate());
+            REQUIRE(child.get_property<ExtrusionAttributes>() != nullptr);
+            CHECK(child.get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::Perimeter);
+        }
+        CHECK(root->get_id() == root_id);
+        CHECK_FALSE(root->can_sort());
+        CHECK_FALSE(root->can_reverse());
+        CHECK_FALSE(root->can_rotate());
+        REQUIRE(root->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+        CHECK(root->custom_gcode_string(*root->get_property<ExtrusionPropertyCustomGcode>()) == "M117 retained owner");
+        if (collection) {
+            const ExtrusionEntitiesPtr &view = static_cast<const ExtrusionEntityCollection &>(*root).entities();
+            REQUIRE(view.size() == 3);
+            for (size_t i = 0; i < view.size(); ++i) CHECK(view[i] == original[expected[i]]);
+        }
+    }
+}
+
+TEST_CASE("Native loop rotation preserves warmed compatibility views and child identities",
+          "[plugins][printing][plan][native-retirement]")
+{
+    for (const bool collection : {false, true}) {
+        CAPTURE(collection);
+        ExtrusionEntityUPtr loop = collection ? ExtrusionEntityUPtr(new ExtrusionEntityCollection(false, false)) :
+            std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+        loop->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter});
+        const Points square{{0, 0}, {100, 0}, {100, 100}, {0, 100}, {0, 0}};
+        std::vector<const ExtrusionEntity *> children;
+        std::vector<uint64_t> ids;
+        for (size_t i = 1; i < square.size(); ++i) {
+            ExtrusionEntityUPtr edge = test_path({square[i - 1], square[i]}, false);
+            edge->set_can_rotate(false);
+            children.push_back(edge.get());
+            ids.push_back(edge->get_id());
+            loop->append_child(std::move(edge));
+        }
+        if (collection) {
+            const ExtrusionEntitiesPtr &cached = static_cast<const ExtrusionEntityCollection &>(*loop).entities();
+            REQUIRE(cached.size() == 4);
+            CHECK(cached[0] == children[0]);
+        }
+        const ExtrusionEntity *loop_handle = loop.get();
+        const uint64_t loop_id = loop->get_id();
+        ExtrusionEntityCollection outer(true, false);
+        outer.append(std::move(loop));
+        REQUIRE(outer.entities().size() == 1);
+        order_extrusion_tree(outer, Point(100, 0));
+        REQUIRE(outer.child_count() == 1);
+        const ExtrusionEntity &rotated = outer.child(0);
+        CHECK(&rotated == loop_handle);
+        CHECK(rotated.get_id() == loop_id);
+        REQUIRE(rotated.child_count() == 4);
+        CHECK(rotated.ExtrusionEntity::first_point() == Point(100, 0));
+        CHECK(rotated.ExtrusionEntity::last_point() == Point(100, 0));
+        for (size_t i = 0; i < 4; ++i) {
+            const size_t original = (i + 1) % 4;
+            CHECK(&rotated.child(i) == children[original]);
+            CHECK(rotated.child(i).get_id() == ids[original]);
+            CHECK(rotated.child(i).polyline_ref().front() == square[original]);
+            CHECK(rotated.child(i).polyline_ref().back() == square[original + 1]);
+            CHECK_FALSE(rotated.child(i).can_reverse());
+            CHECK_FALSE(rotated.child(i).can_rotate());
+        }
+        REQUIRE(rotated.get_property<ExtrusionAttributes>() != nullptr);
+        CHECK(rotated.get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::Perimeter);
+        CHECK_FALSE(rotated.can_rotate());
+        REQUIRE(outer.entities().size() == 1);
+        CHECK(outer.entities()[0] == loop_handle);
+        if (collection) {
+            const ExtrusionEntitiesPtr &cached = static_cast<const ExtrusionEntityCollection &>(rotated).entities();
+            REQUIRE(cached.size() == 4);
+            for (size_t i = 0; i < cached.size(); ++i) CHECK(cached[i] == children[(i + 1) % 4]);
+        }
+    }
+}
+
+TEST_CASE("Native extrusion extents use stored geometry and restore inherited widths between siblings",
+          "[plugins][printing][plan][native-retirement]")
+{
+    const ExtrusionAttributes normal{ExtrusionRole::Perimeter, ExtrusionFlow(0.08, 0.4f, 0.2f)};
+    const ExtrusionAttributes wide{ExtrusionRole::ExternalPerimeter, ExtrusionFlow(0.2, 1.f, 0.2f)};
+    const coord_t normal_radius = scale_i(0.5 * normal.width);
+    const coord_t wide_radius = scale_i(0.5 * wide.width);
+    for (const std::string form : {"base", "collection", "loop", "path"}) {
+        CAPTURE(form);
+        ExtrusionEntityUPtr root;
+        if (form == "collection") root = std::make_unique<ExtrusionEntityCollection>();
+        else if (form == "loop") root = std::make_unique<ExtrusionLoop>();
+        else if (form == "path") root = std::make_unique<ExtrusionPath>(normal);
+        else root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), true, true, false);
+        root->add_property(normal);
+        root->append_child(test_path({Point::new_scale(-2., 0.), Point::new_scale(0., 0.)}));
+        ExtrusionEntityUPtr nested = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+        nested->add_property(wide);
+        nested->append_child(test_path({Point::new_scale(10., 0.), Point::new_scale(10., 2.)}));
+        root->append_child(std::move(nested));
+        ExtrusionEntityUPtr command = std::make_unique<ExtrusionEntity>(false);
+        command->add_property(ExtrusionAttributes{ExtrusionRole::Travel, ExtrusionFlow(0., 100.f, 0.2f)});
+        command->add_property(ExtrusionPropertyCustomGcodeText("M117 no local position"));
+        root->append_child(std::move(command));
+        root->append_child(test_path({Point::new_scale(20., 0.), Point::new_scale(20., 1.)}));
+        const ExtrusionEntityUPtr canonical = root->clone_canonical();
+        for (const ExtrusionEntity *view : {root.get(), canonical.get()}) {
+            const BoundingBoxf bounds = get_extrusion_extents(*view);
+            REQUIRE(bounds.defined);
+            CHECK(bounds.min == unscale_p(Point(scale_i(-2.) - normal_radius, -wide_radius)));
+            CHECK(bounds.max == unscale_p(Point(scale_i(20.) + normal_radius, scale_i(2.) + wide_radius)));
+        }
+    }
+    ExtrusionEntity command(false);
+    command.add_property(normal);
+    CHECK_FALSE(get_extrusion_extents(command).defined);
+    ExtrusionEntity no_attributes(false, ArcPolyline(Points{{0, 0}, {100, 0}}));
+    CHECK_FALSE(get_extrusion_extents(no_attributes).defined);
+}
+
+TEST_CASE("Native extrusion extents ignore degenerate local boxes before merging",
+          "[plugins][printing][plan][native-retirement]")
+{
+    const ExtrusionAttributes normal{ExtrusionRole::Perimeter, ExtrusionFlow(0.08, 0.4f, 0.2f)};
+    const coord_t radius = scale_i(0.5 * normal.width);
+    for (const ExtrusionRole role : {ExtrusionRole::Perimeter, ExtrusionRole::Travel}) {
+        CAPTURE(role);
+        ExtrusionEntityCollection source;
+        source.append(ExtrusionPath(ArcPolyline(Points{Point::new_scale(-1., -1.), Point::new_scale(1., 1.)}),
+                                    normal, nullptr));
+        source.append(ExtrusionPath(ArcPolyline(Points{Point::new_scale(0., 100.), Point::new_scale(10., 100.)}),
+                                    ExtrusionAttributes{role, ExtrusionFlow(0., 0.f, 0.2f)}, nullptr));
+        REQUIRE(source.child_count() == 2);
+        CHECK_FALSE(get_extrusion_extents(source.child(1)).defined);
+        const ExtrusionEntityUPtr canonical = source.clone_canonical();
+        for (const ExtrusionEntity *view : {static_cast<const ExtrusionEntity *>(&source),
+                                            static_cast<const ExtrusionEntity *>(canonical.get())}) {
+            const BoundingBoxf bounds = get_extrusion_extents(*view);
+            REQUIRE(bounds.defined);
+            CHECK(bounds.min == unscale_p(Point(scale_i(-1.) - radius, scale_i(-1.) - radius)));
+            CHECK(bounds.max == unscale_p(Point(scale_i(1.) + radius, scale_i(1.) + radius)));
+        }
+    }
 }
 
 TEST_CASE("PrintingPlan extrusion ordering leaves non-sortable nodes unchanged", "[printing][plan]")

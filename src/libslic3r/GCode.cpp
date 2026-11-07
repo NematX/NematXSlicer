@@ -32,6 +32,9 @@ The source Print supplies borrowed geometry and settings for one export. GCode
 owns its writer state, temporary ordering/output data and placeholder values.
 Do not confuse that temporary export state with the layers owned by Print or
 with the independently implemented plugin-based printing-plan writer.
+Obstacle marking receives the source bucket as well as the emitted copy. The
+source supplies inherited roles and complete-unit identities; copied grouping
+or seam preparation must not turn an isolated descendant into a printed unit.
 
 The legacy generator writes ordered layer paths, tracks writer state and supplies
 script placeholders. Each export owns a WipeTower2 for global-tower paths;
@@ -8097,7 +8100,7 @@ void GCodeGenerator::extrude_perimeters(const ExtrudeArgs &print_args, const Lay
             //#endif
             gcode += this->extrude_entity(next_entity, comment_perimeter, -1.);
             if (m_travel_obstacle_tracker->is_init())
-                m_travel_obstacle_tracker->mark_extruded(&next_entity.extrusion_entity(),
+                m_travel_obstacle_tracker->mark_extruded(eec, next_entity.extrusion_entity(),
                                                         print_args.print_instance.object_layer_to_print_id,
                                                         print_args.print_instance.instance_id);
         }
@@ -8120,7 +8123,7 @@ void GCodeGenerator::extrude_perimeters(const ExtrudeArgs &print_args, const Lay
         for (const ExtrusionEntityReference &next_entity : chained) {
             gcode += this->extrude_entity(next_entity, comment_perimeter, -1.);
             if (m_travel_obstacle_tracker->is_init())
-                m_travel_obstacle_tracker->mark_extruded(&next_entity.extrusion_entity(),
+                m_travel_obstacle_tracker->mark_extruded(eec, next_entity.extrusion_entity(),
                                                         print_args.print_instance.object_layer_to_print_id,
                                                         print_args.print_instance.instance_id);
         }

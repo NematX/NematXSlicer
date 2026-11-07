@@ -23,7 +23,6 @@
 
 #include "libslic3r/Color.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Line.hpp"
@@ -53,11 +52,7 @@ class SLAPrintObject;
 enum  SLAPrintObjectStep : uint8_t;
 class BuildVolume;
 class DynamicPrintConfig;
-class ExtrusionPath;
-class ExtrusionMultiPath;
-class ExtrusionLoop;
 class ExtrusionEntity;
-class ExtrusionEntityCollection;
 class ModelObject;
 class ModelVolume;
 enum ModelInstanceEPrintVolumeState : uint8_t;
@@ -508,33 +503,9 @@ struct _3DScene
 {
     static void thick_lines_to_verts(const Lines& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, double top_z, GUI::GLModel::Geometry& geometry);
     static void thick_lines_to_verts(const Lines3& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, GUI::GLModel::Geometry& geometry);
-    static void extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
-    static void extrusionentity_to_verts(const ExtrusionLoop& extrusion_loop, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
-    static void extrusionentity_to_verts(const ExtrusionMultiPath& extrusion_multi_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+    // Mesh compatible continuous paths together, resolving widths and roles from
+    // inherited attributes. Different role destinations and unsupported paths split runs.
     static void extrusionentity_to_verts(const ExtrusionEntity &extrusion_entity, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry, std::optional<std::map<GCodeExtrusionRole, GUI::GLModel::Geometry*>> gl_map = std::nullopt);
-};
-
-class ExtrusionToVert : public ExtrusionVisitorConst {
-    float print_z;
-    const Point &copy;
-    GUI::GLModel::Geometry &geometry;
-public:
-    ExtrusionToVert(float print_z, const Point& copy, GUI::GLModel::Geometry& geometry) : print_z(print_z), copy(copy), geometry(geometry) {}
-    virtual void default_use(const ExtrusionEntity &entity) override;
-};
-
-class ExtrusionToVertMap : public ExtrusionVisitorConst {
-    float print_z;
-    const Point &copy;
-    std::map<GCodeExtrusionRole, GUI::GLModel::Geometry *> &geometries;
-    GUI::GLModel::Geometry &default_geometry;
-public:
-    ExtrusionToVertMap(float print_z, const Point &copy, GUI::GLModel::Geometry &default_geometry, std::map<GCodeExtrusionRole, GUI::GLModel::Geometry*> &geometries)
-        : print_z(print_z), copy(copy), geometries(geometries), default_geometry(default_geometry) {
-        assert(!geometries.empty());
-    }
-    virtual void            default_use(const ExtrusionEntity &entity) override;
-    GUI::GLModel::Geometry &get_geometry(const ExtrusionEntity &e);
 };
 
 }
