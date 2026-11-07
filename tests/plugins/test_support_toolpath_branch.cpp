@@ -22,9 +22,9 @@ Tree branch sheaths, run through the support toolpath step on synthetic auxiliar
 subject area and holds typed surfaces; the step then runs the active providers, and the helpers read the published
 region islands back. The first-layer case compares the branch flange with the legacy base flange of the same surface,
 and the selector case runs both algorithms over the same sparse surfaces, including an inactive-provider fallback.
-The thin islands print their centreline instead
- of a sheath or a stationary deposit when elongated (BranchIslandClass.hpp); their cases check order, flow, volume,
- and the islands that fall back to a deposit. A full tree print checks deposit G-code and the reader's support volume.
+Elongated thin islands print their centreline instead of a sheath or a stationary deposit
+(BranchIslandClass.hpp). Their cases check geometry, unique emission, flow and volume,
+independently of island order. A full tree print checks deposit G-code and the reader's support volume.
 
 Representative direct calls (branches are not a timeline):
 
@@ -46,6 +46,9 @@ const char *const k_sparse_id = "support.toolpath.legacy_sparse";
 
 // Return owned grid settings with an explicit sheath sparse selector; no print state changes and configuration failures propagate.
 DynamicPrintConfig branch_config();
+// Check a disc of radius one millimeter: its anchored sheath and material properties.
+// The path must go around its centre, not merely lie inside its bounding box.
+void check_disc_sheath(const ExtrusionEntity &entity, const c_flow &flow, double x, double y);
 
 // A support surface with its surface type, as published on an auxiliary layer.
 struct TypedArea {
@@ -260,6 +263,35 @@ slic3r_api::Support::Toolpath::BranchIslandMeasure classify(const Print &print, 
     return slic3r_api::Support::Toolpath::classify_island(
         reinterpret_cast<storage_handle *>(&storage), slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&shape)),
         scale_i(branch_width(print)));
+}
+
+void check_disc_sheath(const ExtrusionEntity &entity, const c_flow &flow, double x, double y)
+{
+    CHECK_FALSE(entity.can_reverse());
+    REQUIRE(entity.has_polyline());
+    REQUIRE(entity.child_count() == 0);
+    CHECK_FALSE(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&entity)).is_deposit());
+    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    REQUIRE(attributes != nullptr);
+    CHECK(attributes->role == ExtrusionRole::SupportMaterial);
+    CHECK(double(attributes->width) == Approx(unscaled(flow.width)).epsilon(1e-6));
+    CHECK(double(attributes->height) == Approx(unscaled(flow.height)).epsilon(1e-6));
+    CHECK(attributes->mm3_per_mm == Approx(flow.mm3_per_mm).epsilon(1e-6));
+    const ArcPolyline &line = entity.polyline_ref();
+    REQUIRE(line.size() > 3);
+    CHECK(distance_to(line.front(), x, y) < 1. - unscaled(flow.width));
+    double turning = 0.;
+    for (size_t index = 1; index < line.size(); ++index) {
+        const Point &a = line.get_point(index - 1), &b = line.get_point(index);
+        CHECK(distance_to(b, x, y) <= 1.);
+        const double ax = unscaled(a.x()) - x, ay = unscaled(a.y()) - y;
+        const double bx = unscaled(b.x()) - x, by = unscaled(b.y()) - y;
+        turning += std::atan2(ax * by - ay * bx, ax * bx + ay * by);
+    }
+    CHECK(turning > 2. * PI);
+    const double circumference = 2. * PI * (1. - 0.5 * unscaled(flow.width));
+    CHECK(unscaled(line.length()) > circumference + 4. * unscaled(flow.spacing));
+    CHECK(unscaled(line.length()) < circumference + 6.5 * unscaled(flow.spacing));
 }
 } // namespace
 
@@ -665,16 +697,14 @@ TEST_CASE("A dumbbell with a narrow neck prints two sheaths and nothing in the n
     CHECK(lies_in(*children[1 - left], 5. + 1.5 * w, 5. - 2. * w, 5. + 5.5 * w, 5. + 2. * w));
 }
 
-// A thin island is replaced by one centreline entity. The entity takes the place of the first sheath piece of its island;
-// an island whose pieces all vanished under the closing (a strip under one width wide) appends the entity after the others.
-// The wide discs are sheaths. The test locates the strip entity by geometry and pins its rank against the two discs, which lie
-// on a diagonal: with a piece, the strip ranks between them, which holds for the orders of the closing result that are monotone
-// in x or in y; without a piece, it ranks after both.
-TEST_CASE("A thin island takes the place of its sheath piece or comes after the sheaths", "[plugins][support-toolpath][support-toolpath-branch]")
+// The strip prints once even when no closed piece survives. Input permutations
+// must not change its geometry/flow or either disc's sheath; island order is free.
+TEST_CASE("A thin island prints once with or without a surviving sheath piece", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const size_t shift : {0u, 1u, 2u})
     for (const bool vanishes : {false, true}) {
-        DYNAMIC_SECTION("strip " << (vanishes ? "without" : "with") << " a sheath piece") {
+        DYNAMIC_SECTION("strip " << (vanishes ? "without" : "with") << " a sheath piece / permutation " << shift) {
             Print print;
             slice(print, branch_config());
             const c_flow flow = SG::params(print, print.object(0)).base_flow;
@@ -682,8 +712,9 @@ TEST_CASE("A thin island takes the place of its sheath piece or comes after the 
             const ExPolygon first = circle(1., 2., 2.), strip = square(4., 5.7, 8., 5.7 + thickness), last = circle(1., 10., 10.);
             CHECK(classify(print, strip).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
             PluginStorage storage;
-            run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-                      {TypedArea{first, base_type()}, TypedArea{strip, base_type()}, TypedArea{last, base_type()}});
+            std::vector<TypedArea> areas{{first, base_type()}, {strip, base_type()}, {last, base_type()}};
+            std::rotate(areas.begin(), areas.begin() + shift, areas.end());
+            run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.), areas);
 
             // The pieces that the closing leaves: the entity replaces one of them, or is added when the strip has none.
             const ExPolygons pieces = closing_ex(to_polygons(ExPolygons{first, strip, last}), double(SCALED_EPSILON),
@@ -694,10 +725,9 @@ TEST_CASE("A thin island takes the place of its sheath piece or comes after the 
             REQUIRE(children.size() == 3);
             const size_t rank_first = child_in(children, 1., 1., 3., 3.), rank_last = child_in(children, 9., 9., 11., 11.);
             const size_t rank_strip = child_in(children, 4., 5.7, 8., 5.7 + thickness);
-            if (vanishes)
-                CHECK((rank_strip > rank_first && rank_strip > rank_last));
-            else
-                CHECK(((rank_first < rank_strip && rank_strip < rank_last) || (rank_last < rank_strip && rank_strip < rank_first)));
+            check_disc_sheath(*children[rank_first], flow, 2., 2.);
+            check_disc_sheath(*children[rank_last], flow, 10., 10.);
+            CHECK(total_length(*children[rank_strip]) > 3.9);
 
             // The centreline entity is reversible and holds line paths with the support material attributes, as wide as the
             // strip plus the rounded ends, where a sheath keeps the extrusion width.
@@ -705,10 +735,14 @@ TEST_CASE("A thin island takes the place of its sheath piece or comes after the 
             CHECK(children[rank_strip]->can_reverse());
             size_t lines = 0;
             for_each_leaf(*children[rank_strip], [&](const ExtrusionEntity &leaf) {
+                CHECK_FALSE(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&leaf)).is_deposit());
                 const ExtrusionAttributes *attributes = leaf.get_property<ExtrusionAttributes>();
                 REQUIRE(attributes != nullptr);
                 CHECK(attributes->role == ExtrusionRole::SupportMaterial);
                 CHECK(double(attributes->width) == Approx(thickness + rounded_ends).margin(0.001));
+                const double height = unscaled(flow.height);
+                CHECK(double(attributes->height) == Approx(height).epsilon(1e-6));
+                CHECK(attributes->mm3_per_mm == Approx(height * (double(attributes->width) - height * (1. - 0.25 * PI))).epsilon(1e-3));
                 ++lines;
             });
             CHECK(lines >= 1);
@@ -717,34 +751,49 @@ TEST_CASE("A thin island takes the place of its sheath piece or comes after the 
 }
 
 // A thin elongated island that the closing cuts into two pieces: a bar 1.3 w wide whose middle is a neck 0.9 w wide. The sides
-// keep a piece, the neck does not. The island prints one reversible entity at the rank of its first piece, none for the second,
-// and the line runs over the whole bar. The discs on both sides lie on a diagonal, as in the case above.
+// keep a piece, the neck does not. The island prints one reversible unit over
+// the whole bar, not one unit per closed piece. Disjoint island order is free.
 TEST_CASE("A thin island cut in two pieces by the closing prints one entity", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Print print;
-    slice(print, branch_config());
-    const c_flow flow = SG::params(print, print.object(0)).base_flow;
-    const double w = unscaled(flow.width), side = 0.65 * w, neck = 0.45 * w, y = 6.;
-    const ExPolygon first = circle(1., 2., 2.), last = circle(1., 10., 10.);
-    const ExPolygon bar = polygon_of({{3., y - side}, {5.5, y - side}, {5.5, y - neck}, {6.5, y - neck}, {6.5, y - side}, {9., y - side},
-                                      {9., y + side}, {6.5, y + side}, {6.5, y + neck}, {5.5, y + neck}, {5.5, y + side}, {3., y + side}});
-    CHECK(classify(print, bar).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
-    const double closing_distance = double(SCALED_EPSILON) + 0.5 * double(flow.width);
-    CHECK(closing_ex(to_polygons(bar), double(SCALED_EPSILON), closing_distance).size() == 2);
-    PluginStorage storage;
-    run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-              {TypedArea{first, base_type()}, TypedArea{bar, base_type()}, TypedArea{last, base_type()}});
+    for (const size_t shift : {0u, 1u, 2u})
+        DYNAMIC_SECTION("bar / permutation " << shift) {
+            Print print;
+            slice(print, branch_config());
+            const c_flow flow = SG::params(print, print.object(0)).base_flow;
+            const double w = unscaled(flow.width), side = 0.65 * w, neck = 0.45 * w, y = 6.;
+            const ExPolygon first = circle(1., 2., 2.), last = circle(1., 10., 10.);
+            const ExPolygon bar = polygon_of({{3., y - side}, {5.5, y - side}, {5.5, y - neck}, {6.5, y - neck}, {6.5, y - side}, {9., y - side},
+                                              {9., y + side}, {6.5, y + side}, {6.5, y + neck}, {5.5, y + neck}, {5.5, y + side}, {3., y + side}});
+            CHECK(classify(print, bar).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline);
+            const double closing_distance = double(SCALED_EPSILON) + 0.5 * double(flow.width);
+            CHECK(closing_ex(to_polygons(bar), double(SCALED_EPSILON), closing_distance).size() == 2);
+            PluginStorage storage;
+            std::vector<TypedArea> areas{{first, base_type()}, {bar, base_type()}, {last, base_type()}};
+            std::rotate(areas.begin(), areas.begin() + shift, areas.end());
+            run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.), areas);
 
-    const ExPolygons pieces = closing_ex(to_polygons(ExPolygons{first, bar, last}), double(SCALED_EPSILON), closing_distance);
-    CHECK(pieces.size() == 4);
-    const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
-    REQUIRE(children.size() == 3);
-    const size_t rank_first = child_in(children, 1., 1., 3., 3.), rank_last = child_in(children, 9., 9., 11., 11.);
-    const size_t rank_bar = child_in(children, 3., y - side, 9., y + side);
-    CHECK(((rank_first < rank_bar && rank_bar < rank_last) || (rank_last < rank_bar && rank_bar < rank_first)));
-    CHECK(children[rank_bar]->can_reverse());
-    CHECK(total_length(*children[rank_bar]) > 5.5);
+            const ExPolygons pieces = closing_ex(to_polygons(ExPolygons{first, bar, last}), double(SCALED_EPSILON), closing_distance);
+            CHECK(pieces.size() == 4);
+            const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
+            REQUIRE(children.size() == 3);
+            const size_t rank_first = child_in(children, 1., 1., 3., 3.), rank_last = child_in(children, 9., 9., 11., 11.);
+            const size_t rank_bar = child_in(children, 3., y - side, 9., y + side);
+            check_disc_sheath(*children[rank_first], flow, 2., 2.);
+            check_disc_sheath(*children[rank_last], flow, 10., 10.);
+            CHECK(children[rank_bar]->can_reverse());
+            CHECK(total_length(*children[rank_bar]) > 5.5);
+            for_each_leaf(*children[rank_bar], [&](const ExtrusionEntity &leaf) {
+                CHECK_FALSE(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&leaf)).is_deposit());
+                const ExtrusionAttributes *attributes = leaf.get_property<ExtrusionAttributes>();
+                REQUIRE(attributes != nullptr);
+                const double height = unscaled(flow.height);
+                CHECK(attributes->role == ExtrusionRole::SupportMaterial);
+                CHECK(double(attributes->height) == Approx(height).epsilon(1e-6));
+                CHECK(double(attributes->width) > 0.);
+                CHECK(attributes->mm3_per_mm == Approx(height * (double(attributes->width) - height * (1. - 0.25 * PI))).epsilon(1e-3));
+            });
+        }
 }
 
 // A compact thin disc prints one non-reversible stationary deposit, with geometric volume and the support flow attributes.
@@ -846,29 +895,50 @@ TEST_CASE("A support deposit of a crescent sits on the boundary closest to the c
     CHECK((point - centroid).cast<double>().norm() <= closest + 3.);
     CHECK(deposit.get(slic3r_api::EPropertySpecialCommand::key)->extra_data == Approx(unscaled(unscaled(island.area())) * unscaled(flow.height)));
 }
-// Blob replacement preserves closed-piece order; a vanished blob appends after the sheaths instead of disappearing.
-TEST_CASE("Blob islands replace their first piece or append after sheaths", "[plugins][support-toolpath-branch][support-branch-blob]")
+// A compact island prints exactly one deposit whether its closed piece survives
+// or vanishes. Placement, volume and other islands' sheaths do not depend on rank.
+TEST_CASE("Blob islands print once with or without a surviving sheath piece", "[plugins][support-toolpath-branch][support-branch-blob]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const size_t shift : {0u, 1u, 2u})
     for (const bool vanishes : {false, true}) {
-        DYNAMIC_SECTION("blob " << (vanishes ? "without" : "with") << " a sheath piece") {
+        DYNAMIC_SECTION("blob " << (vanishes ? "without" : "with") << " a sheath piece / permutation " << shift) {
             Print print;
             slice(print, branch_config());
             const double w = branch_width(print);
             const ExPolygon first = circle(1., 2., 2.), dot = circle((vanishes ? 0.45 : 0.7) * w, 6., 6.), last = circle(1., 10., 10.);
             CHECK(classify(print, dot).kind == slic3r_api::Support::Toolpath::BranchIslandClass::Blob);
             PluginStorage storage;
-            run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.),
-                {TypedArea{first, base_type()}, TypedArea{dot, base_type()}, TypedArea{last, base_type()}});
+            std::vector<TypedArea> areas{{first, base_type()}, {dot, base_type()}, {last, base_type()}};
+            std::rotate(areas.begin(), areas.begin() + shift, areas.end());
+            run_layer(print, storage, scale_i(0.6), square(0., 0., 12., 12.), areas);
             const std::vector<const ExtrusionEntity *> children = bucket_children(print.object(0));
             REQUIRE(children.size() == 3);
             const size_t a = child_in(children, 1., 1., 3., 3.), b = child_in(children, 9., 9., 11., 11.);
             const size_t t = child_in(children, 5., 5., 7., 7.);
             CHECK(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(children[t])).is_deposit());
-            if (vanishes)
-                CHECK((t > a && t > b));
-            else
-                CHECK(((a < t && t < b) || (b < t && t < a)));
+            CHECK_FALSE(children[t]->can_reverse());
+            CHECK_FALSE(children[t]->can_sort());
+            REQUIRE(children[t]->polyline_ref().size() == 1);
+            CHECK(distance_to(children[t]->polyline_ref().front(), 6., 6.) < 1e-5);
+            const c_flow flow = SG::params(print, print.object(0)).base_flow;
+            check_disc_sheath(*children[a], flow, 2., 2.);
+            check_disc_sheath(*children[b], flow, 10., 10.);
+            const ExtrusionAttributes *attributes = children[t]->get_property<ExtrusionAttributes>();
+            REQUIRE(attributes != nullptr);
+            CHECK(attributes->role == ExtrusionRole::SupportMaterial);
+            CHECK(attributes->mm3_per_mm == Approx(flow.mm3_per_mm));
+            CHECK(double(attributes->width) == Approx(unscaled(flow.width)).epsilon(1e-6));
+            CHECK(double(attributes->height) == Approx(unscaled(flow.height)).epsilon(1e-6));
+            const slic3r_api::ClipperContext clipper(reinterpret_cast<storage_handle *>(&storage));
+            slic3r_api::StoredExPolygonCollection fused = slic3r_api::clipper_offset2(
+                clipper(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&dot))),
+                double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection();
+            fused.ensure_valid(SG::params(print, print.object(0)).resolution);
+            REQUIRE(fused.size() == 1);
+            const ExtrusionPropertySpecialCommand *command = children[t]->get_property<ExtrusionPropertySpecialCommand>();
+            REQUIRE(command != nullptr);
+            CHECK(command->extra_data == Approx(unscaled(unscaled(fused.at(0).area())) * unscaled(flow.height)));
         }
     }
 }

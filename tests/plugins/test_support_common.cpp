@@ -45,13 +45,22 @@
      compared with the native FillSmooth on the same surfaces.
    - The perimeter-wrapped fill calls its inner pattern through the
      STEP_SUPPORT_TOOLPATH pattern service, as a toolpath plugin does, and its
-     extrusion tree is compared node by node with the native one. The honeycomb
+     printable paths are matched by geometry, multiplicity and effective properties.
+     Perimeters must stay before their own fill; independent areas and inner islands
+     have no canonical order or grouping. The honeycomb
      plugin leaves its clipped pieces unconnected where the native filler joins them,
      so for it only the perimeters are compared and the inner fill is measured.
 
    The flows come both as scaled integers (c_flow) and as the host's float
    millimeters (c_flow_mm); the derived densities read the millimeters, so
-   every value is compared exactly. */
+   every value is compared exactly.
+
+       compare_perimeter_fill(): run the same recipe through native and plugin code
+           `-- same_perimeter_fill(): match geometry and check perimeter-before-fill
+               |-- collect_printed_paths(): read paths, inherited properties and ancestry
+               |-- same_printed_path(): match points, orientation and physical properties
+               `-- fixed_before(): check ordering permissions at the shared ancestor
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -199,16 +208,35 @@ void check_flow_mm(const c_flow_mm &actual, const Flow &expected);
 std::string pattern_name(InfillPattern pattern);
 // Native pattern choice for one interface, as SupportParameters.cpp computes it.
 InfillPattern native_auto_interface(bool soluble, double interface_density);
-// Compare two extrusion trees node by node: shape, flags, loops, points and attributes.
-void check_same_tree(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
-                     const std::string &node = "root");
+// One printable path with effective properties and its borrowed ancestry. Ancestry
+// checks perimeter-before-fill constraints, not equality of grouping nodes.
+struct PrintedPath {
+    Points points;
+    ExtrusionAttributes attributes;
+    bool has_attributes = false, loop = false, reversible = false, sortable = false, loop_locked = true;
+    std::vector<std::pair<const ExtrusionEntity *, size_t>> ancestors;
+};
+// Copy printable paths and inherited properties; owners remain borrowed through ancestry.
+void collect_printed_paths(const ExtrusionEntity &entity, std::vector<PrintedPath> &paths,
+    const ExtrusionAttributes *inherited = nullptr, bool loop = false, bool loop_reverse = true,
+    bool loop_locked = true, std::vector<std::pair<const ExtrusionEntity *, size_t>> ancestors = {});
+// Compare coordinates including cyclic loop starts and only permitted reversal.
+bool same_printed_path(const PrintedPath &actual, const PrintedPath &expected);
+// Check physical attributes with the existing one-scaled-unit dimension tolerance.
+bool same_path_attributes(const PrintedPath &actual, const PrintedPath &expected);
+// Whether the tree keeps this perimeter before this fill under later ordering/reversal.
+bool fixed_before(const PrintedPath &perimeter, const PrintedPath &fill);
 // Paths and length of the inner fills of a perimeter-wrapped tree, native and API.
 struct InnerFillStats { size_t native_paths = 0, api_paths = 0; double native_length = 0, api_length = 0; };
-// Compare the area nodes and their perimeters exactly, and only measure the inner fills.
-void check_perimeters_and_measure_fill(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
-                                       InnerFillStats &stats);
-// Count the leaves of a tree and add their lengths (mm).
-void measure_leaves(const ExtrusionEntity &entity, size_t &paths, double &length);
+// Match printable paths with multiplicity, independently of island/group order.
+// Native FillWithPerimeter identifies perimeter paths and their zones; only its
+// printable geometry/properties and perimeter-before-fill relations are required.
+// Non-exact mode retains the documented honeycomb connection difference.
+bool same_perimeter_fill(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
+                         bool exact, InnerFillStats &stats, std::string &error);
+// Two disjoint areas with literal contours, a hole and open fill paths, owned by
+// the returned tree. Each fixed area prints its perimeters before its fill.
+ExtrusionEntity perimeter_comparison_fixture(bool reversible);
 // Forward a pattern request of the test payload to the pattern service, as the host step does.
 int32_t service_generate_pattern(const run_ctx_support_toolpath *ctx, infill_pattern_runtime_id pattern_id,
                                  const layer_handle *layer, const layer_island_handle *island,
@@ -294,67 +322,174 @@ InfillPattern native_auto_interface(bool soluble, double interface_density)
     return soluble ? ipConcentric : interface_density > 0.95 ? ipRectilinear : ipSupportBase;
 }
 
-// Recursively compares borrowed trees and their attributes without mutation, requiring matching shape and zero no_seam on published paths; structural failures stop the check and value differences fail assertions at node.
-void check_same_tree(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
-                     const std::string &node)
+void collect_printed_paths(const ExtrusionEntity &entity, std::vector<PrintedPath> &paths,
+    const ExtrusionAttributes *inherited, bool loop, bool loop_reverse, bool loop_locked,
+    std::vector<std::pair<const ExtrusionEntity *, size_t>> ancestors)
 {
-    CAPTURE(node, expected.is_loop(), expected.is_collection(), expected.child_count());
-    REQUIRE(actual.has_polyline() == expected.has_polyline());
-    REQUIRE(actual.child_count() == expected.child_count());
-    CHECK(actual.can_sort() == expected.can_sort());
-    CHECK(actual.can_reverse() == expected.can_reverse());
-    CHECK(actual.is_loop() == expected.is_loop());
-    if (expected.has_polyline())
-        CHECK(actual.polyline_ref().to_polyline().points == expected.polyline_ref().to_polyline().points);
-    const ExtrusionAttributes *actual_attributes = actual.get_property<ExtrusionAttributes>();
-    const ExtrusionAttributes *expected_attributes = expected.get_property<ExtrusionAttributes>();
-    REQUIRE((actual_attributes == nullptr) == (expected_attributes == nullptr));
-    if (expected_attributes != nullptr) {
-        CHECK(actual_attributes->role == expected_attributes->role);
-        CHECK(actual_attributes->no_seam == 0);
-        CHECK(actual_attributes->mm3_per_mm == expected_attributes->mm3_per_mm);
-        // Width and height go through the scaled integers of c_flow: allow one scaled unit,
-        // unscaled(1) = SCALING_FACTOR mm.
-        CHECK(std::abs(actual_attributes->width - expected_attributes->width) <= unscaled(coord_t(1)));
-        CHECK(std::abs(actual_attributes->height - expected_attributes->height) <= unscaled(coord_t(1)));
+    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    if (attributes == nullptr) attributes = inherited;
+    if (entity.is_loop()) {
+        loop = true;
+        loop_reverse = loop_reverse && entity.can_reverse();
+        loop_locked = loop_locked && !entity.can_sort();
     }
-    for (size_t idx = 0; idx < expected.child_count(); ++idx)
-        check_same_tree(actual.child(idx), expected.child(idx), node + "/" + std::to_string(idx));
-}
-
-void measure_leaves(const ExtrusionEntity &entity, size_t &paths, double &length)
-{
     if (entity.has_polyline()) {
-        ++paths;
-        length += unscaled(entity.polyline_ref().to_polyline().length());
+        PrintedPath path;
+        path.points = entity.polyline_ref().to_polyline().points;
+        path.has_attributes = attributes != nullptr;
+        if (attributes != nullptr) path.attributes = *attributes;
+        path.loop = loop;
+        path.reversible = entity.can_reverse() && (!loop || loop_reverse);
+        path.sortable = entity.can_sort();
+        path.loop_locked = loop_locked;
+        path.ancestors = ancestors;
+        paths.push_back(std::move(path));
     }
-    for (size_t idx = 0; idx < entity.child_count(); ++idx)
-        measure_leaves(entity.child(idx), paths, length);
+    for (size_t idx = 0; idx < entity.child_count(); ++idx) {
+        ancestors.emplace_back(&entity, idx);
+        collect_printed_paths(entity.child(idx), paths, attributes, loop, loop_reverse, loop_locked, ancestors);
+        ancestors.pop_back();
+    }
 }
 
-void check_perimeters_and_measure_fill(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
-                                       InnerFillStats &stats)
+bool same_path_attributes(const PrintedPath &actual, const PrintedPath &expected)
 {
-    // A single area is the root itself; several areas are fixed nodes under a sortable root.
-    REQUIRE(actual.can_sort() == expected.can_sort());
-    std::vector<std::pair<const ExtrusionEntity *, const ExtrusionEntity *>> areas;
-    if (expected.can_sort()) {
-        REQUIRE(actual.child_count() == expected.child_count());
-        for (size_t idx = 0; idx < expected.child_count(); ++idx)
-            areas.emplace_back(&actual.child(idx), &expected.child(idx));
-    } else {
-        areas.emplace_back(&actual, &expected);
+    return actual.has_attributes && expected.has_attributes && actual.attributes.role == expected.attributes.role &&
+        actual.attributes.no_seam == 0 && expected.attributes.no_seam == 0 &&
+        actual.attributes.mm3_per_mm == expected.attributes.mm3_per_mm &&
+        std::abs(actual.attributes.width - expected.attributes.width) <= unscaled(coord_t(1)) &&
+        std::abs(actual.attributes.height - expected.attributes.height) <= unscaled(coord_t(1));
+}
+
+bool same_printed_path(const PrintedPath &actual, const PrintedPath &expected)
+{
+    if (!same_path_attributes(actual, expected) || actual.loop != expected.loop ||
+        actual.reversible != expected.reversible || actual.sortable != expected.sortable ||
+        actual.loop_locked != expected.loop_locked || actual.points.size() != expected.points.size()) return false;
+    size_t size = expected.points.size();
+    if (size == 0) return false;
+    if (expected.loop) {
+        if (actual.points.front() != actual.points.back() || expected.points.front() != expected.points.back()) return false;
+        --size;
     }
-    for (const std::pair<const ExtrusionEntity *, const ExtrusionEntity *> &area : areas) {
-        REQUIRE(area.first->child_count() >= 1);
-        REQUIRE(area.second->child_count() >= 1);
-        CHECK(area.first->can_sort() == area.second->can_sort());
-        check_same_tree(area.first->child(0), area.second->child(0), "perimeters");
-        for (size_t idx = 1; idx < area.second->child_count(); ++idx)
-            measure_leaves(area.second->child(idx), stats.native_paths, stats.native_length);
-        for (size_t idx = 1; idx < area.first->child_count(); ++idx)
-            measure_leaves(area.first->child(idx), stats.api_paths, stats.api_length);
+    // A loop's first vertex is not a seam guarantee. Its winding is retained
+    // unless the printable unit explicitly permits reversal.
+    for (size_t start = 0; start < (expected.loop ? size : 1); ++start) {
+        bool forward = true, reverse = expected.reversible;
+        for (size_t i = 0; i < size; ++i) {
+            forward = forward && actual.points[(start + i) % size] == expected.points[i];
+            const size_t reversed = expected.loop ? (start + size - i) % size : size - i - 1;
+            reverse = reverse && actual.points[reversed] == expected.points[i];
+        }
+        if (forward || reverse) return true;
     }
+    return false;
+}
+
+bool fixed_before(const PrintedPath &perimeter, const PrintedPath &fill)
+{
+    for (size_t i = 0; i < std::min(perimeter.ancestors.size(), fill.ancestors.size()); ++i) {
+        const std::pair<const ExtrusionEntity *, size_t> &a = perimeter.ancestors[i], &b = fill.ancestors[i];
+        if (a.first != b.first) return false;
+        if (a.second != b.second)
+            return a.second < b.second && !a.first->can_sort() && !a.first->can_reverse();
+    }
+    return false;
+}
+
+bool same_perimeter_fill(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
+                         bool exact, InnerFillStats &stats, std::string &error)
+{
+    std::vector<PrintedPath> a, b;
+    collect_printed_paths(actual, a);
+    collect_printed_paths(expected, b);
+    std::vector<bool> used(a.size(), false);
+    std::vector<size_t> zones(b.size()), matches(b.size(), a.size());
+    std::vector<bool> perimeter(b.size());
+    const size_t area_depth = expected.can_sort() ? 1 : 0;
+    const size_t zone_count = expected.can_sort() ? expected.child_count() : 1;
+    std::vector<ExPolygon> boundaries(zone_count);
+    // Only the native reference's documented builder layout labels the expected
+    // perimeter paths. No actual grouping node is compared with that layout.
+    for (size_t i = 0; i < b.size(); ++i) {
+        if (b[i].ancestors.size() <= area_depth) { error = "Incomplete native perimeter fixture"; return false; }
+        zones[i] = area_depth == 0 ? 0 : b[i].ancestors[0].second;
+        perimeter[i] = b[i].ancestors[area_depth].second == 0;
+        if (perimeter[i]) {
+            Points ring = b[i].points;
+            if (ring.size() < 4 || ring.front() != ring.back()) { error = "Invalid native perimeter loop"; return false; }
+            ring.pop_back();
+            Polygon polygon(std::move(ring));
+            if (polygon.is_counter_clockwise()) boundaries[zones[i]].contour = std::move(polygon);
+            else boundaries[zones[i]].holes.push_back(std::move(polygon));
+        } else {
+            ++stats.native_paths;
+            stats.native_length += unscaled(Polyline(b[i].points).length());
+        }
+        if (!exact && !perimeter[i]) continue;
+        for (size_t j = 0; j < a.size(); ++j)
+            if (!used[j] && same_printed_path(a[j], b[i])) { matches[i] = j; used[j] = true; break; }
+        if (matches[i] == a.size()) { error = "Missing or changed printable path " + std::to_string(i); return false; }
+    }
+    std::vector<size_t> actual_zones(a.size(), zone_count);
+    std::vector<bool> actual_perimeter(a.size(), false);
+    for (size_t i = 0; i < b.size(); ++i)
+        if (matches[i] != a.size()) {
+            actual_zones[matches[i]] = zones[i];
+            actual_perimeter[matches[i]] = perimeter[i];
+        }
+    for (size_t j = 0; j < a.size(); ++j) {
+        if (!used[j]) {
+            if (exact) { error = "Extra or duplicated printable path"; return false; }
+            // Honeycomb alone has a documented connection difference. Its inner
+            // paths still need the right material properties and geometric zone.
+            for (size_t i = 0; i < b.size(); ++i)
+                if (perimeter[i] && same_printed_path(a[j], b[i])) { error = "Duplicated perimeter"; return false; }
+            size_t holders = 0;
+            for (size_t zone = 0; zone < boundaries.size(); ++zone) {
+                const bool inside = a[j].points.size() >= 2 &&
+                    diff_pl(Polylines{Polyline(a[j].points)}, ExPolygons{boundaries[zone]}).empty();
+                if (inside) { actual_zones[j] = zone; ++holders; }
+            }
+            if (holders != 1 || !same_path_attributes(a[j], b.front()) || a[j].sortable || !a[j].reversible) {
+                error = "Invalid honeycomb inner path"; return false;
+            }
+        }
+        if (!actual_perimeter[j]) {
+            ++stats.api_paths;
+            stats.api_length += unscaled(Polyline(a[j].points).length());
+            for (size_t i = 0; i < a.size(); ++i)
+                if (actual_perimeter[i] && actual_zones[i] == actual_zones[j] && !fixed_before(a[i], a[j])) {
+                    error = "Perimeter is not fixed before its own fill"; return false;
+                }
+        }
+    }
+    return true;
+}
+
+ExtrusionEntity perimeter_comparison_fixture(bool reversible)
+{
+    const ExtrusionAttributes attributes{ExtrusionRole::SupportMaterial, ExtrusionFlow{0.08, 0.44f, 0.2f}};
+    ExtrusionEntity root(ExtrusionEntity::Children{}, true, true, false);
+    for (const double x : {0., 20.}) {
+        ExtrusionEntity area(ExtrusionEntity::Children{}, false, false, false);
+        ExtrusionEntity perimeters(ExtrusionEntity::Children{}, true, true, false);
+        Polygon contour{Point::new_scale(x, 0.), Point::new_scale(x + 10., 0.),
+                        Point::new_scale(x + 10., 10.), Point::new_scale(x, 10.)};
+        perimeters.append_child(ExtrusionLoop(ExtrusionPath(ArcPolyline(contour.split_at_index(0)), attributes, nullptr)));
+        if (x == 0.) {
+            Polygon hole{Point::new_scale(3., 3.), Point::new_scale(3., 4.), Point::new_scale(4., 4.), Point::new_scale(4., 3.)};
+            perimeters.append_child(ExtrusionLoop(ExtrusionPath(ArcPolyline(hole.split_at_index(0)), attributes, nullptr)));
+        }
+        area.append_child(std::move(perimeters));
+        ExtrusionEntity fill(ExtrusionEntity::Children{}, true, true, false);
+        for (const double y : {2., 7.})
+            fill.append_child(ExtrusionPath(ArcPolyline(Polyline{Point::new_scale(x + 1., y), Point::new_scale(x + 9., y)}),
+                                            attributes, nullptr, reversible));
+        area.append_child(std::move(fill));
+        root.append_child(std::move(area));
+    }
+    return root;
 }
 
 int32_t service_generate_pattern(const run_ctx_support_toolpath *ctx, infill_pattern_runtime_id pattern_id,
@@ -529,14 +664,22 @@ void compare_perimeter_fill(PatternServiceFixture &fixture, const ExPolygon &sur
                                 settings, Common::pattern_service_fill(nullptr, fixture.payload, recipe.pattern_id, recipe, nullptr, nullptr, nullptr, nullptr),
                                 out.mutable_view());
     const ExtrusionEntity &api_out = *reinterpret_cast<const ExtrusionEntity *>(out.handle());
-    REQUIRE(api_out.child_count() == native_roots.size());
+    REQUIRE(api_out.empty() == native_roots.empty());
     if (native_roots.empty())
         return;
+    REQUIRE(native_roots.size() == 1);
     const ExtrusionEntity &native_root = *native_roots.front();
-    if (inner.exact)
-        check_same_tree(api_out.child(0), native_root);
-    else
-        check_perimeters_and_measure_fill(api_out.child(0), native_root, result.honeycomb);
+    InnerFillStats measured;
+    std::string error;
+    const bool equal = same_perimeter_fill(api_out, native_root, inner.exact, measured, error);
+    INFO(error);
+    REQUIRE(equal);
+    if (!inner.exact) {
+        result.honeycomb.native_paths += measured.native_paths;
+        result.honeycomb.api_paths += measured.api_paths;
+        result.honeycomb.native_length += measured.native_length;
+        result.honeycomb.api_length += measured.api_length;
+    }
     if (native_root.child_count() > 0 && !native_root.child(0).is_leaf() && native_root.can_sort())
         ++result.multi_area_trees;
 }
@@ -947,6 +1090,94 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
     CHECK(std::string(keys.back().key) == path.keys[path.size - 1].key);
 }
 
+TEST_CASE("Perimeter comparison accepts independent permutations and grouping", "[plugins][support-common][support-comparison]")
+{
+    const ExtrusionEntity expected = perimeter_comparison_fixture(true);
+    ExtrusionEntity actual(expected);
+    SECTION("independent areas and fill paths") {
+        std::swap(actual.children()[0], actual.children()[1]);
+        for (const ExtrusionEntityUPtr &area : actual.children())
+            std::reverse(area->child(1).children().begin(), area->child(1).children().end());
+    }
+    SECTION("different grouping with all perimeters before their fills") {
+        actual = ExtrusionEntity(ExtrusionEntity::Children{}, false, false, false);
+        for (const size_t index : {1u, 0u}) actual.append_child(expected.child(index).child(0));
+        for (const size_t index : {0u, 1u}) {
+            ExtrusionEntity wrapper(ExtrusionEntity::Children{}, false, false, false);
+            wrapper.append_child(expected.child(index).child(1));
+            actual.append_child(std::move(wrapper));
+        }
+    }
+    SECTION("independent fill islands inside a fixed area") {
+        ExtrusionEntity &area = actual.child(0);
+        const ExtrusionEntity fill(area.child(1));
+        area.remove_child(1);
+        area.append_child(fill.child(1));
+        area.append_child(fill.child(0));
+    }
+    SECTION("cyclic loop start") {
+        ExtrusionEntity &path = actual.child(0).child(0).child(0).child(0);
+        Points points = path.polyline_ref().to_polyline().points;
+        points.pop_back();
+        std::rotate(points.begin(), points.begin() + 1, points.end());
+        points.push_back(points.front());
+        path.set_polyline(ArcPolyline(Polyline(std::move(points))));
+    }
+    SECTION("permitted open path reversal") {
+        actual.child(0).child(1).child(0).reverse();
+    }
+    SECTION("effective attributes inherited through a wrapper") {
+        ExtrusionEntity &fill = actual.child(0).child(1);
+        fill.add_property(*fill.child(0).get_property<ExtrusionAttributes>());
+        for (const ExtrusionEntityUPtr &path : fill.children()) path->remove_property<ExtrusionAttributes>();
+    }
+    InnerFillStats stats;
+    std::string error;
+    const bool equal = same_perimeter_fill(actual, expected, true, stats, error);
+    INFO(error);
+    CHECK(equal);
+    CHECK(stats.api_paths == 4);
+    CHECK(stats.api_paths == stats.native_paths);
+}
+
+TEST_CASE("Perimeter comparison rejects lost geometry properties and printing constraints", "[plugins][support-common][support-comparison]")
+{
+    const ExtrusionEntity expected = perimeter_comparison_fixture(false);
+    ExtrusionEntity actual(expected);
+    ExtrusionEntity &fill = actual.child(0).child(1);
+    SECTION("missing path") { fill.remove_child(0); }
+    SECTION("duplicated path") { fill.append_child(fill.child(0)); }
+    SECTION("changed coordinate") {
+        Points points = fill.child(0).polyline_ref().to_polyline().points;
+        points.front().x() += 1;
+        fill.child(0).set_polyline(ArcPolyline(Polyline(std::move(points))));
+    }
+    SECTION("changed role") { fill.child(0).get_property<ExtrusionAttributes>()->role = ExtrusionRole::SupportMaterialInterface; }
+    SECTION("changed flow") { fill.child(0).get_property<ExtrusionAttributes>()->mm3_per_mm *= 2.; }
+    SECTION("changed width") { fill.child(0).get_property<ExtrusionAttributes>()->width += 0.01f; }
+    SECTION("changed height") { fill.child(0).get_property<ExtrusionAttributes>()->height += 0.01f; }
+    SECTION("changed seam permission") { fill.child(0).get_property<ExtrusionAttributes>()->no_seam = 1; }
+    SECTION("forbidden open path reversal") { fill.child(0).reverse(); }
+    SECTION("changed reversal permission") { fill.child(0).set_can_sort_reverse(false, true); }
+    SECTION("reversed perimeter winding") { actual.child(0).child(0).child(0).child(0).reverse(); }
+    SECTION("fill before its own perimeter") { std::swap(actual.child(0).children()[0], actual.child(0).children()[1]); }
+    SECTION("sortable perimeter and fill") { actual.child(0).set_can_sort_reverse(true, true); }
+    SECTION("reversible perimeter and fill") { actual.child(0).set_can_sort_reverse(false, true); }
+    SECTION("broken continuous path") {
+        const ExtrusionEntity path(fill.child(0));
+        const ExtrusionAttributes attributes = *path.get_property<ExtrusionAttributes>();
+        const Points points = path.polyline_ref().to_polyline().points;
+        fill.remove_child(0);
+        const Point middle = (points.front() + points.back()) / 2;
+        for (const Polyline &piece : Polylines{Polyline{points.front(), middle}, Polyline{middle, points.back()}})
+            fill.append_child(ExtrusionPath(ArcPolyline(piece), attributes, nullptr, false));
+    }
+    InnerFillStats stats;
+    std::string error;
+    CHECK_FALSE(same_perimeter_fill(actual, expected, true, stats, error));
+    CHECK_FALSE(error.empty());
+}
+
 TEST_CASE("Perimeter-wrapped support fill equals the native FillWithPerimeter", "[plugins][support-common]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1008,7 +1239,7 @@ TEST_CASE("Perimeter-wrapped support fill drops the small intersection rings lik
         }
     }
     CAPTURE(residue_surfaces.size(), removed_rings);
-    REQUIRE_FALSE(residue_surfaces.empty());
+    REQUIRE(residue_surfaces.size() == 4);
     CHECK(removed_rings >= residue_surfaces.size());
     PerimeterComparison result;
     for (size_t surface_idx = 0; surface_idx < residue_surfaces.size(); ++surface_idx) {

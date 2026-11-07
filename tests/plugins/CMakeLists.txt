@@ -421,3 +421,9 @@ add_test(NAME plugins_seam_visibility_guard
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_seam_visibility_guard.py"
         "$<TARGET_FILE:${_TEST_NAME}_tests>")
 set_tests_properties(plugins_seam_visibility_guard PROPERTIES TIMEOUT 180 LABELS "plugins;seam-visibility")
+
+# The measured parent must not share its timing destination with isolated registries.
+add_test(NAME plugins_exporter_child_timings
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_plugins_test_timings.py"
+        "$<TARGET_FILE:${_TEST_NAME}_tests>" ExporterChildTimingTests)
+set_tests_properties(plugins_exporter_child_timings PROPERTIES TIMEOUT 780 LABELS "plugins;exporter;timings")

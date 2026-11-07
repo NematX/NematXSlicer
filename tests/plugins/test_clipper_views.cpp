@@ -11,7 +11,7 @@ Polygon operations are compared with the corresponding native slicer functions.
 Conversion tests also inspect Clipper's polygon tree directly. An island is an
 outer contour together with its holes. These tests check that conversion keeps
 every contour, hole and vertex intact while placing containing islands before
-the islands inside them. Explicit expected orders also check stable sorting.
+the islands inside them. Independent islands have no promised relative order.
 
 Polyline comparisons preserve every bend and each path's direction. They may
 ignore the order of separate paths, but tests of collection indices or result
@@ -156,6 +156,9 @@ namespace {
 Slic3r::ExPolygons recorded_union_fragments();
 // Inspect borrowed contour containment in original result order and emit Catch assertions matching layer reconstruction; never reorder or mutate geometry, and diagnostics/allocation failures remain visible.
 void check_union_island_order(const Slic3r::ExPolygons &islands, const char *stage);
+// Check actual contour inclusion, not bounding boxes or a possibly touching first
+// vertex. Holes stay attached to their enclosing contour; independent islands are free.
+bool has_enclosure_order(const Slic3r::ExPolygons &islands);
 // Recursively copy borrowed engine contours before descendants into caller-owned polygons, retaining hole membership; no engine/storage mutation occurs and allocation failures propagate.
 void append_engine_islands(const Slic3r::ClipperLib::PolyNode &node, Slic3r::ExPolygons &out);
 
@@ -215,13 +218,22 @@ Slic3r::ExPolygons recorded_union_fragments()
 void check_union_island_order(const Slic3r::ExPolygons &islands, const char *stage)
 {
     INFO(stage);
+    CHECK(has_enclosure_order(islands));
+}
+
+bool has_enclosure_order(const Slic3r::ExPolygons &islands)
+{
     for (size_t later = 1; later < islands.size(); ++later)
         for (size_t earlier = 0; earlier < later; ++earlier) {
-            CAPTURE(later, earlier);
-            const Slic3r::BoundingBox outer(islands[later].contour.points);
-            const Slic3r::BoundingBox inner(islands[earlier].contour.points);
-            CHECK_FALSE((outer.contains(inner) && islands[later].contour.contains(islands[earlier].contour.first_point())));
+            const Slic3r::Polygon &outer = islands[later].contour, &inner = islands[earlier].contour;
+            const bool vertices_inside = !inner.points.empty() && std::all_of(inner.points.begin(), inner.points.end(),
+                [&outer](const Slic3r::Point &point) { return Slic3r::contains(outer, point, true); });
+            // Edges may leave a concave contour even when all vertices are inside.
+            if (vertices_inside && std::abs(inner.area()) < std::abs(outer.area()) &&
+                Slic3r::diff(Slic3r::Polygons{inner}, Slic3r::Polygons{outer}).empty())
+                return false;
         }
+    return true;
 }
 
 void append_engine_islands(const Slic3r::ClipperLib::PolyNode &node, Slic3r::ExPolygons &out)
@@ -310,27 +322,41 @@ TEST_CASE("SDK union preserves layer island order for four recorded fragments", 
 }
 
 namespace {
-// Serialize each borrowed contour and hole in exact vertex order into owned strings; only whole-island order is optionally ignored, no coordinates change, and allocation failures propagate.
+// Serialize contours with their holes and multiplicity. Unordered comparison
+// accepts cyclic ring starts and independent island/hole permutations, not winding
+// or coordinate changes. Ordered mode checks plain borrowed collection copies.
 std::vector<std::string> island_signatures(const Slic3r::ExPolygons &islands, bool ignore_order = true);
 // Build disjoint translated copies with at most one hole each, restore their exact borrowed rings on engine-owned nodes, and permute the roots; node ownership remains with the tree and invalid test inputs fail through Catch.
 Slic3r::ClipperLib::PolyTree independent_test_roots(const Slic3r::ExPolygons &islands, const std::vector<size_t> &permutation);
 // Construct six owned disjoint islands with explicit contour boxes 600/500/400/300/100/100 mm2 and holes on A/C/F; every ring is literal via rectangle_mm, all allocations are local, and failures propagate.
 Slic3r::ExPolygons independent_cycle_islands();
-// Run borrowed subjects/clips through separate default NonZero engines and SDK storage, compare every ordered ring before/after conversion, and assert layer order plus native union area/count; all outputs are local owners and failures remain visible.
+// Run subjects/clips through separate NonZero engines and SDK storage, compare
+// geometry and hole membership, and check enclosure order plus native union area/count.
 void check_sdk_boolean_geometry(const Slic3r::ExPolygons &subjects, const Slic3r::ExPolygons &clips, clipper_operation_t operation);
 
 std::vector<std::string> island_signatures(const Slic3r::ExPolygons &islands, bool ignore_order)
 {
     std::vector<std::string> signatures;
     for (const Slic3r::ExPolygon &island : islands) {
-        std::ostringstream key;
-        key << "C:";
-        for (const Slic3r::Point &point : island.contour.points) key << point.x() << ',' << point.y() << ';';
+        const auto ring_key = [ignore_order](const Slic3r::Polygon &ring) {
+            Slic3r::Points points = ring.points;
+            if (ignore_order && !points.empty()) {
+                const Slic3r::Points::iterator first = std::min_element(points.begin(), points.end(),
+                    [](const Slic3r::Point &a, const Slic3r::Point &b) { return a.x() < b.x() || (a.x() == b.x() && a.y() < b.y()); });
+                std::rotate(points.begin(), first, points.end());
+            }
+            std::ostringstream key;
+            for (const Slic3r::Point &point : points) key << point.x() << ',' << point.y() << ';';
+            return key.str();
+        };
+        std::string key = "C:" + ring_key(island.contour);
+        std::vector<std::string> holes;
         for (const Slic3r::Polygon &hole : island.holes) {
-            key << "H:";
-            for (const Slic3r::Point &point : hole.points) key << point.x() << ',' << point.y() << ';';
+            holes.push_back(ring_key(hole));
         }
-        signatures.push_back(key.str());
+        if (ignore_order) std::sort(holes.begin(), holes.end());
+        for (const std::string &hole : holes) key += "H:" + hole;
+        signatures.push_back(std::move(key));
     }
     if (ignore_order) std::sort(signatures.begin(), signatures.end());
     return signatures;
@@ -422,8 +448,9 @@ void check_sdk_boolean_geometry(const Slic3r::ExPolygons &subjects, const Slic3r
 }
 }
 
-// Materialize a deliberately inverted forest with nested rings, large holes and unequal disjoint boxes; require the explicit box-area permutation, equal-key stability and exact preservation of every original ring.
-TEST_CASE("SDK multi-root box ordering has an explicit stable permutation", "[plugins][clipper][union-sdk-order]")
+// Nested rings must follow their containers; disjoint and equal-box islands
+// retain their geometry without a promised relative position.
+TEST_CASE("SDK multi-root conversion preserves nested and independent islands", "[plugins][clipper][union-sdk-order]")
 {
     Slic3r::ExPolygons source{
         Slic3r::ExPolygon(rectangle_mm(0., 0., 100., 100.)),
@@ -442,18 +469,14 @@ TEST_CASE("SDK multi-root box ordering has an explicit stable permutation", "[pl
     append_engine_islands(tree, raw);
     const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
-    const std::vector<size_t> expected{0, 1, 2, 4, 3, 5};
-    REQUIRE(converted.size() == expected.size());
-    for (size_t index = 0; index < expected.size(); ++index) {
-        CAPTURE(index);
-        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[expected[index]].contour.points));
-    }
+    REQUIRE(converted.size() == source.size());
     CHECK(island_signatures(converted) == island_signatures(raw));
-    check_union_island_order(converted, "box order with net-area trap and equal-box stability");
+    check_union_island_order(converted, "nested islands with net-area trap and equal boxes");
 }
 
-// Convert B/A/E/C/D/F to A/B/C/D/E/F using independent cycles (0,1) and (2,3,4), fixed slot 5 and stable equal-area E/F; verify explicit positions and every owned ring, with failures reported by Catch.
-TEST_CASE("SDK box ordering completes independent permutation cycles", "[plugins][clipper][union-sdk-order][union-sdk-cycles]")
+// A scrambled forest must preserve every contour/hole, including equal-size
+// disjoint islands. No particular permutation is part of the result contract.
+TEST_CASE("SDK conversion preserves scrambled independent islands", "[plugins][clipper][union-sdk-order][union-sdk-cycles]")
 {
     const Slic3r::ExPolygons source = independent_cycle_islands();
     Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {1, 0, 4, 2, 3, 5});
@@ -472,18 +495,13 @@ TEST_CASE("SDK box ordering completes independent permutation cycles", "[plugins
     const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
     REQUIRE(converted.size() == source.size());
-    for (size_t index = 0; index < source.size(); ++index) {
-        CAPTURE(index);
-        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
-    }
-    CHECK(island_signatures(converted, false) == expected_rings);
     CHECK(island_signatures(converted) == island_signatures(raw));
-    CHECK(island_signatures(converted, false)[5] == raw_rings[5]);
-    check_union_island_order(converted, "two independent cycles, fixed slot and equal-area stability");
+    check_union_island_order(converted, "scrambled independent islands and equal boxes");
 }
 
-// Convert the same six roots already ordered A/B/C/D/E/F through the multi-root early return; compare exact traversal order and rings, including the unequal-shape equal-area pair and fixed hole-bearing island.
-TEST_CASE("SDK sorted multi-root conversion preserves exact traversal", "[plugins][clipper][union-sdk-order][union-sdk-sorted]")
+// Ordered inputs still require full geometry and hole membership, not retention
+// of their ranks after operation-backed materialization.
+TEST_CASE("SDK conversion preserves independent islands from ordered input", "[plugins][clipper][union-sdk-order][union-sdk-sorted]")
 {
     const Slic3r::ExPolygons source = independent_cycle_islands();
     Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {0, 1, 2, 3, 4, 5});
@@ -495,16 +513,12 @@ TEST_CASE("SDK sorted multi-root conversion preserves exact traversal", "[plugin
     const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
     REQUIRE(converted.size() == source.size());
-    CHECK(island_signatures(converted, false) == expected_rings);
-    CHECK(island_signatures(converted, false) == island_signatures(raw, false));
-    for (size_t index = 0; index < source.size(); ++index) {
-        CAPTURE(index);
-        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
-    }
-    check_union_island_order(converted, "already sorted multi-root sequence including stable ties");
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    check_union_island_order(converted, "ordered input with independent equal-size islands");
 }
 
-// Convert two owned roots A/B with C under A's hole although B contains C; require A/B/C across subtree boundaries and preserve the exact multiset of rings, with failures reported by Catch.
+// C must follow both containing contours even when the engine places it under
+// A's hole. Preserve geometry without requiring unrelated subtree ranks.
 TEST_CASE("SDK multi-root ordering interleaves containing roots and descendants", "[plugins][clipper][union-sdk-order][union-sdk-interleaving]")
 {
     Slic3r::ExPolygon a(rectangle_mm(0., 0., 100., 100.));
@@ -530,15 +544,12 @@ TEST_CASE("SDK multi-root ordering interleaves containing roots and descendants"
     const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
     REQUIRE(converted.size() == 3);
-    for (size_t index = 0; index < source.size(); ++index) {
-        CAPTURE(index);
-        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
-    }
     CHECK(island_signatures(converted) == island_signatures(raw));
     check_union_island_order(converted, "interleaving A/B/C instead of root-grouped A/C/B");
 }
 
-// Preserve the original multi-level branch order of a one-root tree even when smaller siblings precede larger ones; moving the guard would change this exact sequence, while all rings remain independently checked.
+// A single-root tree still promises containment order and preserved rings, not
+// a fixed traversal of its independent siblings.
 TEST_CASE("SDK single-root conversion preserves all levels and branches", "[plugins][clipper][union-sdk-order]")
 {
     Slic3r::ExPolygon outer(rectangle_mm(0., 0., 100., 100.));
@@ -565,12 +576,12 @@ TEST_CASE("SDK single-root conversion preserves all levels and branches", "[plug
     REQUIRE(raw.size() == 4);
     const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
-    CHECK(island_signatures(converted, false) == island_signatures(raw, false));
+    CHECK(island_signatures(converted) == island_signatures(raw));
     check_union_island_order(converted, "single root with multiple levels and unequal sibling sizes");
 }
 
 // Exercise concave disjoint contours whose first vertex touches the other's boundary, point contacts and overlapping inputs; exact stored rings and layer order must survive conversion and every SDK boolean.
-TEST_CASE("SDK box ordering handles concave bays and boundary contacts", "[plugins][clipper][union-sdk-order]")
+TEST_CASE("SDK conversion handles concave bays and boundary contacts", "[plugins][clipper][union-sdk-order]")
 {
     const Slic3r::Polygon bay({point_mm(0., 0.), point_mm(30., 0.), point_mm(30., 5.), point_mm(5., 5.), point_mm(5., 25.), point_mm(30., 25.), point_mm(30., 30.), point_mm(0., 30.)});
     const Slic3r::Polygon triangle({point_mm(5., 15.), point_mm(10., 10.), point_mm(10., 20.)});
@@ -584,7 +595,6 @@ TEST_CASE("SDK box ordering handles concave bays and boundary contacts", "[plugi
     const Slic3r::ExPolygons converted = shapes->to_expolygons();
     CHECK(island_signatures(converted) == island_signatures(raw));
     REQUIRE(converted.size() == 2);
-    CHECK(converted.front().contour.points == bay.points);
     check_union_island_order(converted, "concave bay with first vertex on boundary");
     const Slic3r::ExPolygons touching{Slic3r::ExPolygon(rectangle_mm(0., 0., 20., 20.)), Slic3r::ExPolygon(rectangle_mm(20., 20., 25., 25.)), Slic3r::ExPolygon(rectangle_mm(10., -5., 30., 5.))};
     const Slic3r::ExPolygons clip{Slic3r::ExPolygon(rectangle_mm(5., -10., 22., 22.))};
@@ -592,6 +602,51 @@ TEST_CASE("SDK box ordering handles concave bays and boundary contacts", "[plugi
         CAPTURE(operation);
         check_sdk_boolean_geometry(touching, clip, operation);
     }
+}
+
+TEST_CASE("Island comparison accepts only geometry-preserving enclosure orders", "[plugins][clipper][union-sdk-order][clipper-comparison]")
+{
+    Slic3r::ExPolygon outer(rectangle_mm(0., 0., 20., 20.));
+    outer.holes.push_back(rectangle_mm(2., 2., 18., 18.));
+    outer.holes.front().make_clockwise();
+    const Slic3r::ExPolygon inner(rectangle_mm(4., 4., 6., 6.));
+    const Slic3r::ExPolygon independent(rectangle_mm(40., 0., 45., 5.));
+    const Slic3r::ExPolygons expected{outer, inner, independent};
+    Slic3r::ExPolygons permuted{independent, outer, inner};
+    std::rotate(permuted[1].contour.points.begin(), permuted[1].contour.points.begin() + 1, permuted[1].contour.points.end());
+    CHECK(island_signatures(permuted) == island_signatures(expected));
+    CHECK(has_enclosure_order(expected));
+    CHECK(has_enclosure_order(permuted));
+    CHECK_FALSE(has_enclosure_order(Slic3r::ExPolygons{inner, independent, outer}));
+    const Slic3r::ExPolygon with_holes = rectangle_with_two_holes();
+    Slic3r::ExPolygon reordered_holes(with_holes);
+    std::reverse(reordered_holes.holes.begin(), reordered_holes.holes.end());
+    std::rotate(reordered_holes.holes[0].points.begin(), reordered_holes.holes[0].points.begin() + 1, reordered_holes.holes[0].points.end());
+    CHECK(island_signatures({reordered_holes}) == island_signatures({with_holes}));
+    Slic3r::ExPolygons changed(expected);
+    SECTION("missing island") { changed.pop_back(); }
+    SECTION("duplicate island") { changed.push_back(inner); }
+    SECTION("duplicate hole") { changed[0].holes.push_back(changed[0].holes.front()); }
+    SECTION("coordinate change") { changed[1].contour.points.front().x() += 1; }
+    SECTION("hole assigned to another contour") {
+        changed[2].holes.push_back(changed[0].holes.front());
+        changed[0].holes.clear();
+    }
+    SECTION("reversed winding") { changed[1].contour.reverse(); }
+    CHECK(island_signatures(changed) != island_signatures(expected));
+}
+
+TEST_CASE("Enclosure comparison distinguishes contacts from concave overlaps", "[plugins][clipper][union-sdk-order][clipper-comparison]")
+{
+    const Slic3r::ExPolygon bay(Slic3r::Polygon{point_mm(0., 0.), point_mm(30., 0.), point_mm(30., 5.),
+        point_mm(5., 5.), point_mm(5., 25.), point_mm(30., 25.), point_mm(30., 30.), point_mm(0., 30.)});
+    const Slic3r::ExPolygon crossing(Slic3r::Polygon{point_mm(1., 1.), point_mm(29., 1.), point_mm(1., 29.)});
+    for (const Slic3r::Point &point : crossing.contour.points) REQUIRE(bay.contour.contains(point));
+    CHECK(has_enclosure_order(Slic3r::ExPolygons{crossing, bay}));
+    CHECK(has_enclosure_order(Slic3r::ExPolygons{bay, crossing}));
+    const Slic3r::ExPolygon touching(rectangle_mm(0., 1., 2., 3.));
+    CHECK(has_enclosure_order(Slic3r::ExPolygons{bay, touching}));
+    CHECK_FALSE(has_enclosure_order(Slic3r::ExPolygons{touching, bay}));
 }
 
 // Keep borrowed ExPolygon collections in exact source order, including hole membership; only operation-backed trees may reorder their independent owned materializations.

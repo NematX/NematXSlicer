@@ -3176,7 +3176,7 @@ TEST_CASE("Exporter startup without the built-in exporter", "[.][exporter-startu
 // Start a second test process without the built-in exporter, since the exporter list is fixed once the runtime starts.
 // Boost.Process is already part of the Boost used by the project, starts the executable without a shell (no quoting
 // rules), and boost::dll finds the running executable on every platform. The child inherits the working directory,
-// gets one extra environment variable, and is killed if it does not finish within the delay.
+// gets its probe flag but not the parent's timing destination, and is killed if it does not finish within the delay.
 TEST_CASE("An unavailable default exporter is never replaced by another provider", "[plugins][gcode][exporter]")
 {
     ScopedTestDirectory directory;
@@ -3184,9 +3184,12 @@ TEST_CASE("An unavailable default exporter is never replaced by another provider
     namespace bp = boost::process;
     // Keep the native (wide on Windows) path: a narrow conversion would break Unicode installation folders.
     const boost::filesystem::path program = boost::dll::program_location();
+    bp::environment environment = boost::this_process::environment();
+    environment.erase("SLIC3R_TEST_TIMINGS");
+    environment["SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED"] = "1";
     bp::child child(bp::exe = program,
                     bp::args = {"Exporter startup without the built-in exporter"},
-                    bp::env["SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED"] = "1",
+                    bp::env = environment,
                     (bp::std_out & bp::std_err) > log);
     const bool finished = child.wait_for(std::chrono::seconds(300));
     if (!finished)
@@ -6098,9 +6101,12 @@ TEST_CASE("Bambu rejects an active PNG provider without image capability", "[plu
     if (std::getenv("SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG") == nullptr) {
         ScopedTestDirectory directory;
         const boost::filesystem::path log = directory.path() / "png-capability-child.log";
+        boost::process::environment environment = boost::this_process::environment();
+        environment.erase("SLIC3R_TEST_TIMINGS");
+        environment["SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG"] = "1";
         boost::process::child child(boost::process::exe = boost::dll::program_location(),
             boost::process::args = {"Bambu rejects an active PNG provider without image capability", "-r", "compact"},
-            boost::process::env["SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG"] = "1",
+            boost::process::env = environment,
             (boost::process::std_out & boost::process::std_err) > log);
         child.wait();
         const std::string output = read_binary_file(log);
