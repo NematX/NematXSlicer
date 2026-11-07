@@ -34,6 +34,16 @@ Distances use scaled coordinate units.
     // storage is the caller's storage; view is a live API ExPolygon.
     auto inset = clipper::shrink(storage, view, 100.);
     auto editable = clipper::from_expolygon_view(view);
+
+The Polygons union, offset and shrink helpers use ClipperOperand operations.
+The ExPolygons boolean and offset adapters instead call API operations that
+return geometry collections in core ring, vertex and collection order.
+simplify leaves its input unchanged and reduces copied closed rings,
+reverses those whose orientation changed, and only then unions them to rebuild
+topology if a reversal occurred. Variable inner offsets inset the filled area:
+the contour shrinks and holes grow, and the result may split or disappear.
+diff_pl requires a nonempty mask: with an empty mask the host copies subject
+paths directly, whereas the core Clipper operation may reorder them.
 */
 
 #include <algorithm>
@@ -51,6 +61,27 @@ namespace clipper {
 using namespace polygon_work;
 
 static constexpr const double DefaultMiterLimit = 3.;
+
+// Copy ring points into a mutable API polygon without moving a source ring.
+inline void copy_ring(polygon_handle *destination, const Polygon &source) {
+    multipoint_handle *points = polygon_as_multipoint(destination);
+    multipoint_clear(points);
+    for (const Point &point : source.points) multipoint_push_back(points, c_point{point.x(), point.y()});
+}
+
+// Materialize work polygons in caller storage, retaining every ring vertex and its order.
+inline StoredExPolygonCollection to_stored_expolygons(storage_handle *storage, const ExPolygons &source) {
+    StoredExPolygonCollection stored(storage);
+    expolygons_resize(stored.mutable_handle(), uint32_t(source.size()));
+    for (size_t i = 0; i < source.size(); ++i) {
+        expolygon_handle *destination = expolygons_at(stored.mutable_handle(), uint32_t(i));
+        copy_ring(expolygon_contour(destination), source[i].contour);
+        expolygon_holes_resize(destination, uint32_t(source[i].holes.size()));
+        for (size_t h = 0; h < source[i].holes.size(); ++h)
+            copy_ring(expolygon_hole_at(destination, uint32_t(h)), source[i].holes[h]);
+    }
+    return stored;
+}
 
 // Copy all API ring points into an owned work point array in source order.
 inline Points from_polygon_view(const slic3r_api::Polygon &polygon)
@@ -143,6 +174,166 @@ inline ExPolygons union_ex(storage_handle *storage, const Polygons &polygons)
     return from_expolygon_collection_view(collection.readonly());
 }
 
+// Run the native union on work ExPolygons, preserving its ordered contour/hole result.
+inline ExPolygons union_ex(storage_handle *storage, const ExPolygons &polygons) {
+    const Polygons rings = polygon_work::to_polygons(polygons);
+    StoredPolygonCollection stored = to_stored_polygons(storage, rings);
+    StoredExPolygonCollection result = slic3r_api::clipper_union_ex(storage, stored.readonly(), CLIPPER_FILL_NONZERO);
+    return from_expolygon_collection_view(result.readonly());
+}
+
+// Union two work collections after concatenating their rings into the subject.
+inline ExPolygons union_ex(storage_handle *storage, const ExPolygons &first, const ExPolygons &second) {
+    ExPolygons combined = first;
+    combined.insert(combined.end(), second.begin(), second.end());
+    return union_ex(storage, combined);
+}
+
+// Offset work ExPolygons using the native API; local Stored* objects free the temporary handles.
+inline ExPolygons offset_ex(storage_handle *storage, const ExPolygons &polygons, double delta) {
+    StoredExPolygonCollection stored = to_stored_expolygons(storage, polygons);
+    StoredExPolygonCollection result = slic3r_api::clipper_offset_ex(storage, stored.readonly(), delta, CLIPPER_JOIN_MITER, 3.);
+    return from_expolygon_collection_view(result.readonly());
+}
+
+// Offset one work ExPolygon using the same native collection operation.
+inline ExPolygons offset_ex(storage_handle *storage, const ExPolygon &polygon, double delta) {
+    return offset_ex(storage, ExPolygons{polygon}, delta);
+}
+
+// Subtract work collections without a safety offset, preserving native ring and island order.
+inline ExPolygons diff_ex(storage_handle *storage, const ExPolygons &subject, const ExPolygons &clip) {
+    StoredExPolygonCollection stored_subject = to_stored_expolygons(storage, subject);
+    StoredExPolygonCollection stored_clip = to_stored_expolygons(storage, clip);
+    StoredExPolygonCollection result = slic3r_api::clipper_diff_ex(storage, stored_subject.readonly(), stored_clip.readonly());
+    return from_expolygon_collection_view(result.readonly());
+}
+
+// Subtract a nonempty collection of filled areas in one native batch, retaining native path and point order.
+inline Polylines diff_pl(storage_handle *storage, const Polylines &subject, const ExPolygons &clip) {
+    assert(!clip.empty());
+    StoredPolylineCollection stored_subject(storage);
+    for (const Polyline &path : subject) {
+        StoredPolyline stored_path(storage);
+        for (const Point &point : path.points)
+            stored_path.push_back(c_point{point.x(), point.y()});
+        stored_subject.push_back_move(std::move(stored_path));
+    }
+    StoredExPolygonCollection stored_clip = to_stored_expolygons(storage, clip);
+    StoredPolylineCollection result = slic3r_api::clipper_diff_polylines_expolygons(
+        storage, stored_subject.readonly(), stored_clip.readonly());
+    Polylines out;
+    for (uint32_t i = 0; i < result.size(); ++i) {
+        Polyline path;
+        const slic3r_api::Polyline view = result.readonly().at(i);
+        for (uint32_t j = 0; j < view.size(); ++j)
+            path.points.emplace_back(view.at(j));
+        out.push_back(std::move(path));
+    }
+    return out;
+}
+
+// Subtract one work ExPolygon from another by delegating to the collection overload.
+inline ExPolygons diff_ex(storage_handle *storage, const ExPolygon &subject, const ExPolygon &clip) {
+    return diff_ex(storage, ExPolygons{subject}, ExPolygons{clip});
+}
+
+// Intersect work collections without a safety offset, preserving the native result order.
+inline ExPolygons intersection_ex(storage_handle *storage, const ExPolygons &subject, const ExPolygons &clip) {
+    StoredExPolygonCollection stored_subject = to_stored_expolygons(storage, subject);
+    StoredExPolygonCollection stored_clip = to_stored_expolygons(storage, clip);
+    StoredExPolygonCollection result = slic3r_api::clipper_intersection_ex(storage, stored_subject.readonly(), stored_clip.readonly());
+    return from_expolygon_collection_view(result.readonly());
+}
+
+// Inset the filled region: shrink its CCW contour and grow its CW holes, with miter limit 2.0.
+// Supply contour then hole delta vectors, with one finite value <= 0 per vertex in scaled units.
+inline ExPolygons variable_offset_inner_ex(storage_handle *storage, const ExPolygon &polygon,
+    const std::vector<std::vector<float>> &deltas) {
+    assert(deltas.size() == polygon.holes.size() + 1);
+    assert(deltas.front().size() == polygon.contour.size());
+    for (size_t i = 0; i < polygon.holes.size(); ++i)
+        assert(deltas[i + 1].size() == polygon.holes[i].size());
+    StoredExPolygonCollection stored = to_stored_expolygons(storage, ExPolygons{polygon});
+    std::vector<float> flat;
+    for (const std::vector<float> &ring : deltas) flat.insert(flat.end(), ring.begin(), ring.end());
+    StoredExPolygonCollection result = slic3r_api::clipper_variable_offset_inner_ex(
+        storage, stored.readonly().at(0), flat.data(), uint32_t(flat.size()));
+    return from_expolygon_collection_view(result.readonly());
+}
+
+// Expand CCW rings and shrink CW rings by a positive delta, retaining native vertices and order.
+inline Polygons expand(storage_handle *storage, const Polygons &polygons, double delta) {
+    StoredPolygonCollection stored = to_stored_polygons(storage, polygons);
+    StoredPolygonCollection result = slic3r_api::clipper_expand(storage, stored.readonly(), delta);
+    Polygons out;
+    out.reserve(result.readonly().size());
+    for (uint32_t i = 0; i < result.readonly().size(); ++i) {
+        Polygon polygon;
+        polygon.points = from_polygon_view(result.readonly().at(i));
+        out.push_back(std::move(polygon));
+    }
+    return out;
+}
+
+// Compute the signed area with ClipperLib::Area's double arithmetic and accumulation order.
+inline double orientation_area(const Polygon &polygon) {
+    const int size = int(polygon.size());
+    if (size < 3) return 0.;
+    double area = 0.;
+    for (int i = 0, j = size - 1; i < size; ++i) {
+        area += (double(polygon[j].x()) + polygon[i].x()) * (double(polygon[j].y()) - polygon[i].y());
+        j = i;
+    }
+    return -area * 0.5;
+}
+
+// Simplify a contour with non-negative area and clockwise holes; drop rings with fewer than three vertices.
+// Reverse changed orientations, then rebuild topology by union only if a reversal occurred.
+inline ExPolygons simplify(storage_handle *storage, const ExPolygon &polygon, coord_t tolerance) {
+    assert(polygon.contour.size() < 3 || orientation_area(polygon.contour) >= 0.);
+    for (const Polygon &hole : polygon.holes) assert(orientation_area(hole) < 0.);
+    ExPolygons out{polygon};
+    bool need_union = false;
+    out.front().contour.douglas_peucker(tolerance);
+    if (out.front().contour.size() < 3) out.clear();
+    else {
+        if (orientation_area(out.front().contour) < 0.) {
+            out.front().contour.reverse();
+            need_union = true;
+        }
+        for (size_t i = 0; i < out.front().holes.size(); ++i) {
+            Polygon &hole = out.front().holes[i];
+            assert(hole.size() < 3 || orientation_area(hole) < 0.);
+            hole.douglas_peucker(tolerance);
+            if (hole.size() < 3) {
+                out.front().holes.erase(out.front().holes.begin() + ptrdiff_t(i));
+                --i;
+            } else if (orientation_area(hole) >= 0.) {
+                hole.reverse();
+                need_union = true;
+            }
+        }
+    }
+    // Reversed rings require rebuilding their filled-area topology before final validation.
+    if (need_union) {
+        out = union_ex(storage, out);
+        StoredExPolygonCollection stored = to_stored_expolygons(storage, out);
+        stored.ensure_valid(tolerance);
+        out = from_expolygon_collection_view(stored.readonly());
+    }
+    return out;
+}
+
+// Test path containment by checking that the native difference leaves no open paths.
+inline bool contains(storage_handle *storage, const ExPolygon &polygon, const Polyline &path) {
+    StoredPolyline line(storage);
+    for (const Point &point : path.points) line.push_back(c_point{point.x(), point.y()});
+    StoredExPolygonCollection stored = to_stored_expolygons(storage, ExPolygons{polygon});
+    StoredPolylineCollection result = slic3r_api::clipper_diff_polyline_expolygons(storage, line.readonly(), stored.readonly());
+    return result.empty();
+}
+
 // Offset closed work rings by delta using the supplied join style and miter limit; return owned rings.
 inline Polygons offset(storage_handle *storage, const Polygons &polygons, double delta,
                        clipper_join_type_t join_type = CLIPPER_JOIN_MITER, double miter_limit = 3.)
@@ -194,6 +385,13 @@ inline BoundingBox get_extents(const ExPolygon &expolygon) {
     return out;
 }
 inline BoundingBox get_extents(const Polyline &polyline) { return BoundingBox(polyline.points); }
+
+// Measure all outer contours; holes cannot enlarge the extent of valid ExPolygons.
+inline BoundingBox get_extents(const ExPolygons &polygons) {
+    BoundingBox out;
+    for (const ExPolygon &polygon : polygons) out.merge(polygon.contour.points);
+    return out;
+}
 
 // Test whether the middle point repeats a neighbour or nearly retraces a collinear segment.
 static inline bool is_stick(const Point &p1, const Point &p2, const Point &p3)
