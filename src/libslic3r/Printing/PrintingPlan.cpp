@@ -13,7 +13,6 @@
 #include <memory>
 #include <utility>
 
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -222,19 +221,14 @@ expensive travel optimizer.
 size_t find_polyline_point_index(const ArcPolyline &polyline, const Point &point);
 
 /*
-Move all children out of entity while preserving the concrete node object.
-
-ExtrusionEntityCollection has an entity cache, so collections must be drained
-through release(). Plain ExtrusionEntity nodes can move their child vector
-directly because they have no additional cache.
+Move all children out of entity while preserving child identities and the parent
+object. Native compatibility views revalidate against the owned storage on read.
 */
 ExtrusionEntity::Children release_all_children(ExtrusionEntity &entity);
 
 /*
-Append one owned child to entity and refresh any collection cache.
-
-This is the inverse operation of release_all_children() and keeps collection
-nodes consistent after ordering or loop rotation.
+Append one owned child without changing its identity or the parent object.
+Borrowed compatibility views are reacquired after this structural mutation.
 */
 void append_owned_child(ExtrusionEntity &entity, ExtrusionEntityUPtr &&child);
 
@@ -1225,13 +1219,6 @@ ExtrusionEntity::Children release_all_children(ExtrusionEntity &entity)
 {
     ExtrusionEntity::Children out;
 
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&entity)) {
-        out.reserve(collection->child_count());
-        while (collection->child_count() > 0)
-            out.push_back(collection->release(0));
-        return out;
-    }
-
     ExtrusionEntity::Children &children = entity.children();
     out = std::move(children);
     children.clear();
@@ -1242,11 +1229,6 @@ void append_owned_child(ExtrusionEntity &entity, ExtrusionEntityUPtr &&child)
 {
     if (!child)
         return;
-
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&entity)) {
-        collection->append(std::move(child));
-        return;
-    }
 
     entity.append_child(std::move(child));
 }
@@ -1347,7 +1329,7 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
         if (!region_island.has_extrusion(role))
             continue;
 
-        const ExtrusionEntityCollection &source_root = region_island.extrusion(role);
+        const ExtrusionEntity &source_root = region_island.extrusion(role);
 
         /*
         Each role bucket becomes its own PrintingExtrusion. Keeping role buckets

@@ -1,3 +1,4 @@
+
 #include <catch2/catch.hpp>
 
 #include "perimeter_test_helpers.hpp"
@@ -16,6 +17,7 @@
 #include "libslic3r/Api/internal/LayerIslandAccess.hpp"
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_post_infill.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_post_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_pre_perimeter.h"
@@ -30,6 +32,20 @@
 #include "libslic3r/Steps/StepPostPerimeterGeneration.hpp"
 #include "libslic3r/Steps/StepPrepareForPeriemters.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
+
+/* Exercise plugin lifecycle, mutable step outputs and direct perimeter publication.
+   Recording plugins run on small sliced prints and inspect output after callbacks
+   return. Direct publication replaces a whole bucket, retains marked source
+   scopes and child handles, and removes cleared buckets. Source destruction must
+   not invalidate published owned text. This callback service is tested separately
+   from the region-group traversal that computes perimeter and fill domains.
+
+       TEST_CASE -> public step runner -> recording_run()
+           |-- record callbacks, object indexes and step payloads
+           |-- inspect post-perimeter/post-infill mutable outputs
+           `-- check_direct_publication()
+               `-- set_region_island_extrusion(): replace, donate children, then clear
+*/
 
 namespace {
 using namespace Slic3r;
@@ -65,7 +81,15 @@ struct RecordingPluginState
     bool changed_fill_areas = false;
     bool rejected_perimeter_bucket = false;
     int32_t group_priority = 100;
+    size_t direct_publications = 0;
 };
+
+// Exercise replacement and clearing through the generator's public callback on its first island.
+void check_direct_publication(RecordingPluginState &state, const plugin_run_context *run_ctx);
+// Record one plugin run and perform the mutable-output checks selected by the test state.
+void recording_run(void *plugin_ctx, const plugin_run_context *run_ctx);
+
+RecordingPluginState g_direct_publisher = {"test.perimeter.direct_publication", STEP_PERIMETER, 0};
 
 RecordingPluginState g_pre_first  = {"test.pre_perimeter.first", STEP_PRE_PERIMETER, -10};
 RecordingPluginState g_pre_second = {"test.pre_perimeter.second", STEP_PRE_PERIMETER, 20};
@@ -357,6 +381,8 @@ void recording_run(void *plugin_ctx, const plugin_run_context *run_ctx)
         mutate_post_perimeter_outputs(state, run_ctx);
     if (state.mutate_post_infill_outputs)
         mutate_post_infill_outputs(state, run_ctx);
+    if (state.step == STEP_PERIMETER && state.direct_publications == 0)
+        check_direct_publication(state, run_ctx);
 }
 
 int32_t recording_group_priority(void *plugin_ctx)
@@ -574,6 +600,66 @@ ExtrusionPath straight_test_path(ExtrusionRole role, const double y_mm)
     return path;
 }
 
+void check_direct_publication(RecordingPluginState &state, const plugin_run_context *run_ctx)
+{
+    const run_ctx_generate_perimeter *payload = plugin_ctx_as_generate_perimeter(run_ctx);
+    REQUIRE(payload != nullptr);
+    REQUIRE(payload->set_region_island_extrusion != nullptr);
+    layer_region_island_handle *handle = layer_island_get_or_create_region_island(
+        const_cast<layer_island_handle *>(payload->island), nullptr, 0, -1);
+    REQUIRE(handle != nullptr);
+    LayerRegionIsland &island = *reinterpret_cast<LayerRegionIsland *>(handle);
+    ExtrusionEntityCollection &bucket = island.mutable_extrusion(LayerRegionIsland::PERIMETERS);
+    bucket.add_property(ExtrusionPropertySpeed(12.f));
+    bucket.append_child(straight_test_path(ExtrusionRole::Perimeter, -1.));
+    CHECK(bucket.entities().size() == 1);
+
+    // A source scope must follow its children, while the replaced bucket's properties disappear.
+    {
+        ExtrusionEntity source(ExtrusionEntity::Children{}, false, false, false);
+        source.add_property(ExtrusionPropertyCustomGcodeText("source scope"));
+        source.append_child(straight_test_path(ExtrusionRole::Perimeter, 0.));
+        source.append_child(straight_test_path(ExtrusionRole::Perimeter, 1.));
+        const uint64_t source_id = source.get_id();
+        const ExtrusionEntity *first = &source.child(0);
+        const ExtrusionEntity *second = &source.child(1);
+        REQUIRE(payload->set_region_island_extrusion(handle, RAW_EXTRUSION_ROLE_PERIMETER,
+            reinterpret_cast<extrusion_entity_handle *>(&source)) != 0);
+        CHECK(source.empty());
+        CHECK_FALSE(source.has_properties());
+        REQUIRE(bucket.child_count() == 1);
+        CHECK_FALSE(bucket.has_properties());
+        const ExtrusionEntity &scope = bucket.child(0);
+        CHECK(scope.get_id() == source_id);
+        REQUIRE(scope.child_count() == 2);
+        CHECK(&scope.child(0) == first);
+        CHECK(&scope.child(1) == second);
+        CHECK(bucket.entities().front() == &scope);
+    }
+    const ExtrusionEntity &scope = bucket.child(0);
+    const ExtrusionPropertyCustomGcode *text = scope.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(text != nullptr);
+    CHECK(scope.custom_gcode_string(*text) == "source scope");
+
+    // An unmarked transport root donates its children directly, preserving their order and addresses.
+    ExtrusionEntity replacement(ExtrusionEntity::Children{}, true, true, false);
+    replacement.append_child(straight_test_path(ExtrusionRole::Perimeter, 2.));
+    replacement.append_child(straight_test_path(ExtrusionRole::Perimeter, 3.));
+    const ExtrusionEntity *first = &replacement.child(0);
+    const ExtrusionEntity *second = &replacement.child(1);
+    REQUIRE(payload->set_region_island_extrusion(handle, RAW_EXTRUSION_ROLE_PERIMETER,
+        reinterpret_cast<extrusion_entity_handle *>(&replacement)) != 0);
+    CHECK(replacement.empty());
+    REQUIRE(bucket.child_count() == 2);
+    CHECK(bucket.entities()[0] == first);
+    CHECK(bucket.entities()[1] == second);
+
+    // Clearing through the same callback removes the empty bucket rather than leaving a visible shell.
+    REQUIRE(payload->set_region_island_extrusion(handle, RAW_EXTRUSION_ROLE_PERIMETER, nullptr) != 0);
+    CHECK_FALSE(island.has_extrusion(LayerRegionIsland::PERIMETERS));
+    ++state.direct_publications;
+}
+
 const Steps::StepExclusivePluginGroup *find_exclusive_group(const std::vector<Steps::StepExclusivePluginGroup> &groups,
                                                             const char *group_id)
 {
@@ -630,6 +716,25 @@ void run_and_check_object_step(slicing_step_t step,
 }
 
 } // namespace
+
+TEST_CASE("Perimeter publication replaces whole buckets and preserves source scopes",
+          "[plugins][perimeter][steps][publication-host]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    if (orchestrator.get_plugin(g_direct_publisher.id) == nullptr) {
+        plugin_instance instance = {};
+        instance.ctx = &g_direct_publisher;
+        instance.vt = recording_vtable();
+        REQUIRE(orchestrator.register_plugin(instance));
+    }
+    PreparedPerimeterPrint prepared;
+    prepare_cube_print(prepared, perimeter_config({}));
+    g_direct_publisher.direct_publications = 0;
+    ScopedActivePlugins active({g_direct_publisher.id});
+    Steps::StepGeneratePerimeter::run_step(orchestrator, prepared.print);
+    CHECK(g_direct_publisher.direct_publications == 1);
+}
 
 // "Empty perimeter boundary steps" are the pre/post perimeter extension points.
 // They currently do not transform perimeter geometry themselves; their host-side

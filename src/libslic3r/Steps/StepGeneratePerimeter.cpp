@@ -26,7 +26,7 @@
 #include "libslic3r/Api/internal/LayerIslandAccess.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -126,6 +126,53 @@ namespace {
 //       Plugin::run
 // Plugins read sliced islands and region settings. The host writes perimeter trees and infill areas
 // to those islands. Islands run in sequence; callback failures are contained at the C boundary.
+
+/* The normal call flow and the separate direct-publication service are:
+
+       StepGeneratePerimeter::run_step()
+       |-- select the STEP_PERIMETER generator and count sliced islands
+       |-- generator.setup() once, advertising that island count
+       `-- walk print.objects()
+           `-- walk object.layers()
+               `-- walk layer.islands()
+                   `-- run_generator_for_island()
+                       |-- build the borrowed island payload and active callback context
+                       |-- generator.setup_run(); check stop/error state on return
+                       |-- generator.run()
+                       |   |-- run_region_group_callback(), for each requested region set
+                       |   |   |-- use the island slice or the supplied root area
+                       |   |   |-- resolve regions; create/reuse their LayerRegionIsland
+                       |   |   |-- build PerimeterTree with the requested perimeter count
+                       |   |   |-- create_perimeter_generation_modules()
+                       |   |   |   `-- module setup/setup_run/run exposes each module vtable
+                       |   |   |-- call_module_start() once for this region group
+                       |   |   |-- depth-first traversal of pending tree nodes
+                       |   |   |   |-- skip nodes that need no further perimeter
+                       |   |   |   |-- check cancellation and synchronize C node pointers
+                       |   |   |   |-- call_module_before() on the current node
+                       |   |   |   |-- generate_node() emits one depth and returns inner areas
+                       |   |   |   |-- create_children() from perimeter and infill inner areas
+                       |   |   |   |-- synchronize pointers, then call_module_after()
+                       |   |   |   `-- queue the final children, including module changes
+                       |   |   |-- finish started modules with end(), also on early exit
+                       |   |   `-- publish_region_group(), only after successful traversal
+                       |   |       |-- collect_extrusions() recursively preserves tree scopes
+                       |   |       |-- replace the region-island PERIMETERS bucket
+                       |   |       `-- collect_leaf_areas() into the run's two fill domains
+                       |   `-- set_region_island_extrusion_callback(), when requested
+                       |       |-- stage source scopes for the selected generator-owned bucket
+                       |       `-- replace the bucket, or clear it for a null source
+                       |-- check stop/error state after run()
+                       `-- assign_island_outputs(), if a region group was used
+                           |-- validate and write infill_areas and infill_free_areas
+                           `-- store the island slice in perimeter_slices
+
+   Callbacks borrow their handles for the call and contain failures before the
+   C ABI returns. Deferred cancellation/failure is handled at the generator phase
+   boundary. The direct-publication callback is not called by publish_region_group
+   and does not itself compute the island's fill domains. */
+
+// Own one perimeter depth, its generated extrusion and the areas passed to child depths.
 struct PerimeterTreeNode
 {
     explicit PerimeterTreeNode(const ExPolygon &area)
@@ -188,6 +235,17 @@ struct PerimeterTreeNode
         node.child_count = uint32_t(child_nodes.size());
     }
 };
+
+// Consume node outputs into owned groups that preserve perimeter depth and sibling order.
+// The destination must be a distinct Children root under exclusive access; failures may leave sources partly consumed.
+void collect_extrusions(PerimeterTreeNode &node, ExtrusionEntity &out);
+
+// Replace the selected bucket with staged output; a null source clears it.
+// Borrow handles under exclusive access for this call; a successful move leaves the source valid and empty.
+// Return 0 on a stop or contained failure, which may leave the source partly consumed or output already published.
+int32_t set_region_island_extrusion_callback(layer_region_island_handle *region_island_handle,
+                                             raw_extrusion_role role,
+                                             extrusion_entity_handle *extrusion_handle) noexcept;
 
 struct PerimeterTree
 {
@@ -445,26 +503,6 @@ uint32_t requested_perimeter_count(const LayerRegionSetCPtrs &regions)
 
     const int count = (*regions.begin())->region().config().perimeters.value;
     return count <= 0 ? 0 : uint32_t(count);
-}
-
-void collect_extrusions(PerimeterTreeNode &node, ExtrusionEntityCollection &out)
-{
-    // Keep the extrusion publication shaped like the generation tree. Each
-    // PerimeterTreeNode becomes one collection node containing the loops/gap
-    // fill generated for this level, followed by one child collection per
-    // inner area. Later steps can then recover the perimeter depth hierarchy
-    // instead of receiving a flat list of unrelated loops.
-    std::unique_ptr<ExtrusionEntity> group =
-        std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, true, false);
-    append_source_extrusions(*group, node.extrusions);
-    for (std::unique_ptr<PerimeterTreeNode> &child : node.children) {
-        ExtrusionEntityCollection child_group;
-        collect_extrusions(*child, child_group);
-        append_source_extrusions(*group, child_group);
-    }
-
-    if (!group->is_leaf() && group->child_count() > 0)
-        out.append(std::move(group));
 }
 
 void collect_leaf_areas(const PerimeterTreeNode &node,
@@ -986,13 +1024,17 @@ void publish_region_group(PerimeterRunContext &run,
     // Perimeter extrusion goes to the region-island bucket; leaf areas are
     // accumulated on the layer island because later surface generation works
     // from island-level fill domains.
-    ExtrusionEntityCollection perimeters;
+    ExtrusionEntity perimeters(ExtrusionEntity::Children{}, true, true, false);
     perimeters.set_can_sort_reverse(false, false);
     collect_extrusions(tree.root, perimeters);
 
-    ExtrusionEntityCollection &dst = region_island.mutable_extrusion(LayerRegionIsland::PERIMETERS);
-    dst.clear();
-    dst.append_move_from(perimeters);
+    ExtrusionEntity &dst = region_island.mutable_extrusion(LayerRegionIsland::PERIMETERS);
+    dst.children().clear();
+    ExtrusionEntity::Children &dst_children = dst.children();
+    ExtrusionEntity::Children &src_children = perimeters.children();
+    dst_children.reserve(dst_children.size() + src_children.size());
+    dst_children.insert(dst_children.end(), std::make_move_iterator(src_children.begin()), std::make_move_iterator(src_children.end()));
+    src_children.clear();
     region_island.remove_empty_extrusions();
 
     collect_leaf_areas(tree.root, run.infill_areas, run.infill_free_areas);
@@ -1130,12 +1172,12 @@ int32_t set_region_island_extrusion_callback(layer_region_island_handle *region_
 
         // Prepare the consumed entity in scratch storage before changing the
         // published bucket. Exceptions during conversion leave output intact.
-        ExtrusionEntityCollection prepared;
+        ExtrusionEntity prepared(ExtrusionEntity::Children{}, true, true, false);
         if (extrusion_handle != nullptr)
             append_source_extrusions(prepared, *to_extrusion(extrusion_handle));
 
-        ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role_from_raw(role));
-        dst.swap(prepared);
+        ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role_from_raw(role));
+        std::swap(dst, prepared);
         region_island->remove_empty_extrusions();
         return 1;
     } catch (...) {
@@ -1252,6 +1294,21 @@ bool run_generator_for_island(Orchestrator &orchestrator,
     if (perimeter_context.used_region_group)
         assign_island_outputs(island, perimeter_context);
     return perimeter_context.used_region_group;
+}
+
+void collect_extrusions(PerimeterTreeNode &node, ExtrusionEntity &out)
+{
+    std::unique_ptr<ExtrusionEntity> group =
+        std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, true, false);
+    append_source_extrusions(*group, node.extrusions);
+    for (std::unique_ptr<PerimeterTreeNode> &child : node.children) {
+        ExtrusionEntity child_group(ExtrusionEntity::Children{}, true, true, false);
+        collect_extrusions(*child, child_group);
+        append_source_extrusions(*group, child_group);
+    }
+
+    if (!group->is_leaf() && group->child_count() > 0)
+        out.append_child(std::move(group));
 }
 
 } // namespace

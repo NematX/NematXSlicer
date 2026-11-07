@@ -9,14 +9,17 @@
 #include <optional>
 
 #include "libslic3r/DataTreeFwd.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/libslic3r.h"
+
+/* Internal host access for PrintObject's layer profiles, owned layer replacement,
+   instances and auxiliary adhesion cleanup. Callers retain exclusive access to
+   the edited object; this adapter does not provide an external plugin ABI or own
+   borrowed instances. Layer replacement transfers the supplied owned layers.
+*/
 
 namespace Slic3r {
 
 class Layer;
-class ExtrusionEntity;
-class ExtrusionEntityCollection;
 class PrintObject;
 
 namespace ApiInternal {
