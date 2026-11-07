@@ -33,6 +33,8 @@ contours, open atomic composites and event barriers must offer only legal entrie
 without editing geometry, endpoint Z, identities or permissions. Native split
 previews distinguish the rounded input from the exact point they will publish.
 Ordinary-copy tests retain native descendants and distinguish root destruction effects.
+Loop-builder probes reject short polygons before invariant checks and preserve
+borrowed point arrays, while consuming overloads clear all processed inputs.
 */
 
 #include <catch2/catch.hpp>
@@ -1317,6 +1319,34 @@ TEST_CASE("Ordinary root copy destruction distinguishes Children from local geom
             CHECK(source.child_count() == (local_geometry ? 0 : 1));
             const ExtrusionEntity &geometry = local_geometry ? static_cast<const ExtrusionEntity &>(source) : source.child(0);
             CHECK(geometry.polyline_ref().to_polyline().points == expected);
+        }
+    }
+}
+
+// Reject short inputs before the polygon invariant without consuming borrowed points.
+TEST_CASE("Native loop builders ignore polygons with fewer than three vertices", "[plugins][native-fill]")
+{
+    using namespace Slic3r;
+    const ExtrusionAttributes attributes{ExtrusionRole::SolidInfill, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    for (const bool consume : {false, true}) {
+        CAPTURE(consume);
+        // Populate public points directly so constructor checks do not preempt the input filter.
+        Polygons loops(3);
+        loops[1].points = {Point(0, 0)};
+        loops[2].points = {Point(0, 0), Point(1000000, 0)};
+        const std::vector<Points> before{loops[0].points, loops[1].points, loops[2].points};
+        ExtrusionEntityCollection output;
+        if (consume)
+            extrusion_entities_append_loops(output, std::move(loops), ExtrusionAttributes(attributes), false);
+        else
+            extrusion_entities_append_loops(output, loops, ExtrusionAttributes(attributes), false);
+        CHECK(output.child_count() == 0);
+        if (consume) {
+            CHECK(loops.empty());
+        } else {
+            REQUIRE(loops.size() == before.size());
+            for (size_t index = 0; index < loops.size(); ++index)
+                CHECK(loops[index].points == before[index]);
         }
     }
 }

@@ -248,7 +248,7 @@ inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Poly
 inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Polygons &loops, ExtrusionAttributes &&path_attr, bool can_reverse = true) {
     //dst.reserve(dst.size() + loops.size());
     for (Polygon & polygon : loops) {
-        if (polygon.is_valid()) {
+        if (polygon.size() >= 3 && polygon.is_valid()) {
             ExtrusionPath path(path_attr, nullptr, can_reverse);
             path.polyline().append(polygon.points);
             path.polyline().append(path.polyline().front());
@@ -261,7 +261,7 @@ inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Poly
 {
     //dst.reserve(dst.size() + loops.size());
     for (Polygon &polygon : loops) {
-        if (polygon.is_valid()) {
+        if (polygon.size() >= 3 && polygon.is_valid()) {
             ExtrusionPath path(path_attr, nullptr, can_reverse);
             path.polyline().append(std::move(polygon.points));
             path.polyline().append(path.polyline().front());
