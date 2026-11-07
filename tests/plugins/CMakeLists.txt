@@ -66,6 +66,7 @@ add_executable(${_TEST_NAME}_tests
     test_concentric_pattern.cpp
     test_native_extrusion_publication.cpp
     test_native_fill_producers.cpp
+    test_native_medial_producers.cpp
     test_smooth_pattern.cpp
     test_post_full_fill_volume.cpp
     test_rectilinear_edge_grid.cpp

@@ -14,6 +14,28 @@
 #include "clipper.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 
+/* Supply width-bearing centerlines and constant-flow extrusion geometry to thin
+   wall and gap-fill producers. MedialAxis::build() derives and cleans centerlines
+   from the borrowed polygon. unsafe_variable_width() splits their width changes
+   into constructive path values; variable_width() transfers these values into
+   generic owned leaves under one continuous, unsortable, fixed-start sequence.
+   Sequence reversal is independent of each leaf's permissions.
+
+   thin_variable_width() selects envelopes using epsilon-close endpoints without
+   rewriting them. Real contours retain the whole sequence; degenerate returns
+   keep only their surviving path. Thin walls keep a fixed sequence, while gap
+   fill may publish one leaf directly. Generic loop queries still require exact
+   stored XY closure. No legacy loop override supplies an invented endpoint.
+   All partially built outputs stay owned until the final raw-pointer return;
+   allocation failure releases them. Callers own every returned raw pointer.
+
+       MedialAxis::build() -> Voronoi centerlines -> width/length cleanup
+       thin_variable_width() [default tolerance or explicit width tolerance]
+           |-- variable_width() [generic envelope, explicit permissions]
+           |   `-- unsafe_variable_width() [constant-flow path values]
+           `-- classify contour, degenerate return, thin wall or gap fill
+*/
+
 
 namespace Slic3r { namespace Geometry {
 
@@ -2489,12 +2511,6 @@ MedialAxis::build(ThickPolylines& polylines_out)
 
 }
 
-ExtrusionMultiPath variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance, bool can_reverse) {
-    ExtrusionMultiPath temp(unsafe_variable_width(polyline, role, flow, resolution_internal, tolerance));
-    //can reverse the whole multipath, but not each individual path inside.
-    temp.set_can_reverse(can_reverse);
-    return temp;
-}
 ExtrusionPaths
 unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance)
 {
@@ -2799,7 +2815,8 @@ ExtrusionEntitiesPtr
     if (tolerance <= 0)
         tolerance = flow.scaled_width() / 20;
 
-    ExtrusionEntitiesPtr coll;
+    ExtrusionEntityUPtrs owned;
+    owned.reserve(polylines.size());
     for (const ThickPolyline& p : polylines) {
 #if _DEBUG
         for (size_t idx_pt = 1; idx_pt < p.size(); ++idx_pt) {
@@ -2807,58 +2824,73 @@ ExtrusionEntitiesPtr
             assert(p.points[idx_pt - 1].distance_to(p.points[idx_pt]) >= SCALED_EPSILON);
         }
 #endif
-        ExtrusionMultiPath multi_paths = variable_width(p, role, flow, resolution_internal, tolerance, can_reverse);
-        // Append paths to collection.
+        ExtrusionEntity multi_paths = variable_width(p, role, flow, resolution_internal, tolerance, can_reverse);
+        ExtrusionEntity::Children &paths = multi_paths.children();
         if (!multi_paths.empty()) {
 #if _DEBUG
-            for (auto it = std::next(multi_paths.paths().begin()); it != multi_paths.paths().end(); ++it) {
-                assert(it->polyline().size() >= 2);
-                assert(std::prev(it)->polyline().back() == it->polyline().front());
+            for (ExtrusionEntity::Children::const_iterator it = std::next(paths.begin()); it != paths.end(); ++it) {
+                assert((*it)->polyline_ref().size() >= 2);
+                assert((*std::prev(it))->polyline_ref().back() == (*it)->polyline_ref().front());
             }
-            for (auto it = multi_paths.paths().begin(); it != multi_paths.paths().end(); ++it)
-                for (size_t idx_pt = 1; idx_pt < it->size(); ++idx_pt)
-                    assert(!it->polyline().get_point(idx_pt - 1).coincides_with_epsilon(it->polyline().get_point(idx_pt)));
+            for (const ExtrusionEntityUPtr &path : paths)
+                for (size_t idx_pt = 1; idx_pt < path->polyline_ref().size(); ++idx_pt)
+                    assert(!path->polyline_ref().get_point(idx_pt - 1).coincides_with_epsilon(path->polyline_ref().get_point(idx_pt)));
 #endif
-            if (multi_paths.paths().front().first_point().coincides_with_epsilon(multi_paths.paths().back().last_point())) {
+            if (multi_paths.first_point().coincides_with_epsilon(multi_paths.last_point())) {
                 // check if real loop or fluke
                 int nb_points = 0;
-                for (ExtrusionPath &path : multi_paths.paths()) {
-                    nb_points += path.size() -1;
+                for (const ExtrusionEntityUPtr &path : paths) {
+                    nb_points += path->polyline_ref().size() - 1;
                 }
                 if (nb_points > 2) {
-                    // good enough
-                    coll.push_back(new ExtrusionLoop(std::move(multi_paths.paths())));
+                    multi_paths.set_can_sort_reverse(false, false);
+                    multi_paths.set_can_rotate(true);
+                    owned.emplace_back(std::make_unique<ExtrusionEntity>(std::move(multi_paths)));
                 } else {
                     // fluke, not big enough
-                    assert(multi_paths.paths().size() <= 2);
-                    assert(multi_paths.paths().front().size() > 1);
-                    if (multi_paths.paths().front().size() > 2) {
-                        multi_paths.paths().front().polyline().pop_back();
+                    assert(paths.size() <= 2);
+                    assert(paths.front()->polyline_ref().size() > 1);
+                    if (paths.front()->polyline_ref().size() > 2) {
+                        paths.front()->polyline_ref().pop_back();
                     }
-                    coll.push_back(multi_paths.paths().front().clone_move());
+                    owned.emplace_back(std::move(paths.front()));
                 }
             } else {
                 if (role == ExtrusionRole::ThinWall) {
                     //thin walls : avoid to cut them, please.
                     //also, keep the start, as the start should be already in a frontier where possible.
-                    ExtrusionEntityCollection* unsortable_coll = new ExtrusionEntityCollection(std::move(multi_paths.paths()));
-                    unsortable_coll->set_can_sort_reverse(false, false);
-                    //TODO un-reversable multipath ?
-                    coll.push_back(unsortable_coll);
+                    multi_paths.set_can_sort_reverse(false, false);
+                    multi_paths.set_can_rotate(true);
+                    owned.emplace_back(std::make_unique<ExtrusionEntity>(std::move(multi_paths)));
                 } else if (role == ExtrusionRole::GapFill) {
-                    if (multi_paths.size() == 1) {
-                        coll.push_back(multi_paths.paths().front().clone_move());
+                    if (paths.size() == 1) {
+                        owned.emplace_back(std::move(paths.front()));
                     } else {
                         //can reverse but not sort/cut: it's a multipath!
-                        coll.push_back(multi_paths.clone_move());
+                        owned.emplace_back(std::make_unique<ExtrusionEntity>(std::move(multi_paths)));
                     }
                 } else {
-                    coll.push_back(multi_paths.clone_move());
+                    owned.emplace_back(std::make_unique<ExtrusionEntity>(std::move(multi_paths)));
                 }
             }
         }
     }
+    ExtrusionEntitiesPtr coll;
+    coll.reserve(owned.size());
+    for (ExtrusionEntityUPtr &entity : owned)
+        coll.push_back(entity.release());
     return coll;
+}
+
+ExtrusionEntity variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance, bool can_reverse) {
+    ExtrusionPaths paths = unsafe_variable_width(polyline, role, flow, resolution_internal, tolerance);
+    ExtrusionEntity::Children children;
+    children.reserve(paths.size());
+    for (ExtrusionPath &path : paths)
+        children.emplace_back(std::make_unique<ExtrusionEntity>(std::move(static_cast<ExtrusionEntity &>(path))));
+    ExtrusionEntity temp(std::move(children), false, can_reverse, true);
+    temp.set_can_rotate(false);
+    return temp;
 }
 
 } } // namespace Slicer::Geometry
