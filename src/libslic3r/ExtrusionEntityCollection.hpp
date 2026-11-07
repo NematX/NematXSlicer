@@ -71,8 +71,9 @@ public:
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
     ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other);
     ~ExtrusionEntityCollection() override { clear(); }
-    // move all entitites from src into this
-    void append_move_from(ExtrusionEntityCollection &src);
+    // Move source children to the end in order, preserving root properties and child identities.
+    // Both trees require exclusive access; reacquire views after mutation. Local geometry may materialize and failures propagate.
+    void append_move_from(ExtrusionEntity &src);
 
     /// Operator to convert and flatten this collection to a single vector of ExtrusionPaths.
     explicit operator ExtrusionPaths() const;

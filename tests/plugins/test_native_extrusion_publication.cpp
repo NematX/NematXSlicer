@@ -26,6 +26,9 @@
    The complete-node swap probe separately checks transferred resource buffers,
    their next IDs, live child handles and warmed pointer views. It is distinct
    from content-only publication swaps, which retain the outer identities.
+   Clear, append and replace traces retain each root's own property scopes while
+   transferring or releasing children. Copy/move controls distinguish independent
+   owned copies from retained child handles, including after source destruction.
 
        TEST_CASE
            |-- make_leaf() -> mark_scope() [seed exact owned metadata]
@@ -77,6 +80,130 @@ void repopulate(ExtrusionEntityCollection &root);
 void record(const std::string &name, const Trace &trace, size_t expected_snapshots);
 
 } // namespace
+
+TEST_CASE("Publication primitives retain scopes except for whole-node swaps",
+          "[plugins][extrusion][native-publication]")
+{
+    for (size_t index = 0; index < scenarios.size(); ++index) {
+        const Scenario &scenario = scenarios[index];
+        CAPTURE(scenario.name);
+        const Profile &destination_profile = profiles[index % profiles.size()];
+        const Profile &source_profile = profiles[index == 9 ? 0 : (index + 1) % profiles.size()];
+        std::unique_ptr<ExtrusionEntityCollection> destination = make_root(100, scenario.destination_full,
+            destination_profile, false);
+        std::unique_ptr<ExtrusionEntityCollection> source = make_root(200, scenario.source_full,
+            source_profile, index == 3 || index == 9);
+        const ExtrusionEntity *destination_address = destination.get();
+        const uint64_t destination_id = destination->get_id();
+        const uint64_t source_id = source->get_id();
+        const std::string destination_text = scope_text(*destination);
+        const std::string source_text = scope_text(*source);
+        const ExtrusionEntitiesPtr destination_children = child_addresses(*destination);
+        const ExtrusionEntitiesPtr source_children = child_addresses(*source);
+        Trace trace;
+        trace.out.imbue(std::locale::classic());
+        trace.out << std::hexfloat;
+        snapshot("destination-before", *destination, trace);
+        snapshot("source-before", *source, trace);
+        ExtrusionEntity &borrowed_source = *source;
+        if (index == 3) {
+            CHECK(source->is_continuous());
+            CHECK_FALSE(source->can_sort());
+        } else if (index == 9) {
+            CHECK_FALSE(source->is_continuous());
+            CHECK(source->can_sort());
+        }
+
+        if (scenario.operation == Operation::Clear)
+            destination->clear();
+        else if (scenario.operation == Operation::Append) {
+            // The prefilled append mirrors the native infill caller's reservation before publication.
+            if (scenario.destination_full)
+                destination->children().reserve(destination->child_count() + source->child_count());
+            destination->append_move_from(borrowed_source);
+        } else if (scenario.operation == Operation::Swap)
+            destination->swap(*source);
+        else {
+            destination->clear();
+            destination->append_move_from(borrowed_source);
+        }
+        const std::string &published_text = scenario.operation == Operation::Swap ? source_text : destination_text;
+        CHECK(destination.get() == destination_address);
+        CHECK(scope_text(*destination) == published_text);
+        CHECK(scope_text(*source) == (scenario.operation == Operation::Swap ? destination_text : source_text));
+        const ExtrusionEntitiesPtr published = child_addresses(*destination);
+        if (scenario.operation == Operation::Swap) {
+            CHECK(destination->get_id() == source_id);
+            CHECK(source->get_id() == destination_id);
+            CHECK(published == source_children);
+            CHECK(child_addresses(*source) == destination_children);
+        } else {
+            CHECK(destination->get_id() == destination_id);
+            CHECK(source->get_id() == source_id);
+            if (scenario.operation == Operation::Clear) {
+                CHECK(published.empty());
+                CHECK(child_addresses(*source) == source_children);
+            } else {
+                ExtrusionEntitiesPtr expected;
+                if (scenario.operation == Operation::Append)
+                    expected = destination_children;
+                expected.insert(expected.end(), source_children.begin(), source_children.end());
+                CHECK(published == expected);
+                CHECK(source->child_count() == 0);
+            }
+        }
+        trace.out << "addresses:" << (destination.get() == destination_address) << ':'
+                  << (scenario.operation == Operation::Swap ? published == source_children :
+                      scenario.operation == Operation::Clear ? published.empty() : source->child_count() == 0) << ';';
+        snapshot("destination-after", *destination, trace);
+        snapshot("source-after", *source, trace);
+        source.reset();
+        CHECK(scope_text(*destination) == published_text);
+        snapshot("destination-survives-source", *destination, trace);
+        repopulate(*destination);
+        CHECK(scope_text(*destination) == published_text);
+        CHECK_FALSE(destination->is_continuous());
+        CHECK(destination->is_collection());
+        if (scenario.operation == Operation::Swap ? source_profile.sort : destination_profile.sort)
+            CHECK(destination->can_sort());
+        else
+            CHECK_FALSE(destination->can_sort());
+        snapshot("destination-permissions-exposed", *destination, trace);
+        record(scenario.name, trace, 6);
+    }
+
+    for (const bool move : {false, true}) {
+        CAPTURE(move);
+        std::unique_ptr<ExtrusionEntityCollection> source = make_root(300, true, profiles[2], false);
+        const ExtrusionEntitiesPtr original_children = child_addresses(*source);
+        const uint64_t identity = source->get_id();
+        const std::string text = scope_text(*source);
+        Trace trace;
+        trace.out.imbue(std::locale::classic());
+        trace.out << std::hexfloat;
+        snapshot("source-before", *source, trace);
+        std::unique_ptr<ExtrusionEntityCollection> destination = move ?
+            std::make_unique<ExtrusionEntityCollection>(std::move(*source)) :
+            std::make_unique<ExtrusionEntityCollection>(*source);
+        CHECK(destination->get_id() == identity);
+        CHECK(scope_text(*destination) == text);
+        const ExtrusionEntitiesPtr copied_children = child_addresses(*destination);
+        REQUIRE(copied_children.size() == original_children.size());
+        for (size_t index = 0; index < copied_children.size(); ++index) {
+            CHECK((copied_children[index] == original_children[index]) == move);
+            CHECK(copied_children[index]->get_id() == original_children[index]->get_id());
+        }
+        trace.out << "move:" << move << ":same-address:" << (copied_children == original_children) << ';';
+        snapshot("destination-created", *destination, trace);
+        snapshot("source-after", *source, trace);
+        source.reset();
+        CHECK(scope_text(*destination) == text);
+        snapshot("destination-survives-source", *destination, trace);
+        repopulate(*destination);
+        snapshot("destination-permissions-exposed", *destination, trace);
+        record(move ? "control-move" : "control-copy", trace, 5);
+    }
+}
 
 TEST_CASE("Publication swaps transfer owned property buffers and future resource IDs",
           "[plugins][extrusion][native-publication]")

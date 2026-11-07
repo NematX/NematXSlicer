@@ -22,11 +22,15 @@
    prefixes flattened children. Materializing local destination geometry and
    rebuilding groups retain the legacy flattening contract, including its known
    loss of inherited group properties; this is not canonical plan acquisition.
+   append_move_from() transfers the source's owned children after the destination
+   prefix. Root properties and identities stay in place; local source geometry
+   first becomes an owned child. Both trees require exclusive access throughout.
 
        entities() -> EntitiesCacheLock -> rebuild_entities_cache()
        reverse() -> reverse owned children and order -> invalidate pointer cache
        swap() -> exchange properties/resources and node state -> invalidate both caches
        flatten(preserve_ordering, out) -> FlatenEntities -> append wrapper or prefix children
+       append_move_from() -> materialize children -> reserve -> transfer in source order
 */
 
 #include <algorithm>
@@ -137,7 +141,7 @@ ExtrusionEntityCollection& ExtrusionEntityCollection::operator=(ExtrusionEntityC
     return *this;
 }
 
-void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
+void ExtrusionEntityCollection::append_move_from(ExtrusionEntity &src)
 {
     Children &dst = this->children();
     Children &src_children = src.children();
