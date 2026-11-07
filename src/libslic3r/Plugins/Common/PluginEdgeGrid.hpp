@@ -35,6 +35,12 @@ query remains available.
     grid.create(rings, 25);
     auto nearest = grid.closest_point_signed_distance({50, 50}, 100);
     // Keep rings alive and unchanged until queries finish.
+
+Box queries subtract the grid origin and one unit from the upper coordinate
+bound, then divide toward zero and clip to inclusive cell limits. Thus a box
+just below the origin may include the first cell; this is not an exact geometric
+filter. The returned box keeps its input defined flag. Visitors receive cells
+in row order, visit none for inverted limits, and stop on false.
 */
 
 #include <algorithm>
@@ -138,6 +144,51 @@ public:
     void create(const Polygons &polygons, coord_t resolution);
     void create(const std::vector<const Polygon*> &polygons, coord_t resolution);
     void create(const slic3r_api::ExPolygon &expoly, coord_t resolution);
+
+    // Rasterize the contour and holes of a work ExPolygon as closed rings; the grid borrows their point arrays.
+    void create(const polygon_work::ExPolygon &expoly, coord_t resolution) {
+        ContourViews contours;
+        contours.reserve(1 + expoly.holes.size());
+        contours.emplace_back(expoly.contour.points);
+        for (const Polygon &hole : expoly.holes) contours.emplace_back(hole.points);
+        this->create(contours, resolution, false);
+    }
+
+    // Convert coordinate bounds to clipped inclusive cell limits by division toward zero.
+    // Near-origin negative bounds may include cell zero; retain the input defined flag.
+    BoundingBox get_cells_intersecting_box(BoundingBox box) const {
+        box.min -= m_bbox.min;
+        box.max -= m_bbox.min + Point(1, 1);
+        box.min = box.min / m_resolution;
+        box.max = box.max / m_resolution;
+        box.min.x() = std::max<coord_t>(box.min.x(), 0);
+        box.min.y() = std::max<coord_t>(box.min.y(), 0);
+        box.max.x() = std::min<coord_t>(box.max.x(), coord_t(m_cols) - 1);
+        box.max.y() = std::min<coord_t>(box.max.y(), coord_t(m_rows) - 1);
+        return box;
+    }
+
+    // Visit candidate cells in row order; inverted limits visit nothing, and false stops traversal.
+    template<typename VISITOR> void visit_cells_intersecting_box(BoundingBox box, VISITOR &visitor) const {
+        box = this->get_cells_intersecting_box(box);
+        for (coord_t row = box.min.y(); row <= box.max.y(); ++row)
+            for (coord_t col = box.min.x(); col <= box.max.x(); ++col)
+                if (!visitor(row, col)) return;
+    }
+
+    // Report whether an in-range cell references at least one contour segment.
+    bool cell_has_data(coord_t row, coord_t col) const {
+        assert(row >= 0 && size_t(row) < m_rows);
+        assert(col >= 0 && size_t(col) < m_cols);
+        const Cell &cell = m_cells[row * m_cols + col];
+        return cell.begin != cell.end;
+    }
+
+    // Copy the endpoints of a referenced contour segment into an integer line.
+    Line line(const std::pair<size_t, size_t> &index) const {
+        const Contour &contour = m_contours[index.first];
+        return Line(Point(contour.segment_start(index.second)), Point(contour.segment_end(index.second)));
+    }
 
     // Borrow the indexed contour views for the lifetime of this grid state.
     const std::vector<Contour> &contours() const { return m_contours; }

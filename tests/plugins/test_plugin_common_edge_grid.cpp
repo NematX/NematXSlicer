@@ -22,6 +22,7 @@ Tests
 |-- matching work contours: compare rasterization and line traversal
 |-- API ExPolygon: compare indexed contour segments
 `-- signed closest points: compare selected edges, distances and parameters
+Box traversal additionally checks clipped indices, empty cells and early stopping.
 */
 
 namespace {
@@ -113,6 +114,7 @@ TEST_CASE("Rectilinear edge grid port matches the core rasterization", "[plugins
         for (size_t col = 0; col < core_grid.cols(); ++col) {
             const auto core_range = core_grid.cell_data_range(coord_t(row), coord_t(col));
             const auto ported_range = ported_grid.cell_data_range(coord_t(row), coord_t(col));
+            CHECK(core_grid.cell_has_data(coord_t(row), coord_t(col)) == ported_grid.cell_has_data(coord_t(row), coord_t(col)));
             REQUIRE(std::distance(core_range.first, core_range.second) ==
                     std::distance(ported_range.first, ported_range.second));
             auto core_it = core_range.first;
@@ -127,8 +129,40 @@ TEST_CASE("Rectilinear edge grid port matches the core rasterization", "[plugins
                 CHECK(core_segment.first.y() == ported_segment.first.y);
                 CHECK(core_segment.second.x() == ported_segment.second.x);
                 CHECK(core_segment.second.y() == ported_segment.second.y);
+                const Slic3r::Line core_line = core_grid.line(*core_it);
+                const rect_work::Line work_line = ported_grid.line(*ported_it);
+                CHECK(core_line.a.x() == work_line.a.x());
+                CHECK(core_line.a.y() == work_line.a.y());
+                CHECK(core_line.b.x() == work_line.b.x());
+                CHECK(core_line.b.y() == work_line.b.y());
             }
         }
+    }
+
+    // Half-open boxes at grid edges retain the core's clipped indices and visitation order.
+    for (coord_t x : {-12000000, -8000016, -8000000, 0, 9000000, 14000000}) {
+        const Slic3r::BoundingBox box({x, -6000000}, {x + 1000000, 1000000});
+        const rect_work::BoundingBox work_box({x, -6000000}, {x + 1000000, 1000000});
+        const Slic3r::BoundingBox expected = core_grid.get_cells_intersecting_box(box);
+        const rect_work::BoundingBox actual = ported_grid.get_cells_intersecting_box(work_box);
+        CHECK(actual.min.x() == expected.min.x()); CHECK(actual.min.y() == expected.min.y());
+        CHECK(actual.max.x() == expected.max.x()); CHECK(actual.max.y() == expected.max.y());
+        CoreTraversalVisitor core_visitor;
+        TraversalVisitor work_visitor;
+        core_grid.visit_cells_intersecting_box(box, core_visitor);
+        ported_grid.visit_cells_intersecting_box(work_box, work_visitor);
+        CHECK(core_visitor.cells == work_visitor.cells);
+        std::vector<std::pair<coord_t, coord_t>> first_cells, second_cells;
+        // Stop after two cells to exercise the visitor's early return.
+        const auto first = [&first_cells](coord_t row, coord_t col) {
+            first_cells.emplace_back(row, col); return first_cells.size() < 2;
+        };
+        const auto second = [&second_cells](coord_t row, coord_t col) {
+            second_cells.emplace_back(row, col); return second_cells.size() < 2;
+        };
+        core_grid.visit_cells_intersecting_box(box, first);
+        ported_grid.visit_cells_intersecting_box(work_box, second);
+        CHECK(first_cells == second_cells);
     }
 
     // The traversal of a set of deterministic lines must visit the same cells.
@@ -177,6 +211,20 @@ TEST_CASE("Rectilinear edge grid port matches the core on an ExPolygon boundary"
     core_grid.create(core_expolygon, resolution);
     ported_grid.create(ported_expolygon, resolution);
 
+    rect_work::ExPolygon copied;
+    for (const Slic3r::Point &point : core_expolygon.contour.points)
+        copied.contour.points.emplace_back(point.x(), point.y());
+    for (const Slic3r::Polygon &hole : core_expolygon.holes) {
+        rect_work::Polygon ring;
+        for (const Slic3r::Point &point : hole.points) ring.points.emplace_back(point.x(), point.y());
+        copied.holes.push_back(std::move(ring));
+    }
+    rect_edge_grid::Grid copied_grid;
+    copied_grid.set_bbox(ported_bbox);
+    copied_grid.create(copied, resolution);
+    REQUIRE(copied_grid.rows() == core_grid.rows());
+    REQUIRE(copied_grid.cols() == core_grid.cols());
+
     REQUIRE(core_grid.contours().size() == ported_grid.contours().size());
     REQUIRE(core_grid.rows() == ported_grid.rows());
     REQUIRE(core_grid.cols() == ported_grid.cols());
@@ -185,6 +233,10 @@ TEST_CASE("Rectilinear edge grid port matches the core on an ExPolygon boundary"
         for (size_t col = 0; col < core_grid.cols(); ++col) {
             const auto core_range = core_grid.cell_data_range(coord_t(row), coord_t(col));
             const auto ported_range = ported_grid.cell_data_range(coord_t(row), coord_t(col));
+            const auto copied_range = copied_grid.cell_data_range(coord_t(row), coord_t(col));
+            const std::vector<std::pair<size_t, size_t>> core_entries(core_range.first, core_range.second);
+            const std::vector<std::pair<size_t, size_t>> copied_entries(copied_range.first, copied_range.second);
+            CHECK(core_entries == copied_entries);
             REQUIRE(std::distance(core_range.first, core_range.second) ==
                     std::distance(ported_range.first, ported_range.second));
             auto core_it = core_range.first;
