@@ -15,6 +15,7 @@
 #include "TowerFlow.hpp"
 #include "TowerFootprints.hpp"
 #include "WipeTowerLayout.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_wipetower.h"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
@@ -49,9 +50,13 @@ one for the whole print:
 5. GENERATE: each request's service fills its band, in plan order. Every
    request that printed something is bracketed by one speed-ratio save and
    restore, so that the whole tool change, its T command included, runs at 100%.
-6. Maintenance: brim, perimeter, cone and fill of the unused area of every
+6. Maintenance: brim, perimeters, cone and fill of the unused area of every
    non-floating tower layer, with the host's Monotonic and Grid fills
-   (rectilinear/, a reviewed copy).
+   (rectilinear/, a reviewed copy). wipe_tower_perimeters, a setting of this
+   package, gives the number of perimeters: 1 is the default manager's band
+   rectangle and cone ring, each further one is one line spacing outside, and 0
+   prints none. The host's tower footprint (collision check, preview) does not
+   include these further perimeters.
 7. Insertion: every generated root is rotated, moved to the platter and inserted
    by descending anchor, so that pending anchors stay valid; then the forced
    visits that stayed empty are removed.
@@ -82,6 +87,7 @@ namespace raster = NematXWipeTowerCopy::RectilinearPatternsPlugin::fills;
 namespace raster_work = NematXWipeTowerCopy::RectilinearPatternsPlugin::work;
 
 constexpr const char *k_plugin_id = "nematx_wipetower";
+constexpr const char *k_perimeters_key = "wipe_tower_perimeters";
 const uint32_t no_tower = UINT32_MAX;
 const char *const k_no_dependencies[] = { nullptr };
 const raw_used_config_key k_used_keys[] = {
@@ -110,8 +116,11 @@ const raw_used_config_key k_used_keys[] = {
     {"nozzle_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"spiral_vase", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+    {"spiral_vase", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
 };
+// Settings defined by this package; their values are object settings, like the other wipe tower settings.
+const char *const k_defined_keys[] = { k_perimeters_key };
 
 struct ForcedVisit { uint32_t present; };
 struct Tower {
@@ -166,6 +175,10 @@ private:
     int32_t exclusive_group_priority_impl() const noexcept override;
     // Copy typed configuration dependencies into the optional caller array.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
+    // Copy the keys of the settings defined by this package into the optional caller array.
+    int32_t defined_config_keys(const char **keys) const noexcept override;
+    // Define the settings of this package.
+    void inilialize_impl(storage_handle *storage) const override;
     // Edit contour visits, dispatch services, lay out all towers and publish generated geometry.
     void run_impl(const plugin_run_context *run) const override;
     PluginPropertyKey<ForcedVisit> m_forced_visit;
@@ -239,6 +252,35 @@ int32_t WipeTowerManager::used_config_keys(raw_used_config_key *keys) const noex
     if (keys != nullptr)
         std::copy(k_used_keys, k_used_keys + count, keys);
     return count;
+}
+int32_t WipeTowerManager::defined_config_keys(const char **keys) const noexcept
+{
+    const int32_t count = static_cast<int32_t>(sizeof(k_defined_keys) / sizeof(k_defined_keys[0]));
+    if (keys != nullptr)
+        std::copy(k_defined_keys, k_defined_keys + count, keys);
+    return count;
+}
+void WipeTowerManager::inilialize_impl(storage_handle *) const
+{
+    raw_config_option_def def = raw_config_option_def_init();
+    def.opt_key = k_perimeters_key;
+    def.type = RAW_CO_INT;
+    def.container_type = RAW_CONTAINER_TYPE_OBJECT;
+    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    def.printer_technology = RAW_PT_FFF;
+    def.invalidates_step = STEP_WIPETOWER;
+    def.category = RAW_OPTION_CATEGORY_MMSETUP;
+    def.label = "Wipe tower perimeters";
+    def.tooltip = "Number of perimeter loops printed around the wipe tower. Set to zero to disable the wipe tower "
+                  "perimeters while keeping the purge, the fill and the brim.";
+    def.has_min = 1;
+    def.min_value = 0;
+    def.mode = raw_config_option_mode(RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI);
+    def.default_serialized_value = "1";
+    const option_def_error_code result = orchestrator_create_option_def(m_orchestrator, &def);
+    if (result != OPTION_DEF_ERROR_OK)
+        throw std::runtime_error(std::string("Cannot define ") + k_perimeters_key + " (option definition error " +
+                                 std::to_string(int(result)) + ").");
 }
 
 void WipeTowerManager::run_impl(const plugin_run_context *run) const
@@ -774,26 +816,38 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
         const StoredPolygon cone = make_polygon(storage, points);
         envelope = convex_hull(storage, cone);
     }
+    // The first perimeter is the band rectangle, then the cone ring when there is a cone; each
+    // further perimeter is one line spacing outside the envelope. Zero perimeters prints none of them.
+    const int32_t perimeters = config.get(k_perimeters_key).get_int();
+    const size_t outer_loops = perimeters > 1 ? size_t(perimeters - 1) : 0;
+    // Append the closed rings of the envelope offset outward by the given number of line spacings.
+    const auto append_envelope_offset = [&](const size_t spacings) {
+        const StoredPolygonCollection rings = clipper_offset(ClipperOperand::from_polygon(storage, envelope),
+            scale_d(double(spacings) * flow.spacing())).to_polygon_collection();
+        for (const Polygon &ring : rings) {
+            std::vector<c_point> points = ring.points();
+            points.push_back(points.front());
+            append_path(storage, root.mutable_view(), points, flow, speed);
+        }
+    };
     if (layer_idx == 0 && tower.footprint.brim_width > 0.) {
+        // The brim starts outside the last perimeter and is printed from the outside in.
         const size_t loops = size_t((tower.footprint.brim_width + flow.spacing() / 2.) / flow.spacing());
-        for (size_t i = loops; i > 0; --i) {
-            const StoredPolygonCollection rings = clipper_offset(ClipperOperand::from_polygon(storage, envelope),
-                scale_d(double(i) * flow.spacing())).to_polygon_collection();
-            for (const Polygon &ring : rings) {
-                std::vector<c_point> points = ring.points();
-                points.push_back(points.front());
-                append_path(storage, root.mutable_view(), points, flow, speed);
-            }
+        for (size_t i = loops; i > 0; --i)
+            append_envelope_offset(outer_loops + i);
+    }
+    if (perimeters > 0) {
+        std::vector<c_point> perimeter = rectangle;
+        perimeter.push_back(perimeter.front());
+        append_path(storage, root.mutable_view(), perimeter, flow, speed);
+        if (envelope.area() > rectangle_area + 1.) {
+            std::vector<c_point> ring = envelope.points();
+            ring.push_back(ring.front());
+            append_path(storage, root.mutable_view(), ring, flow, speed);
         }
     }
-    std::vector<c_point> perimeter = rectangle;
-    perimeter.push_back(perimeter.front());
-    append_path(storage, root.mutable_view(), perimeter, flow, speed);
-    if (envelope.area() > rectangle_area + 1.) {
-        std::vector<c_point> ring = envelope.points();
-        ring.push_back(ring.front());
-        append_path(storage, root.mutable_view(), ring, flow, speed);
-    }
+    for (size_t i = 1; i <= outer_loops; ++i)
+        append_envelope_offset(i);
     StoredExPolygonCollection fill = clipper_offset(ClipperOperand::from_polygon(storage, envelope),
         -double(flow.scaled_spacing()) / 3.).to_expolygon_collection();
     if (layer.used > 0.) {
