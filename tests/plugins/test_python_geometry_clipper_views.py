@@ -539,7 +539,14 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(self.api_module, name)))
         header = (RUNTIME.parent / "c/slic3r_clipper.h").read_text(encoding="utf-8")
         self.assertIn("#define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u", header)
-        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 1)
+        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 2)
+        for name in ("clipper_diff_ex", "clipper_intersection_ex"):
+            self.assertEqual(signatures[name], (ctypes.c_void_p, [ctypes.c_void_p] * 3))
+        self.assertEqual(signatures["clipper_expand"],
+                         (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double]))
+        self.assertEqual(signatures["clipper_variable_offset_inner_ex"],
+                         (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_float), ctypes.c_uint32]))
         self.assertEqual(
             signatures["clipper_union"], (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int])
         )

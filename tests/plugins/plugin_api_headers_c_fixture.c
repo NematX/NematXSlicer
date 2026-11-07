@@ -199,6 +199,13 @@ int test_plugin_api_headers_c(void)
     expolygon_collection_handle *(*offset2_ex_fn)(storage_handle *, const expolygon_collection_handle *, double,
                                                   double, clipper_join_type_t, double) = clipper_offset2_ex;
     clipper_fill_rule_t fill_rules[3] = {CLIPPER_FILL_NONZERO, CLIPPER_FILL_EVENODD, CLIPPER_FILL_POSITIVE};
+    expolygon_collection_handle *(*diff_ex_fn)(storage_handle *, const expolygon_collection_handle *,
+        const expolygon_collection_handle *) = clipper_diff_ex;
+    expolygon_collection_handle *(*intersection_ex_fn)(storage_handle *, const expolygon_collection_handle *,
+        const expolygon_collection_handle *) = clipper_intersection_ex;
+    expolygon_collection_handle *(*variable_offset_fn)(storage_handle *, const expolygon_handle *,
+        const float *, uint32_t) = clipper_variable_offset_inner_ex;
+    polygon_collection_handle *(*expand_fn)(storage_handle *, const polygon_collection_handle *, double) = clipper_expand;
     int32_t (*slice_fn)(const triangle_mesh_handle *, const c_mesh_slicing_params *, const float *,
                         polygon_collection_handle **, uint32_t, const plugin_run_context *) =
         triangle_mesh_slice_to_polygons;
@@ -215,7 +222,8 @@ int test_plugin_api_headers_c(void)
     /* A call with no argument at all is rejected before anything is dereferenced. */
     if (slice_fn(NULL, NULL, NULL, NULL, 0u, NULL) != RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT)
         return 0;
-    return union_fn != 0 && union_ex_fn != 0 && offset_ex_fn != 0 && offset2_ex_fn != 0 &&
+    return diff_ex_fn != 0 && intersection_ex_fn != 0 && variable_offset_fn != 0 && expand_fn != 0 &&
+           union_fn != 0 && union_ex_fn != 0 && offset_ex_fn != 0 && offset2_ex_fn != 0 &&
            fill_rules[0] == 0 && fill_rules[1] == 1 && fill_rules[2] == 2 &&
            slice_statuses[0] == 1 && slice_statuses[1] == 0 && slice_statuses[2] == -1 &&
            slice_statuses[3] == -2 && context.step == STEP_SLICING && surface.id == 0;

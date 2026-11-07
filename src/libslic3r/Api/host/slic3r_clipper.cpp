@@ -22,19 +22,57 @@
 #include "Orchestrator.hpp"
 
 /*
-This file implements public clipping and offset operations for plugins. Opaque
-handles borrow native geometry while each result is published in PluginStorage.
-Closed-ring offsets clean spikes without changing unrelated rings. Variable
-inward offsets validate per-vertex distances and coordinate margins before
-calling the native geometry routine; inputs are never changed.
+Provide polygon clipping and offsets to plugins without exposing native C++ types.
+The shape route borrows geometry through ClipperShapes, computes intermediate
+path lists or contour/hole trees, then materializes public geometry collections.
+The native-result route calls ClipperUtils directly when callers need its exact
+processing and order rather than the shape route's processing.
+Closed-ring offsets clean spikes without changing unrelated rings. The configurable
+variable inward offset validates per-vertex distances and coordinate margins
+before calling the native geometry routine; inputs are never changed.
 
-    clipper_offset*()
-    |-- offset_closed_rings(): clean affected rings and unite the result
-    `-- store_shape(): transfer owned paths to plugin storage
-    clipper_variable_offset_inner()
-    |-- validate ring layout, distances and coordinate margins
-    `-- variable_offset_inner_ex(): publish a storage-owned polygon collection
+Native-result calls validate arguments, compute into local owning temporaries,
+then transfer a successful collection to PluginStorage. They catch all exceptions
+and return NULL without storing a result. The shape route does not provide that
+exception guarantee. Storage owns returned handles until free, clear or destruction;
+adapters borrow their source geometry for their entire use.
+
+PluginStorage locks its ownership registry, not the geometry. Callers keep borrowed
+inputs alive and unchanged during use and exclude concurrent edits or destruction.
+
+Plugin calls
+|-- clipper_shapes_from_*: retain a borrowed source adapter in storage
+|-- clipper_execute / clipper_offset: compute a stored shape result
+|   `-- offset_closed_rings: clean affected rings and unite the result
+|-- clipper_shapes_to_*: materialize a storage-owned geometry collection
+|-- clipper_union_ex / clipper_offset_ex / clipper_offset2_ex: compute native results
+|   `-- store_expolygons: transfer the completed collection to storage
+|-- clipper_variable_offset_inner: validate distances and coordinate margins
+|   `-- variable_offset_inner_ex: compute with the requested miter limit
+|-- clipper_diff_ex / clipper_intersection_ex: native cleanup and topology rebuild
+|   `-- store_expolygons: transfer the completed collection to storage
+|-- clipper_variable_offset_inner_ex: validate and regroup vertex distances
+|   |-- variable_offset_inner_ex: compute inset areas using per-ring distances
+|   `-- store_expolygons: transfer the completed collection to storage
+`-- clipper_expand: expand individual rings, unite them and store Polygons
 */
+
+// Borrow both collections and store the native difference unchanged; NULL handles
+// or any exception return NULL without adding an object to storage.
+expolygon_collection_handle *clipper_diff_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip);
+// Borrow both collections and store the native intersection unchanged; NULL
+// handles or any exception return NULL without adding an object to storage.
+expolygon_collection_handle *clipper_intersection_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip);
+// Validate borrowed rings and flattened non-positive deltas before rebuilding
+// native ring vectors; store only a successful result, returning NULL on failure.
+expolygon_collection_handle *clipper_variable_offset_inner_ex(storage_handle *storage,
+    const expolygon_handle *expolygon, const float *deltas, uint32_t delta_count);
+// Expand borrowed rings with native orientation handling and union; finite
+// positive delta is required, and failures store nothing and return NULL.
+polygon_collection_handle *clipper_expand(storage_handle *storage,
+    const polygon_collection_handle *polygons, double delta);
 
 namespace Slic3r {
 
@@ -556,6 +594,82 @@ expolygon_collection_handle *clipper_offset2_ex(storage_handle *storage,
         Slic3r::ExPolygons result =
             Slic3r::offset2_ex(*Slic3r::to_expolygons(src), delta1, delta2, native_join, miter_limit);
         return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+expolygon_collection_handle *clipper_diff_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip)
+{
+    if (storage == nullptr || subject == nullptr || clip == nullptr)
+        return nullptr;
+    try {
+        Slic3r::ExPolygons result = Slic3r::diff_ex(*Slic3r::to_expolygons(subject), *Slic3r::to_expolygons(clip));
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+expolygon_collection_handle *clipper_intersection_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip)
+{
+    if (storage == nullptr || subject == nullptr || clip == nullptr)
+        return nullptr;
+    try {
+        Slic3r::ExPolygons result = Slic3r::intersection_ex(*Slic3r::to_expolygons(subject), *Slic3r::to_expolygons(clip));
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+expolygon_collection_handle *clipper_variable_offset_inner_ex(storage_handle *storage,
+    const expolygon_handle *expolygon, const float *deltas, uint32_t delta_count)
+{
+    if (storage == nullptr || expolygon == nullptr)
+        return nullptr;
+    try {
+        const Slic3r::ExPolygon &input = *Slic3r::to_expolygon(expolygon);
+        // Reject orientations and delta layouts the native inset routine cannot use.
+        size_t expected = input.contour.size();
+        if (!(Slic3r::ClipperLib::Area(input.contour.points) > 0.))
+            return nullptr;
+        for (const Slic3r::Polygon &hole : input.holes) {
+            if (!(Slic3r::ClipperLib::Area(hole.points) < 0.))
+                return nullptr;
+            expected += hole.size();
+        }
+        if (expected != delta_count || (expected > 0 && deltas == nullptr))
+            return nullptr;
+        for (size_t i = 0; i < expected; ++i)
+            if (!std::isfinite(deltas[i]) || deltas[i] > 0.f)
+                return nullptr;
+        // The native routine needs one delta vector per ring, not the ABI flat array.
+        std::vector<std::vector<float>> ring_deltas;
+        ring_deltas.emplace_back(deltas, deltas + input.contour.size());
+        size_t position = input.contour.size();
+        for (const Slic3r::Polygon &hole : input.holes) {
+            ring_deltas.emplace_back(deltas + position, deltas + position + hole.size());
+            position += hole.size();
+        }
+        Slic3r::ExPolygons result = Slic3r::variable_offset_inner_ex(input, ring_deltas, 2.0);
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+polygon_collection_handle *clipper_expand(storage_handle *storage,
+    const polygon_collection_handle *polygons, double delta)
+{
+    if (storage == nullptr || polygons == nullptr || !std::isfinite(delta) || delta <= 0.)
+        return nullptr;
+    try {
+        Slic3r::Polygons result = Slic3r::expand(*Slic3r::to_polygons(polygons), delta);
+        return reinterpret_cast<polygon_collection_handle *>(
+            Slic3r::to_storage(storage)->store(std::make_unique<Slic3r::Polygons>(std::move(result))));
     } catch (...) {
         return nullptr;
     }

@@ -85,11 +85,21 @@ clipper_union_ex(), clipper_offset_ex() and clipper_offset2_ex() do not use the
 ClipperOperand pipeline: they call the native union_ex / offset_ex / offset2_ex and
 return their result unchanged (same expolygons, same order, same points) as a
 StoredExPolygonCollection. Prefer them when parity with the native code matters.
-They throw std::invalid_argument for a NULL storage or input, an unknown enum value, a
-non-finite number, or delta2 == 0 in clipper_offset2_ex(); they check these themselves
-before calling the host. A NULL from the host after that is an internal error (for
+Their input views must be valid: handle() asserts on a null view before the
+helpers can report invalid arguments. With valid views they throw
+std::invalid_argument for NULL storage, an unknown enum value, a non-finite
+number, or delta2 == 0 in clipper_offset2_ex(), before calling the host. A NULL from the host after that is an internal error (for
 example ClipperLib rejecting coordinates outside its allowed range) and throws
 std::runtime_error; nothing is added to the storage in that case.
+
+The native clipper_diff_ex / clipper_intersection_ex helpers accept ExPolygon
+collections without safety offset. clipper_variable_offset_inner_ex accepts
+flattened contour-then-hole vertex deltas (finite, <= 0) with miter limit 2.0.
+These return StoredExPolygonCollection. clipper_expand returns
+StoredPolygonCollection: a positive scaled delta grows CCW rings and shrinks CW
+rings before union. Results use the same ownership rules. The variable-offset
+helper checks only null handles and a null delta pointer with nonzero count;
+the host validates geometry and delta values, and rejection throws runtime_error.
 
 Choosing output form
 --------------------
@@ -577,10 +587,10 @@ inline bool clipper_is_known_join_type(clipper_join_type_t join_type) {
 }
 } // namespace detail
 
-// The three functions below return the native ClipperUtils result directly (same order, no extra cleaning),
-// as a storage-owned collection. Invalid arguments (NULL storage or input, unknown enum, non-finite value,
-// or delta2 == 0 for clipper_offset2_ex) throw std::invalid_argument before the host is called. A NULL from
-// the host is then an internal error and throws std::runtime_error; it is never adopted.
+// clipper_union_ex, clipper_offset_ex and clipper_offset2_ex return the native ClipperUtils result directly (same order, no extra cleaning),
+// as a storage-owned collection. Input views must be valid; handle() asserts on null views.
+// With valid views, NULL storage, unknown enums, non-finite values or delta2 == 0 throw
+// std::invalid_argument before the host call. Host NULL throws std::runtime_error and is not adopted.
 
 // Native union_ex(polygons, fill_rule).
 inline StoredExPolygonCollection clipper_union_ex(storage_handle *storage,
@@ -627,6 +637,57 @@ inline StoredExPolygonCollection clipper_offset2_ex(storage_handle *storage,
     if (handle == nullptr)
         throw std::runtime_error("clipper_offset2_ex: internal error");
     return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native difference without safety offset; invalid handles throw invalid_argument,
+// host failures throw runtime_error, and the returned ExPolygons are storage-owned.
+inline StoredExPolygonCollection clipper_diff_ex(storage_handle *storage,
+    const ExPolygonCollection &subject, const ExPolygonCollection &clip) {
+    if (storage == nullptr || !subject.valid() || !clip.valid())
+        throw std::invalid_argument("clipper_diff_ex: invalid arguments");
+    expolygon_collection_handle *handle = ::clipper_diff_ex(storage, subject.handle(), clip.handle());
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_diff_ex: internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native intersection without safety offset, with the ownership and errors of clipper_diff_ex.
+inline StoredExPolygonCollection clipper_intersection_ex(storage_handle *storage,
+    const ExPolygonCollection &subject, const ExPolygonCollection &clip) {
+    if (storage == nullptr || !subject.valid() || !clip.valid())
+        throw std::invalid_argument("clipper_intersection_ex: invalid arguments");
+    expolygon_collection_handle *handle = ::clipper_intersection_ex(storage, subject.handle(), clip.handle());
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_intersection_ex: internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native inner offset with miter limit 2.0 requires a CCW contour and CW holes;
+// deltas are scaled distances, finite and non-positive, contour first then holes, one per vertex.
+// Null handles or a null delta pointer with nonzero count throw invalid_argument;
+// host rejection of geometry or deltas, or an internal failure, throws runtime_error.
+inline StoredExPolygonCollection clipper_variable_offset_inner_ex(storage_handle *storage,
+    const ExPolygon &expolygon, const float *deltas, uint32_t delta_count) {
+    if (storage == nullptr || !expolygon.valid())
+        throw std::invalid_argument("clipper_variable_offset_inner_ex: invalid handles");
+    if (delta_count > 0 && deltas == nullptr)
+        throw std::invalid_argument("clipper_variable_offset_inner_ex: null deltas with nonzero count");
+    expolygon_collection_handle *handle = ::clipper_variable_offset_inner_ex(storage, expolygon.handle(), deltas, delta_count);
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_variable_offset_inner_ex: invalid geometry or deltas, or internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native expand uses miter joins with limit 3.0, grows CCW rings and shrinks CW rings, returning storage-owned
+// Polygons. Invalid arguments throw invalid_argument; host failures throw runtime_error.
+inline StoredPolygonCollection clipper_expand(storage_handle *storage,
+    const PolygonCollection &polygons, double delta) {
+    if (storage == nullptr || !polygons.valid() || !std::isfinite(delta) || delta <= 0.)
+        throw std::invalid_argument("clipper_expand: invalid arguments");
+    polygon_collection_handle *handle = ::clipper_expand(storage, polygons.handle(), delta);
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_expand: internal error");
+    return StoredPolygonCollection::adopt(storage, handle);
 }
 
 inline ClipperOperand clipper_union2(storage_handle *storage,
