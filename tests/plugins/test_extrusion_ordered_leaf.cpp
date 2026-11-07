@@ -164,8 +164,14 @@ TEST_CASE("Source publication retains property scopes for legacy and canonical t
         ExtrusionEntityUPtr source = canonical ? native->clone_canonical() : ExtrusionEntityUPtr(native.release());
         const ExtrusionEntityUPtr before = source->clone_canonical();
         ExtrusionEntityCollection copied;
-        Slic3r::detail::append_adhesion_extrusion_copy(copied, *source);
+        CHECK(copied.entities().empty());
+        ExtrusionEntity &copied_root = copied;
+        Slic3r::detail::append_adhesion_extrusion_copy(copied_root, *source);
         REQUIRE(copied.child_count() == 1);
+        const ExtrusionEntitiesPtr &copied_entities = copied.entities();
+        REQUIRE(copied_entities.size() == copied.child_count());
+        for (size_t index = 0; index < copied_entities.size(); ++index)
+            CHECK(copied_entities[index] == &copied.child(index));
         const ExtrusionEntityUPtr copy = copied.child(0).clone_canonical();
         check_canonical_copy(*before, *copy);
         CHECK(source->has_properties());
@@ -183,8 +189,14 @@ TEST_CASE("Source publication retains property scopes for legacy and canonical t
     ExtrusionEntity command(false);
     command.add_property(ExtrusionPropertyCustomGcodeText("M117 geometry-less command"));
     ExtrusionEntityCollection copied;
-    Slic3r::detail::append_adhesion_extrusion_copy(copied, command);
+    CHECK(copied.entities().empty());
+    ExtrusionEntity &copied_root = copied;
+    Slic3r::detail::append_adhesion_extrusion_copy(copied_root, command);
     CHECK(copied.child_count() == 1);
+    const ExtrusionEntitiesPtr &copied_entities = copied.entities();
+    REQUIRE(copied_entities.size() == copied.child_count());
+    for (size_t index = 0; index < copied_entities.size(); ++index)
+        CHECK(copied_entities[index] == &copied.child(index));
     ExtrusionEntity moved(ExtrusionEntity::Children(), false, false, false);
     append_source_extrusions(moved, command);
     REQUIRE(moved.child_count() == 1);
