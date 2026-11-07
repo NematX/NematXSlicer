@@ -25,6 +25,10 @@ Volume and flow entry points borrow any base root, without requiring a legacy
 collection. They retain their terminal direct-attribute rules: volume adds to
 its running total and applies the gap-fill filter, while flow scales mm3/mm and
 width in place without changing geometry, height, ownership or child order.
+The deprecated FlatenEntities visitor rebuilds grouping collections while
+retaining required fixed order. Completed groups transfer to their output parent
+without an extra clone. Its output can be borrowed through the base interface;
+the visitor owns it until a caller explicitly transfers the flattened result.
 SimplifyVisitor edits exclusively owned source geometry using stored polylines
 and inherited attributes. Short-path pruning is disabled across command scopes
 and process properties, but remains active for pure generated geometry.
@@ -819,7 +823,8 @@ void FlatenEntities::leave_node(const ExtrusionEntity&)
         std::unique_ptr<ExtrusionEntityCollection> group = std::move(m_group_stack.back());
         m_group_stack.pop_back();
         m_output_stack.pop_back();
-        m_output_stack.back()->append(std::move(group));
+        // Adopt the completed group without cloning its Collection root.
+        m_output_stack.back()->append_child(std::move(group));
     }
 }
 

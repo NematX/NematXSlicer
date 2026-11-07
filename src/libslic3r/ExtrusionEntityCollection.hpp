@@ -178,9 +178,11 @@ public:
     /// the original tree and choose candidates without destroying hierarchy.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
     ExtrusionEntityCollection flatten(bool preserve_ordering) const;
-    // Reads the source and flattens into out, mutating its children and cache; out requires exclusive access throughout the call.
+    // When preserving a non-sortable source with more than one direct child, append the entire owned flattened Collection.
+    // Otherwise prefix its owned flattened children. Borrow out exclusively; reacquire descendant and pointer views after mutation.
+    // Local destination geometry may materialize and change ordering permissions. Errors can leave partial output.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
-    void flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const;
+    void flatten(bool preserve_ordering, ExtrusionEntity& out) const;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities()) volume+=ent->total_volume(); return volume; }
 
     // Following methods shall never be called on an ExtrusionEntityCollection.

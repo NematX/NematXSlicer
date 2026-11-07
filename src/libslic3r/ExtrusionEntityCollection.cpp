@@ -17,10 +17,16 @@
    properties and their detached resource buffers travel together. It requires
    exclusive access and invalidates both pointer caches without allocating.
    This differs from swap_content(), which preserves the two outer identities.
+   The deprecated flatten() destination overload accepts base storage. It appends
+   a whole flattened collection when fixed order needs a wrapper, but otherwise
+   prefixes flattened children. Materializing local destination geometry and
+   rebuilding groups retain the legacy flattening contract, including its known
+   loss of inherited group properties; this is not canonical plan acquisition.
 
        entities() -> EntitiesCacheLock -> rebuild_entities_cache()
        reverse() -> reverse owned children and order -> invalidate pointer cache
        swap() -> exchange properties/resources and node state -> invalidate both caches
+       flatten(preserve_ordering, out) -> FlatenEntities -> append wrapper or prefix children
 */
 
 #include <algorithm>
@@ -345,22 +351,19 @@ ExtrusionEntityCollection ExtrusionEntityCollection::flatten(bool preserve_order
 
 }
 
-// Reads the source through FlatenEntities, appending an ordered wrapper or transferring flattened children into out and clearing
-// its cache. out owns the added children and requires exclusive access throughout the call; allocation/traversal failures propagate.
-void ExtrusionEntityCollection::flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const
+void ExtrusionEntityCollection::flatten(bool preserve_ordering, ExtrusionEntity& out) const
 {
     if (!this->can_sort() && preserve_ordering && this->entities().size() > 1) {
-        out.append(this->flatten(preserve_ordering));
+        out.append_child(this->flatten(preserve_ordering));
     } else {
         FlatenEntities flattener(preserve_ordering);
         flattener.traverse(*this);
         //tranfert owner of entities.
-        ExtrusionEntityCollection &flat = flattener.set();
+        ExtrusionEntity &flat = flattener.set();
         Children &out_children = out.children();
         Children &flat_children = flat.children();
         out_children.insert(out_children.begin(), std::make_move_iterator(flat_children.begin()), std::make_move_iterator(flat_children.end()));
         flat_children.clear();
-        out.m_entities_cache.clear();
     }
 }
 
