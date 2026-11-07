@@ -43,6 +43,11 @@ Inspect region-island extrusions:
         extrusion = region_island.extrusion(RAW_EXTRUSION_ROLE_PERIMETER)
         print(extrusion.length())
 
+LayerIsland.perimeter_slices() borrows filled XY areas published by perimeter
+processing for travel boundaries, not extrusion paths. The collection may be
+empty. See layer_island_get_perimeter_slices in slic3r_data_tree.h for publication,
+lifetime and thread rules.
+
 Property guide: [Using Plugin Properties](/doc/plugins/properties.md)
 
 Extrusion guide: [Using Unified Extrusion Entities](/doc/plugins/extrusions.md)
@@ -1709,6 +1714,14 @@ class LayerIsland(DataTreeView):
 
     def infill_areas(self) -> ExPolygonCollection:
         return ExPolygonCollection(self.api, self.api.host.layer_island_get_infill_areas(self.c_handle()))
+
+    def perimeter_slices(self) -> ExPolygonCollection:
+        """Borrow filled XY areas published by perimeter processing for travel boundaries.
+
+        These are not extrusion paths and may be empty. See the C function
+        layer_island_get_perimeter_slices for publication, lifetime and thread rules.
+        """
+        return ExPolygonCollection(self.api, self.api.host.layer_island_get_perimeter_slices(self.c_handle()))
 
     def infill_bounding_box(self):
         return self.api.host.layer_island_get_infill_bounding_box(self.c_handle())

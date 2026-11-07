@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 4u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 5u
 
 /*
 Data-tree access for a sliced Print.
@@ -32,6 +32,11 @@ stale; use the documented recomputation function before consuming such caches.
 Unless a function documents another result, null input is accepted by query
 functions and produces zero, an empty value or null, while indexed accessors
 return null for an out-of-range index.
+
+For travel boundaries, layer_island_get_perimeter_slices borrows filled XY
+areas published by perimeter processing, not extrusion paths. They are empty
+before publication and on auxiliary/support islands. No lock is acquired:
+concurrent readers require that no thread modifies or destroys the island.
 
 Developer guide: [Using Plugin Properties](/doc/plugins/properties.md)
 
@@ -555,6 +560,16 @@ collection owned by that island; it may be empty and must not be freed. Later pe
 reprocessing may replace it and invalidate its element handles.
 */
 SLIC3R_HOST_API const expolygon_collection_handle *layer_island_get_infill_areas(const layer_island_handle *me);
+/*
+Borrow filled XY areas published by perimeter processing for travel boundaries,
+not extrusion paths. A live island always returns a non-null collection, empty
+before publication and on auxiliary/support islands. The island owns it; do not
+free it. Island destruction invalidates the collection; perimeter reprocessing
+may replace its contents and invalidate element handles.
+NULL input returns NULL; no exception is thrown. No lock is acquired. Concurrent
+readers require that no thread modifies or destroys the island.
+*/
+SLIC3R_HOST_API const expolygon_collection_handle *layer_island_get_perimeter_slices(const layer_island_handle *me);
 /* Copy the bounding box of the first infill area, or an empty box when absent. */
 SLIC3R_HOST_API c_bounding_box layer_island_get_infill_bounding_box(const layer_island_handle *me);
 /*

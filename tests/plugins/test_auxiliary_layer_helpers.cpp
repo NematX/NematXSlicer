@@ -1,6 +1,30 @@
+/*
+Test auxiliary-layer construction, region assignment and public geometry views
+against the owning Print. Box models distinguish the default, part-override,
+modifier and ignored negative-volume cases at the chosen Z. Tests build auxiliary
+regions and compare their assignments and areas, then check surface transfer and
+native slice/island reconstruction. These checks cover publication as well as
+the geometry that remains owned by the Print.
+
+A supported roof is fully processed to obtain object and support islands. Its
+C getter must borrow exactly the native perimeter-slice collection, and the C++
+view must expose that same handle and size. Object collections must include a
+non-empty example; support collections must stay empty. These are filled XY
+areas for travel boundaries, not extrusion paths.
+
+Test scenes
+|-- box models: check default/override/modifier assignment and that negative volumes
+|   do not further clip the supplied subject
+|-- generic and print-level auxiliary layers: check ownership and region helpers
+|-- surface publication: check transfer, clearing and rejection on object layers
+|-- layer-height ranges: check every configured range
+|-- native island writes: compare slices, islands, infill areas and bounding boxes
+`-- supported roof: compare C/C++ borrowed perimeter slices with native collections
+*/
 #include <catch2/catch.hpp>
 
 #include "plugin_test_helpers.hpp"
+#include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/internal/LayerAccess.hpp"
@@ -541,4 +565,50 @@ TEST_CASE("Layer native island writes publish consistent slices, islands and inf
     REQUIRE(layer.island(0).infill_areas_bboxes().size() == areas.size());
     for (size_t idx = 0; idx < areas.size(); ++idx)
         CHECK(layer.island(0).infill_areas_bboxes()[idx] == get_extents(areas[idx]));
+}
+
+// Slice a supported roof and compare borrowed collections with their owners after perimeter and support publication.
+TEST_CASE("Island perimeter slices expose the exact published object and support domains",
+          "[plugins][islands][perimeter-slices]")
+{
+    DynamicPrintConfig config = print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"support_material", "1"}, {"support_material_style", "grid"},
+        {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"}});
+    TriangleMesh mesh = make_box({0., 0., 0., 4., 8., 2.});
+    mesh.merge(make_box({0., 0., 2., 12., 8., 2.6}));
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    print.process();
+
+    CHECK(layer_island_get_perimeter_slices(nullptr) == nullptr);
+    bool saw_object = false;
+    bool saw_support = false;
+    std::vector<const Layer *> layers;
+    for (const Layer &layer : print.object(0).layers())
+        layers.push_back(&layer);
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        layers.push_back(&layer);
+    for (const Layer *layer_ptr : layers) {
+        const Layer &layer = *layer_ptr;
+        const bool support = support_layer_role(layer).is_support();
+        for (const LayerSliceIsland &island : layer.islands()) {
+            const layer_island_handle *handle = reinterpret_cast<const layer_island_handle *>(&island);
+            const expolygon_collection_handle *collection = layer_island_get_perimeter_slices(handle);
+            REQUIRE(collection != nullptr);
+            CHECK(reinterpret_cast<const ExPolygons *>(collection) == &island.get_perimeter_slices());
+            CHECK(*reinterpret_cast<const ExPolygons *>(collection) == island.get_perimeter_slices());
+            const slic3r_api::LayerIsland view(handle);
+            CHECK(view.perimeter_slices().handle() == collection);
+            CHECK(view.perimeter_slices().size() == island.get_perimeter_slices().size());
+            if (support) {
+                CHECK(island.get_perimeter_slices().empty());
+                saw_support = true;
+            } else if (!island.get_perimeter_slices().empty())
+                saw_object = true;
+        }
+    }
+    CHECK(saw_object);
+    CHECK(saw_support);
 }

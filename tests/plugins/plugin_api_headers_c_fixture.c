@@ -190,6 +190,8 @@ typedef char slicing_step_custom_above_builtin[SLICING_STEP_CUSTOM_BEGIN > WIPE_
 /* Returns 1 when the header declarations and step callback checks are usable from C. */
 int test_plugin_api_headers_c(void)
 {
+    const expolygon_collection_handle *(*perimeter_slices_fn)(const layer_island_handle *) =
+        layer_island_get_perimeter_slices;
     clipper_shapes_handle *(*union_fn)(storage_handle *, const clipper_shapes_handle *, clipper_fill_rule_t) =
         clipper_union;
     expolygon_collection_handle *(*union_ex_fn)(storage_handle *, const polygon_collection_handle *,
@@ -222,7 +224,8 @@ int test_plugin_api_headers_c(void)
     /* A call with no argument at all is rejected before anything is dereferenced. */
     if (slice_fn(NULL, NULL, NULL, NULL, 0u, NULL) != RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT)
         return 0;
-    return diff_ex_fn != 0 && intersection_ex_fn != 0 && variable_offset_fn != 0 && expand_fn != 0 &&
+    return perimeter_slices_fn != 0 && perimeter_slices_fn(NULL) == NULL &&
+           diff_ex_fn != 0 && intersection_ex_fn != 0 && variable_offset_fn != 0 && expand_fn != 0 &&
            union_fn != 0 && union_ex_fn != 0 && offset_ex_fn != 0 && offset2_ex_fn != 0 &&
            fill_rules[0] == 0 && fill_rules[1] == 1 && fill_rules[2] == 2 &&
            slice_statuses[0] == 1 && slice_statuses[1] == 0 && slice_statuses[2] == -1 &&
