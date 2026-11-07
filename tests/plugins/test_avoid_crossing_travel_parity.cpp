@@ -15,6 +15,7 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
@@ -22,6 +23,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
@@ -58,8 +60,14 @@ check detour units and stable multi-tool ordering.
 Core-only checks are separate from these plugin comparisons. top_oracle_routes
 slices and orders a ring without travel editing, then computes core routes
 between successive leaves and copies surface counts and ordering diagnostics.
-The top sensitivity case is expected to fail: the core reads empty regional
-fill surfaces rather than the tops published per island.
+The ring checks require top-avoidance sensitivity without changing ordering.
+Controlled chords across a cube test regional top avoidance directly through
+the core router. A same-tool modifier disables top avoidance on part of a
+shared island. Intersections are measured against top areas inset by 0.5 mm,
+excluding the perimeter band where detours may pass. The crossing test still
+detects the top interior when top avoidance is off, because top surfaces are
+excluded from the areas treated as safe to cross; routing and crossing are
+separate checks.
 
     Travel tests
     |-- Plugin/core comparisons
@@ -69,7 +77,8 @@ fill surfaces rather than the tops published per island.
     |   |-- enabled_endpoint, oracle_path: compute core routes and compare every point
     |   `-- lookup_at_point: check the controlled modifier-edge retry
     `-- Core-only checks
-        `-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
+        |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
+        `-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -258,15 +267,94 @@ TEST_CASE("Top travel scene has stable ordering and surfaces published per islan
     CHECK(off.ordered == on.ordered);
 }
 
-// The core router reads LayerRegion fill surfaces, which the pipeline leaves empty.
-// This case fails while that router ignores the top surfaces published per island.
-TEST_CASE("Core travel router ignores top surfaces published per island",
-          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters][avoid-crossing-parity][!shouldfail]")
+// The core router uses top surfaces published per island even when regional surfaces are empty.
+TEST_CASE("Core travel router avoids top surfaces published per island",
+          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters][avoid-crossing-parity]")
 {
     const TopRoutes off = top_oracle_routes(false);
     const TopRoutes on = top_oracle_routes(true);
     const bool different = off.routes != on.routes;
     CHECK(different);
+}
+
+// A same-tool modifier shares generated surfaces but must retain its own top-avoidance setting.
+TEST_CASE("Shared island tops obey regional top avoidance",
+          "[plugins][travel][avoid-crossing-parity]")
+{
+    const bool avoid_top = GENERATE(false, true);
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", avoid_top ? "1" : "0"},
+        {"nozzle_diameter", "0.4"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"fill_density", "20%"}, {"top_solid_layers", "1"},
+        {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 0.6), ModelVolumeType::MODEL_PART, false);
+    ModelVolume *modifier = object->add_volume(make_cube(10., 20., 0.6), ModelVolumeType::PARAMETER_MODIFIER, false);
+    DynamicPrintConfig disabled;
+    disabled.set_deserialize_strict({{"avoid_crossing_top", "0"}});
+    modifier->config.assign_config(disabled);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const Layer &layer = print.object(0).layers().back();
+    const BoundingBox bbox = get_extents(layer.lslices());
+    bool shared = false;
+    ExPolygons enabled_tops, disabled_tops;
+    for (const LayerSliceIsland &island : layer.islands()) {
+        for (const LayerRegionIsland &region_island : island.regions_islands()) {
+            shared = shared || region_island.regions().size() > 1;
+            for (const Surface &surface : region_island.fill_surfaces()) {
+                if (!surface.has_pos_top())
+                    continue;
+                for (const LayerRegion *region : region_island.regions()) {
+                    ExPolygons part = intersection_ex(ExPolygons{surface.expolygon}, region->get_raw_slices());
+                    const bool avoided = region->region().config().avoid_crossing_top;
+                    append(!avoid_top || avoided ? enabled_tops : disabled_tops,
+                           offset_ex(part, -scale_i(0.5)));
+                }
+            }
+        }
+    }
+    if (avoid_top)
+        REQUIRE(shared);
+    REQUIRE_FALSE(enabled_tops.empty());
+    if (avoid_top)
+        REQUIRE_FALSE(disabled_tops.empty());
+    // Keep endpoints in the perimeter band, so only the chord crosses the fill interior.
+    size_t enabled_chords = 0, disabled_chords = 0;
+    for (int eighth : {1, 3, 5, 7}) {
+        const coord_t x = bbox.min.x() + (bbox.max.x() - bbox.min.x()) * eighth / 8;
+        const Point from(x, bbox.min.y() + scale_i(0.2));
+        const Point to(x, bbox.max.y() - scale_i(0.2));
+        AvoidCrossingPerimeters router;
+        router.init_layer(layer);
+        if (!avoid_top) {
+            // Endpoints stay in the perimeter band; the chord crosses the excluded top interior.
+            const Polyline interior_chord(from, to);
+            REQUIRE_FALSE(intersection_pl(interior_chord, enabled_tops).empty());
+            const std::vector<const Layer *> printed_layers{&layer};
+            router.prepare_crossing_test({layer, printed_layers, 0, 0, scale_i(0.2), []() {}});
+            CHECK(router.can_cross_perimeter(interior_chord, false));
+        }
+        const Polyline route = router.travel_to({layer, from, Point::Zero(), 0, 0., false}, to);
+        REQUIRE(route.size() >= 2);
+        if (!intersection_pl(Polyline(from, to), enabled_tops).empty()) {
+            ++enabled_chords;
+            CHECK(intersection_pl(route, enabled_tops).empty() == avoid_top);
+        } else if (avoid_top) {
+            ++disabled_chords;
+            REQUIRE_FALSE(intersection_pl(Polyline(from, to), disabled_tops).empty());
+            CHECK_FALSE(intersection_pl(route, disabled_tops).empty());
+        }
+    }
+    CHECK(enabled_chords > 0);
+    if (avoid_top)
+        CHECK(disabled_chords > 0);
 }
 
 void check_scene(const Scene scenario)

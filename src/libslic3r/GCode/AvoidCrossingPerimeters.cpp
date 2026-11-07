@@ -26,7 +26,66 @@
 
 //#define AVOID_CROSSING_PERIMETERS_DEBUG_OUTPUT
 
+// AvoidCrossingPerimeters supplies the legacy G-code generator with crossing tests
+// and two-dimensional travel detours. Crossing detection and routing are separate:
+// a caller can test a path without building the rings needed to guide a detour.
+// A safe interior is a filled area whose edges are tested for crossings; the test
+// does not prove that a path stays inside it. Object base areas are slices clipped
+// to the active tool when any region assigns perimeters, infill or solid infill
+// to another tool; offset areas inset them by 1.5 nozzle radii.
+// Tops are removed from both. Support base areas combine slices from
+// already_printed_object_layers; offset areas expand those slices by 1.5 nozzle
+// radii. The offset argument of can_cross_perimeter selects which set is tested.
+// Tool clipping keeps one tool from oozing its material over another tool's area.
+//
+// init_layer resets the routing caches and prepares inset perimeter slices.
+// prepare_crossing_test caches base and offset interiors for a layer and tool.
+// Object crossing tests remove all tops, regardless of avoid_crossing_top.
+// Tops come from layer islands; a top shared by regions is clipped to each
+// region's raw slices before applying that region's settings. Support has no tops.
+//
+// travel_to builds routing boundaries only when needed. Internal rings follow
+// inset filled areas in object coordinates. Tops are removed only where the
+// region enables avoid_crossing_top. A band remains around such a top only with
+// perimeters and without ironing: it lets a detour follow the top's perimeter;
+// ironing passes over the edge and makes that band useless. For support targets,
+// perimeter slices from the same object's last layer strictly below
+// Z + SCALED_EPSILON add internal rings. This does not route support travel around
+// objects; its purpose is undocumented.
+// External rings come from holes of all objects at this height. For support
+// targets, they also include holes of each object's last layer strictly below
+// Z + SCALED_EPSILON. A layer at the target Z qualifies, so its holes can appear
+// twice. The holes are expanded and placed at each instance's shift
+// in platter coordinates; they are not outer object outlines.
+//
+// Routing places endpoints near rings, finds crossings and connects islands,
+// follows a chosen ring direction, then removes unnecessary points. It is a
+// heuristic, not a shortest-path or no-crossing guarantee. A detour exceeding
+// the configured extra-length limit can be replaced by the direct travel.
+// Layers are borrowed during geometry preparation and routing calls. Cached
+// polygons are owned by the router; stored layer pointers identify the prepared
+// context.
+//
+// Entry points and the helpers that prepare their results:
+// |-- init_layer: reset routing caches and prepare inset perimeter slices
+// |-- prepare_crossing_test: prepare interiors for can_cross_perimeter
+// |   `-- regional_top_surfaces: separate each region's tops
+// |-- can_cross_perimeter: test a path against prepared interiors
+// `-- travel_to: select boundaries and enforce the detour limit
+//     |-- get_boundary: build internal areas and collect excluded tops
+//     |   |-- regional_top_surfaces: apply regional top settings
+//     |   `-- inner_offset: reduce the inset in narrow areas
+//     |-- get_boundary_external: place expanded object holes
+//     |-- init_boundary: store rings and index their edges
+//     `-- avoid_perimeters: form a route from the selected boundaries
+//         `-- avoid_perimeters_inner: join crossings along rings
+//             |-- jump_between_island: connect separate islands
+//             `-- simplify_travel: remove unnecessary waypoints
+
 namespace Slic3r {
+
+// Copy top surfaces from the layer's islands, clipping shared islands to the region's raw slices.
+static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region);
 
 struct TravelPoint
 {
@@ -2202,7 +2261,7 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
 
 //#define INCLUDE_SUPPORTS_IN_BOUNDARY
 
-// called by AvoidCrossingPerimeters::travel_to()
+// Return inset travel areas for the zero-based extruder_id; append original/inset pairs to slice_2_boundary and excluded tops to to_avoid, keeping prior entries.
 static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id, std::vector<std::pair<ExPolygon, ExPolygon>> &slice_2_boundary, ExPolygons &to_avoid)
 {
     const coord_t perimeter_spacing = get_perimeter_spacing(layer);
@@ -2249,31 +2308,23 @@ static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id,
         boundary = union_ex(boundary);
     }
     // Collect all top layers that will not be crossed.
-    size_t      polygons_count    = 0;
-    for (const LayerRegion &layer_region : layer.regions())
-        if(layer_region.region().config().avoid_crossing_top)
-            for (const Surface &surface : layer_region.fill_surfaces())
-                if (surface.has_pos_top()) ++polygons_count;
-
-    if (polygons_count > 0) {
-        ExPolygons top_layer_polygons;
-        top_layer_polygons.reserve(polygons_count);
+    ExPolygons top_layer_polygons;
+    if (!support_layer) {
         for (const LayerRegion &layer_region : layer.regions()) {
             if (layer_region.region().config().avoid_crossing_top) {
-                for (const Surface &surface : layer_region.fill_surfaces()) {
-                    if (surface.has_pos_top()) {
-                        ExPolygons offseted_top = offset_ex(surface.expolygon, coordf_t(-perimeter_spacing / 2));
-                        // still get a perimeter width to travel (unless no perimeters or post-process ironing)
-                        if (layer_region.region().config().perimeters > 0 && !layer_region.region().config().ironing) {
-                            append(boundary,
-                                   diff_ex(offset_ex(surface.expolygon, coordf_t(perimeter_spacing / 4)), offseted_top));
-                        }
-                        append(top_layer_polygons, offseted_top);
+                for (const ExPolygon &surface : regional_top_surfaces(layer, layer_region)) {
+                    ExPolygons offseted_top = offset_ex(surface, coordf_t(-perimeter_spacing / 2));
+                    // Keep a band for following the top perimeter; ironing crosses its edge, so needs no band.
+                    if (layer_region.region().config().perimeters > 0 && !layer_region.region().config().ironing) {
+                        append(boundary,
+                               diff_ex(offset_ex(surface, coordf_t(perimeter_spacing / 4)), offseted_top));
                     }
+                    append(top_layer_polygons, offseted_top);
                 }
             }
         }
-        
+    }
+    if (!top_layer_polygons.empty()) {
         top_layer_polygons = union_ex(top_layer_polygons);
         boundary = union_ex(boundary);
         append(to_avoid, top_layer_polygons);
@@ -2332,6 +2383,27 @@ static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id,
     }
 
     return boundary;
+}
+
+static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region)
+{
+    ExPolygons tops;
+    for (const LayerSliceIsland &island : layer.islands()) {
+        for (const LayerRegionIsland &region_island : island.regions_islands()) {
+            if (region_island.regions().count(&region) == 0)
+                continue;
+            for (const Surface &surface : region_island.fill_surfaces()) {
+                if (!surface.has_pos_top())
+                    continue;
+                // A shared island must not apply one region's settings to its neighbours.
+                if (region_island.regions().size() > 1)
+                    append(tops, intersection_ex(ExPolygons{surface.expolygon}, region.get_raw_slices()));
+                else
+                    tops.push_back(surface.expolygon);
+            }
+        }
+    }
+    return tops;
 }
 
 // called by AvoidCrossingPerimeters::travel_to()
@@ -2547,8 +2619,7 @@ bool AvoidCrossingPerimeters::prepare_crossing_test(const PerimeterCrossingConte
     if (!is_support_layer) {
         for (const LayerRegion &region : context.layer.regions()) {
             m_crossing_throw_if_canceled();
-            const ExPolygons top_surfaces = to_expolygons(
-                region.fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop));
+            const ExPolygons top_surfaces = regional_top_surfaces(context.layer, region);
             offset_slices = diff_ex(offset_slices, top_surfaces);
             slices = diff_ex(slices, top_surfaces);
         }
