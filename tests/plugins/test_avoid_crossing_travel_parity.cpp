@@ -69,6 +69,12 @@ detects the top interior when top avoidance is off, because top surfaces are
 excluded from the areas treated as safe to cross; routing and crossing are
 separate checks.
 
+The core-only spacing scene routes across a ring hole. The region's slice
+surfaces are empty while its raw slices remain, and a 0.8 mm perimeter width
+on a 0.4 mm nozzle separates the flow-spacing inset from the nozzle fallback.
+The test measures intermediate route points against the expected flow-based
+inset.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
@@ -78,7 +84,8 @@ separate checks.
     |   `-- lookup_at_point: check the controlled modifier-edge retry
     `-- Core-only checks
         |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
-        `-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
+        |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
+        `-- travel_to: measure the raw-slice flow-spacing inset
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -275,6 +282,44 @@ TEST_CASE("Core travel router avoids top surfaces published per island",
     const TopRoutes on = top_oracle_routes(true);
     const bool different = off.routes != on.routes;
     CHECK(different);
+}
+
+// Route across a sliced ring hole and measure the flow-dependent inset of the detour.
+TEST_CASE("Core travel detour uses raw-sliced regional perimeter spacing",
+          "[plugins][travel][avoid-crossing-parity][raw-slice-spacing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"nozzle_diameter", "0.4"},
+        {"perimeter_extrusion_width", "0.8"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"thin_walls", "0"}, {"gap_fill_enabled", "0"},
+        {"skirts", "0"}, {"brim_width", "0"}});
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({ring_mesh()}, print, model, config);
+    print.process();
+    const Layer &layer = print.object(0).layers().back();
+    REQUIRE(layer.regions().size() == 1);
+    const LayerRegion &region = *layer.regions().begin();
+    REQUIRE(region.slices().empty());
+    REQUIRE_FALSE(region.get_raw_slices().empty());
+    const BoundingBox bbox = get_extents(layer.lslices());
+    const Point from(bbox.min.x() + scale_i(2.), bbox.min.y() + scale_i(10.));
+    const Point to(bbox.max.x() - scale_i(2.), from.y());
+    AvoidCrossingPerimeters router;
+    router.init_layer(layer);
+    const Polyline route = router.travel_to({layer, from, Point::Zero(), 0, 0., false}, to);
+    REQUIRE(route.size() > 2);
+    // get_boundary insets the internal boundary by 1.5 perimeter spacings through inner_offset.
+    const double expected = 1.5 * region.flow(frPerimeter).scaled_spacing();
+    // Separate the roughly 1.14 mm flow inset from the 0.6 mm nozzle-based fallback.
+    REQUIRE(expected > scale_i(1.));
+    double inset = double(bbox.max.y() - bbox.min.y());
+    for (size_t idx = 1; idx + 1 < route.size(); ++idx)
+        inset = std::min(inset, double(std::min(route.points[idx].y() - bbox.min.y(),
+                                              bbox.max.y() - route.points[idx].y())));
+    CHECK(inset == Approx(expected).margin(scale_i(0.02)));
 }
 
 // A same-tool modifier shares generated surfaces but must retain its own top-avoidance setting.

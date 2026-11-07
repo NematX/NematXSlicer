@@ -58,6 +58,12 @@
 // twice. The holes are expanded and placed at each instance's shift
 // in platter coordinates; they are not outer object outlines.
 //
+// Boundary distances use averages of flow dimensions over regions with raw
+// slices, in scaled coordinate units. Internal spacing and external perimeter
+// width use this layer; external spacing uses all print objects at its print Z.
+// With no contributing region, the fallback is the mean nozzle diameter of this
+// object's extruders, which requires at least one extruder.
+//
 // Routing places endpoints near rings, finds crossings and connects islands,
 // follows a chosen ring direction, then removes unnecessary points. It is a
 // heuristic, not a shortest-path or no-crossing guarantee. A detour exceeding
@@ -86,6 +92,14 @@ namespace Slic3r {
 
 // Copy top surfaces from the layer's islands, clipping shared islands to the region's raw slices.
 static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region);
+// Return mean nozzle diameter in scaled units as fallback spacing; the object must have at least one extruder.
+static inline coord_t get_default_perimeter_spacing(const PrintObject &print_object);
+// Return mean perimeter spacing in scaled units over regions with raw slices, or the object's mean nozzle diameter.
+static coord_t get_perimeter_spacing(const Layer &layer);
+// Return mean perimeter spacing in scaled units over raw-sliced regions of all print objects at this print Z, or this object's mean nozzle diameter.
+static coord_t get_perimeter_spacing_external(const Layer &layer);
+// Return a float in scaled units: mean external perimeter width over this layer's regions with raw slices, or the object's mean nozzle diameter.
+static float get_external_perimeter_width(const Layer &layer);
 
 struct TravelPoint
 {
@@ -698,7 +712,6 @@ static std::vector<TravelPoint> simplify_travel(const AvoidCrossingPerimeters::B
     return simplified_path;
 }
 
-// called by get_perimeter_spacing() / get_perimeter_spacing_external()
 static inline coord_t get_default_perimeter_spacing(const PrintObject &print_object)
 {
     std::set<extruder_index_t> printing_extruders = print_object.object_extruders();
@@ -710,13 +723,12 @@ static inline coord_t get_default_perimeter_spacing(const PrintObject &print_obj
     return avg_extruder;
 }
 
-// called by get_boundary() / avoid_perimeters_inner()
 static coord_t get_perimeter_spacing(const Layer &layer)
 {
     size_t regions_count     = 0;
     coord_t  perimeter_spacing = 0;
     for (const LayerRegion &layer_region : layer.regions())
-        if (! layer_region.slices().empty()) {
+        if (! layer_region.get_raw_slices().empty()) {
             perimeter_spacing += layer_region.flow(frPerimeter).scaled_spacing();
             ++regions_count;
         }
@@ -729,7 +741,6 @@ static coord_t get_perimeter_spacing(const Layer &layer)
     return perimeter_spacing;
 }
 
-// called by get_boundary_external()
 static coord_t get_perimeter_spacing_external(const Layer &layer)
 {
     size_t  regions_count     = 0;
@@ -739,7 +750,7 @@ static coord_t get_perimeter_spacing_external(const Layer &layer)
                object.get_layer_at_printz(layer.scaled_print_z()));
         if (const Layer *l = object.get_layer_at_printz(layer.scaled_print_z()); l) {
             for (const LayerRegion &layer_region : l->regions()) {
-                if (!layer_region.slices().empty()) {
+                if (!layer_region.get_raw_slices().empty()) {
                     perimeter_spacing += layer_region.flow(frPerimeter).scaled_spacing();
                     ++regions_count;
                 }
@@ -822,13 +833,12 @@ bool find_point_on_boundary(Point& pt_to_move, const AvoidCrossingPerimeters::Bo
     return true;
 }
 
-// Returns average perimeter width calculated from all LayerRegion within the layer.
 static float get_external_perimeter_width(const Layer &layer)
 {
     size_t regions_count     = 0;
     float  perimeter_width   = 0.f;
     for (const LayerRegion &layer_region : layer.regions())
-        if (! layer_region.slices().empty()) {
+        if (! layer_region.get_raw_slices().empty()) {
             perimeter_width += float(layer_region.flow(frExternalPerimeter).scaled_width());
             ++regions_count;
         }
