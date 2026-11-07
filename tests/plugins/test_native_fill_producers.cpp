@@ -29,6 +29,8 @@
    IDs; generic descendants are required independently of their legacy shell.
    Only named builder references are exercised here. Other native-fill references
    in the shared table are not evidence for producers until their cases run.
+   ControlledFill supplies empty or one-line output to the generic acquisition
+   overload, checking that prepared root state and existing child handles survive.
 
        TEST_CASE
            |-- extrusion_entities_append_paths/loops/loops_and_paths()
@@ -55,6 +57,15 @@ void require_generic_fill(const ExtrusionEntity &entity, const std::string &path
 // Compare complete stored output and require direct generic construction of owned subtrees.
 void record_fill(const std::string &name, const ExtrusionEntity &entity);
 
+// Supply fixed centerlines to exercise shared extrusion acquisition independently of pattern geometry.
+class ControlledFill : public Fill
+{
+    Polylines m_lines;
+public:
+    explicit ControlledFill(Polylines lines) : m_lines(std::move(lines)) {}
+    Fill *clone() const override { return new ControlledFill(*this); }
+    Polylines fill_surface(const Surface *, const FillParams &) const override { return m_lines; }
+};
 
 void write_fill_tree(const ExtrusionEntity &entity, std::ostringstream &out, std::map<uint64_t, size_t> &ids)
 {
@@ -192,5 +203,73 @@ TEST_CASE("Native geometry builders preserve overload specific inputs and closur
             }
             CHECK(output.child_count() == (method == 2 || method == 3 ? 3 : 4));
             record_fill("builder-" + std::to_string(method) + '-' + std::to_string(can_reverse), output);
+        }
+}
+
+TEST_CASE("Native fill acquisition preserves a prepared destination for empty and nonempty output", "[plugins][native-fill]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const PrintRegionConfig region;
+    const Surface surface(stPosInternal | stDensSolid, rectangle_expolygon(0., 0., 14., 2.));
+    const Polyline line{Point(scale_i(10.), 0), Point(scale_i(12.), 0)};
+    FillParams params;
+    params.config = &region;
+    params.density = 1.f;
+    params.role = ExtrusionRole::SolidInfill;
+    params.flow = Flow::new_from_width(0.45f, 0.4f, 0.2f, 1.f, false);
+    const ExtrusionAttributes attributes{params.role, params.flow};
+    for (const bool sortable : {false, true})
+        for (const bool emit : {false, true}) {
+            CAPTURE(sortable, emit);
+            ControlledFill filler(emit ? Polylines{line} : Polylines{});
+            filler.init_spacing(params.flow.spacing(), params);
+            ExtrusionEntity output(ExtrusionEntity::Children{}, sortable, true, false);
+            output.set_can_rotate(false);
+            ExtrusionPropertySpeed &speed = output.get_or_add_property<ExtrusionPropertySpeed>();
+            speed.speed_mm_per_s = 17.f;
+            for (const coord_t start : {coord_t(-5000000), coord_t(-3000000)}) {
+                ExtrusionEntityUPtr prefix = std::make_unique<ExtrusionEntity>(false,
+                    ArcPolyline(Points{{start, 0}, {start + 1000000, 0}}));
+                prefix->add_property(attributes);
+                output.append_child(std::move(prefix));
+            }
+            const uint64_t root_id = output.get_id();
+            const ExtrusionPropertySpeed *speed_handle = &speed;
+            const size_t property_count = ApiInternal::ExtrusionPropertyAccess::property_count(output);
+            const ExtrusionEntity *first = &output.child(0);
+            const ExtrusionEntity *second = &output.child(1);
+            const uint64_t first_id = first->get_id();
+            const uint64_t second_id = second->get_id();
+            const std::string first_before = fill_snapshot(*first);
+            const std::string second_before = fill_snapshot(*second);
+
+            static_cast<const Fill &>(filler).fill_surface_extrusion(&surface, params, output);
+
+            CHECK(output.get_id() == root_id);
+            CHECK_FALSE(output.is_leaf());
+            CHECK(output.can_sort() == sortable);
+            CHECK(output.can_reverse());
+            CHECK_FALSE(output.can_rotate());
+            CHECK(ApiInternal::ExtrusionPropertyAccess::property_count(output) == property_count);
+            REQUIRE(output.get_property<ExtrusionPropertySpeed>() == speed_handle);
+            CHECK(speed_handle->speed_mm_per_s == 17.f);
+            REQUIRE(output.child_count() == (emit ? 3 : 2));
+            CHECK(&output.child(0) == first);
+            CHECK(&output.child(1) == second);
+            CHECK(first->get_id() == first_id);
+            CHECK(second->get_id() == second_id);
+            CHECK(fill_snapshot(*first) == first_before);
+            CHECK(fill_snapshot(*second) == second_before);
+            if (emit) {
+                const ExtrusionEntity &added = output.child(2);
+                REQUIRE(typeid(added) == typeid(ExtrusionEntity));
+                REQUIRE(added.child_count() == 1);
+                const ExtrusionEntity &leaf = added.child(0);
+                REQUIRE(typeid(leaf) == typeid(ExtrusionEntity));
+                REQUIRE(leaf.has_polyline());
+                CHECK(leaf.polyline_ref().to_polyline().points == line.points);
+                REQUIRE(leaf.get_property<ExtrusionAttributes>() != nullptr);
+                CHECK(leaf.get_property<ExtrusionAttributes>()->mm3_per_mm == params.flow.mm3_per_mm());
+            }
         }
 }

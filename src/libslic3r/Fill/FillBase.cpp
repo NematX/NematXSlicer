@@ -40,13 +40,42 @@
 #include "FillRectilinear.hpp"
 #include "FillSmooth.hpp"
 
+/* Provide the shared surface-fill implementation used by native patterns and
+   their plugin adapters. Pattern-specific fill_surface() creates centerlines;
+   the shared extrusion pass resolves flow, builds owned geometry and applies
+   optional gap fill. The generic-root overload appends produced children to a
+   prepared destination without replacing its identity, permissions or properties.
+   Region options owned by disabled plugins use the documented local fallbacks.
+
+       Fill::fill_surface_extrusion(surface, params, root)
+           |-- fill_surface_extrusion(surface, params, pointers)
+           |   `-- fill_surface(): obtain the selected pattern's centerlines
+           `-- append_fill_entities(): reserve, adopt owned nodes, clear pointers
+       fill_surface_extrusion_with_gap_fill()
+           `-- add gap paths after the main surface output
+*/
+
 // #define INFILL_DEBUG_OUTPUT
 
 namespace Slic3r {
 
 namespace {
 
+// Adopt freshly produced pointers after reserving destination storage, then empty the source list.
+void append_fill_entities(ExtrusionEntity &destination, ExtrusionEntitiesPtr &&source);
+
 // Plugin-owned region settings can be absent when their provider is disabled.
+double fill_region_option_effective_value(const PrintRegionConfig *config, const char *key, double fallback);
+
+void append_fill_entities(ExtrusionEntity &destination, ExtrusionEntitiesPtr &&source)
+{
+    ExtrusionEntity::Children &children = destination.children();
+    children.reserve(children.size() + source.size());
+    for (ExtrusionEntity *entity : source)
+        children.emplace_back(entity);
+    source.clear();
+}
+
 double fill_region_option_effective_value(const PrintRegionConfig *config, const char *key, double fallback)
 {
     const ConfigOption *option = config != nullptr ? config->option(key) : nullptr;
@@ -469,11 +498,8 @@ void Fill::fill_surface_extrusion(const Surface *surface, const FillParams &para
 #endif
 
             // Save into layer.
-            auto* eec = new ExtrusionEntityCollection();
-            /// pass the no_sort attribute to the extrusion path
-            eec->set_can_sort_reverse(!this->no_sort(), !this->no_sort());
-            /// add it into the collection
-            out.push_back(eec);
+            ExtrusionEntityUPtr eec = std::make_unique<ExtrusionEntity>(
+                ExtrusionEntity::Children{}, !this->no_sort(), !this->no_sort(), false);
             //get the role
             ExtrusionRole good_role = getRoleFromSurfaceType(params, surface);
             /// push the path
@@ -486,17 +512,19 @@ void Fill::fill_surface_extrusion(const Surface *surface, const FillParams &para
 #ifdef _DEBUGINFO
             LoopAssertVisitor().traverse(*eec);
 #endif
+            out.push_back(eec.get());
+            eec.release();
         }
     } catch (InfillFailedException&) {
     }
 
 }
 
-void Fill::fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntityCollection &out) const
+void Fill::fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntity &out) const
 {
     ExtrusionEntitiesPtr entities;
     this->fill_surface_extrusion(surface, params, entities);
-    out.append(std::move(entities));
+    append_fill_entities(out, std::move(entities));
 }
 
 

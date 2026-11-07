@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
     test_line_pattern.cpp
     test_arachne_infill.cpp
     test_concentric_pattern.cpp
+    test_native_extrusion_nesting.cpp
     test_native_extrusion_publication.cpp
     test_native_fill_producers.cpp
     test_native_medial_producers.cpp
