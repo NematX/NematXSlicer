@@ -27,6 +27,8 @@ The package defines these object settings, overridable per object like the other
   objects (at most until the last tool change): the tool visits the tower on the layers where it
   prints nothing else. The brim surrounds every section; the cone setting is ignored. It is refused
   with `single_extruder_multi_material` and with `filament_multitool_ramming`.
+- `wipe_tower_only_solid` (default off): the unused area of the tower, or of each separate section,
+  is filled densely on every layer, like on the first layer, instead of with a sparse grid.
 
 ## Sources
 
@@ -54,7 +56,8 @@ The package defines these object settings, overridable per object like the other
 - `tests/test_wipetower.py`: exports a two-tool model with both managers and
   compares the G-code, one tower setting at a time; checks the loops added or removed by
   `wipe_tower_perimeters`; checks that separate sections never overlap, keep their place and are
-  printed where their tool prints nothing else, and the refusal with one nozzle.
+  printed where their tool prints nothing else, and the refusal with one nozzle; checks that
+  `wipe_tower_only_solid` only replaces the sparse grid by a dense fill, in both modes.
 
 ```
 cmake --build .build --config Debug --target nematx_wipetower

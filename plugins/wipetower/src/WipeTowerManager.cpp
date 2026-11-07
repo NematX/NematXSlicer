@@ -57,7 +57,9 @@ one for the whole print:
    package, gives the number of perimeters: 1 is the default manager's band
    rectangle and cone ring, each further one is one line spacing outside, and 0
    prints none. The host's tower footprint (collision check, preview) does not
-   include these further perimeters.
+   include these further perimeters. The fill is dense on the first layer, and
+   on every layer with wipe_tower_only_solid, another setting of this package;
+   otherwise it is a sparse grid.
 7. Insertion: every generated root is rotated, moved to the platter and inserted
    by descending anchor, so that pending anchors stay valid; then the forced
    visits that stayed empty are removed.
@@ -109,6 +111,7 @@ namespace raster_work = NematXWipeTowerCopy::RectilinearPatternsPlugin::work;
 constexpr const char *k_plugin_id = "nematx_wipetower";
 constexpr const char *k_perimeters_key = "wipe_tower_perimeters";
 constexpr const char *k_separate_key = "wipe_tower_separate_filament";
+constexpr const char *k_only_solid_key = "wipe_tower_only_solid";
 const uint32_t no_tower = UINT32_MAX;
 const char *const k_no_dependencies[] = { nullptr };
 const raw_used_config_key k_used_keys[] = {
@@ -141,10 +144,11 @@ const raw_used_config_key k_used_keys[] = {
     {"single_extruder_multi_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"filament_multitool_ramming", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {k_separate_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+    {k_separate_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_only_solid_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
 };
 // Settings defined by this package; their values are object settings, like the other wipe tower settings.
-const char *const k_defined_keys[] = { k_perimeters_key, k_separate_key };
+const char *const k_defined_keys[] = { k_perimeters_key, k_separate_key, k_only_solid_key };
 
 struct ForcedVisit { uint32_t present; };
 // A layer group of the plan: group index, then layer group index; pairs compare in print order.
@@ -335,6 +339,9 @@ void WipeTowerManager::inilialize_impl(storage_handle *) const
     define_tower_option(m_orchestrator, k_separate_key, RAW_CO_BOOL, "Separate filament sections",
         "Purge each filament in its own wipe tower section, with a dedicated perimeter around each section. "
         "This avoids relying on adhesion between incompatible materials inside the wipe tower.", "0");
+    define_tower_option(m_orchestrator, k_only_solid_key, RAW_CO_BOOL, "Solid wipe tower spare layers",
+        "If enabled, the unused area of the wipe tower, or of each separate filament section, is filled densely "
+        "on every layer, like on the first layer, instead of with a sparse grid.", "0");
 }
 
 void define_tower_option(orchestrator_handle *orchestrator, const char *key, const raw_config_option_type type,
@@ -1116,7 +1123,9 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
     params.object_bounding_box = {{0, 0}, {scale_i(width), scale_i(area.pattern_y1)}};
     params.spacing = flow.spacing();
     params.density = 1.f;
-    if (layer_idx != 0) {
+    // The first layer is always dense; wipe_tower_only_solid makes every layer dense.
+    const bool dense = layer_idx == 0 || config.get(k_only_solid_key).get_bool();
+    if (!dense) {
         // Grid divides density between two sweeps. Limit cell diagonals, not just their perpendicular pitch.
         // The extra spacing percent is read as a ratio.
         const double nominal_pitch = 20. * flow.spacing() * config.get("wipe_tower_extra_spacing").get_float();
@@ -1126,7 +1135,7 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
     }
     raster::FillMonotonic solid;
     raster::FillGrid sparse;
-    raster::FillRectilinear &filler = layer_idx == 0 ? static_cast<raster::FillRectilinear &>(solid) : sparse;
+    raster::FillRectilinear &filler = dense ? static_cast<raster::FillRectilinear &>(solid) : sparse;
     raster::configure_filler(filler, params, storage);
     for (const ExPolygon &polygon : fill) {
         const raster_work::Polylines lines = filler.fill_surface(polygon, params);

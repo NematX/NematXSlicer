@@ -338,6 +338,39 @@ class WipeTowerParity(unittest.TestCase):
         log = (OUTPUT_ROOT / "separate-semm" / "host.log").read_text(encoding="utf-8")
         self.assertIn("Separate filament sections of the wipe tower cannot be used", log)
 
+    def check_dense_fill(self, sparse: str, dense: str) -> None:
+        """Above the first layer, the only segments that change are the fill of the unused area, and the dense
+        fill is much longer than the sparse grid (a tenth of the area by default). The first layer is always
+        dense; a layer whose bands use the whole depth has no fill."""
+        sparse_layers, dense_layers = tower_segments(sparse), tower_segments(dense)
+        self.assertEqual(sorted(sparse_layers), sorted(dense_layers))
+        self.assertEqual(sparse_layers[min(sparse_layers)], dense_layers[min(dense_layers)])
+        changed = 0
+        for z in sorted(sparse_layers)[1:]:
+            grid = sparse_layers[z] - dense_layers[z]
+            solid = dense_layers[z] - sparse_layers[z]
+            if not grid and not solid:
+                continue
+            changed += 1
+            grid_length = sum(math.dist(*segment) for segment in grid)
+            solid_length = sum(math.dist(*segment) for segment in solid)
+            self.assertGreater(solid_length, 4 * grid_length, f"fill at z={z}")
+        self.assertGreater(changed, 0)
+
+    def test_only_solid_fills_every_layer_densely(self) -> None:
+        # The stacked blocks change tools on a few layers only, so the tower has layers with unused area.
+        stacked = OUTPUT_ROOT / "stacked-solid.3mf"
+        write_boxes(stacked, [(0, 0, 0, 10, 10, 1, 1), (0, 0, 1, 10, 10, 2, 2), (0, 0, 2, 10, 10, 3, 1)])
+        nematx = (f"step_wipetower_plugin = {NEMATX_MANAGER}",)
+        for name, options in (("shared", ()), ("separate", ("wipe_tower_separate_filament = 1",))):
+            with self.subTest(mode=name):
+                sparse, _ = run_export(f"only-solid-{name}-off", self.extruders + nematx + options, stacked)
+                dense, _ = run_export(f"only-solid-{name}-on", self.extruders + nematx + options +
+                                      ("wipe_tower_only_solid = 1",), stacked)
+                self.check_dense_fill(sparse, dense)
+                if options:
+                    self.check_separate_sections(dense, {0, 1})
+
     def test_selection_needs_the_active_package(self) -> None:
         # The proof of selection used above: with the package deactivated, the host reports the profile value.
         datadir = OUTPUT_ROOT / "datadir-without-package"
