@@ -29,6 +29,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
+#include "libslic3r/Api/plugin/cpp/TemperatureTargets.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 
 /*
@@ -53,12 +54,21 @@ without a region are ignored by the root loop
 because settings_context needs a region; their current target is retained
 instead of causing temperature oscillation.  The chamber is a startup-only
 event and is not tracked here.
+Regional and filament target selection uses the public TemperatureTargets
+helpers; heater tracking and all cached decisions remain private to this file.
+
+    startup_heating() -> TemperatureTargets::filament_target(): select startup targets
+    LayerTemperature::setup_impl(): walk visits and retain sequential decisions
+        `-- visit_target() / TemperatureTargets::extrusion_target(): select source targets
+    LayerTemperature::run_impl(): materialize only the cached layer decisions
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultTemperaturePlugin {
 namespace {
 
 using ProcessParameterHelpers::ExtrusionSettingsContext;
+using TemperatureTargets::extrusion_target;
+using TemperatureTargets::filament_target;
 
 const char *const k_no_dependencies[] = {nullptr};
 
@@ -177,15 +187,6 @@ std::optional<int16_t> standby_target(const Config &config,
                                       extruder_index_t tool,
                                       const std::optional<int16_t> &base);
 
-// Read regional overrides before falling back to filament temperatures.
-std::optional<int16_t> extrusion_target(const ExtrusionSettingsContext &context,
-                                        extruder_index_t tool);
-
-// Read first-layer and normal filament temperatures for one concrete tool.
-std::optional<int16_t> filament_target(const Config &config,
-                                       extruder_index_t tool,
-                                       bool first_layer);
-
 // Convert a non-negative configuration value to the signed heater ABI value.
 std::optional<int16_t> heater_temperature(int32_t value);
 
@@ -292,39 +293,6 @@ std::optional<int16_t> heater_temperature(const int32_t value)
     if (value > (std::numeric_limits<int16_t>::max)())
         throw std::invalid_argument("A configured heater temperature is out of range.");
     return static_cast<int16_t>(value);
-}
-
-// Read first-layer then normal filament targets for one tool; the borrowed configuration is unchanged and non-positive values produce no target.
-std::optional<int16_t> filament_target(const Config &config,
-                                       const extruder_index_t tool,
-                                       const bool first_layer)
-{
-    if (first_layer) {
-        const int32_t first = config.vector_int_or_default("first_layer_temperature", tool, -1);
-        if (first > 0)
-            return heater_temperature(first);
-    }
-    const int32_t normal = config.vector_int_or_default("temperature", tool, -1);
-    if (normal > 0)
-        return heater_temperature(normal);
-    return std::nullopt;
-}
-
-// Resolve the borrowed source layer's regional overrides before filament fallback using its first-layer status; return no target for disabled values, propagate conversion errors, and leave all state unchanged.
-std::optional<int16_t> extrusion_target(const ExtrusionSettingsContext &context,
-                                        const extruder_index_t tool)
-{
-    if (context.first_layer) {
-        const int32_t override_temperature = context.region_config.int_or_default(
-            "print_first_layer_temperature", -1);
-        if (override_temperature >= 0)
-            return heater_temperature(override_temperature);
-    }
-    const int32_t override_temperature = context.region_config.int_or_default(
-        "print_temperature", -1);
-    if (override_temperature >= 0)
-        return heater_temperature(override_temperature);
-    return filament_target(context.print_config, tool, context.first_layer);
 }
 
 // Resolve an enabled idle target, including zero, or a nonzero standby delta; a missing fallback produces no operation.
@@ -449,7 +417,7 @@ std::optional<int16_t> visit_target(const Print &print,
             continue;
         ExtrusionSettingsContext context = ProcessParameterHelpers::settings_context(
             print, tool_group, extrusion);
-        return extrusion_target(context, tool);
+        return extrusion_target(context.print_config, context.region_config, tool, context.first_layer);
     }
     return filament_target(print.config(), tool, first_layer);
 }
@@ -872,7 +840,8 @@ void LayerTemperature::setup_impl(const plugin_run_context *run_ctx, const uint3
                     ExtrusionSettingsContext context = ProcessParameterHelpers::settings_context(
                         print, tool_group, extrusion);
                     last_source_first_layer = context.first_layer;
-                    const std::optional<int16_t> target = extrusion_target(context, tool);
+                    const std::optional<int16_t> target = extrusion_target(
+                        context.print_config, context.region_config, tool, context.first_layer);
                     if (!target || *target <= 0)
                         continue;
                     TrackedHeater &state = tracked_tool(tools, tool, semm);

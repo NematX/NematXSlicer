@@ -4,6 +4,7 @@
 #include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
+#include "libslic3r/Api/plugin/cpp/TemperatureTargets.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
@@ -19,6 +20,7 @@ checks arc geometry without including any internal host header.
     |-- compensate_convex_holes: require resolution from the SDK archive
     |-- extrusion_can_rotate / extrusion_set_can_rotate: link additive rotation exports
     |-- FanPolicy stages: link the shared kernels and validate the public context
+    |-- TemperatureTargets: require both shared resolvers from the SDK archive
     `-- arc_center(): check the public signed-radius calculation
 */
 
@@ -61,6 +63,12 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
         const slic3r_api::ConvexHoleDelta &, bool &) = &slic3r_api::compensate_convex_holes;
     if (compensate == nullptr)
         return 3;
+    std::optional<int16_t> (*volatile filament_target)(const slic3r_api::Config &, extruder_index_t, bool) =
+        &slic3r_api::TemperatureTargets::filament_target;
+    std::optional<int16_t> (*volatile extrusion_target)(const slic3r_api::Config &, const slic3r_api::Config &,
+        extruder_index_t, bool) = &slic3r_api::TemperatureTargets::extrusion_target;
+    if (filament_target == nullptr || extrusion_target == nullptr)
+        return 7;
     if (extrusion_can_rotate(nullptr) != 0 || extrusion_set_can_rotate(nullptr, 1) != 0)
         return 6;
     slic3r_api::FanPolicy::Settings settings;

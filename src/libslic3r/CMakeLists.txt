@@ -253,6 +253,8 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/SeamPlacerViews.hpp
 	Api/plugin/cpp/SkirtBrimStepViews.hpp
 	Api/plugin/cpp/StringHelpers.hpp
+	Api/plugin/cpp/TemperatureTargets.cpp
+	Api/plugin/cpp/TemperatureTargets.hpp
 	Api/plugin/cpp/VolumeViews.hpp
 	Api/plugin/cpp/Views.cpp
 	Api/plugin/cpp/Views.hpp

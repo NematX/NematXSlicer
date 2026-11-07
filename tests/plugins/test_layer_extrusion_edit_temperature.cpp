@@ -2,19 +2,25 @@
 
 #include <array>
 #include <memory>
+#include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "gcode_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "perimeter_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/ApiHostUtils.hpp"
 #include "libslic3r/Api/internal/LayerAccess.hpp"
+#include "libslic3r/Api/plugin/cpp/TemperatureTargets.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -34,6 +40,15 @@ These fixtures build small source-linked PrintingPlans, run the plan-level and
 layer-level temperature providers, and inspect the resulting firmware output.
 The cases cover target precedence, sequential heater tracking, startup policy,
 tool changes, second-layer updates, SEMM tower ownership, and object groups.
+Fixture paths are acquired as canonical roots before crossing the plan boundary;
+source regions remain borrowed from the prepared print.
+Direct SDK checks cover selection, disabled options and conversion errors without
+creating a plan. A declared linear STL catalogue checks the real export pipeline.
+
+    SDK TEST_CASE -> TemperatureTargets: resolve borrowed configuration views
+    provider TEST_CASE -> append_temperature_root(): acquire canonical source paths
+        `-- run_temperature_plugins(): plan events -> export_with_firmware()
+    catalogue TEST_CASE -> linear_cases(): check setting coverage -> STL export
 */
 
 namespace {
@@ -108,7 +123,7 @@ void append_temperature_root(PrintingToolGroup &tool_group,
     PrintingExtrusion extrusion;
     extrusion.region_island = &source;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
-    extrusion.root = std::move(path);
+    extrusion.root = CanonicalExtrusion::acquire(*path);
     tool_group.extrusions.push_back(std::move(extrusion));
 }
 
@@ -117,10 +132,11 @@ void append_temperature_tower_root(PrintingToolGroup &tool_group)
 {
     PrintingExtrusion tower;
     tower.sregion_island_role = ExtrusionRole::WipeTower;
-    tower.root = make_firmware_path(
+    std::unique_ptr<ExtrusionPath> path = make_firmware_path(
         ArcPolyline(Points{Point(scale_i(2.0), scale_i(0.0)),
                            Point(scale_i(2.5), scale_i(0.0))}),
         20.f, 400.f);
+    tower.root = CanonicalExtrusion::acquire(*path);
     tool_group.extrusions.push_back(std::move(tower));
 }
 
@@ -531,6 +547,155 @@ std::string export_late_tool_fixture(bool ooze_prevention)
 }
 
 } // namespace
+
+TEST_CASE("SDK temperature targets retain regional and filament precedence", "[plugins][temperature][temperature-sdk]")
+{
+    namespace Targets = slic3r_api::TemperatureTargets;
+    struct TargetCase {
+        int regional_first;
+        int regional_normal;
+        int filament_first;
+        int filament_normal;
+        bool first_layer;
+        std::optional<int16_t> expected;
+    };
+    const TargetCase cases[] = {
+        {225, 220, 215, 200, true, 225}, {225, 220, 215, 200, false, 220},
+        {0, 220, 215, 200, true, 0}, {-1, 0, 215, 200, true, 0},
+        {-1, -1, 215, 200, true, 215}, {-1, -1, 215, 200, false, 200},
+        {-1, -1, 0, 200, true, 200}, {-1, -1, -1, 200, true, 200},
+        {-1, -1, 0, 0, true, std::nullopt}, {-1, -1, -1, -1, false, std::nullopt},
+        {32767, 32768, 32768, 32768, true, 32767}
+    };
+    for (const TargetCase &test : cases) {
+        CAPTURE(test.regional_first, test.regional_normal, test.filament_first,
+            test.filament_normal, test.first_layer);
+        DynamicPrintConfig print_config;
+        DynamicPrintConfig region_config;
+        print_config.set_key_value("first_layer_temperature", new ConfigOptionInts({test.filament_first}));
+        print_config.set_key_value("temperature", new ConfigOptionInts({test.filament_normal}));
+        region_config.set_key_value("print_first_layer_temperature", new ConfigOptionInt(test.regional_first));
+        region_config.set_key_value("print_temperature", new ConfigOptionInt(test.regional_normal));
+        const slic3r_api::Config filament(ApiHost::to_config_handle(&print_config));
+        const slic3r_api::Config region(ApiHost::to_config_handle(&region_config));
+        const std::string before = filament.serialize_all() + region.serialize_all();
+        CHECK(Targets::extrusion_target(filament, region, 0, test.first_layer) == test.expected);
+        CHECK(filament.serialize_all() + region.serialize_all() == before);
+    }
+}
+
+TEST_CASE("SDK temperature targets skip absent disabled and unavailable tool settings", "[plugins][temperature][temperature-sdk]")
+{
+    namespace Targets = slic3r_api::TemperatureTargets;
+    DynamicPrintConfig print_config;
+    DynamicPrintConfig region_config;
+    const slic3r_api::Config filament(ApiHost::to_config_handle(&print_config));
+    const slic3r_api::Config region(ApiHost::to_config_handle(&region_config));
+    CHECK_FALSE(Targets::filament_target(filament, 0, true));
+    CHECK_FALSE(Targets::extrusion_target(filament, region, 0, true));
+    print_config.set_key_value("first_layer_temperature", new ConfigOptionInts({215, 225}));
+    print_config.set_key_value("temperature", new ConfigOptionInts({200, 210}));
+    CHECK(Targets::filament_target(filament, 1, true) == std::optional<int16_t>(225));
+    CHECK(Targets::filament_target(filament, 1, false) == std::optional<int16_t>(210));
+    CHECK_FALSE(Targets::filament_target(filament, 2, true));
+    CHECK_FALSE(Targets::filament_target(filament, EXTRUDER_ID_UNKNOWN, true));
+    ConfigOption *first = print_config.option("first_layer_temperature");
+    first->set_can_be_disabled();
+    first->set_enabled(false, 1);
+    CHECK(Targets::filament_target(filament, 1, true) == std::optional<int16_t>(210));
+    CHECK(Targets::filament_target(filament, 0, true) == std::optional<int16_t>(215));
+    region_config.set_key_value("print_first_layer_temperature", new ConfigOptionInt(230));
+    region_config.set_key_value("print_temperature", new ConfigOptionInt(220));
+    region_config.option("print_first_layer_temperature")->set_can_be_disabled(true);
+    CHECK(Targets::extrusion_target(filament, region, 1, true) == std::optional<int16_t>(220));
+    region_config.option("print_temperature")->set_can_be_disabled(true);
+    CHECK(Targets::extrusion_target(filament, region, 1, true) == std::optional<int16_t>(210));
+    print_config.option("temperature")->set_can_be_disabled(true);
+    CHECK_FALSE(Targets::extrusion_target(filament, region, 1, true));
+}
+
+TEST_CASE("SDK temperature targets reject only a selected overflowing value", "[plugins][temperature][temperature-sdk]")
+{
+    namespace Targets = slic3r_api::TemperatureTargets;
+    DynamicPrintConfig print_config;
+    DynamicPrintConfig region_config;
+    const slic3r_api::Config filament(ApiHost::to_config_handle(&print_config));
+    const slic3r_api::Config region(ApiHost::to_config_handle(&region_config));
+    print_config.set_key_value("first_layer_temperature", new ConfigOptionInts({32767}));
+    print_config.set_key_value("temperature", new ConfigOptionInts({32768}));
+    CHECK(Targets::filament_target(filament, 0, true) == std::optional<int16_t>(32767));
+    CHECK_THROWS_AS(Targets::filament_target(filament, 0, false), std::invalid_argument);
+    CHECK_THROWS_WITH(Targets::filament_target(filament, 0, false),
+        "A configured heater temperature is out of range.");
+    region_config.set_key_value("print_temperature", new ConfigOptionInt(32768));
+    CHECK_THROWS_WITH(Targets::extrusion_target(filament, region, 0, true),
+        "A configured heater temperature is out of range.");
+    region_config.set_key_value("print_first_layer_temperature", new ConfigOptionInt(0));
+    CHECK(Targets::extrusion_target(filament, region, 0, true) == std::optional<int16_t>(0));
+    CHECK_THROWS_WITH(Targets::extrusion_target(filament, region, 0, false),
+        "A configured heater temperature is out of range.");
+}
+
+TEST_CASE("Temperature providers export their declared linear STL catalogue", "[plugins][temperature][plugin-e2e][temperature-e2e]")
+{
+    namespace E2E = Slic3r::Test::PluginE2E;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"temperature", "200"}, {"first_layer_temperature", "215"}, {"chamber_temperature", "30"},
+        {"bed_temperature", "50"}, {"first_layer_bed_temperature", "60"}, {"idle_temperature", "!150"},
+        {"print_temperature", "-1"}, {"print_first_layer_temperature", "-1"},
+        {"print_bed_temperature", "0"}, {"print_first_layer_bed_temperature", "0"},
+        {"autoemit_temperature_commands", "1"}, {"start_gcode_manual", "0"},
+        {"ooze_prevention", "0"}, {"single_extruder_multi_material", "0"}, {"standby_temperature_delta", "-5"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"start_gcode", ""}, {"end_gcode", ""},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::vector<E2E::Domain> domains = {
+        {{"autoemit_temperature_commands"}, {{"manual-heating", {{"autoemit_temperature_commands", "0"}}}}},
+        {{"start_gcode_manual"}, {{"manual-start", {{"start_gcode_manual", "1"}}}}},
+        {{"chamber_temperature"}, {{"no-chamber", {{"chamber_temperature", "0"}}}}},
+        {{"bed_temperature"}, {{"normal-bed", {{"bed_temperature", "55"}}}}},
+        {{"first_layer_bed_temperature"}, {{"first-bed", {{"first_layer_bed_temperature", "65"}}}}},
+        {{"first_layer_temperature"}, {{"filament-fallback", {{"first_layer_temperature", "0"}}}}},
+        {{"temperature"}, {{"normal-filament", {{"temperature", "205"}}}}},
+        {{"idle_temperature"}, {{"idle-zero", {{"idle_temperature", "0"}}}}},
+        {{"ooze_prevention"}, {{"ooze-prevention", {{"ooze_prevention", "1"}}}}},
+        {{"single_extruder_multi_material"}, {{"shared-heater", {{"single_extruder_multi_material", "1"}}}}},
+        {{"standby_temperature_delta"}, {{"standby-delta", {{"standby_temperature_delta", "-10"}}}}},
+        {{"print_bed_temperature"}, {{"regional-bed", {{"print_bed_temperature", "55"}}}}},
+        {{"print_first_layer_bed_temperature"}, {{"regional-first-bed", {{"print_first_layer_bed_temperature", "65"}}}}},
+        {{"print_temperature"}, {{"regional-target", {{"print_temperature", "220"}}},
+            {"regional-zero", {{"print_temperature", "0"}}}}},
+        {{"print_first_layer_temperature"}, {{"regional-first-target", {{"print_first_layer_temperature", "225"}}}}}
+    };
+    const std::vector<E2E::Case> cases = E2E::linear_cases(host,
+        {"extrusion_edit.startup_temperature.default", "layer_extrusion_edit.temperature.default"}, baseline, domains);
+    const TriangleMesh mesh = E2E::stl_fixture(false);
+    for (const E2E::Case &test : cases) {
+        CAPTURE(test.name);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, E2E::apply_case(baseline, test));
+        print.process();
+        const boost::filesystem::path path = temporary_gcode_path();
+        std::string output;
+        try {
+            output = read_text_file(host.export_gcode_cli(print, path.string()));
+            remove_output_pair(path);
+        } catch (...) {
+            remove_output_pair(path);
+            throw;
+        }
+        const std::vector<std::string> lines = gcode_lines(output);
+        CHECK(first_extrusion_line(lines, 0) != std::string::npos);
+        CHECK(count_command_lines(lines, "M104") + count_command_lines(lines, "M109") > 0);
+        for (size_t index = 1; index < lines.size(); ++index)
+            if (lines[index].compare(0, 4, "M104") == 0 || lines[index].compare(0, 4, "M109") == 0)
+                CHECK(lines[index] != lines[index - 1]);
+    }
+}
 
 TEST_CASE("Temperature plugins register and activate their two providers",
           "[plugins][temperature]")

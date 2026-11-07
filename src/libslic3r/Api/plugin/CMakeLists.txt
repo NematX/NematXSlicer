@@ -10,6 +10,7 @@ set(_sdk_sources
     cpp/FanPolicy.cpp
     cpp/HoleCompensation.cpp
     cpp/PrintHelpers.cpp
+    cpp/TemperatureTargets.cpp
     cpp/gcode/BuiltinGCodeReaderBase.cpp
     cpp/gcode/DefaultExtruder.cpp
     cpp/gcode/DefaultGCodeFirmwareSession.cpp
