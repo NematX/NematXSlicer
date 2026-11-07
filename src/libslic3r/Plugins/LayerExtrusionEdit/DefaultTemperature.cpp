@@ -80,25 +80,6 @@ const char *const k_startup_plugin_id = "extrusion_edit.startup_temperature.defa
 // Exclusive group containing the startup-temperature providers.
 const char *const k_startup_group_id = "extrusion_edit.startup_temperature";
 
-enum class HeaterKind
-{
-    Tool,
-    Bed,
-    Chamber
-};
-
-struct HeaterRequest
-{
-    // Physical heater category receiving this operation.
-    HeaterKind heater = HeaterKind::Tool;
-    // Tool address, or the unknown marker for bed and chamber operations.
-    extruder_index_t tool = EXTRUDER_ID_UNKNOWN;
-    // Requested temperature in degrees Celsius, including zero for standby.
-    int16_t temperature = 0;
-    // Whether firmware must wait until the requested temperature is reached.
-    bool wait = false;
-};
-
 struct StartupToolTarget
 {
     // Concrete tool receiving a non-waiting startup request.
@@ -130,26 +111,6 @@ struct TrackedHeater
     // Last temperature known to have been reached by a waited request.
     std::optional<int16_t> known;
 };
-
-struct VisitTemperatureDecision
-{
-    // Requests appended before this visit, normally the incoming tool target.
-    std::vector<HeaterRequest> before;
-    // Requests appended after this visit, normally standby for its leaving tool.
-    std::vector<HeaterRequest> after;
-    // Root index and target for non-synthetic regional roots in visit order.
-    std::vector<std::pair<uint32_t, int16_t>> roots;
-};
-
-struct LayerTemperatureDecision
-{
-    // Requests appended after the layer's existing before events.
-    std::vector<HeaterRequest> before;
-    // Per-tool-visit requests and root edits for this layer.
-    std::vector<VisitTemperatureDecision> visits;
-};
-
-using LayerDecisions = std::vector<std::vector<LayerTemperatureDecision>>;
 
 struct PreviousVisit
 {
@@ -238,51 +199,6 @@ private:
     const char *progress_message_format_impl() const noexcept override;
     // Append startup heater events to the plan's before sequence.
     void run_impl(const plugin_run_context *run_ctx) const override;
-};
-
-class LayerTemperature final : public PluginBase
-{
-public:
-    // Return the singleton layer provider registered in the current orchestrator.
-    static LayerTemperature &instance(orchestrator_handle *orchestrator);
-
-    // Initialize the generic plugin facade without owning plan or print data.
-    explicit LayerTemperature(orchestrator_handle *orchestrator);
-
-private:
-    // Return the stable layer provider identifier.
-    const char *id_impl() const noexcept override;
-    // Return the layer provider display name.
-    const char *name_impl() const noexcept override;
-    // Describe sequential target tracking and layer event placement.
-    const char *description_impl() const noexcept override;
-    // Select the exclusive layer-temperature group.
-    const char *exclusive_group_impl() const noexcept override;
-    // Run in the layer extrusion edit step.
-    slicing_step_t step_impl() const noexcept override;
-    // Declare that layer temperature has no plugin dependency.
-    const char *const *dependencies_impl() const noexcept override;
-    // Run after the default fan provider and tool-change producer.
-    int32_t priority_impl() const noexcept override;
-    // Copy every configuration option read by layer temperature planning.
-    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
-    // Layer temperature does not define a new user setting.
-    int32_t defined_config_keys(const char **keys) const noexcept override;
-    // Initialize without creating dynamic options.
-    void inilialize_impl(storage_handle *) const override;
-    // Describe layer-level temperature progress.
-    const char *progress_message_format_impl() const noexcept override;
-    // Record all sequential heater decisions before parallel layer runs begin.
-    void setup_impl(const plugin_run_context *run_ctx, uint32_t run_count) const override;
-    // Count the current layer as one materialization unit.
-    void setup_run_impl(const plugin_run_context *run_ctx) const override;
-    // Apply only the cached decisions for the current layer.
-    void run_impl(const plugin_run_context *run_ctx) const override;
-
-    // True when setup completed and cached decisions match the current plan.
-    mutable bool m_setup_valid = false;
-    // Per-group and per-layer decisions materialized by parallel layer runs.
-    mutable LayerDecisions m_decisions;
 };
 
 // Validate a non-negative configuration temperature and return the ABI-sized value; negative values disable a request and oversized values fail.
@@ -588,6 +504,16 @@ void StartupTemperature::run_impl(const plugin_run_context *run_ctx) const
     for (const StartupToolTarget &target : heating.other_tools)
         append_heater_event(run_ctx->plugin_storage, events,
                             HeaterRequest{HeaterKind::Tool, target.tool, target.temperature, false}, true);
+}
+
+} // namespace
+
+// Resolve the borrowed source layer's regional overrides before filament fallback using its first-layer status; return no target for disabled values, propagate conversion errors, and leave all state unchanged.
+std::optional<int16_t> extrusion_target(const ExtrusionSettingsContext &context,
+                                        const extruder_index_t tool)
+{
+    return TemperatureTargets::extrusion_target(context.print_config, context.region_config, tool,
+                                                context.first_layer);
 }
 
 // Return the process-local layer plugin singleton associated with the supplied orchestrator handle.
@@ -899,8 +825,6 @@ void LayerTemperature::run_impl(const plugin_run_context *run_ctx) const
     }
     progress().increment();
 }
-
-} // namespace
 
 // Register the plan-level startup and layer-level temperature providers in the supplied orchestrator without taking ownership,
 // then copy the description of each provider's selection setting; rejected descriptions or allocation failures throw.
