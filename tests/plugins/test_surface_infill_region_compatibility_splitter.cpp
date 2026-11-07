@@ -1,6 +1,14 @@
 // These tests build perimeter and surface geometry, then check how infill settings
 // split one island into region groups. A region group owns its fill surfaces;
 // island-wide validation checks their overlap and coverage in scaled coordinates.
+// Fixtures retain their Print/Model while surface views are inspected. Selected
+// providers run through the real host steps; scoped activation is restored after
+// each test. Converging source groups must contribute before any shared destination
+// is replaced, preserving both complete coverage and each source's metadata.
+//
+// The test calls StepSurfaceGeneration::run_step() to dispatch the selected passes.
+// Calls that build perimeter input and assertions that inspect resulting groups
+// are separate test operations, not calls made by the splitter itself.
 #include <catch2/catch.hpp>
 
 #include "perimeter_test_helpers.hpp"
@@ -305,6 +313,55 @@ TEST_CASE("InfillRegionCompatibilitySplitter splits sparse surfaces by common in
     const ExPolygons expected_right = intersection_ex(island.infill_areas(), layer.region(1).get_raw_slices());
     require_region_island_area(*left, expected_left);
     require_region_island_area(*right, expected_right);
+}
+
+TEST_CASE("InfillRegionCompatibilitySplitter merges sources that resolve to one tool",
+          "[plugins][surface-generation][infill-region-compatibility]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedPerimeterPrint prepared;
+    prepare_cube_print(prepared, perimeter_config({{"perimeters", "0"},
+        {"nozzle_diameter", "0.4,0.6"}, {"solid_infill_extruder", "2"},
+        {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.45"}}));
+    run_surface_splitter_pipeline(prepared.print);
+    Layer &layer = prepared.print.object(0).layer(0);
+    LayerSliceIsland &island = layer.island(0);
+    const LayerRegionSetCPtrs regions = region_set(layer.region(0));
+    LayerRegionIsland &ordinary = island.get_or_add_region_island(regions, 0);
+    LayerRegionIsland &bridge = island.get_or_add_region_island(regions, 1);
+    const double middle = unscaled(island.get_bounding_box().center().x());
+    const ExPolygons first = intersection_ex(island.infill_areas(),
+        ExPolygons{rectangle_expolygon(-1000., -1000., middle, 1000.)});
+    const ExPolygons second = diff_ex(island.infill_areas(), first);
+    REQUIRE_FALSE(first.empty());
+    REQUIRE_FALSE(second.empty());
+    ordinary.set_fill_surfaces().set(first, stPosInternal | stDensSolid);
+    bridge.set_fill_surfaces().set(second, stPosBottom | stDensSolid | stModBridge);
+    for (Surface &surface : bridge.set_fill_surfaces()) {
+        surface.bridge_angle = M_PI / 6.;
+        surface.priority = 7;
+    }
+    // Both sources resolve to tool index 1: combine their outputs before either
+    // collection is replaced, preserving the bridge geometry and metadata.
+    ScopedActivePlugins active({INFILL_REGION_COMPATIBILITY_SPLITTER});
+    Steps::StepSurfaceGeneration::run_step(Orchestrator::instance(), prepared.print);
+    std::string error;
+    const bool valid = Steps::StepSurfaceGeneration::validate_post(prepared.print, &error);
+    INFO(error);
+    REQUIRE(valid);
+    CHECK(non_empty_region_island_count(island) == 1);
+    const LayerRegionIsland *merged = region_island_for_regions(island, regions);
+    REQUIRE(merged != nullptr);
+    CHECK(merged->extruder_id() == 1);
+    require_region_island_area(*merged, island.infill_areas());
+    size_t bridge_count = 0;
+    for (const Surface &surface : merged->fill_surfaces())
+        if ((surface.surface_type & stModBridge) != stNone) {
+            CHECK(surface.bridge_angle == M_PI / 6.);
+            CHECK(surface.priority == 7);
+            ++bridge_count;
+        }
+    CHECK(bridge_count == second.size());
 }
 
 // Build a real two-group island, replace its surfaces with clipped halves, and

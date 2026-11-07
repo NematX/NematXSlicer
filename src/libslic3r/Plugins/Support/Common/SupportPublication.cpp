@@ -14,9 +14,12 @@
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/DataTreeProperties.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 
-/* Publication turns the slabs of a GeneratedSupport into auxiliary layers, for any support family.
+/* Store a support algorithm's results as layers that can receive extrusion paths.
+   Each input slab describes an area between a bottom and top Z; GeneratedSupport
+   holds these slabs for the support algorithm.
    Slabs sharing the same exact print Z and printable thickness become one auxiliary layer, whose
    raw slice is their union in object region zero, without modifier splitting; pieces that the closing
    by +SCALED_EPSILON then -SCALED_EPSILON of the legacy toolpath fill would join form one joined island, the others
@@ -38,7 +41,20 @@
    Slab ring bounding boxes are cached per height group. Each island intersection keeps only rings whose boxes
    can touch its contour box, in original order; enclosing rings and boundary touches remain in the operand.
    run_support_family() shares the style and demand filters, constructs one parameter object, calls the family's
-   slab generator, publishes the slabs and finishes progress for valid payloads. */
+   slab generator, publishes the slabs and finishes progress for valid payloads.
+   A matching family marks its surface calculation complete even for empty demand;
+   a different family cannot certify that result.
+
+   Representative calls:
+
+       run_support_family()
+           |-- generate() [the selected family's slab-generator callback]
+           `-- publish()
+               |-- collect_publication_z() [group slabs by exact heights]
+               `-- publish_group() [publish groups thinnest first at each Z]
+
+   The generator callback chooses support geometry; publication assigns its layer,
+   region, role and completion metadata. These are separate responsibilities. */
 
 namespace slic3r_api::Support::Common {
 namespace {
@@ -111,11 +127,15 @@ void run_support_family(const plugin_run_context *context, orchestrator_handle *
     const Print print(payload->print);
     const Object object(payload->object);
     const SupportStyle style = support_style(object.config());
-    if ((style == first_style || style == second_style) && object_has_support_demand(object)) {
-        const SupportParams params(print, object);
-        GeneratedSupport support(context->plugin_storage);
-        generate(context, print, object, params, support);
-        publish(context, object, params, support, orchestrator);
+    if (style == first_style || style == second_style) {
+        if (object_has_support_demand(object)) {
+            const SupportParams params(print, object);
+            GeneratedSupport support(context->plugin_storage);
+            generate(context, print, object, params, support);
+            publish(context, object, params, support, orchestrator);
+        }
+        // Empty demand is a completed result for this style, not a missing producer.
+        object.mutable_properties().get_or_add(SupportPipelineInfo::key).surfaces_generated=1;
     }
     progress.finish_run();
 }

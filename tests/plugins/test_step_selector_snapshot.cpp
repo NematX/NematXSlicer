@@ -28,21 +28,24 @@ from the Python packages listed by python_package_provider(). ActivationGuard re
 saved activation flags. SLIC3R_SELECTOR_SNAPSHOT names an optional output file for C++ rows.
 Group descriptions contain pointers into their own strings; copies refresh those pointers.
 
-Operation notes:
-- append_group :  escaped
-- append_registered :  python_package_provider, escaped
-- finalized_members :  python_package_provider
-- append_selection :  python_package_provider
-
 Representative direct calls (branches are not a timeline):
 
     TEST_CASE
         |-- host.register_step()
         |-- Steps::make_exclusive_step_group()
         |-- append_group()
+        |   `-- escaped()
         |-- host.registered_plugins()
         |-- append_registered()
-        `-- append_selection()
+        |   |-- python_package_provider()
+        |   `-- escaped()
+        |-- append_selection()
+        `-- append_scenarios()
+            |-- finalized_members()
+            |   `-- python_package_provider()
+            |-- append_group()
+            `-- append_selection()
+                `-- python_package_provider()
 */
 
 namespace {
@@ -470,6 +473,8 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         const std::string label = entry.group.step == dynamic_step ? "dynamic" : std::to_string(int(entry.group.step));
         append_group(rows, "group|" + label + "|runtime|" + entry.group.group_id, entry.group);
     }
+    // The shared regional switch has its own fragment, separate from the generated selector.
+    groups.insert("bridge.volume.enabled");
     append_registered(rows, host, keys, groups, provider_ids, excluded_keys);
     {
         ActivationGuard normal_guard(host);
@@ -492,6 +497,7 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         return;
     }
 const char *const k_expected[] = {
+    "def|bridge_volume_compensation|label=Bridge volume model|tooltip=Selects the active plugin used to adjust bridge volume. The surface model estimates room from lower surfaces and infill density; the experimental model uses actual extrusion footprints.|type=9|container=1|preset=1|category=3|invalidates=1400|mode=22|gui=0|plugin_ids=1|technology=1|default=bridge.finalize_surface_volume|values=bridge.finalize_surface_volume,bridge.finalize_volume",
     "group|1300|synthetic|snapshot_group|key=exclusive_group_1300_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=7|invalidates=1300|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_1300_snapshot_group_plugin\\nend_line\\n",
     "def|exclusive_group_1350_support_toolpath_bottom_interface_plugin|label=support_toolpath_bottom_interface|tooltip=Choose which active plugin owns this exclusive plugin group. Automatic selection uses the first matching active preference, otherwise the active group default.|type=9|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=0|plugin_ids=1|technology=1|default=auto|values=auto,support.toolpath.legacy_bottom,test.support_toolpath.bottom",
     "def|exclusive_group_1350_support_toolpath_sparse_plugin|label=support_toolpath_sparse|tooltip=Choose which active plugin owns this exclusive plugin group. Automatic selection uses the first matching active preference, otherwise the active group default.|type=9|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=0|plugin_ids=1|technology=1|default=auto|values=auto,support.toolpath.legacy_sparse,support.toolpath.branch_sheath,test.support_toolpath.patterns,test.support_toolpath.sparse",
@@ -537,6 +543,7 @@ const char *const k_expected[] = {
     "group|1350|runtime|support_toolpath_top_interface|key=exclusive_group_1350_support_toolpath_top_interface_plugin|label=support_toolpath_top_interface|tooltip=Choose which active plugin owns this exclusive plugin group. Automatic selection uses the first matching active preference, otherwise the active group default.|type=8|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=7|plugin_ids=1|technology=1|default=auto|values=auto,test.support_toolpath.alternate,support.toolpath.legacy_top,test.support_toolpath.top|ui=page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_top_interface_plugin\\nend_line\\n",
     "group|1350|synthetic|snapshot_group|key=exclusive_group_1350_snapshot_group_plugin|label=snapshot_group|tooltip= Automatic selection uses the first matching active preference, otherwise the active group default.|type=8|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=7|plugin_ids=1|technology=1|default=auto|values=|ui=page:Support material\\ngroup:Support toolpaths\\nline:snapshot_group\\nsetting:exclusive_group_1350_snapshot_group_plugin\\nend_line\\n",
     "group|1400|synthetic|snapshot_group|key=exclusive_group_1400_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=2|invalidates=1400|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_1400_snapshot_group_plugin\\nend_line\\n",
+    "group|1400|runtime|bridge_volume|key=bridge_volume_compensation|label=Bridge volume model|tooltip=Selects the active plugin used to adjust bridge volume. The surface model estimates room from lower surfaces and infill density; the experimental model uses actual extrusion footprints.|type=8|container=1|preset=1|category=3|invalidates=1400|mode=22|gui=7|plugin_ids=1|technology=1|default=bridge.finalize_surface_volume|values=bridge.finalize_surface_volume,bridge.finalize_volume|ui=page:Width & Flow\\ngroup:Flow\\nline:\\nsetting:bridge_volume_compensation\\nend_line\\n",
     "group|1450|synthetic|snapshot_group|key=exclusive_group_1450_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=2|invalidates=1450|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_1450_snapshot_group_plugin\\nend_line\\n",
     "group|1500|ordering_all|ordering.extrusion_tree|key=exclusive_group_1500_ordering_extrusion_tree_plugin|label=Extrusion-tree ordering|tooltip=Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.|type=8|container=1|preset=1|category=11|invalidates=1500|mode=22|gui=7|plugin_ids=1|technology=1|default=ordering.extrusion_tree.advanced|values=ordering.extrusion_tree.advanced,ordering.extrusion_tree.xy_serpentine,ordering.extrusion_tree.default|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Extrusion-tree ordering\\nsetting:exclusive_group_1500_ordering_extrusion_tree_plugin\\nend_line\\n",
     "group|1500|real|ordering.extrusion_tree|key=exclusive_group_1500_ordering_extrusion_tree_plugin|label=Extrusion-tree ordering|tooltip=Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.|type=8|container=1|preset=1|category=11|invalidates=1500|mode=22|gui=7|plugin_ids=1|technology=1|default=ordering.extrusion_tree.default|values=ordering.extrusion_tree.default|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Extrusion-tree ordering\\nsetting:exclusive_group_1500_ordering_extrusion_tree_plugin\\nend_line\\n",
@@ -622,6 +629,8 @@ const char *const k_expected[] = {
     "ui|exclusive_group_1350_support_toolpath_bottom_interface_plugin|print.ui|support_toolpath_bottom_interface|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_bottom_interface_plugin\\nend_line\\n",
     "ui|exclusive_group_1350_support_toolpath_sparse_plugin|print.ui|support_toolpath_sparse|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_sparse_plugin\\nend_line\\n",
     "ui|exclusive_group_1350_support_toolpath_top_interface_plugin|print.ui|support_toolpath_top_interface|priority=0|page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_top_interface_plugin\\nend_line\\n",
+    "ui|exclusive_group_750_surface_bridge_preparation_plugin|print.ui|surface.bridge_preparation|priority=1|page:Infill\\ngroup:Advanced\\nline:insert$afterline$Anchor solid infill by X mm:Uniform bridge margin\\nsetting:bridged_infill_uniform_margin\\nend_line\\n",
+    "ui|bridge.volume.enabled|print.ui|bridge.volume.enabled|priority=1|page:Width & Flow\\ngroup:Flow\\nline:insert$afterline$Bridge type:Bridge volume compensation\\nsetting:bridge_volume_compensation_enabled\\nend_line\\n",
     "ui|exclusive_group_700_support_demand_bridge_removal_plugin|print.ui|support.demand.bridge_removal|priority=0|page:Support material\\ngroup:Options for support material and raft\\nsetting:insert$aftersetting$support_material_xy_spacing:dont_support_bridges\\n",
     "ui|exclusive_group_1800_nozzle_cleaning_plugin|printer_fff.ui|nozzle_cleaning|priority=0|page:Custom G-code\\ngroup:Nozzle cleaning\\nsetting:nozzle_cleaning_gcode\\nsetting:nozzle_cleaning_interval_layers\\nsetting:nozzle_cleaning_interval_volume\\nsetting:nozzle_cleaning_interval_retractions\\nsetting:nozzle_cleaning_interval_toolchanges\\nsetting:nozzle_cleaning_when\\nend_group\\n",
     "ui|exclusive_group_2000_gcode_post_process_plugin|print.ui|gcode.post_process|priority=0|page:Notes\\ngroup:Exclusive step plugins\\nline:gcode.post_process\\nsetting:exclusive_group_2000_gcode_post_process_plugin\\nend_line\\n",

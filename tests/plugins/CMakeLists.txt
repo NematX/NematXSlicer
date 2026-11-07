@@ -10,11 +10,15 @@ add_executable(${_TEST_NAME}_tests
     clipper_offset_test_helpers.cpp
     gcode_test_helpers.cpp
     perimeter_test_helpers.cpp
+    plugin_e2e_test_helpers.cpp
     plugin_test_helpers.cpp
     test_adaptive_cubic_pattern.cpp
     test_lightning_pattern.cpp
     test_auxiliary_layer_helpers.cpp
     test_bridge_detector_cancellation.cpp
+    test_bridge_ordering.cpp
+    test_bridge_pipeline.cpp
+    test_bridge_preparation.cpp
     mesh_queries_c_fixture.c
     plugin_api_headers_c_fixture.c
     support_pattern_c_fixture.c
@@ -40,6 +44,7 @@ add_executable(${_TEST_NAME}_tests
     test_plugin_activation_config.cpp
     test_plugin_api_compatibility.cpp
     test_plugin_config.cpp
+    test_plugin_e2e_matrix.cpp
     test_plugin_loader_diagnostics.cpp
     test_plugin_property.cpp
     test_print_records.cpp

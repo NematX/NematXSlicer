@@ -8,10 +8,20 @@
    make the compiler type-check the parameters and return type of the declarations; the pragmas below
    turn an incompatible pointer assignment into an error (MSVC only warns by default). Compile-time
    array checks verify the type and value of the slicing step constants.
-   The four step headers use their real dependencies. Exact C callback assignments
+   The step headers use their real dependencies. Exact C callback assignments
    and payload-field calls check that callback parameters use file-scope payload
    types, not distinct structs introduced inside function prototypes. The step
-   calls are type-checked in an uncalled function and never reach a live host. */
+   calls are type-checked in uncalled functions and never reach a live host.
+   Finalization also instantiates the fixed-size bridge payloads from slic3r_bridge.h.
+
+   Calls written in the unexecuted compile-only probe body:
+
+       test_finalize_callback_types_c() [never invoked by the test runtime]
+           |-- ctx->replace_infill_buckets() [typed callback expression]
+           `-- ctx->get_requested_support_areas() [typed callback expression]
+
+   This checks declarations and C type compatibility, not runtime ownership or
+   transactional geometry behavior. */
 #if defined(_MSC_VER)
 #pragma warning(1 : 4115)
 #pragma warning(error : 4047 4113 4115 4133)
@@ -25,9 +35,33 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_wipetower.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_finalize_slicing.h"
+#include "libslic3r/Api/plugin/c/slic3r_bridge.h"
 #ifdef __cplusplus
 #error This fixture must be compiled as C.
 #endif
+
+/* Borrow but ignore the payload, storage and entries; return success without
+   mutation. Its exact C signature checks the finalization callback type. */
+static int32_t c_final_replace(const run_ctx_finalize_slicing *ctx, storage_handle *storage,
+    const raw_final_infill_replacement *entries, uint32_t count)
+{
+    (void)ctx; (void)storage; (void)entries; (void)count;
+    return 1;
+}
+
+/* Compile-only probe, never called: assign and invoke both finalization callbacks
+   and instantiate bridge payloads so missing fields or incompatible types fail. */
+void test_finalize_callback_types_c(run_ctx_finalize_slicing *ctx)
+{
+    final_replace_infill_fn replace = c_final_replace;
+    c_bridge_surface_property surface = {0};
+    c_bridge_volume_property volume = {0};
+    ctx->replace_infill_buckets = replace;
+    (void)ctx->replace_infill_buckets(ctx, NULL, NULL, 0);
+    (void)ctx->get_requested_support_areas(NULL);
+    (void)surface; (void)volume;
+}
 
 /* Borrow the infill payload and id string without reading host state; return a fixed id. */
 static infill_pattern_runtime_id c_infill_resolve(const run_ctx_generate_infill *ctx, const char *id)

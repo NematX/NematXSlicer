@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 1u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 2u
 
 /*
 Data-tree access for a sliced Print.
@@ -318,6 +318,32 @@ temporary surface snapshots.
 */
 SLIC3R_HOST_API uint64_t surface_get_id(const surface_handle *me);
 
+/* Read the borrowed surface's axial bridge direction in radians; negative means
+   undefined and zero is valid. Null returns -1. No allocation, mutation or exception
+   occurs; keep the surface alive and unchanged for this read. */
+SLIC3R_HOST_API double surface_get_bridge_angle(const surface_handle *me);
+/* Set one angle in a collection owned by this storage, normalized modulo PI.
+   Handles stay borrowed for the call. Return 1 on success, or 0 without mutation
+   for null handles, wrong ownership, an invalid index, a negative/non-finite angle
+   or a caught failure. No exception crosses C. Call only while the collection is
+   not being read or changed by another run. */
+SLIC3R_HOST_API int32_t surface_collection_set_bridge_angle(storage_handle *storage,
+    surface_collection_handle *me, uint32_t idx, double angle);
+/* Change one surface's classification without losing its geometry or metadata.
+   The collection must belong to storage. Return 1 on success, or 0 unchanged for
+   null handles, wrong ownership, an invalid index/type or a caught failure.
+   A type has exactly one position and one density. No exception crosses C;
+   handles are borrowed and the caller must exclude concurrent collection edits. */
+SLIC3R_HOST_API int32_t surface_collection_set_type(storage_handle *storage,
+    surface_collection_handle *me, uint32_t idx, raw_surface_type type);
+/* Return 1 when the two borrowed surfaces have equal type, thickness, layer count,
+   extra perimeters, solid-layer count, priority and plugin properties. Ignore an
+   undefined angle; two defined angles must agree modulo PI within 1e-9 radians.
+   Null returns 0. This read-only comparison retains no handle or geometry and
+   performs no allocation or throwing operation. */
+SLIC3R_HOST_API int32_t surface_metadata_compatible_for_bridge(const surface_handle *a,
+    const surface_handle *b);
+
 /* Convenience helper for one flag inside the surface type bitmask. */
 SLIC3R_HOST_API int32_t surface_get_flag(const surface_handle *me, raw_surface_type flag);
 
@@ -621,6 +647,13 @@ SLIC3R_HOST_API const layer_island_handle *layer_island_get_upper_island(const l
 SLIC3R_HOST_API extruder_index_t layer_region_island_extruder_id(const layer_region_island_handle *me);
 /* Null handles report no extrusions. */
 SLIC3R_HOST_API int32_t layer_region_island_has_extrusions(const layer_region_island_handle *me);
+/* Count the published role buckets without allocating or changing them; null
+   returns 0. Enumerate indices with extrusion_role_at(), then read each root with
+   layer_region_island_get_extrusion(). Keep the bucket map unchanged while reading. */
+SLIC3R_HOST_API uint32_t layer_region_island_extrusion_count(const layer_region_island_handle *me);
+/* Return the role at this position in the borrowed bucket map, or 0 for null or
+   an out-of-range index. The role is a value, not an owned extrusion handle. */
+SLIC3R_HOST_API raw_extrusion_role layer_region_island_extrusion_role_at(const layer_region_island_handle *me, uint32_t idx);
 /* Report whether this bucket contains an extrusion root for role. */
 SLIC3R_HOST_API int32_t layer_region_island_has_extrusion(const layer_region_island_handle *me, raw_extrusion_role role);
 /*
@@ -986,6 +1019,25 @@ typedef struct c_flow_mm
     double height;
     double nozzle_diameter;
 } c_flow_mm;
+
+/* Return the infill generator's bridge dimensions in mm before coordinate
+   quantization, including bridge_flow_ratio. The role selects the nozzle/tool;
+   flow-based mode uses normal solid-infill area to compute the diameter.
+   Borrow a valid region for this read-only call. Null or a caught resolution
+   failure returns zeroed fields; no exception crosses C. The result owns no data. */
+SLIC3R_HOST_API c_flow_mm layer_region_get_infill_bridge_flow_mm(
+    const layer_region_handle *me, raw_extrusion_role role);
+/* The same native infill bridge flow in the generator's scaled transport,
+   including native area in mm3/mm, spacing ratio and layer-quantized height.
+   Use the same borrowed-region and role contract as the mm query. Null or a caught
+   resolution failure returns zeroed fields; no exception crosses C. */
+SLIC3R_HOST_API c_flow layer_region_get_infill_bridge_flow(
+    const layer_region_handle *me, raw_extrusion_role role);
+/* Resolve the borrowed region's role tool to a zero-based index without mutation.
+   Null or a caught resolution failure returns EXTRUDER_ID_UNKNOWN; no exception
+   crosses C. No handle is retained. */
+SLIC3R_HOST_API extruder_index_t layer_region_get_role_extruder(
+    const layer_region_handle *me, raw_extrusion_role role);
 
 /*
 The same flows as object_get_support_flow() and object_get_region_flow(), with

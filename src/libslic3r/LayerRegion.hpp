@@ -27,6 +27,21 @@
 #include "Polyline.hpp"
 #include "SurfaceCollection.hpp"
 
+/* Connect a sliced layer's geometry with its material settings and extrusion trees.
+   LayerRegion refers to the owning Layer and PrintRegion and resolves role-specific
+   flow. LayerRegionIsland groups fill surfaces and extrusion buckets inside one
+   connected layer island, potentially for several compatible physical regions.
+
+   A bucket is one group's extrusion tree for a role. Inspect extrusion_buckets()
+   to enumerate what was actually published, including plugin-defined role
+   combinations; a fixed list of known roles can miss printable content. The
+   returned map and its roots remain owned by the region group.
+
+   Surface-generation and infill steps rebuild these collections. Keep their layer
+   and print alive, and reacquire descendant references after replacement. The
+   legacy region-wide surface accessors below retain their stated restrictions.
+*/
+
 namespace Slic3r {
 
 class ExPolygon;
@@ -195,6 +210,8 @@ public:
 
 
     bool has_extrusion(ExtrusionRole role) const;
+    // Read every actually published bucket, including plugin-defined role combinations.
+    const std::map<ExtrusionRole, ExtrusionEntityCollection> &extrusion_buckets() const { return m_extrusion_regions; }
     bool has_extrusions() const;
     const ExtrusionEntityCollection &extrusion(ExtrusionRole role) const;
 

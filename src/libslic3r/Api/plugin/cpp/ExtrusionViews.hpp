@@ -727,8 +727,8 @@ treat an entity tree as one printable unit.
 template<class Derived> class ExtrusionEntityReadApi
 {
 public:
-    bool valid() const { return self().handle() != nullptr; }
-    explicit operator bool() const { return valid(); }
+    // Empty views can be tested without calling an accessor that requires a handle.
+    explicit operator bool() const { return self().valid(); }
     uint32_t flags() const { return extrusion_flags(self().handle()); }
 
     /*
@@ -976,6 +976,8 @@ public:
     ExtrusionEntity() = default;
     explicit ExtrusionEntity(const extrusion_entity_handle *handle) : m_handle(handle) { assert(handle != nullptr); }
 
+    // Test whether a handle is present without asserting on an empty view.
+    bool valid() const { return m_handle != nullptr; }
     const extrusion_entity_handle *handle() const {
         assert(m_handle != nullptr);
         return m_handle;
@@ -1100,6 +1102,8 @@ public:
         return StoredExtrusionEntity(storage, handle);
     }
 
+    // Test presence after construction, move or release without calling handle().
+    bool valid() const { return m_handle != nullptr; }
     const extrusion_entity_handle *handle() const {
         assert(m_handle != nullptr);
         return m_handle;

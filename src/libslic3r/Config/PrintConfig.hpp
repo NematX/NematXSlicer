@@ -1060,6 +1060,7 @@ void deserialize_maybe_from_prusa(std::map<t_config_option_key, std::string> set
                                   bool                                       with_phony,
                                   bool                                       check_prusa);
 
+// Classify a defined plugin option for Prusa export, retaining compatible keys and keys with dedicated conversion.
 void add_to_prusa_export_to_remove_keys(std::string &opt_key);
 
 } // namespace Slic3r

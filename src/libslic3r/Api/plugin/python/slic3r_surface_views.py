@@ -18,6 +18,12 @@ Copy operations preserve their source. Move operations consume the geometry
 inside a ``StoredExPolygon`` container but leave that container valid and
 empty. ``append_like*()`` first snapshots its Surface template, so the template
 may safely come from the same collection that receives the new elements.
+
+Read a host-backed surface's canonical bridge direction with ``bridge_angle()``.
+Only ``StoredSurfaceCollection.set_bridge_angle()`` can write it, using that
+collection's storage ownership rather than a borrowed element's handle.
+Use ``StoredSurfaceCollection.set_type()`` to reclassify an owned surface while
+preserving its geometry, chosen angle and other metadata.
 """
 
 from __future__ import annotations
@@ -180,6 +186,14 @@ class Surface:
             return int(self.api.host.surface_get_id(self.c_handle()))
         return int(self._surface.id)
 
+    @abi_requires_headers("slic3r_data_tree.h")
+    def bridge_angle(self) -> float:
+        """Return the host angle in radians, or -1 for a value-only Surface.
+
+        Negative means undefined; zero is a valid direction.
+        """
+        return float(self.api.host.surface_get_bridge_angle(self.c_handle())) if self.has_handle() else -1.0
+
     def properties(self) -> "ConstPluginProperties":
         # Delayed import keeps Surface views independent from the much larger
         # data-tree module while preserving the existing public property type.
@@ -308,6 +322,28 @@ class StoredSurfaceCollection(_UniqueOwnerMixin, SurfaceCollection):
     def clear(self) -> None:
         """Remove every Surface and invalidate all element views."""
         self.api.host.surface_collection_clear(self.mutable_c_handle())
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def set_bridge_angle(self, index: int, angle: float) -> bool:
+        """Normalize a finite nonnegative direction modulo pi in this owned collection.
+
+        Return False unchanged if the host rejects ownership, index or angle.
+        This updates metadata, not geometry, and does not transfer ownership.
+        """
+        return bool(self.api.host.surface_collection_set_bridge_angle(
+            _void_p(self._storage), self.mutable_c_handle(), int(index), float(angle)
+        ))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def set_type(self, index: int, surface_type: int) -> bool:
+        """Reclassify an owned surface without losing geometry or metadata.
+
+        Return False unchanged for invalid ownership, index or type bits.
+        The host call borrows both handles and contains all exceptions.
+        """
+        return bool(self.api.host.surface_collection_set_type(
+            _void_p(self._storage), self.mutable_c_handle(), int(index), int(surface_type)
+        ))
 
     def mutable_at(self, idx: int) -> MutableSurface:
         """Borrow one mutable metadata view until the next structural change."""

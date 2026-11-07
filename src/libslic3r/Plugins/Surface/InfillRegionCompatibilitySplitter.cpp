@@ -36,21 +36,22 @@ The normal execution flow is:
         |-- for every fill surface, select the settings relevant to its role
         |-- segregate the surface by those settings
         |-- group each resulting piece by region handles and extruder
-        `-- replace the original group with the compatible groups
+        `-- collect_region_island_groups() for every source, then
+            publish_split_groups() for the combined island destinations
 
 The selected settings include the effective infill extruder, extrusion
 parameters, temperature-related values, region G-code, wipe behavior, and the
 pattern settings used by the surface role. Concentric patterns also include
 the perimeter settings selected by the host, because their generated geometry
-depends on those settings. If the relevant settings are identical across all
-regions, the surface is kept in its original group without replacement.
+depends on those settings. If every source keeps its original region/tool key,
+the island's collections stay unchanged.
 
 Surface pieces retain the source surface metadata; only their ExPolygon is
-changed. The old region-island surface collection is cleared before the new
-groups are published. New groups are not processed again during the same pass,
-so the plugin does not recursively split its own output. This plugin changes
-the organization and geometry of fill surfaces, but does not generate infill
-extrusions itself.
+changed. All source groups are read before any destination is replaced, because
+several sources can resolve to the same region set and tool. New groups are not
+processed again during the same pass, so the plugin does not recursively split
+its own output. This plugin changes the organization and geometry of fill surfaces,
+but does not generate infill extrusions itself.
 */
 
 namespace slic3r_api { namespace SurfaceGeneration { namespace InfillRegionCompatibilitySplitterPlugin {
@@ -104,6 +105,15 @@ struct PendingSurfaceGroup
     RegionKey regions;
     StoredSurfaceCollection surfaces;
 };
+
+// Append one source's metadata-preserving pieces to the private island groups;
+// return whether its region/tool key changes, without modifying live collections.
+bool collect_region_island_groups(orchestrator_handle *orchestrator,
+                                  const run_ctx_surface_generation &ctx,
+                                  storage_handle *storage,
+                                  const Config &print_config,
+                                  const LayerRegionIsland &region_island,
+                                  std::vector<PendingSurfaceGroup> &island_groups);
 
 bool is_sparse_surface(const Surface &surface)
 {
@@ -396,19 +406,18 @@ bool has_same_single_group(const std::vector<PendingSurfaceGroup> &groups, const
 }
 
 void publish_split_groups(const run_ctx_surface_generation &ctx,
-                          const LayerIsland &island,
-                          const LayerRegionIsland &original_region_island,
-                          std::vector<PendingSurfaceGroup> &groups)
+                           const LayerIsland &island,
+                           const std::vector<LayerRegionIsland> &original_region_islands,
+                           std::vector<PendingSurfaceGroup> &groups)
 {
     if (ctx.set_region_island_fill_surfaces == nullptr)
         return;
 
-    // Clear the old group first. Any newly created compatible group gets a full
-    // replacement collection below. If one target uses the original region set,
-    // layer_island_get_or_create_region_island() simply returns this cleared group.
-    ctx.set_region_island_fill_surfaces(
-        const_cast<layer_region_island_handle *>(original_region_island.handle()),
-        nullptr);
+    // All sources have contributed before any is cleared, so converging keys
+    // cannot overwrite a collection that another source has yet to read.
+    for (const LayerRegionIsland &original : original_region_islands)
+        ctx.set_region_island_fill_surfaces(
+            const_cast<layer_region_island_handle *>(original.handle()), nullptr);
 
     for (PendingSurfaceGroup &group : groups) {
         if (group.surfaces.empty())
@@ -427,20 +436,20 @@ void publish_split_groups(const run_ctx_surface_generation &ctx,
     }
 }
 
-void split_region_island_if_needed(orchestrator_handle *orchestrator,
-                                   const run_ctx_surface_generation &ctx,
-                                   storage_handle *storage,
-                                   const Config &print_config,
-                                   const LayerIsland &island,
-                                   const LayerRegionIsland &region_island)
+bool collect_region_island_groups(orchestrator_handle *orchestrator,
+                                    const run_ctx_surface_generation &ctx,
+                                    storage_handle *storage,
+                                    const Config &print_config,
+                                    const LayerRegionIsland &region_island,
+                                    std::vector<PendingSurfaceGroup> &island_groups)
 {
     const SurfaceCollection input_surfaces = region_island.fill_surfaces_collection();
     if (input_surfaces.empty())
-        return;
+        return false;
 
     const std::vector<LayerRegion> regions = region_island.regions();
     if (regions.empty())
-        return;
+        return false;
 
     RegionKey original_region_key;
     original_region_key.extruder_id = region_island.extruder_id();
@@ -461,13 +470,17 @@ void split_region_island_if_needed(orchestrator_handle *orchestrator,
                                          surface,
                                          groups);
 
-    // If every surface still belongs to the same region set, avoid a needless
-    // whole-collection replacement. This keeps pointer churn low for the common
-    // case where regions are already compatible for infill.
-    if (has_same_single_group(groups, original_region_key))
-        return;
-
-    publish_split_groups(ctx, island, region_island, groups);
+    const bool changed = !has_same_single_group(groups, original_region_key);
+    // Even an unchanged source contributes to a destination another source may use.
+    for (PendingSurfaceGroup &group : groups) {
+        StoredSurfaceCollection &destination = surfaces_for_region_key(island_groups, storage, std::move(group.regions));
+        for (const Surface surface : group.surfaces.readonly()) {
+            StoredExPolygonCollection single(storage);
+            single.push_back(surface.expolygon());
+            append_surface_like(ctx, destination, surface, single.readonly());
+        }
+    }
+    return changed;
 }
 
 void process_layer(orchestrator_handle *orchestrator,
@@ -489,8 +502,13 @@ void process_layer(orchestrator_handle *orchestrator,
         for (uint32_t region_island_idx = 0; region_island_idx < island.region_island_count(); ++region_island_idx)
             region_islands.emplace_back(island.region_island(region_island_idx));
 
+        std::vector<PendingSurfaceGroup> groups;
+        bool changed = false;
         for (const LayerRegionIsland &region_island : region_islands)
-            split_region_island_if_needed(orchestrator, ctx, storage, print_config, island, region_island);
+            changed = collect_region_island_groups(orchestrator, ctx, storage, print_config, region_island, groups) || changed;
+        // The common already-compatible case keeps its original collections.
+        if (changed)
+            publish_split_groups(ctx, island, region_islands, groups);
     }
 }
 

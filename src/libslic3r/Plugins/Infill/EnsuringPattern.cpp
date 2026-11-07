@@ -42,7 +42,8 @@ Ensuring pattern plugin
    left in the surface with variable-width walls, and gap walls whose ends
    nearly meet in line are joined;
 5. the lines are ordered, touching lines first, then consecutive lines whose
-   ends are close are joined, and everything is rotated back.
+   ends are close are joined. After rotation and rounding, adjacent identical
+   point/width pairs are removed; distinct widths at one point remain transitions.
 
 Each line becomes one extrusion with its variable widths, in one sortable
 group, like the legacy Fill::fill_surface_extrusion() Arachne branch. The
@@ -143,7 +144,8 @@ double distance_from_segments(const std::vector<Section> &segments, const Slic3r
 double distance_to_squared(const Section &segment, const Slic3r::Point &point);
 // Join consecutive lines whose ends are close.
 void connect_extrusions(Slic3r::ThickPolylines &lines, double squared_reconnection);
-// Rotate the lines with rounding, like the native helper.
+// Rotate with rounding and remove adjacent identical point/width pairs, preserving
+// width transitions even when their positions coincide.
 void rotate_thick_polylines(Slic3r::ThickPolylines &lines, double cos_angle, double sin_angle);
 // Publish one extrusion per line in one group.
 void publish(const run_ctx_infill_pattern &ctx, storage_handle *storage, const Slic3r::ThickPolylines &lines,
@@ -786,13 +788,23 @@ void connect_extrusions(Slic3r::ThickPolylines &lines, double squared_reconnecti
 
 void rotate_thick_polylines(Slic3r::ThickPolylines &lines, double cos_angle, double sin_angle)
 {
-    for (Slic3r::ThickPolyline &line : lines)
-        for (Slic3r::Point &point : line.points) {
-            const double px = double(point.x());
-            const double py = double(point.y());
-            point.x() = coord_t(std::round(cos_angle * px - sin_angle * py));
-            point.y() = coord_t(std::round(cos_angle * py + sin_angle * px));
+    for (Slic3r::ThickPolyline &line : lines) {
+        size_t count = 0;
+        for (size_t index = 0; index < line.points.size(); ++index) {
+            const double px = double(line.points[index].x());
+            const double py = double(line.points[index].y());
+            const Slic3r::Point point(coord_t(std::round(cos_angle * px - sin_angle * py)),
+                                      coord_t(std::round(cos_angle * py + sin_angle * px)));
+            const coord_t width = line.points_width[index];
+            // A repeated join contributes neither length nor a width transition.
+            if (count > 0 && line.points[count - 1] == point && line.points_width[count - 1] == width)
+                continue;
+            line.points[count] = point;
+            line.points_width[count++] = width;
         }
+        line.points.resize(count);
+        line.points_width.resize(count);
+    }
 }
 
 void publish(const run_ctx_infill_pattern &ctx, storage_handle *storage, const Slic3r::ThickPolylines &lines,

@@ -1544,6 +1544,28 @@ class PrintRegion(DataTreeView):
 
 # Borrowed layer-region view.
 class LayerRegion(DataTreeView):
+    @abi_requires_headers("slic3r_data_tree.h")
+    def infill_bridge_flow_mm(self, role: int) -> CFlowMm:
+        """Return bridge dimensions in mm before coordinate quantization.
+
+        The role selects the nozzle; flow-based mode uses solid-infill area.
+        A host resolution failure returns zeroed fields without changing the region.
+        """
+        return self.api.host.layer_region_get_infill_bridge_flow_mm(self.c_handle(), int(role))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def infill_bridge_flow(self, role: int) -> CFlow:
+        """Return native area and scaled recipe dimensions, including layer-grid height.
+
+        The role follows infill_bridge_flow_mm(); host resolution failure returns zeros.
+        """
+        return self.api.host.layer_region_get_infill_bridge_flow(self.c_handle(), int(role))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def role_extruder(self, role: int) -> int:
+        """Return this role's zero-based tool index, or EXTRUDER_ID_UNKNOWN on failure."""
+        return int(self.api.host.layer_region_get_role_extruder(self.c_handle(), int(role)))
+
     def flow(self, role: int) -> CFlow:
         return self.api.host.layer_region_get_flow(self.c_handle(), int(role))
 

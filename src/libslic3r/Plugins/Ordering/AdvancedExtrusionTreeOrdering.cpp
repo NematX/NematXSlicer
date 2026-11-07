@@ -109,6 +109,12 @@ their parent, and loops deliberately stop recursion even when represented by a
 collection. A loop therefore scans its complete geometry once, while ordinary
 nodes obtain their extrema by merging cached child summaries. Cardinal reduction
 and extreme-point helpers do not change the traversal order.
+
+A collection marked with BridgeAtomicStrand represents one continuous split
+bridge row. Treat it as a single candidate: do not spatially sort its children or
+choose their directions independently. Any permitted reversal applies to the
+whole sequence through reverse_tree(), then final ordering locks its descendant
+permissions. The marker is not permission to reverse an otherwise fixed path.
 */
 
 const char *k_no_dependencies[] = { nullptr };
@@ -607,6 +613,14 @@ void estimate_entity_entry_exit(
     if (entity.empty())
         return;
 
+    // A continuous split strand offers whole-strand endpoints, never child candidates.
+    if (TreeOrderingGeometry::atomic_strand(entity)) {
+        EntryExitEstimates result=estimate_leaf_entry_exit(entity);
+        collect_extreme_points(entity,result.extremes,run_ctx);
+        estimates.emplace(entity.handle(),std::move(result));
+        return;
+    }
+
     /*
     A composed loop is still one seam-placement unit. Its descendants must not
     publish independent candidates because the future sorter may only rotate
@@ -943,7 +957,8 @@ c_point coarsely_order_entity_descending(
         return entity.back();
     }
 
-    if (entity.is_leaf()) {
+    // Treat a split strand like a leaf so coarse ordering cannot flip one piece.
+    if (entity.is_leaf() || TreeOrderingGeometry::atomic_strand(entity.readonly())) {
         /* Strict comparison keeps the existing direction on an exact tie. */
         if (entity.readonly().reversible() &&
             squared_distance(current_position, entity.back()) <
@@ -1215,7 +1230,8 @@ c_point finalize_entity_descending(
         return entity.back();
     }
 
-    if (entity.is_leaf()) {
+    // Finalize the strand's collective direction, then lock all descendant flags.
+    if (entity.is_leaf() || TreeOrderingGeometry::atomic_strand(entity.readonly())) {
         if (entity.readonly().reversible() &&
             squared_distance(current_position, entity.back()) <
                 squared_distance(current_position, entity.front()))
@@ -1224,8 +1240,7 @@ c_point finalize_entity_descending(
             reverse_entity_tree(entity, nullptr, run_ctx);
         }
         throw_if_cancelled(run_ctx);
-        entity.disable_sort();
-        entity.disable_reverse();
+        TreeOrderingGeometry::disable_ordering_flags_recursively(entity,run_ctx);
         return entity.back();
     }
 

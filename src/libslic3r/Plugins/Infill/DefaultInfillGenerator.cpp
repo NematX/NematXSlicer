@@ -18,6 +18,9 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 #include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
+#include "libslic3r/Api/host/InfillBridgeFlow.hpp"
+#include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
@@ -34,15 +37,18 @@
 Default infill generation
 ==========================
 
-This plugin provides the default implementation of STEP_INFILL. The host runs
-it once per PrintObject after earlier steps have classified the layer-region
-islands into fill surfaces. It does not choose one fixed infill algorithm:
+Generate extrusion paths for each fill surface using its selected infill pattern.
+This is the default STEP_INFILL plugin, run once per PrintObject after earlier
+steps have classified its fill surfaces. It does not use one fixed algorithm:
 each surface selects a pattern plugin through its configured pattern id.
 
 setup_run_impl() performs a discovery pass over the object: it visits layers,
 islands, region islands, and their fill surfaces. For each usable surface,
 make_surface_recipe() resolves its flow, density, pattern, connection, bridge
 data, and overlap area; the optional recipe callback may change those values.
+Prepared bridges are validated after that complete modifier chain, before their
+recipe can be cached. Their generated attributes regain native circular dimensions
+only when they still exactly match the pattern's transported flow.
 Surfaces of one region island that end up with identical raw parameters are
 grouped, and every group is reported to the host through
 report_pattern_assignments() so the used pattern plugins can be initialized
@@ -58,29 +64,26 @@ append_region_island_extrusion() and a STEP_POST_INFILL plugin later turns the
 area and the recipe into a flow correction. Gap fill is not generated here; it
 is deliberately left for the post-infill step.
 
-The normal call flow is:
+Representative direct calls, not loop nesting or a timeline:
 
     DefaultInfillGenerator::setup_run_impl()
-    `-- walk object.layers()
-        `-- walk layer.islands()
-            `-- walk island.regions_islands()
-                `-- walk region_island.fill_surfaces()
-                    |-- skip empty or void surfaces
-                    |-- make_surface_recipe(...)
-                    |   |-- resolve surface settings and no-overlap areas
-                    |   |-- resolve_pattern_id()
-                    |   `-- modify_surface_recipe() when provided
-                    |-- skip invalid pattern or density
-                    `-- append to the group sharing the same raw parameters
-    `-- report_pattern_assignments() per pattern
-        `-- publish the progress total
+        |-- make_surface_recipe()
+        |   |-- resolve_pattern_id() [host callback]
+        |   |-- modify_surface_recipe() [optional host callback]
+        |   `-- BridgePreparation::validate_recipe() [after all modifiers]
+        |-- params_key() [group equal effective recipes]
+        `-- report_pattern_assignments() [host callback]
 
     DefaultInfillGenerator::run_impl()
-    `-- replay m_object_caches[object]
-        |-- generate_pattern() per surface
-        |-- attach ExtrusionPropertyInfill::source_surface_id
-        |-- attach ExtrusionPropertyInfill::area_to_fill_mm2 when requested
-        `-- append_region_island_extrusion()
+        |-- make_surface_recipe() [only for an uncached direct run]
+        `-- generate_surface_from_recipe()
+            |-- generate_pattern() [host callback]
+            |-- restore_prepared_bridge_dimensions() [matching transport only]
+            `-- append_region_island_extrusion() [host callback]
+
+Discovery visits layers, islands, region groups and surfaces, skipping empty,
+void or invalid recipes. It accumulates progress totals and reports each pattern.
+Normal execution reuses that cache; an uncached direct run rebuilds recipes.
 
 The generator works through the public step context and callbacks. It reads
 the existing print data but leaves ownership and direct publication of the
@@ -119,6 +122,11 @@ struct DefaultInfillObjectWorkCache
 };
 
 namespace {
+
+// Restore native circular dimensions only for attributes matching the pattern's
+// scaled transport exactly. Other physical models retain their incoming attributes.
+void restore_prepared_bridge_dimensions(Slic3r::ExtrusionEntity &output, const c_flow &transport,
+                                       const Slic3r::Flow &native, const plugin_run_context *run_ctx);
 
 const char *k_default_infill_generator_id = "infill.generator.default";
 const char *k_no_dependencies[] = { nullptr };
@@ -361,6 +369,8 @@ float compute_fill_angle_for_layer(const Slic3r::PrintRegionConfig &region_confi
 
 Slic3r::FlowRole flow_role_for_surface(const Slic3r::Surface &surface)
 {
+    if (surface.get_property<BridgeSurfaceInfo>() != nullptr)
+        return Slic3r::frSolidInfill;
     if (surface.has_pos_top())
         return Slic3r::frTopSolidInfill;
     if (surface.has_fill_solid())
@@ -407,28 +417,6 @@ Slic3r::InfillConnection connection_for_surface(const Slic3r::Surface &surface,
     if (surface.has_fill_solid())
         return region_config.infill_connection_solid.value;
     return region_config.infill_connection.value;
-}
-
-Slic3r::Flow bridge_flow_for_surface(const Slic3r::Layer &layer,
-                                     const Slic3r::LayerRegion &region,
-                                     Slic3r::FlowRole extrusion_role,
-                                     const Slic3r::PrintRegionConfig &region_config)
-{
-    const float nozzle_diameter =
-        layer.object()->print()->config().nozzle_diameter.get_at(
-            region.region().extruder(extrusion_role, *layer.object()) - 1);
-    double diameter = 0.;
-    if (region_config.bridge_type == Slic3r::BridgeType::btFromFlow) {
-        const Slic3r::Flow reference_flow = region.flow(Slic3r::frSolidInfill);
-        diameter = std::sqrt(4. * reference_flow.mm3_per_mm() / PI);
-    } else if (region_config.bridge_type == Slic3r::BridgeType::btFromHeight) {
-        diameter = layer.unscaled_height();
-    } else {
-        diameter = nozzle_diameter;
-    }
-    return Slic3r::Flow::bridging_flow(
-        float(diameter * std::sqrt(region_config.bridge_flow_ratio.get_effective_value(1))),
-        nozzle_diameter);
 }
 
 Slic3r::Flow normal_flow_for_surface(const Slic3r::Layer &layer,
@@ -487,7 +475,7 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
     const Slic3r::FlowRole extrusion_role = flow_role_for_surface(surface);
     const std::string pattern_id = pattern_for_surface(surface, bridge, region_config);
     const Slic3r::Flow flow = bridge ?
-        bridge_flow_for_surface(layer, region, extrusion_role, region_config) :
+        Slic3r::infill_bridge_flow(layer, region, extrusion_role) :
         normal_flow_for_surface(layer, region, extrusion_role, surface);
 
     SurfaceInfillRecipe recipe;
@@ -501,7 +489,7 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
     recipe.raw.density = surface.has_fill_solid() || bridge ? 1.f : float(region_config.fill_density) / 100.f;
     if (surface.has_mod_overBridge())
         recipe.raw.density = float(region_config.over_bridge_flow_ratio.get_effective_value(1));
-    recipe.raw.flow_mult = surface.has_pos_top() ?
+    recipe.raw.flow_mult = surface.has_pos_top() && surface.get_property<BridgeSurfaceInfo>() == nullptr ?
         float(region_config.fill_top_flow_ratio.get_effective_value(1)) :
         1.f;
     recipe.raw.connection = static_cast<c_infill_connection>(connection_for_surface(surface, bridge, region_config));
@@ -594,6 +582,11 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
         throw_if_cancelled(run_ctx);
     }
 
+    // A late modifier cannot silently replace the prepared bridge's directional contract.
+    BridgePreparation::validate_recipe(reinterpret_cast<const surface_handle *>(&surface),recipe.raw,
+        ctx.pattern_plugin_id==nullptr ? nullptr : ctx.pattern_plugin_id(&ctx,recipe.raw.pattern_id),
+        reinterpret_cast<const layer_region_handle *>(&region));
+
     // Enforce full fill volume: measure the free area this surface expects, so
     // a STEP_POST_INFILL plugin can compute the volume target and correct the
     // generated extrusion. Sparse surfaces are never corrected, even at 100%
@@ -666,6 +659,9 @@ void generate_surface_from_recipe(const run_ctx_generate_infill &ctx,
     if (!generated || output.empty())
         return;
 
+    if (surface.get_property<BridgeSurfaceInfo>() != nullptr)
+        restore_prepared_bridge_dimensions(output, params.flow, Slic3r::infill_bridge_flow(layer, region, Slic3r::frSolidInfill), run_ctx);
+
     // Keep a direct link from the extrusion subtree to the Surface recipe that
     // produced it, together with useful data for next plugins. The property is inherited by
     // every child path, so later post-infill plugins can split or reorder paths
@@ -692,6 +688,31 @@ void generate_surface_from_recipe(const run_ctx_generate_infill &ctx,
         reinterpret_cast<layer_region_island_handle *>(const_cast<Slic3r::LayerRegionIsland *>(&region_island)),
         params.extrusion_role,
         reinterpret_cast<extrusion_entity_handle *>(&output));
+}
+
+void restore_prepared_bridge_dimensions(Slic3r::ExtrusionEntity &output, const c_flow &transport,
+                                       const Slic3r::Flow &native, const plugin_run_context *run_ctx)
+{
+    std::vector<Slic3r::ExtrusionEntity *> pending{&output};
+    while (!pending.empty()) {
+        throw_if_cancelled(run_ctx);
+        Slic3r::ExtrusionEntity &entity = *pending.back();
+        pending.pop_back();
+        if (Slic3r::ExtrusionAttributes *attributes = entity.get_property<Slic3r::ExtrusionAttributes>()) {
+            if ((attributes->role == RAW_EXTRUSION_ROLE_BRIDGE_INFILL || attributes->role == RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL) && attributes->mm3_per_mm == transport.mm3_per_mm &&
+                attributes->width == float(unscaled(transport.width)) && attributes->height == float(unscaled(transport.height))) {
+                // Transported height uses the layer grid. Recover native circular dimensions
+                // only when the attributes still match that transport, without changing flow area.
+                attributes->width = native.width();
+                attributes->height = native.height();
+            }
+        }
+        // Read children through the const overload: the mutable accessor wraps
+        // a leaf in a new collection and would keep extending this traversal.
+        for (const Slic3r::ExtrusionEntityUPtr &child : static_cast<const Slic3r::ExtrusionEntity &>(entity).children())
+            if (child)
+                pending.push_back(child.get());
+    }
 }
 
 } // namespace

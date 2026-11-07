@@ -14,6 +14,7 @@
 #include <boost/filesystem/path.hpp>
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/slic3r_bridge.h"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
@@ -49,15 +50,14 @@ orchestrator_send_log() writes text through the application's logger without
 attributing a package failure. Initialization callbacks return stored error
 identifiers rather than invoking a separate failure-reporting function.
 
-Operation notes:
-- orchestrator_register_exclusive_group
-- Orchestrator::record_exclusive_group_declaration
-
 Representative direct calls (branches are not a timeline):
 
     orchestrator_register_plugin()
         |-- Slic3r::Orchestrator::instance()
         `-- orchestrator->register_plugin()
+
+    orchestrator_register_exclusive_group()
+        `-- Orchestrator::record_exclusive_group_declaration()
 
     orchestrator_execute_plugin()
         |-- to_orchestrator()
@@ -126,6 +126,10 @@ const std::vector<GenericPropertyInfo> &builtin_property_infos()
         { SLIC3R_PROPERTY_TYPE_LAYER_BRIM,                "slic3r.layer.brim",                sizeof(c_layer_brim_property),                alignof(c_layer_brim_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_ADHESION,            "slic3r.layer.adhesion",            sizeof(c_layer_adhesion_property),            alignof(c_layer_adhesion_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE,            "slic3r.layer.instance",            sizeof(c_layer_instance_property),            alignof(c_layer_instance_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_SURFACE, "bridge_preparation.surface.v1", sizeof(c_bridge_surface_property), alignof(c_bridge_surface_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME, "bridge_preparation.volume.v1", sizeof(c_bridge_volume_property), alignof(c_bridge_volume_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND, "bridge_preparation.atomic_strand.v1", sizeof(c_bridge_strand_property), alignof(c_bridge_strand_property) },
+        { SLIC3R_PROPERTY_TYPE_SUPPORT_PIPELINE, "support.pipeline_state.v1", sizeof(c_support_pipeline_property), alignof(c_support_pipeline_property) },
     };
     return infos;
 }

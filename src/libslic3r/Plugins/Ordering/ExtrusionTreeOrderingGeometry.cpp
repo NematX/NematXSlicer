@@ -4,6 +4,7 @@
 ///|/
 
 #include "ExtrusionTreeOrderingGeometry.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 
 #include <limits>
 #include <memory>
@@ -32,6 +33,22 @@ PrintingExtrusion owns a transformed clone for printing, while its
 LayerRegionIsland retains the unshifted source extrusion and region slices.
 Matching those two source-side objects avoids mixing coordinate systems before
 the selected region is passed to a SeamPlacer.
+
+A collection marked with BridgeAtomicStrand represents one continuous split
+bridge row. Treat it as a single candidate: do not spatially sort its children or
+choose their directions independently. Any permitted reversal applies to the
+whole sequence through reverse_tree(), then final ordering locks its descendant
+permissions. The marker is not permission to reverse an otherwise fixed path.
+
+
+Representative direct calls:
+
+    atomic_strand()
+        `-- entity.get() [BridgeAtomicStrand property]
+
+    reverse_tree()
+        |-- entity.reverse() [path leaf]
+        `-- reverse_tree() [recursive child paths before reversing child order]
 */
 
 /* Find the nearest point on any local line or arc in one entity subtree. */
@@ -201,6 +218,12 @@ bool entity_intersects_region(storage_handle *scratch_storage,
 }
 
 } // namespace
+
+bool atomic_strand(const ExtrusionEntity &entity)
+{
+    const BridgeAtomicStrand *property=entity.get(BridgeAtomicStrand::key);
+    return property!=nullptr && property->atomic_orientation!=0;
+}
 
 void reverse_tree(MutableExtrusionEntity entity, const plugin_run_context *run_ctx)
 {

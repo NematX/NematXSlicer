@@ -1,20 +1,23 @@
-"""Check the plugin package ABI description without loading a native library.
+"""Check plugin ABI declarations and packaging without loading a native DLL.
 
-Fixtures assemble package files and version requirements, then compare them
-with the public header identities and supported versions. This catches a wrong
-table, missing requirement or incompatible version independently of platform
-library loading. Temporary package contents belong to each fixture; these
-checks do not establish that an external DLL can be loaded or executed.
+Fixtures generate ctypes declarations and ABI catalogues from the real public
+headers, then inspect callback signatures, constants, dependency requirements
+and package manifests. Temporary package files belong to each fixture. These
+checks do not establish that an external plugin library can be loaded or sliced.
+Package fixtures compare version requirements with public header identities and
+supported versions, catching missing requirements and incompatible versions
+independently of platform library loading.
 
-Representative direct calls (branches are not a timeline):
+Representative direct calls in the generated mesh-query declaration test:
 
-    test_python_plugin_analysis_combines_raw_symbols_wrappers_and_local_imports()
-        |-- tempfile.TemporaryDirectory()
-        |-- Path()
-        |-- runtime.mkdir()
-        |-- self._write_catalog()
-        |-- runtime.joinpath('slic3r_api.py').write_text()
-        `-- runtime.joinpath()
+    test_mesh_query_plain_types_callbacks_and_diagnostics_are_generated()
+        |-- generator.generate()
+        |-- exec() [evaluate generated Python declarations only]
+        `-- generator.generate_abi_catalog()
+
+The generated callbacks are exercised with controlled Python functions; their
+execution is not a call into the native host. Header-requirement tests also check
+that surface edits and flow wrappers declare their data-tree dependency.
 """
 import importlib.util
 import json
@@ -496,16 +499,17 @@ class AbiPackagingTests(unittest.TestCase):
             self.assertIn(seam_header, bindings.methods["place_seam"])
 
     def test_auxiliary_fill_surface_mutator_abi(self):
-        """The auxiliary mutator (data tree 4.1), the object flows (4.2) and their millimeter variants (4.3) declare the data-tree header."""
+        """Surface writes and object flow bindings declare the current data-tree API."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 1])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 2])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
-                             "object_get_support_flow_mm", "object_get_region_flow_mm"):
+                             "object_get_support_flow_mm", "object_get_region_flow_mm",
+                             "surface_collection_set_type", "surface_collection_set_bridge_angle"):
                 self.assertIn("slic3r_data_tree.h", catalog.c_functions[function])
             bindings = self.analyzer.build_binding_index(ROOT / "src/libslic3r/Api/plugin/python", catalog)
-            for method in ("set_fill_surfaces", "support_flow", "region_flow", "support_flow_mm", "region_flow_mm"):
+            for method in ("set_fill_surfaces", "support_flow", "region_flow", "support_flow_mm", "region_flow_mm", "set_type", "set_bridge_angle"):
                 self.assertIn("slic3r_data_tree.h", bindings.methods[method])
 
     def _write_catalog(self, root):

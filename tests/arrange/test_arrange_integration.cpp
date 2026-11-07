@@ -12,6 +12,30 @@
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/ModelArrange.hpp"
 
+/* Check arrangement through model instances, scene construction and configuration
+   loading. Small cube/primitive models exercise selection, virtual beds, spacing,
+   placement updates and profile/export conversion rather than only polygon math.
+
+   The fixtures own their Model and configuration values. Some generate random
+   cube arrangements; assertions check geometric and setting invariants instead
+   of requiring one exact placement. INI profiles need plugin-owned definitions
+   initialized by arrange_tests_main.cpp before they are loaded.
+
+   is_collision_free() compares all item pairs after placement. The pair callback
+   shrinks outlines by EPSILON before intersection so boundary contact alone does
+   not count as an overlap. These are callback calls, not direct calls from the
+   outer helper:
+
+       is_collision_free()
+           `-- foreach_combo()
+               `-- pair lambda [test callback]
+                   |-- offset()
+                   `-- intersection()
+
+   Native XY uses scaled integer coordinates; fixture dimensions and profile
+   distances are in millimetres before conversion.
+*/
+
 static Slic3r::Model get_example_model_with_20mm_cube()
 {
     using namespace Slic3r;
@@ -116,6 +140,8 @@ public:
     explicit RandomArrangeSettings() : m_rng(std::random_device{} ()) {}
 
     float get_distance_from_objects() const override { return m_v.d_obj; }
+    // Return the stored spacing used by the previous arrangement.
+    float get_previous_distance_from_objects() const override { return m_v.d_obj_prev; }
     float get_distance_from_bed() const override { return m_v.d_bed; }
     bool  is_rotation_enabled() const override { return m_v.rotations; }
     XLPivots get_xl_alignment() const override { return m_v.xl_align; }
@@ -130,7 +156,7 @@ TEST_CASE("ModelInstance should be retrievable when imbued into ArrangeItem",
     using namespace Slic3r;
 
     Model model = get_example_model_with_20mm_cube();
-    auto mi = model.objects.front()->instances.front();
+    auto mi = model.get_object(0).instances.front();
 
     arr2::ArrangeItem itm;
     arr2::PhysicalOnlyVBedHandler vbedh;
@@ -141,6 +167,39 @@ TEST_CASE("ModelInstance should be retrievable when imbued into ArrangeItem",
     std::optional<ObjectID> id_returned = arr2::retrieve_id(itm);
 
     REQUIRE((id_returned && *id_returned == mi->id()));
+}
+
+TEST_CASE("Plugin-owned arrangement profile options retain Prusa export conversions", "[arrange2][integration]")
+{
+    using namespace Slic3r;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("default_fan_speed", new ConfigOptionInts{25});
+    config.set_key_value("fan_printer_min_speed", new ConfigOptionInts{10});
+
+    std::string key = "bridge_fan_speed";
+    std::string value = "25";
+    PrintConfigDef::to_prusa(key, value, config);
+    REQUIRE(key == "bridge_fan_speed");
+    REQUIRE(value == "25");
+
+    key = "default_fan_speed";
+    value = "25";
+    const std::map<std::string, std::string> extra = PrintConfigDef::to_prusa(key, value, config);
+    REQUIRE(key == "min_fan_speed");
+    REQUIRE(std::stod(value) == Approx(25.));
+    REQUIRE(extra.at("fan_always_on") == "1");
+
+    key = "external_perimeter_speed";
+    value = "50%";
+    PrintConfigDef::to_prusa(key, value, config);
+    REQUIRE(key == "external_perimeter_speed");
+    REQUIRE_FALSE(value.empty());
+
+    key = "gap_fill_fan_speed";
+    value = "25";
+    PrintConfigDef::to_prusa(key, value, config);
+    REQUIRE(key.empty());
+    REQUIRE(value.empty());
 }
 
 struct PhysicalBed
@@ -157,7 +216,7 @@ struct XStriderBed
     int bed_idx_min = 0, bed_idx_max = 100;
 
     XStriderBed() :
-        bed{Slic3r::scaled(250.), Slic3r::scaled(210.)},
+        bed{Slic3r::scale_i(250.), Slic3r::scale_i(210.)},
         vbedh{bounding_box(bed), bounding_box(bed).size().x() / 10} {}
 };
 
@@ -178,14 +237,15 @@ TEMPLATE_TEST_CASE("Writing arrange transformations into ModelInstance should be
 
     Model model = get_example_model_with_20mm_cube();
 
-    auto transl = scaled(Vec2d(tx, ty));
+    auto transl = Point::new_scale(Vec2d(tx, ty));
 
     INFO("Translation = : " << transl.transpose());
     INFO("Rotation is: " << rot * 180 / PI);
 
-    auto mi = model.objects.front()->instances.front();
+    auto mi = model.get_object(0).instances.front();
 
-    BoundingBox bb_before = scaled(to_2d(arr2::instance_bounding_box(*mi)));
+    const BoundingBoxf bb_before_mm = to_2d(arr2::instance_bounding_box(*mi));
+    BoundingBox bb_before{Point::new_scale(bb_before_mm.min), Point::new_scale(bb_before_mm.max)};
 
     TestType bed_case;
     auto bed_index = random_value<int>(bed_case.bed_idx_min, bed_case.bed_idx_max);
@@ -206,7 +266,7 @@ TEMPLATE_TEST_CASE("Writing arrange transformations into ModelInstance should be
     auto cvt = arr2::ArrangeableToItemConverter<ArrItem>::create(scene);
 
     ArrItem itm;
-    scene.model().visit_arrangeable(model.objects.front()->instances.front()->id(),
+    scene.model().visit_arrangeable(model.get_object(0).instances.front()->id(),
                                     [&cvt, &itm](const arr2::Arrangeable &arrbl){
         itm = cvt->convert(arrbl);
     });
@@ -221,7 +281,7 @@ TEMPLATE_TEST_CASE("Writing arrange transformations into ModelInstance should be
 
     if (auto id = retrieve_id(itm)) {
         scene.model().visit_arrangeable(*id, [&itm](arr2::Arrangeable &arrbl) {
-            arrbl.transform(unscaled(get_translation(itm)), get_rotation(itm));
+            arrbl.transform(get_translation(itm).template cast<double>() * SCALING_FACTOR, get_rotation(itm));
         });
     }
 
@@ -257,7 +317,7 @@ TEMPLATE_TEST_CASE("Outline extraction from ModelInstance",
 
     Model model = get_example_model_with_20mm_cube();
 
-    ModelInstance *mi = model.objects.front()->instances.front();
+    ModelInstance *mi = model.get_object(0).instances.front();
     auto matrix = mi->get_matrix();
     matrix.scale(Vec3d{random_value(0.1, 5.),
                        random_value(0.1, 5.),
@@ -285,7 +345,7 @@ TEMPLATE_TEST_CASE("Outline extraction from ModelInstance",
     }
 
     GIVEN("A simple cube as outline") {
-        const ModelInstance *mi = model.objects.front()->instances.front();
+        const ModelInstance *mi = model.get_object(0).instances.front();
 
         WHEN("the outline is generated") {
             auto outline = OutlineExtractor{}(mi);
@@ -293,7 +353,9 @@ TEMPLATE_TEST_CASE("Outline extraction from ModelInstance",
             THEN("the 2D ortho projection of the model bounding box is the "
                  "same as the outline's bb")
             {
-                auto bb = unscaled(get_extents(outline));
+                const BoundingBox bb_scaled = get_extents(outline);
+                BoundingBoxf bb{bb_scaled.min.cast<double>() * SCALING_FACTOR,
+                                bb_scaled.max.cast<double>() * SCALING_FACTOR};
                 auto modelbb = to_2d(model.bounding_box_exact());
 
                 REQUIRE((bb.min - modelbb.min).norm() < EPSILON);
@@ -347,22 +409,22 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
 
     const auto bedsize = Vec2d{random_value(21., 500.), random_value(21., 500.)};
 
-    const Vec2crd bed_displace = {random_value(scaled(-100.), scaled(100.)),
-                                  random_value(scaled(-100.), scaled(100.))};
+    const Vec2crd bed_displace = {random_value(scale_i(-100.), scale_i(100.)),
+                                  random_value(scale_i(-100.), scale_i(100.))};
 
-    const BoundingBox bedbb{bed_displace, scaled(bedsize) + bed_displace};
+    const BoundingBox bedbb{bed_displace, Point::new_scale(bedsize) + bed_displace};
 
-    INFO("Bed boundaries bedbb = { {" << unscaled(bedbb.min).transpose() << "}, {"
-                                      << unscaled(bedbb.max).transpose() << "} }" );
+    INFO("Bed boundaries bedbb = { {" << (bedbb.min.cast<double>() * SCALING_FACTOR).transpose() << "}, {"
+                                      << (bedbb.max.cast<double>() * SCALING_FACTOR).transpose() << "} }" );
 
     auto modelbb = model.bounding_box_exact();
 
     // Center the single instance within the model
-    arr2::transform_instance(*model.objects.front()->instances.front(),
-                             unscaled(bedbb.center()) - to_2d(modelbb.center()),
+    arr2::transform_instance(*model.get_object(0).instances.front(),
+                             bedbb.center().cast<double>() * SCALING_FACTOR - to_2d(modelbb.center()),
                              0.);
 
-    const auto vbed_gap = GENERATE(0, random_value(1, scaled(100.)));
+    const auto vbed_gap = GENERATE(coord_t{0}, random_value<coord_t>(1, scale_i(100.)));
 
     INFO("vbed_gap = " << unscaled(vbed_gap));
 
@@ -371,11 +433,11 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
 
     GIVEN("A ModelInstance on the physical bed")
     {
-        ModelInstance *mi = model.objects.front()->instances.front();
+        ModelInstance *mi = model.get_object(0).instances.front();
 
         WHEN ("trying to move the item to an invalid bed index")
         {
-            auto &mi_to_move = *model.objects.front()->add_instance(*mi);
+            auto &mi_to_move = *model.get_object(0).add_instance(*mi);
             Transform3d mi_trafo_before = mi_to_move.get_matrix();
             bool was_accepted = vbedh->assign_bed(VBP{mi_to_move}, arr2::Unarranged);
 
@@ -390,12 +452,12 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
 
     GIVEN("A ModelInstance being assigned to a virtual bed")
     {
-        ModelInstance *mi = model.objects.front()->instances.front();
+        ModelInstance *mi = model.get_object(0).instances.front();
 
         auto bedidx_to = GENERATE(random_value(-1000, -1), 0, random_value(1, 1000));
         INFO("bed index = " << bedidx_to);
 
-        auto &mi_to_move = *model.objects.front()->add_instance(*mi);
+        auto &mi_to_move = *model.get_object(0).add_instance(*mi);
 
         // Move model instance to the given virtual bed
         bool was_accepted = vbedh->assign_bed(VBP{mi_to_move}, bedidx_to);
@@ -410,7 +472,7 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
 
             THEN("assigning the same bed index again should produce the same result")
             {
-                auto &mi_to_move_cpy = *model.objects.front()->add_instance(mi_to_move);
+                auto &mi_to_move_cpy = *model.get_object(0).add_instance(mi_to_move);
                 bool was_accepted_rep = vbedh->assign_bed(VBP{mi_to_move_cpy}, bedidx_to);
                 int bedidx_on_rep = vbedh->get_bed_index(VBP{mi_to_move_cpy});
 
@@ -421,7 +483,7 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
 
         WHEN ("moving back to the physical bed")
         {
-            auto &mi_back_to_phys = *model.objects.front()->add_instance(mi_to_move);
+            auto &mi_back_to_phys = *model.get_object(0).add_instance(mi_to_move);
             bool moved_back_to_physical = vbedh->assign_bed(VBP{mi_back_to_phys}, arr2::PhysicalBedId);
 
             THEN("model instance should actually move back to the physical bed")
@@ -434,9 +496,9 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
             THEN("the bounding box should be inside bed")
             {
                 auto bbf = arr2::instance_bounding_box(mi_back_to_phys);
-                auto bb = BoundingBox{scaled(to_2d(bbf))};
-                INFO("bb = { {" << unscaled(bb.min).transpose() << "}, {"
-                                << unscaled(bb.max).transpose() << "} }" );
+                auto bb = BoundingBox{Point::new_scale(to_2d(bbf.min)), Point::new_scale(to_2d(bbf.max))};
+                INFO("bb = { {" << (bb.min.cast<double>() * SCALING_FACTOR).transpose() << "}, {"
+                                << (bb.max.cast<double>() * SCALING_FACTOR).transpose() << "} }" );
 
                 REQUIRE(bedbb.contains(bb));
             }
@@ -448,18 +510,18 @@ TEMPLATE_TEST_CASE("Common virtual bed handlers",
             int from_bed_idx = vbedh->get_bed_index(VBP{mi_to_move});
             auto physical_bed_trafo = vbedh->get_physical_bed_trafo(from_bed_idx);
 
-            auto &mi_back_to_phys = *model.objects.front()->add_instance(mi_to_move);
+            auto &mi_back_to_phys = *model.get_object(0).add_instance(mi_to_move);
             mi_back_to_phys.set_transformation(Geometry::Transformation{
                 physical_bed_trafo * mi_back_to_phys.get_matrix()});
 
             auto bbf = arr2::instance_bounding_box(mi_back_to_phys);
 
-            auto bb = BoundingBox{scaled(to_2d(bbf))};
+            auto bb = BoundingBox{Point::new_scale(to_2d(bbf.min)), Point::new_scale(to_2d(bbf.max))};
 
             THEN("the bounding box should be inside bed")
             {
-                INFO("bb = { {" << unscaled(bb.min).transpose() << "}, {"
-                                << unscaled(bb.max).transpose() << "} }" );
+                INFO("bb = { {" << (bb.min.cast<double>() * SCALING_FACTOR).transpose() << "}, {"
+                                << (bb.max.cast<double>() * SCALING_FACTOR).transpose() << "} }" );
 
                 REQUIRE(bedbb.contains(bb));
             }
@@ -486,26 +548,26 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
     Model model = get_example_model_with_20mm_cube();
 
     static const Vec2d bedsize{250., 210.};
-    static const BoundingBox bedbb{{0, 0}, scaled(bedsize)};
+    static const BoundingBox bedbb{{0, 0}, Point::new_scale(bedsize)};
     static const auto modelbb = model.bounding_box_exact();
 
     GIVEN("An instance of StriderVBedHandler with a stride of the bed width"
           " and random non-negative gap")
     {
         auto [instance_pos, instance_displace] = GENERATE(table<std::string, Vec2d>({
-            {"start", unscaled(bedbb.min) - to_2d(modelbb.min) + Vec2d::Ones() * EPSILON},  // at the min edge of vbed
-            {"middle", unscaled(bedbb.center()) - to_2d(modelbb.center())}, // at the center
-            {"end", unscaled(bedbb.max) - to_2d(modelbb.max) - Vec2d::Ones() * EPSILON} // at the max edge of vbed
+            {"start", bedbb.min.cast<double>() * SCALING_FACTOR - to_2d(modelbb.min) + Vec2d::Ones() * EPSILON},  // at the min edge of vbed
+            {"middle", bedbb.center().cast<double>() * SCALING_FACTOR - to_2d(modelbb.center())}, // at the center
+            {"end", bedbb.max.cast<double>() * SCALING_FACTOR - to_2d(modelbb.max) - Vec2d::Ones() * EPSILON} // at the max edge of vbed
         }));
 
         // Center the single instance within the model
-        arr2::transform_instance(*model.objects.front()->instances.front(),
+        arr2::transform_instance(*model.get_object(0).instances.front(),
                                  instance_displace,
                                  0.);
 
         INFO("Instance pos at " << instance_pos << " of bed");
 
-        coord_t gap = GENERATE(0, random_value(1, scaled(100.)));
+        coord_t gap = GENERATE(coord_t{0}, random_value<coord_t>(1, scale_i(100.)));
 
         INFO("Gap is " << unscaled(gap));
 
@@ -513,8 +575,8 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
 
         WHEN("a model instance is on the Nth virtual bed (spatially)")
         {
-            ModelInstance *mi = model.objects.front()->instances.front();
-            auto &mi_to_move = *model.objects.front()->add_instance(*mi);
+            ModelInstance *mi = model.get_object(0).instances.front();
+            auto &mi_to_move = *model.get_object(0).add_instance(*mi);
 
             auto bed_index = GENERATE(random_value(-1000, -1), 0, random_value(1, 1000));
             INFO("N is " << bed_index);
@@ -533,7 +595,8 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
                 mi_to_move.set_transformation(Geometry::Transformation{tr * mi_to_move.get_matrix()});
                 REQUIRE(vbh.get_bed_index(VBP{mi_to_move}) == 0);
 
-                auto instbb = BoundingBox{scaled(to_2d(arr2::instance_bounding_box(mi_to_move)))};
+                const BoundingBoxf instbb_mm = to_2d(arr2::instance_bounding_box(mi_to_move));
+                auto instbb = BoundingBox{Point::new_scale(instbb_mm.min), Point::new_scale(instbb_mm.max)};
                 INFO("bedbb = { {" << bedbb.min.transpose() << "}, {" << bedbb.max.transpose() << "} }" );
                 INFO("instbb = { {" << instbb.min.transpose() << "}, {" << instbb.max.transpose() << "} }" );
 
@@ -543,8 +606,8 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
 
         WHEN("a model instance is on the physical bed")
         {
-            ModelInstance *mi = model.objects.front()->instances.front();
-            auto &mi_to_move = *model.objects.front()->add_instance(*mi);
+            ModelInstance *mi = model.get_object(0).instances.front();
+            auto &mi_to_move = *model.get_object(0).add_instance(*mi);
 
             THEN("assigning the model instance to the Nth bed will move it N*stride in the X axis")
             {
@@ -571,14 +634,14 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
     GIVEN("An instance of StriderVBedHandler with a stride of the bed width"
           " and a 100mm gap")
     {
-        coord_t gap = scaled(100.);
+        coord_t gap = scale_i(100.);
 
         arr2::XStriderVBedHandler vbh{bedbb, gap};
 
         WHEN("a model instance is within the gap on the Nth virtual bed")
         {
-            ModelInstance *mi = model.objects.front()->instances.front();
-            auto &mi_to_move = *model.objects.front()->add_instance(*mi);
+            ModelInstance *mi = model.get_object(0).instances.front();
+            auto &mi_to_move = *model.get_object(0).add_instance(*mi);
 
             auto bed_index = GENERATE(random_value(-1000, -1), 0, random_value(1, 1000));
             INFO("N is " << bed_index);
@@ -586,7 +649,7 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
             auto bed_disp = Vec2d{bed_index * unscaled(vbh.stride_scaled()), 0.};
             auto instbb_before = to_2d(arr2::instance_bounding_box(mi_to_move));
 
-            auto transl_to_bed_end = Vec2d{bed_disp + unscaled(bedbb.max)
+            auto transl_to_bed_end = Vec2d{bed_disp + bedbb.max.cast<double>() * SCALING_FACTOR
                                            - instbb_before.min + Vec2d::Ones() * EPSILON};
 
             arr2::transform_instance(mi_to_move,
@@ -598,7 +661,8 @@ TEST_CASE("Virtual bed handlers - StriderVBedHandler", "[arrange2][integration][
             {
                 REQUIRE(vbh.get_bed_index(VBP{mi_to_move}) == bed_index);
 
-                auto instbb = BoundingBox{scaled(to_2d(arr2::instance_bounding_box(mi_to_move)))};
+                const BoundingBoxf instbb_mm = to_2d(arr2::instance_bounding_box(mi_to_move));
+                auto instbb = BoundingBox{Point::new_scale(instbb_mm.min), Point::new_scale(instbb_mm.max)};
                 INFO("bedbb = { {" << bedbb.min.transpose() << "}, {" << bedbb.max.transpose() << "} }" );
                 INFO("instbb = { {" << instbb.min.transpose() << "}, {" << instbb.max.transpose() << "} }" );
 
@@ -617,7 +681,8 @@ TEMPLATE_TEST_CASE("Bed needs to be completely filled with 1cm cubes",
 
     std::string basepath = TEST_DATA_DIR PATH_SEPARATOR;
 
-    DynamicPrintConfig cfg;
+    // Supply defaults for settings absent from the older profile but used by export conversion.
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
     cfg.load_from_ini(basepath + "default_fff.ini",
                       ForwardCompatibilitySubstitutionRule::Enable);
     cfg.set_key_value("bed_shape",
@@ -633,7 +698,7 @@ TEMPLATE_TEST_CASE("Bed needs to be completely filled with 1cm cubes",
     ModelVolume* new_volume = new_object->add_volume(mesh);
     new_volume->name = new_object->name;
 
-        store_3mf("fillbed_10mm.3mf", &m, &cfg, false);
+        store_3mf("fillbed_10mm.3mf", &m, &cfg, OptionStore3mf{}.set_fullpath_sources(false));
 
     arr2::ArrangeSettings settings;
     settings.values().d_obj = 0.;
@@ -651,18 +716,20 @@ TEMPLATE_TEST_CASE("Bed needs to be completely filled with 1cm cubes",
     auto result = task->process_native(arr2::DummyCtl{});
     result->apply_on(scene.model());
 
-    store_3mf("fillbed_10mm_result.3mf", &m, &cfg, false);
+    store_3mf("fillbed_10mm_result.3mf", &m, &cfg, OptionStore3mf{}.set_fullpath_sources(false));
 
     Points bedpts = get_bed_shape(cfg);
     arr2::ArrangeBed bed = arr2::to_arrange_bed(bedpts);
 
     REQUIRE(bed.which() == 1); // Rectangle bed
 
-    auto bedbb = unscaled(bounding_box(bed));
+    const BoundingBox bedbb_scaled = bounding_box(bed);
+    BoundingBoxf bedbb{bedbb_scaled.min.cast<double>() * SCALING_FACTOR,
+                       bedbb_scaled.max.cast<double>() * SCALING_FACTOR};
     auto bedbbsz = bedbb.size();
 
-    REQUIRE(m.objects.size() == 1);
-    REQUIRE(m.objects.front()->instances.size() ==
+    REQUIRE(m.objects().size() == 1);
+    REQUIRE(m.get_object(0).instances.size() ==
             bedbbsz.x() * bedbbsz.y() / 100);
 
     REQUIRE(task->unselected.empty());
@@ -706,12 +773,12 @@ TEST_CASE("Testing minimum area bounding box rotation on simple cubes", "[arrang
 {
     using namespace Slic3r;
 
-    BoundingBox bb{Point::Zero(), scaled(Vec2d(10., 10.))};
+    BoundingBox bb{Point::Zero(), Point::new_scale(Vec2d(10., 10.))};
     Polygon sh = arr2::to_rectangle(bb);
 
     auto prot = random_value(0., 2 * PI);
-    sh.translate(Vec2crd{random_value<coord_t>(-scaled(10.), scaled(10.)),
-                         random_value<coord_t>(-scaled(10.), scaled(10.))});
+    sh.translate(Vec2crd{random_value<coord_t>(-scale_i(10.), scale_i(10.)),
+                         random_value<coord_t>(-scale_i(10.), scale_i(10.))});
     sh.rotate(prot);
 
     INFO("box item is rotated by: " << prot << " rads");
@@ -722,8 +789,8 @@ TEST_CASE("Testing minimum area bounding box rotation on simple cubes", "[arrang
     double rot = arr2::get_min_area_bounding_box_rotation(itm);
 
     arr2::translate(itm,
-                    Vec2crd{random_value<coord_t>(-scaled(10.), scaled(10.)),
-                            random_value<coord_t>(-scaled(10.), scaled(10.))});
+                    Vec2crd{random_value<coord_t>(-scale_i(10.), scale_i(10.)),
+                            random_value<coord_t>(-scale_i(10.), scale_i(10.))});
     arr2::rotate(itm, rot);
 
     auto itmbb = arr2::fixed_bounding_box(itm);
@@ -738,8 +805,8 @@ bool is_collision_free(const Slic3r::Range<It> &item_range)
 
     bool collision_free = true;
     foreach_combo(item_range, [&collision_free](auto &itm1, auto &itm2) {
-        auto outline1 = offset(arr2::fixed_outline(itm1), -scaled<float>(EPSILON));
-        auto outline2 = offset(arr2::fixed_outline(itm2), -scaled<float>(EPSILON));
+        auto outline1 = offset(arr2::fixed_outline(itm1), -scale_i(EPSILON));
+        auto outline2 = offset(arr2::fixed_outline(itm2), -scale_i(EPSILON));
 
         auto inters = intersection(outline1, outline2);
         collision_free = collision_free && inters.empty();
@@ -757,7 +824,7 @@ TEST_CASE("Testing a simple arrange on cubes", "[arrange2][integration]")
     arr2::ArrangeSettings settings;
     settings.set_rotation_enabled(true);
 
-    auto bed = arr2::RectangleBed{scaled(250.), scaled(210.)};
+    auto bed = arr2::RectangleBed{scale_i(250.), scale_i(210.)};
 
     arr2::Scene scene{arr2::SceneBuilder{}
                           .set_model(model)
@@ -796,12 +863,13 @@ TEST_CASE("Testing arrangement involving virtual beds", "[arrange2][integration]
     using namespace Slic3r;
 
     Model model = get_example_model_with_arranged_primitives();
-    DynamicPrintConfig cfg;
+    // Supply defaults for settings absent from the older profile but used by export conversion.
+    DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
     cfg.load_from_ini(std::string(TEST_DATA_DIR PATH_SEPARATOR) + "default_fff.ini",
                       ForwardCompatibilitySubstitutionRule::Enable);
     auto bed = arr2::to_arrange_bed(get_bed_shape(cfg));
     auto bedbb = bounding_box(bed);
-    auto bedsz = unscaled(bedbb.size());
+    Vec2d bedsz = bedbb.size().cast<double>() * SCALING_FACTOR;
 
     auto strategy = GENERATE(arr2::ArrangeSettingsView::asAuto,
                              arr2::ArrangeSettingsView::asPullToCenter);
@@ -855,7 +923,7 @@ TEST_CASE("Testing arrangement involving virtual beds", "[arrange2][integration]
 
     bool applied = result->apply_on(scene.model());
     REQUIRE(applied);
-    store_3mf("vbed_test_result.3mf", &model, &cfg, false);
+    store_3mf("vbed_test_result.3mf", &model, &cfg, OptionStore3mf{}.set_fullpath_sources(false));
 
     REQUIRE(std::all_of(task->printable.selected.begin(), task->printable.selected.end(),
                         [&bed](auto &item) { return bounding_box(bed).contains(arr2::envelope_bounding_box(item)); }));
@@ -968,7 +1036,8 @@ TEST_CASE("Test SceneBuilder", "[arrange2][integration]")
     {
         std::string basepath = TEST_DATA_DIR PATH_SEPARATOR;
 
-        DynamicPrintConfig cfg;
+        // Supply defaults for settings absent from the older profile but used by export conversion.
+        DynamicPrintConfig cfg = DynamicPrintConfig::full_print_config();
         cfg.load_from_ini(basepath + "default_fff.ini",
                           ForwardCompatibilitySubstitutionRule::Enable);
 
@@ -987,7 +1056,7 @@ TEST_CASE("Test SceneBuilder", "[arrange2][integration]")
                     REQUIRE(is_rect);
 
                     if constexpr (is_rect) {
-                        bedbb.offset(scaled(scene.settings().get_distance_from_objects() / 2.));
+                        bedbb.offset(scale_i(scene.settings().get_distance_from_objects() / 2.));
                         REQUIRE(bedbb.size().x() == bed.width());
                         REQUIRE(bedbb.size().y() == bed.height());
                     }
@@ -1033,7 +1102,7 @@ TEST_CASE("Testing duplicate function to really duplicate the whole Model",
 
     Model model = get_example_model_with_arranged_primitives();
 
-    store_3mf("dupl_example.3mf", &model, nullptr, false);
+    store_3mf("dupl_example.3mf", &model, nullptr, OptionStore3mf{}.set_fullpath_sources(false));
 
     size_t instcnt = arr2::model_instance_count(model);
 
@@ -1056,7 +1125,7 @@ TEST_CASE("Testing duplicate function to really duplicate the whole Model",
     bool applied = result->apply_on(scene.model());
     if (applied) {
         dup_model.apply_duplicates();
-        store_3mf("dupl_example_result.3mf", &model, nullptr, false);
+        store_3mf("dupl_example_result.3mf", &model, nullptr, OptionStore3mf{}.set_fullpath_sources(false));
         REQUIRE(applied);
     }
 

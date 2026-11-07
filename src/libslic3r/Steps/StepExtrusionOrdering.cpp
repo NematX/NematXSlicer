@@ -12,22 +12,33 @@
    layer. Its perimeter trees organize nested extrusion entities. prepare()
    prepares ordering data; validate_pre() checks source-loop information before
    plugins clone or reorder it into PrintingPlan, the output movement plan.
-   run_step() invokes enabled ordering plugins sequentially, validate_post() checks their result,
+   run_step() rejects unrecognized tree orderers when source trees carry atomic
+   bridge strands, before any provider setup or run can change them. It then
+   invokes enabled ordering plugins sequentially, validate_post() checks their result,
    and clear() releases this step's results before recomputation.
 
-   Call graph:
-     prepare
-       CustomGCode::make_print_record
-     run_step
-       validate_pre
-         validate_layer_perimeters
-           validate_perimeter_entity
-       selected_or_active_plugins_for_step
-       Plugin::setup / setup_run / run
-       validate_post */
+   Representative direct calls:
+
+       prepare()
+           `-- CustomGCode::make_print_record()
+
+       run_step()
+           |-- validate_pre()
+           |   `-- validate_layer_perimeters()
+           |       `-- validate_perimeter_entity()
+           |-- selected_or_active_plugins_for_step()
+           |-- plugin->setup()
+           |-- plugin->setup_run()
+           |-- plugin->run()
+           `-- validate_post()
+
+   Provider lifecycle calls occur only after the atomic-strand compatibility
+   check. Their order is setup, setup_run, then run; tree branches show callers,
+   not an additional processing pipeline. */
 #include "StepExtrusionOrdering.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <sstream>
 #include <string>
 
@@ -36,6 +47,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_ordering.h"
+#include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -410,6 +422,28 @@ void run_step(Orchestrator &orchestrator, Print &print)
 
     std::vector<Plugin *> plugins =
         selected_or_active_plugins_for_step(orchestrator, STEP_ORDERING, &print.full_print_config());
+    // Only the listed built-in tree providers are recognized as preserving
+    // collective strand orientation; ordinary unmarked trees need no such check.
+    const std::function<bool(const ExtrusionEntity &)> contains_atomic = [&](const ExtrusionEntity &entity) {
+        if (entity.get_property<slic3r_api::BridgeAtomicStrand>()!=nullptr) return true;
+        for (const ExtrusionEntityUPtr &child : entity.children())
+            if (child && contains_atomic(*child)) return true;
+        return false;
+    };
+    bool requires_atomic=false;
+    for (const PrintObject &object : print.objects())
+        for (const Layer &layer : object.layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const auto &[role, root] : region.extrusion_buckets())
+                        requires_atomic=requires_atomic || contains_atomic(root);
+    if (requires_atomic)
+        for (const Plugin *plugin : plugins)
+            if (plugin->get_exclusive_group()=="ordering.extrusion_tree" &&
+                plugin->get_id()!="ordering.extrusion_tree.advanced" &&
+                plugin->get_id()!="ordering.extrusion_tree.xy_serpentine" &&
+                plugin->get_id()!="ordering.extrusion_tree.default")
+                throw RuntimeError("The selected ordering provider does not preserve atomic bridge strands.");
     std::string last_plugin_id = "<plugin pipeline>";
     for (Plugin *plugin : plugins) {
         if (plugin == nullptr)

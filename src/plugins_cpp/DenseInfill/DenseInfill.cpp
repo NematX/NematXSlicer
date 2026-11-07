@@ -311,10 +311,13 @@ void process_surface_marker_surface(storage_handle *storage,
     };
 
     // Dense infill only refines sparse/void surfaces. Existing solid surfaces
-    // are inputs for other layers to detect support, so this pass must preserve
-    // them exactly instead of reclassifying them.
+    // are inputs for other layers to detect support. Copy their complete metadata,
+    // including prepared bridge direction and provenance, without reclassifying them.
     if (surface_type_is_solid(surface.type())) {
-        surface_output.append_like(surface.expolygon(), surface);
+        StoredExPolygonCollection single(storage);
+        single.push_back(surface.expolygon());
+        const run_ctx_surface_generation *ctx=plugin_ctx_as_surface_generation(run_ctx);
+        ctx->append_surface_like(surface_output.mutable_handle(),surface.handle(),single.handle());
         return;
     }
 

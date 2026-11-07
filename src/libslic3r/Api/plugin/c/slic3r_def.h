@@ -6,7 +6,7 @@
 #define slic3r_def_h_
 
 #define SLIC3R_PLUGIN_API_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_DEF_MINOR 3u
+#define SLIC3R_PLUGIN_API_DEF_MINOR 4u
 
 #include <assert.h>
 #include <stdint.h>
@@ -45,6 +45,12 @@ typedef uint32_t slic3r_property_type;
 #define SLIC3R_PROPERTY_TYPE_EXTRUSION_AXIS             ((slic3r_property_type)14u)
 #define SLIC3R_PROPERTY_TYPE_EXTRUSION_HEATER           ((slic3r_property_type)15u)
 #define SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE             ((slic3r_property_type)16u)
+/* Payloads in slic3r_bridge.h: surface provenance, per-piece flow, collective
+   strand orientation and object-owned support completion, respectively. */
+#define SLIC3R_PROPERTY_TYPE_BRIDGE_SURFACE            ((slic3r_property_type)17u)
+#define SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME             ((slic3r_property_type)18u)
+#define SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND             ((slic3r_property_type)19u)
+#define SLIC3R_PROPERTY_TYPE_SUPPORT_PIPELINE          ((slic3r_property_type)20u)
 
 #ifdef __cplusplus
 #define SLIC3R_CONSTEXPR_INLINE constexpr inline

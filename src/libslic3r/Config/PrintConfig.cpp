@@ -68,6 +68,10 @@ also process dynamic object overrides without requiring a complete preset.
 Dynamic object overrides contain only a subset of printer settings:
 normalization can clamp a tower tool's upper bound only when nozzle data is present.
 
+Plugin option providers define a key before classifying it for Prusa export.
+A compatible key or one handled by a dedicated conversion stays available; only
+the other defined keys enter the omission set. The caller's key is not rewritten.
+
 Legacy map loading keeps source names until each conversion branch runs.
 The caller owns the map; historical setting names and values are converted
 within these branches as needed, not necessarily both in every branch.
@@ -83,6 +87,11 @@ Main entry points and their separate responsibilities:
 
 Representative direct calls (branches are not a timeline):
 
+    add_to_prusa_export_to_remove_keys()
+        |-- PrintConfigDef::instance()
+        |-- get() [resolve the already defined option]
+        `-- prusa_export_to_remove_keys.insert() [only when omission is required]
+
     PrintConfigDef::handle_legacy_map()
         `-- Handle_legacy_tools::_handle_legacy()
 
@@ -93,6 +102,11 @@ Representative direct calls (branches are not a timeline):
 */
 
 namespace Slic3r {
+
+// Look up an already defined option and add its key to the export omission set only when
+// it is neither Prusa-compatible nor handled by a dedicated conversion. The caller's
+// key is unchanged; an undefined key is a programming error, and set allocation may throw.
+void add_to_prusa_export_to_remove_keys(std::string &opt_key);
 
 static t_config_enum_names enum_names_from_keys_map(const t_config_enum_values &enum_keys_map)
 {
@@ -712,6 +726,13 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     using namespace std::literals;
     typedef t_config_option_key Key;
     typedef std::string Val;
+    // Map serialized bridge model names to native exclusive-group provider ids.
+    // The disabled state uses the regional flow switch, not a separate algorithm.
+    for_ech_entry(dict, {"bridge_volume_compensation"}, [](Key &key, Val &value) {
+        if (value=="surface_density_v1") value="bridge.finalize_surface_volume";
+        else if (value=="conservative_clearance_v1") value="bridge.finalize_volume";
+        else if (value=="disabled") { key="bridge_volume_compensation_enabled";value="0"; }
+    });
     // Migrate the old switch without depending on map iteration order. A true
     // switch used to override the palette selector, including in mixed profiles.
     const std::unordered_map<Key, std::pair<Key, Val>>::iterator old_color = dict.find("thumbnails_custom_color");
@@ -2347,7 +2368,11 @@ std::unordered_set<std::string> prusa_export_to_change_keys =
 };
 
 void add_to_prusa_export_to_remove_keys(std::string &opt_key) {
-    prusa_export_to_remove_keys.insert(opt_key);
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(opt_key);
+    assert(definition != nullptr);
+    if ((definition->mode & comPrusa) == 0 &&
+        prusa_export_to_change_keys.find(opt_key) == prusa_export_to_change_keys.end())
+        prusa_export_to_remove_keys.insert(opt_key);
 }
 
 std::map<std::string, std::string> PrintConfigDef::to_prusa(t_config_option_key& opt_key, std::string& value, const DynamicConfig& all_conf) {

@@ -14,6 +14,11 @@ All returned handles are borrowed and valid only during the current
 ``PluginBase.setup_run()`` or ``PluginBase.run()`` callback. Collection setters
 document the few operations that move plugin-owned content into the host.
 Nothing in this module frees a payload or a host-owned data-tree object.
+
+``FinalizeSlicingContext`` reads support completion and local request masks before
+the printing plan exists. It can replace several corrected copies of infill trees
+in one checked call, so a failed correction does not leave only some paths changed.
+After success, the wrappers for those copies own the old contents.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from slic3r_api_generated import (
     INFILL_SURFACE_RECIPE_MODIFIER,
     PluginRunContext,
     RawInfillPatternParams,
+    RawFinalInfillReplacement,
     RunCtxDetectSupportSpots,
     RunCtxExtrusionEdition,
     RunCtxExtrusionOrdering,
@@ -300,10 +306,15 @@ class WipeTowerContext(_PayloadContext):
 
 @abi_requires_headers("steps/slic3r_step_finalize_slicing.h")
 class FinalizeSlicingContext(_PrintObjectContext):
-    """Read-only object context used before construction of the printing plan."""
+    """Replace corrected infill before path ordering, with support paths available.
+
+    The context, object and request masks are borrowed only for the current run.
+    Query completion before interpreting an empty mask as a calculated result.
+    """
 
     @classmethod
     def from_finalize_slicing_run_context(cls, api, address: int):
+        """Wrap this finalization run's payload, or return None for an invalid context."""
         return cls._from_run_context(api, address, STEP_FINALIZE_SLICING, RunCtxFinalizeSlicing, ("print", "object"))
 
     def finalize_slicing_print(self) -> Print:
@@ -311,6 +322,42 @@ class FinalizeSlicingContext(_PrintObjectContext):
 
     def finalize_slicing_object(self) -> Object:
         return self._object()
+
+    def support_demand_computed(self) -> bool:
+        """Return whether final requests were computed, including an empty result."""
+        return bool(self.payload.support_demand_computed)
+
+    def support_material_generated(self) -> bool:
+        """Return whether material producers completed or no material was expected.
+
+        This flag does not imply that any support paths exist.
+        """
+        return bool(self.payload.support_material_generated)
+
+    def requested_support_areas(self, island: LayerIsland) -> ExPolygonCollection:
+        """Borrow final requests on an island of this object for the current run.
+
+        The mask is not printed material; interpret emptiness only after demand completes.
+        """
+        return ExPolygonCollection(self.api, self.payload.get_requested_support_areas(island.c_handle()))
+
+    def replace_infill_buckets(self, storage, replacements) -> bool:
+        """Exchange unique existing buckets with storage-owned donors as one checked batch.
+
+        Each pair is (borrowed_destination, stored_donor), or their addresses.
+        Use this run's storage and only this object's existing infill/gap/ironing
+        roots. Destinations and donors must each be unique. False leaves both sides
+        unchanged; success leaves donors owning old contents and invalidates prior
+        descendant views. Python conversion/allocation errors propagate before C.
+        """
+        pairs = list(replacements)
+        entries = (RawFinalInfillReplacement * len(pairs))()
+        for index, (destination, donor) in enumerate(pairs):
+            entries[index].destination = _address(destination)
+            entries[index].prepared = _address(donor)
+        return bool(self.payload.replace_infill_buckets(
+            self._payload_ptr, _void_p(storage), entries, len(entries)
+        ))
 
 
 @abi_requires_headers("steps/slic3r_step_extrusion_simplification.h")

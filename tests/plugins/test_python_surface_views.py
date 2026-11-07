@@ -1,9 +1,26 @@
-"""Behavior tests for the high-level Python Surface wrappers."""
+"""Test Python Surface ownership, angle access and finalization callback transport.
+
+The fake host invalidates element addresses on structural changes and records
+collection ownership. Bridge-angle tests use its local metadata; finalization
+tests use generated ctypes callbacks with synthetic addresses, not a live slicer.
+
+Selected direct calls from the finalization transport test:
+
+    test_finalize_payload_preserves_both_callbacks_and_passes_the_batch()
+        |-- FinalizeSlicingContext.from_finalize_slicing_run_context()
+        |-- FinalizeSlicingContext.requested_support_areas()
+        `-- FinalizeSlicingContext.replace_infill_buckets()
+
+The wrappers invoke typed ctypes callbacks stored in the synthetic payload. Its
+request lambda returns a fake address; the replace callback records the borrowed
+batch synchronously and returns success without validating native geometry.
+"""
 
 import copy
 import ctypes
 import importlib
 import importlib.util
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -46,8 +63,9 @@ class ReallocatingSurfaceHost:
         return self._next_handle
 
     def storage_new_surface_collection(self, _storage):
+        # Retain the owner id so the angle test can reject a foreign storage capability.
         handle = self._new_handle()
-        self.collections[handle] = {"items": [], "handles": []}
+        self.collections[handle] = {"items": [], "handles": [], "storage": self._int(_storage)}
         return handle
 
     def surface_collection_size(self, collection):
@@ -110,6 +128,29 @@ class ReallocatingSurfaceHost:
 
     def surface_get_type(self, surface):
         return self._surface(surface)["type"]
+
+    def surface_get_bridge_angle(self, surface):
+        """Read fake metadata without changing element handles; absent means -1."""
+        return self._surface(surface).get("bridge_angle", -1.0)
+
+    def surface_collection_set_bridge_angle(self, storage, collection, index, angle):
+        """Model ownership and modulo-pi writes for the tests' nonnegative indices."""
+        record = self.collections[self._int(collection)]
+        if record["storage"] != self._int(storage) or index >= len(record["items"]) or not math.isfinite(angle) or angle < 0:
+            return 0
+        record["items"][index]["bridge_angle"] = angle % math.pi
+        return 1
+
+    def surface_collection_set_type(self, storage, collection, index, surface_type):
+        """Reclassify owned fake metadata while leaving geometry/properties intact."""
+        record = self.collections[self._int(collection)]
+        position, density = surface_type & 15, surface_type & 112
+        if (record["storage"] != self._int(storage) or index >= len(record["items"])
+                or not position or position & (position - 1) or not density or density & (density - 1)
+                or surface_type & ~(15 | 112 | 128 | 256 | 512 | 2048)):
+            return 0
+        record["items"][index]["type"] = surface_type
+        return 1
 
     def surface_get_properties(self, surface):
         return self._surface(surface)["property_handle"]
@@ -179,6 +220,79 @@ class PythonSurfaceViewTests(unittest.TestCase):
         self.assertEqual(appended["type"], 17)
         self.assertEqual(appended["properties"], {42: b"metadata"})
         collection.free_from_storage()
+
+    def test_bridge_angle_is_canonical_and_only_scratch_exposes_the_setter(self):
+        """Check undefined/zero angles, normalization and the owned-only write API."""
+        host = ReallocatingSurfaceHost()
+        api = type("Api", (), {"host": host})()
+        collection = self.surfaces.StoredSurfaceCollection(api, 1)
+        collection.append(self.geometry.ExPolygon(api, 900), 17)
+        surface = collection.front()
+        self.assertEqual(surface.bridge_angle(), -1.0)
+        self.assertFalse(hasattr(surface, "set_bridge_angle"))
+        self.assertTrue(collection.set_bridge_angle(0, 0.0))
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertTrue(collection.set_bridge_angle(0, math.pi))
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertFalse(collection.set_bridge_angle(0, -1.0))
+        self.assertFalse(collection.set_bridge_angle(0, math.nan))
+        collection.free_from_storage()
+
+    def test_owned_type_edit_preserves_geometry_angle_and_properties(self):
+        """The wrapper forwards the storage capability, index and complete type bits."""
+        host = ReallocatingSurfaceHost()
+        api = type("Api", (), {"host": host})()
+        collection = self.surfaces.StoredSurfaceCollection(api, 1)
+        collection.append(self.geometry.ExPolygon(api, 900), 20)
+        surface = collection.front()
+        host._surface(surface.c_handle())["properties"][42] = b"metadata"
+        collection.set_bridge_angle(0, 0.0)
+        area = host._surface(surface.c_handle())["area"]
+        self.assertFalse(hasattr(surface, "set_type"))
+        self.assertTrue(collection.set_type(0, 20 | 128))
+        self.assertEqual(surface.type(), 20 | 128)
+        self.assertEqual(surface.bridge_angle(), 0.0)
+        self.assertEqual(host._surface(surface.c_handle())["area"], area)
+        self.assertEqual(host._surface(surface.c_handle())["properties"], {42: b"metadata"})
+        self.assertFalse(collection.set_type(0, 21))
+        self.assertFalse(collection.set_type(1, 20))
+        self.assertFalse(host.surface_collection_set_type(2, collection.c_handle(), 0, 20))
+        collection.free_from_storage()
+
+    def test_finalize_payload_preserves_both_callbacks_and_passes_the_batch(self):
+        """Check generated callback fields and synchronous argument transport without a host."""
+        import slic3r_api_generated as generated
+        from steps.execution import FinalizeSlicingContext
+
+        fields = dict(generated.RunCtxFinalizeSlicing._fields_)
+        self.assertIn("get_requested_support_areas", fields)
+        calls = []
+
+        def replace(_context, storage, entries, count):
+            """Record the borrowed batch immediately; return success without geometry checks."""
+            calls.append((storage, [(entries[index].destination, entries[index].prepared) for index in range(count)]))
+            return 1
+
+        request = fields["get_requested_support_areas"](lambda _island: 700)
+        batch = fields["replace_infill_buckets"](replace)
+        payload = generated.RunCtxFinalizeSlicing()
+        payload.print = 10
+        payload.object = 20
+        payload.support_demand_computed = 1
+        payload.support_material_generated = 0
+        payload.get_requested_support_areas = request
+        payload.replace_infill_buckets = batch
+        common = generated.PluginRunContext()
+        common.step = generated.STEP_FINALIZE_SLICING
+        common.data = ctypes.addressof(payload)
+        api = type("Api", (), {"host": ReallocatingSurfaceHost()})()
+        context = FinalizeSlicingContext.from_finalize_slicing_run_context(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertTrue(context.support_demand_computed())
+        self.assertFalse(context.support_material_generated())
+        self.assertEqual(context.requested_support_areas(self.datatree.LayerIsland(api, 30)).address, 700)
+        self.assertTrue(context.replace_infill_buckets(40, [(50, 60), (51, 61)]))
+        self.assertEqual(calls, [(40, [(50, 60), (51, 61)])])
 
     def test_support_surface_type_builder_and_predicate(self):
         """Support membership composes with density, position and bridge modifiers."""

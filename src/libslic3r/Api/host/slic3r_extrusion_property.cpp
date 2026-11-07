@@ -10,9 +10,32 @@
 
 #include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
+#include "libslic3r/Api/plugin/c/slic3r_bridge.h"
 #include "libslic3r/ExtrusionEntity.hpp"
 
 #include "Orchestrator.hpp"
+
+/* Expose native extrusion properties through the C API. Built-in payloads have
+   fixed names, sizes and alignments in builtin_property_infos(); custom payload
+   definitions belong to the supplied Orchestrator. The bridge flow/strand entries
+   are fixed-size payload descriptions, not executions of bridge correction.
+
+   Queries borrow entity/orchestrator handles. Existing payload pointers remain
+   owned by the extrusion; new payloads and auxiliary byte resources are allocated
+   in that owner's property container. Reacquire pointers after changes to their
+   storage. Allocation failures are not caught by this adapter itself; the public
+   declarations in slic3r_extrusion_property.h define each operation's contract.
+
+       extrusion_property_get_or_add_data_mutable()
+           |-- property_byte_count()
+           |   |-- builtin_property_info()
+           |   `-- custom_property_info()
+           |-- property_alignment()
+           `-- ApiInternal::ExtrusionPropertyAccess::get_or_add_property_data_mutable()
+
+   Registration describes payload layouts; property access edits an extrusion.
+   Neither operation transfers the owning host or extrusion to the caller.
+*/
 
 namespace Slic3r {
 
@@ -64,6 +87,8 @@ static const std::vector<PropertyInfo> &builtin_property_infos()
         { EXTRUSION_PROPERTY_TYPE_INFILL,          "slic3r.extrusion.infill",          sizeof(c_extrusion_property_infill),          alignof(c_extrusion_property_infill) },
         { EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS,  "slic3r.extrusion.axis",            sizeof(c_extrusion_property_extrusion_axis),  alignof(c_extrusion_property_extrusion_axis) },
         { EXTRUSION_PROPERTY_TYPE_HEATER,           "slic3r.extrusion.heater",          sizeof(c_extrusion_property_heater),          alignof(c_extrusion_property_heater) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME, "bridge_preparation.volume.v1", sizeof(c_bridge_volume_property), alignof(c_bridge_volume_property) },
+        { SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND, "bridge_preparation.atomic_strand.v1", sizeof(c_bridge_strand_property), alignof(c_bridge_strand_property) },
     };
     return infos;
 }

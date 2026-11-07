@@ -6,12 +6,9 @@ Selectors are settings that choose a provider; layout fragments describe pieces 
 Initialization registers providers and settings, applies activation choices, then copies
 provider ids, selector keys and layout fragment ids before individual tests run.
 The copied sets remain unchanged when later tests register or activate providers.
-
-Operation notes:
-- plugin_test_startup_sets
-- ensure_plugin_test_runtime_initialized
-- register_config_option_or_fail
-- activate_plugin_or_fail
+The configuration/activation helpers run inside the function-local static
+initializer lambda, once per process. The startup query only ensures that
+initialization has finished before returning the copied sets.
 
 Representative direct calls (branches are not a timeline):
 
@@ -23,7 +20,9 @@ Representative direct calls (branches are not a timeline):
         |-- init_fff_params()
         |-- init_sla_params()
         |-- register_config_introspection_fixture()
-        `-- register_plugin_option_list_fixtures()
+        |   `-- register_config_option_or_fail()
+        |-- register_plugin_option_list_fixtures()
+        `-- activate_plugin_or_fail()
 */
 #include "plugin_test_helpers.hpp"
 
@@ -138,6 +137,8 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
 #include "libslic3r/Plugins/Surface/TopSurfaceExpansion.hpp"
+#include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
+#include "libslic3r/Plugins/Infill/BridgeVolume.hpp"
 
 
 
@@ -925,6 +926,12 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::SurfaceGeneration::SolidShellsPlugin::register_solid_shells_plugin(
             orchestrator_handle_value);
+        // Register the complete bridge group so its options and callbacks exist
+        // even in tests that leave the feature inactive.
+        slic3r_api::BridgePreparation::register_surface(orchestrator_handle_value);
+        slic3r_api::BridgePreparation::register_recipe(orchestrator_handle_value);
+        slic3r_api::BridgeVolume::register_surface_plugin(orchestrator_handle_value);
+        slic3r_api::BridgeVolume::register_plugin(orchestrator_handle_value);
         slic3r_api::SurfaceGeneration::TopSurfaceExpansionPlugin::register_top_surface_expansion_plugin(
             orchestrator_handle_value);
         slic3r_api::SurfaceGeneration::CleanInfillSurfacesPlugin::register_clean_infill_surfaces_plugin(
@@ -1091,6 +1098,10 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "perimeter.post_process.fuzzy_skin");
         activate_plugin_or_fail(orchestrator, "surface.initial_typed_surface_builder");
         activate_plugin_or_fail(orchestrator, "surface.solid_shells");
+        activate_plugin_or_fail(orchestrator, "surface.bridge_preparation");
+        activate_plugin_or_fail(orchestrator, "infill.recipe.bridge_preparation");
+        activate_plugin_or_fail(orchestrator, "bridge.finalize_surface_volume");
+        activate_plugin_or_fail(orchestrator, "bridge.finalize_volume");
         activate_plugin_or_fail(orchestrator, "surface.top_surface_expansion");
         activate_plugin_or_fail(orchestrator, "surface.clean_infill_surfaces");
         activate_plugin_or_fail(orchestrator, "surface.infill_region_compatibility_splitter");
@@ -1124,6 +1135,11 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("test.gcode.exporter.nofile", false);
         orchestrator.set_plugin_active("test.gcode.exporter.inputs", false);
         orchestrator.set_plugin_active("test.gcode.exporter.raw_inputs", false);
+        // Preserve the shared test baseline; bridge integration cases opt in by scope.
+        orchestrator.set_plugin_active("bridge.finalize_surface_volume", false);
+        orchestrator.set_plugin_active("bridge.finalize_volume", false);
+        orchestrator.set_plugin_active("infill.recipe.bridge_preparation", false);
+        orchestrator.set_plugin_active("surface.bridge_preparation", false);
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         orchestrator.set_plugin_active("com.example.selector", false);
         orchestrator.set_plugin_active("com.example.selector.foreign", false);

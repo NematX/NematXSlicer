@@ -426,6 +426,8 @@ public:
 
     bool has_properties() const { return !m_properties.empty(); }
     void clear_properties();
+    // Exchange payloads and their owned resources without allocation.
+    void swap_properties(ExtrusionPropertyContainer &other) noexcept;
     ExtrusionPropertyUPtrs clone_properties() const;
 
     template<typename PropertyType> PropertyType& add_property(const PropertyType &property)

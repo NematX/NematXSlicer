@@ -62,6 +62,8 @@ set(SLIC3R_SOURCES
 	Api/host/GCodeThumbnailRenderer.hpp
 	Api/host/ClipperShapes.cpp
 	Api/host/ClipperShapes.hpp
+	Api/host/InfillBridgeFlow.cpp
+	Api/host/InfillBridgeFlow.hpp
 	Api/host/Orchestrator.cpp
 	Api/host/Orchestrator.hpp
 	Api/host/Plugin.cpp
@@ -100,6 +102,7 @@ set(SLIC3R_SOURCES
 	Api/internal/LayerRegionAccess.hpp
 	Api/internal/PrintAccess.hpp
 	Api/internal/PrintObjectAccess.hpp
+	Api/plugin/c/slic3r_bridge.h
 	Api/plugin/c/slic3r_bridge_detector.h
 	Api/plugin/c/slic3r_clipper.h
 	Api/plugin/c/slic3r_config.h
@@ -177,6 +180,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/GuiRuleHelpers.hpp
 	Api/plugin/cpp/PluginPropertyKey.hpp
 	Api/plugin/cpp/PolygonOps.hpp
+	Api/plugin/cpp/properties/BridgeProperties.hpp
 	Api/plugin/cpp/properties/DataTreeProperties.hpp
 	Api/plugin/cpp/properties/ExtrusionProperties.hpp
 	Api/plugin/cpp/properties/PrintingExtrusionScopeProperty.hpp
@@ -348,6 +352,12 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/Lightning/LightningPreparation.hpp
 	Plugins/Infill/Lightning/LightningTreeNode.cpp
 	Plugins/Infill/Lightning/LightningTreeNode.hpp
+	Plugins/Infill/BridgeClearance.cpp
+	Plugins/Infill/BridgeClearance.hpp
+	Plugins/Infill/BridgeSurfaceVolume.cpp
+	Plugins/Infill/BridgeSurfaceVolume.hpp
+	Plugins/Infill/BridgeVolume.cpp
+	Plugins/Infill/BridgeVolume.hpp
 	Plugins/Infill/DefaultInfillGenerator.cpp
 	Plugins/Infill/DefaultInfillGenerator.hpp
 	Plugins/Infill/EnsuringPattern.cpp
@@ -516,6 +526,10 @@ set(SLIC3R_SOURCES
 	Plugins/PluginPackageChangelog.hpp
 	Plugins/PluginRepository.cpp
 	Plugins/PluginRepository.hpp
+	Plugins/Surface/BridgeGeometry.cpp
+	Plugins/Surface/BridgeGeometry.hpp
+	Plugins/Surface/BridgePreparation.cpp
+	Plugins/Surface/BridgePreparation.hpp
 	Plugins/Surface/CleanInfillSurfaces.cpp
 	Plugins/Surface/CleanInfillSurfaces.hpp
 	Plugins/Surface/InitialTypedSurfaceBuilder.cpp
