@@ -104,17 +104,22 @@ def two_extruder_options() -> tuple[str, ...]:
 
 def write_two_parts(path: Path) -> None:
     """Two 10 x 10 x 3 mm boxes, 10 mm apart, printed by extruders 1 and 2: one tool change per layer."""
+    write_boxes(path, [(0, 0, 0, 10, 10, 3, 1), (20, 0, 0, 30, 10, 3, 2)])
+
+
+def write_boxes(path: Path, boxes: list[tuple[float, float, float, float, float, float, int]]) -> None:
+    """One object made of box volumes (x0, y0, z0, x1, y1, z1, extruder)."""
     faces = ((3, 2, 1), (1, 0, 3), (4, 5, 6), (6, 7, 4), (0, 1, 5), (5, 4, 0),
              (1, 2, 6), (6, 5, 1), (2, 3, 7), (7, 6, 2), (3, 0, 4), (4, 7, 3))
     vertices, triangles, config = [], [], ""
-    for index, x0 in enumerate((0, 20)):
+    for index, (x0, y0, z0, x1, y1, z1, extruder) in enumerate(boxes):
         base, first = len(vertices), len(triangles)
-        vertices += [(x0 + x, y, z) for z in (0, 3) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
+        vertices += [(x, y, z) for z in (z0, z1) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
         triangles += [tuple(base + corner for corner in face) for face in faces]
         config += (f'<volume firstid="{first}" lastid="{len(triangles) - 1}">'
                    f'<metadata type="volume" key="name" value="part-{index}" />'
                    '<metadata type="volume" key="volume_type" value="ModelPart" />'
-                   f'<metadata type="volume" key="extruder" value="{index + 1}" /></volume>')
+                   f'<metadata type="volume" key="extruder" value="{extruder}" /></volume>')
     model = ('<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" '
              'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>'
              '<object id="1" type="model"><mesh><vertices>'
@@ -181,10 +186,11 @@ Segment = tuple[tuple[float, float], tuple[float, float]]
 WORD = re.compile(r"([XYEZ])([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 
 
-def tower_segments(gcode: str) -> dict[float, set[Segment]]:
-    """Extruding XY segments of the wipe tower role, by layer Z (;Z: marker), as rounded end points."""
-    layers: dict[float, set[Segment]] = {}
+def tower_segments_by_tool(gcode: str) -> dict[tuple[float, int], set[Segment]]:
+    """Extruding XY segments of the wipe tower role, by layer Z (;Z: marker) and tool (Tn command)."""
+    layers: dict[tuple[float, int], set[Segment]] = {}
     x = y = e = z = 0.0
+    tool = 0
     relative_e = False
     role = ""
     for line in gcode.splitlines():
@@ -192,6 +198,8 @@ def tower_segments(gcode: str) -> dict[float, set[Segment]]:
             role = line[6:]
         elif line.startswith(";Z:"):
             z = float(line[3:])
+        elif re.fullmatch(r"T\d+", line.strip()):
+            tool = int(line.strip()[1:])
         elif line.startswith("M83"):
             relative_e = True
         elif line.startswith("M82"):
@@ -208,10 +216,27 @@ def tower_segments(gcode: str) -> dict[float, set[Segment]]:
             if not relative_e:
                 e = extruded
             if deposited > 0 and (nx, ny) != (x, y) and role == "Wipe tower":
-                layers.setdefault(z, set()).add(tuple(sorted(((round(x, 3), round(y, 3)), (round(nx, 3), round(ny, 3))))))
+                segment = tuple(sorted(((round(x, 3), round(y, 3)), (round(nx, 3), round(ny, 3)))))
+                layers.setdefault((z, tool), set()).add(segment)
             x, y = nx, ny
     return layers
 
+
+def tower_segments(gcode: str) -> dict[float, set[Segment]]:
+    """Extruding XY segments of the wipe tower role, by layer Z, whatever the tool."""
+    layers: dict[float, set[Segment]] = {}
+    for (z, _), segments in tower_segments_by_tool(gcode).items():
+        layers.setdefault(z, set()).update(segments)
+    return layers
+
+
+def tower_y_by_tool(gcode: str) -> dict[float, dict[int, tuple[float, float]]]:
+    """Y extent of the extruding wipe tower segments of each tool, by layer Z."""
+    extents: dict[float, dict[int, tuple[float, float]]] = {}
+    for (z, tool), segments in tower_segments_by_tool(gcode).items():
+        ys = [point[1] for segment in segments for point in segment]
+        extents.setdefault(z, {})[tool] = (min(ys), max(ys))
+    return extents
 
 def bounding_box(segments: set[Segment]) -> tuple[float, float, float, float]:
     xs = [point[0] for segment in segments for point in segment]
@@ -273,6 +298,45 @@ class WipeTowerParity(unittest.TestCase):
         sides = {((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x0, y1), (x1, y1)), ((x0, y0), (x0, y1))}
         self.assertTrue(sides - bare)
         self.assertEqual(reference - bare, sides - bare)
+
+    def check_separate_sections(self, gcode: str, tools: set[int]) -> None:
+        """Every tower layer above the first one has a section of each tool; sections never overlap and keep
+        their place. The first layer is skipped: its brim, printed by one tool, surrounds every section."""
+        extents = tower_y_by_tool(gcode)
+        layers = sorted(extents)[1:]
+        self.assertTrue(layers)
+        places: dict[int, tuple[float, float]] = {}
+        for z in layers:
+            self.assertEqual(tools, set(extents[z]), f"tools of the tower layer at z={z}")
+            ranges = sorted(extents[z].values())
+            for (_, high), (low, _) in zip(ranges, ranges[1:]):
+                self.assertLess(high, low, f"sections overlap at z={z}")
+            for tool, extent in extents[z].items():
+                expected = places.setdefault(tool, extent)
+                self.assertAlmostEqual(expected[0], extent[0], delta=0.01, msg=f"tool {tool} moves at z={z}")
+                self.assertAlmostEqual(expected[1], extent[1], delta=0.01, msg=f"tool {tool} moves at z={z}")
+
+    def test_separate_sections_keep_each_filament_apart(self) -> None:
+        gcode, _ = run_export("separate", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",
+                                                           "wipe_tower_separate_filament = 1"), self.model)
+        self.check_separate_sections(gcode, {0, 1})
+
+    def test_separate_sections_are_printed_where_their_tool_is_absent(self) -> None:
+        # Tool 1 prints the bottom and top blocks, tool 2 the middle one: each tool is absent from the
+        # tower owner's layers for a while, and still prints its section there.
+        stacked = OUTPUT_ROOT / "stacked.3mf"
+        write_boxes(stacked, [(0, 0, 0, 10, 10, 1, 1), (0, 0, 1, 10, 10, 2, 2), (0, 0, 2, 10, 10, 3, 1)])
+        gcode, _ = run_export("separate-stacked", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",
+                                                                   "wipe_tower_separate_filament = 1"), stacked)
+        self.check_separate_sections(gcode, {0, 1})
+
+    def test_separate_sections_are_refused_with_one_nozzle(self) -> None:
+        case_options = self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}", "wipe_tower_separate_filament = 1",
+                                         "single_extruder_multi_material = 1")
+        with self.assertRaises(AssertionError):
+            run_export("separate-semm", case_options, self.model)
+        log = (OUTPUT_ROOT / "separate-semm" / "host.log").read_text(encoding="utf-8")
+        self.assertIn("Separate filament sections of the wipe tower cannot be used", log)
 
     def test_selection_needs_the_active_package(self) -> None:
         # The proof of selection used above: with the package deactivated, the host reports the profile value.

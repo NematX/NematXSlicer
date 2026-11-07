@@ -3,7 +3,7 @@
 # directory; only the packaging helpers (cmake/) are shared.
 
 add_library(nematx_wipetower SHARED
-    src/WipeTowerManager.cpp src/WipeTowerLayout.cpp src/TowerFootprints.cpp
+    src/WipeTowerManager.cpp src/WipeTowerLayout.cpp src/TowerFootprints.cpp src/FilamentSections.cpp
     src/rectilinear/RectilinearFills.cpp src/rectilinear/RectilinearEdgeGrid.cpp)
 target_include_directories(nematx_wipetower PRIVATE src src/rectilinear)
 target_compile_definitions(nematx_wipetower PRIVATE SLIC3R_PLUGIN_EXPORTS)
@@ -38,3 +38,8 @@ nematx_package_plugin(
 add_test(NAME wipetower_import
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_import.py"
             "${SUPERSLICER_SOURCE_DIR}/src/libslic3r")
+
+# The section planning is plain C++: its tests need no host DLL.
+add_executable(wipetower_kernel_tests tests/kernel_tests.cpp src/FilamentSections.cpp)
+target_include_directories(wipetower_kernel_tests PRIVATE src)
+add_test(NAME wipetower_kernel COMMAND wipetower_kernel_tests)

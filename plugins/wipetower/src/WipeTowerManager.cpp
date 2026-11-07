@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "FilamentSections.hpp"
 #include "TowerFlow.hpp"
 #include "TowerFootprints.hpp"
 #include "WipeTowerLayout.hpp"
@@ -64,21 +65,40 @@ A floating request is laid out with the regular bands when the tower already
 reaches its Z; above the top it gets its own layer, without maintenance, which
 changes neither the depth nor the cone.
 
+wipe_tower_separate_filament, a setting of this package, gives each tool its own
+section of the tower depth (FilamentSections.hpp), so that incompatible
+materials never need to stick together:
+- it is refused with a single-extruder multi-material printer and with
+  filament_multitool_ramming, whose outgoing filament would print in the section
+  of the incoming one;
+- a tool's section lasts from the first tower layer until the last layer where
+  the tool prints something of the tower's owners, and at most until the last
+  tool change; in step 2, every tool with an active section that is absent from
+  a layer gets a forced visit there, instead of the contour tool;
+- in step 4 the layout decides the tower layers, without cone, and each band then
+  moves into the section of its tool;
+- in step 6 each active section gets its own maintenance, printed by its tool
+  after its bands: perimeters around the section and fill of its unused part;
+  the first section of the first layer also prints the brim around all of them.
+
 Geometry is built in the tower's local frame (X in [0, width], Y toward the open
 side) in scaled coordinates; all roots and the plan stay owned by the host, and
 temporary geometry lives in the plugin storage of the run.
 
     run_impl
         towers_of_print                   tower settings and position
-        add_contour_visits                forced contour visits (EDIT)
+        check_separate_filament           refusals of separate sections
+        add_forced_visits                 section ends, forced visits (EDIT)
         services: EDIT, COLLECT           collect_request, validate_anchor, choose_tower
         tower_layers, layout_tower        bands and tower layers
+            place_sections                bands moved into the sections of their tools
         services: GENERATE                one band per request, speed save and restore
             insert_speed_command, append_visit_speed_command
-        maintenance_anchor, maintenance_root
+        maintenance_anchor, maintenance_root          shared tower
+        append_section_maintenance, maintenance_root  separate sections
             append_path
         transform_root, insertion          descending anchors
-        clean_contour_visits */
+        clean_forced_visits */
 
 namespace nematx_wipetower {
 namespace {
@@ -88,6 +108,7 @@ namespace raster_work = NematXWipeTowerCopy::RectilinearPatternsPlugin::work;
 
 constexpr const char *k_plugin_id = "nematx_wipetower";
 constexpr const char *k_perimeters_key = "wipe_tower_perimeters";
+constexpr const char *k_separate_key = "wipe_tower_separate_filament";
 const uint32_t no_tower = UINT32_MAX;
 const char *const k_no_dependencies[] = { nullptr };
 const raw_used_config_key k_used_keys[] = {
@@ -117,16 +138,27 @@ const raw_used_config_key k_used_keys[] = {
     {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"spiral_vase", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+    {"single_extruder_multi_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"filament_multitool_ramming", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_separate_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
 };
 // Settings defined by this package; their values are object settings, like the other wipe tower settings.
-const char *const k_defined_keys[] = { k_perimeters_key };
+const char *const k_defined_keys[] = { k_perimeters_key, k_separate_key };
 
 struct ForcedVisit { uint32_t present; };
+// A layer group of the plan: group index, then layer group index; pairs compare in print order.
+using PlanLayer = std::pair<uint32_t, uint32_t>;
 struct Tower {
     TowerFootprint footprint;
     uint32_t catalog_id = UINT32_MAX;
     std::vector<uint32_t> owner_ids;
+    // wipe_tower_separate_filament: one section per tool.
+    bool separate = false;
+    // Last layer of each tool's section: its last use in the tower, at most the last tool change.
+    std::map<extruder_index_t, PlanLayer> section_ends;
+    // Section places, planned once the bands are laid out.
+    SectionLayout sections;
 };
 struct CollectedRequest {
     uint32_t plugin_index;
@@ -144,12 +176,30 @@ struct TowerLayer {
     c_wipe_tower_anchor first_owner;
     LayoutLayerInput input;
 };
+// Order of the parts that share an anchor: a shared tower's maintenance comes before the bands,
+// a section's maintenance after the bands of its tool.
+enum class PartOrder { SharedMaintenance, Band, SectionMaintenance };
 struct GeneratedPart {
     c_wipe_tower_anchor anchor;
     uint32_t tower;
-    bool maintenance;
+    PartOrder order;
     double print_z;
     StoredExtrusionEntity root;
+};
+// Area of one maintenance root, in local mm.
+struct MaintenanceArea {
+    // Band rectangle along local Y, and the top of the bands printed in it on this layer.
+    double y0;
+    double y1;
+    double used_y1;
+    // Add the cone envelope of the layout; only a shared tower has one.
+    bool cone;
+    // Print the first-layer brim; without the cone, it surrounds [brim_y0, brim_y1].
+    bool brim;
+    double brim_y0;
+    double brim_y1;
+    // Depth of the whole tower, which places the fill pattern the same way in every area.
+    double pattern_y1;
 };
 
 class WipeTowerManager final : public PluginBase {
@@ -179,11 +229,14 @@ private:
     int32_t defined_config_keys(const char **keys) const noexcept override;
     // Define the settings of this package.
     void inilialize_impl(storage_handle *storage) const override;
-    // Edit contour visits, dispatch services, lay out all towers and publish generated geometry.
+    // Add forced visits, dispatch services, lay out all towers and publish generated geometry.
     void run_impl(const plugin_run_context *run) const override;
     PluginPropertyKey<ForcedVisit> m_forced_visit;
 };
 
+// Define one object setting of this package in the wipe tower settings; a refused definition throws.
+void define_tower_option(orchestrator_handle *orchestrator, const char *key, raw_config_option_type type,
+                         const char *label, const char *tooltip, const char *default_value);
 // Copy a service request into manager-owned storage and retain reporter failures.
 int32_t collect_request(void *context, const c_wipe_tower_request *request);
 // Check post-EDIT anchor bounds and concrete configured tools.
@@ -193,11 +246,15 @@ bool first_owner_anchor(const ConstPrintingLayerGroup &layer, const Tower &tower
 // Map the following extrusion to a tower, preferring its instance over the global tower.
 uint32_t choose_tower(const ConstPrintingPlan &plan, const c_wipe_tower_request &request,
                       const std::vector<Tower> &towers);
-// Add marked contour visits through the owner's last unmodified tool-change layer before service EDIT.
-void add_contour_visits(PrintingPlan &plan, const std::vector<Tower> &towers,
-                        const PluginPropertyKey<ForcedVisit> &marker);
+// Refuse separate sections with the SEMM printers and the rammed tools: their outgoing filament
+// would print in the section of the incoming one.
+void check_separate_filament(const Config &print_config, const ConstPrintingPlan &plan);
+// Before service EDIT, record each separate tower's section ends, then add marked visits through
+// each owner's last unmodified tool-change layer: the contour tool of a shared tower, every tool
+// with an active section of a separate tower.
+void add_forced_visits(PrintingPlan &plan, std::vector<Tower> &towers, const PluginPropertyKey<ForcedVisit> &marker);
 // Remove only marked visits that remain otherwise empty and erase all manager markers.
-void clean_contour_visits(PrintingPlan &plan, const PluginPropertyKey<ForcedVisit> &marker);
+void clean_forced_visits(PrintingPlan &plan, const PluginPropertyKey<ForcedVisit> &marker);
 // Return the largest layer height of a tool in mm, as Slic3r::Slicing::max_layer_height_from_nozzle().
 double max_layer_height_from_nozzle(const Config &print_config, extruder_index_t extruder);
 // Round a height in mm to z_step, as Slic3r::check_z_step(double, double).
@@ -218,10 +275,20 @@ void append_visit_speed_command(storage_handle *storage, PrintingToolGroup tool,
 c_wipe_tower_anchor maintenance_anchor(const ConstPrintingPlan &plan, const Tower &tower,
                                        const TowerLayer &layer, const std::vector<CollectedRequest> &requests,
                                        uint32_t tower_idx);
-// Append complete local maintenance geometry using the copied Monotonic/Grid generators.
+// Plan the sections of a separate tower and move each band of its layout into the section of its tool.
+void place_sections(Tower &tower, TowerLayout &layout, const ConstPrintingPlan &plan,
+                    const std::vector<CollectedRequest> &requests);
+// Append one maintenance part per active section of each layer of a separate tower, after its tool's bands.
+void append_section_maintenance(std::vector<GeneratedPart> &parts, storage_handle *storage, const Config &print_config,
+                                const ConstPrintingPlan &plan, const Tower &tower, uint32_t tower_idx,
+                                const TowerLayout &layout, const std::vector<TowerLayer> &candidates,
+                                const std::vector<CollectedRequest> &requests);
+// Append complete local maintenance geometry of one area using the copied Monotonic/Grid generators.
 StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &print_config,
                                        const Tower &tower, const TowerLayout &layout, size_t layer_idx,
-                                       extruder_index_t extruder);
+                                       extruder_index_t extruder, const MaintenanceArea &area);
+// Return the tool of a request: the incoming tool, or the outgoing one of an outgoing-only request.
+extruder_index_t request_tool(const ConstPrintingPlan &plan, const c_wipe_tower_request &request);
 // Append one scaled local path with complete flow and speed attributes to an owned root.
 void append_path(storage_handle *storage, MutableExtrusionEntity root, const std::vector<c_point> &points,
                  const TowerFlow &flow, double speed);
@@ -262,24 +329,34 @@ int32_t WipeTowerManager::defined_config_keys(const char **keys) const noexcept
 }
 void WipeTowerManager::inilialize_impl(storage_handle *) const
 {
+    define_tower_option(m_orchestrator, k_perimeters_key, RAW_CO_INT, "Wipe tower perimeters",
+        "Number of perimeter loops printed around the wipe tower, or around each separate filament section. "
+        "Set to zero to disable the wipe tower perimeters while keeping the purge, the fill and the brim.", "1");
+    define_tower_option(m_orchestrator, k_separate_key, RAW_CO_BOOL, "Separate filament sections",
+        "Purge each filament in its own wipe tower section, with a dedicated perimeter around each section. "
+        "This avoids relying on adhesion between incompatible materials inside the wipe tower.", "0");
+}
+
+void define_tower_option(orchestrator_handle *orchestrator, const char *key, const raw_config_option_type type,
+                         const char *label, const char *tooltip, const char *default_value)
+{
     raw_config_option_def def = raw_config_option_def_init();
-    def.opt_key = k_perimeters_key;
-    def.type = RAW_CO_INT;
+    def.opt_key = key;
+    def.type = type;
     def.container_type = RAW_CONTAINER_TYPE_OBJECT;
     def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
     def.printer_technology = RAW_PT_FFF;
     def.invalidates_step = STEP_WIPETOWER;
     def.category = RAW_OPTION_CATEGORY_MMSETUP;
-    def.label = "Wipe tower perimeters";
-    def.tooltip = "Number of perimeter loops printed around the wipe tower. Set to zero to disable the wipe tower "
-                  "perimeters while keeping the purge, the fill and the brim.";
-    def.has_min = 1;
+    def.label = label;
+    def.tooltip = tooltip;
+    def.has_min = type == RAW_CO_INT;
     def.min_value = 0;
     def.mode = raw_config_option_mode(RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI);
-    def.default_serialized_value = "1";
-    const option_def_error_code result = orchestrator_create_option_def(m_orchestrator, &def);
+    def.default_serialized_value = default_value;
+    const option_def_error_code result = orchestrator_create_option_def(orchestrator, &def);
     if (result != OPTION_DEF_ERROR_OK)
-        throw std::runtime_error(std::string("Cannot define ") + k_perimeters_key + " (option definition error " +
+        throw std::runtime_error(std::string("Cannot define ") + key + " (option definition error " +
                                  std::to_string(int(result)) + ").");
 }
 
@@ -308,9 +385,12 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
                 owner.object_instance_idx() == tower.footprint.instance_idx)
                 tower.owner_ids.push_back(id);
         }
+        tower.separate = tower.footprint.config.get(k_separate_key).get_bool();
         towers.push_back(std::move(tower));
     }
-    add_contour_visits(plan, towers, m_forced_visit);
+    if (std::any_of(towers.begin(), towers.end(), [](const Tower &tower) { return tower.separate; }))
+        check_separate_filament(print_config, source);
+    add_forced_visits(plan, towers, m_forced_visit);
     RequestCollector collector;
     for (uint32_t idx = 0; idx < ctx->wipe_plugin_count; ++idx) {
         throw_if_cancelled(run);
@@ -349,11 +429,14 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
             (request.incoming.group_idx != request.outgoing.group_idx || request.incoming.layer_group_idx != request.outgoing.layer_group_idx))
             throw std::invalid_argument("Both wipe parts must share a layer group.");
         collected.tower_index = choose_tower(source, request, towers);
+        if (collected.tower_index != no_tower && towers[collected.tower_index].separate && request.has_outgoing)
+            throw std::runtime_error("Separate filament sections of the wipe tower cannot print an outgoing filament "
+                                     "(ramming or unload) in the section of the incoming one.");
     }
     collector.requests.erase(std::remove_if(collector.requests.begin(), collector.requests.end(),
         [](const CollectedRequest &request) { return request.tower_index == no_tower; }), collector.requests.end());
     if (collector.requests.empty()) {
-        clean_contour_visits(plan, m_forced_visit);
+        clean_forced_visits(plan, m_forced_visit);
         return;
     }
     // The incoming visit defines a two-part request's order; equal anchors retain service collection order.
@@ -371,9 +454,12 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
         std::vector<LayoutLayerInput> inputs;
         for (const TowerLayer &layer : candidates[t])
             inputs.push_back(layer.input);
-        // get_float() gives a percent as a ratio: 100% is 1.
+        // get_float() gives a percent as a ratio: 100% is 1. A tower with separate sections has no cone.
         layouts.push_back(layout_tower(tower.footprint.width, tower.footprint.config.get("wipe_tower_extra_spacing").get_float(),
-            print_config.get("wipe_tower_no_sparse_layers").get_bool(), tower.footprint.config.get("wipe_tower_cone_angle").get_float(), inputs));
+            print_config.get("wipe_tower_no_sparse_layers").get_bool(),
+            tower.separate ? 0. : tower.footprint.config.get("wipe_tower_cone_angle").get_float(), inputs));
+        if (tower.separate)
+            place_sections(towers[t], layouts.back(), source, collector.requests);
     }
     for (uint32_t t = 0; t < towers.size(); ++t) {
         if (layouts[t].layers.empty())
@@ -456,28 +542,37 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
             // An enabled root that stayed empty receives only its command and is inserted like
             // any other generated part.
             if (request.has_outgoing)
-                parts.push_back({request.outgoing, collected.tower_index, false, layer->print_z, std::move(outgoing)});
+                parts.push_back({request.outgoing, collected.tower_index, PartOrder::Band, layer->print_z, std::move(outgoing)});
             if (request.has_incoming)
-                parts.push_back({request.incoming, collected.tower_index, false, layer->print_z, std::move(incoming)});
+                parts.push_back({request.incoming, collected.tower_index, PartOrder::Band, layer->print_z, std::move(incoming)});
         }
     }
     // Maintenance geometry is generated only after every service GENERATE call has completed;
     // a floating layer holds only its band and receives none.
-    for (uint32_t t = 0; t < towers.size(); ++t)
+    for (uint32_t t = 0; t < towers.size(); ++t) {
+        if (towers[t].separate) {
+            throw_if_cancelled(run);
+            append_section_maintenance(parts, run->plugin_storage, print_config, source, towers[t], t, layouts[t],
+                                       candidates[t], collector.requests);
+            continue;
+        }
         for (size_t l = 0; l < layouts[t].layers.size(); ++l) {
             throw_if_cancelled(run);
-            if (layouts[t].layers[l].floating)
+            const LayoutLayer &layer = layouts[t].layers[l];
+            if (layer.floating)
                 continue;
-            const TowerLayer &candidate = candidates[t][layouts[t].layers[l].source_index];
+            const TowerLayer &candidate = candidates[t][layer.source_index];
             const c_wipe_tower_anchor anchor = maintenance_anchor(source, towers[t], candidate, collector.requests, t);
             const extruder_index_t tool = source.group(anchor.group_idx).layer_group(anchor.layer_group_idx).tool_group(anchor.tool_group_idx).extruder_id();
-            parts.push_back({anchor, t, true, layouts[t].layers[l].print_z,
-                maintenance_root(run->plugin_storage, print_config, towers[t], layouts[t], l, tool)});
+            const MaintenanceArea area{0., layer.depth, layer.used, true, l == 0, 0., layer.depth, layouts[t].layers.front().depth};
+            parts.push_back({anchor, t, PartOrder::SharedMaintenance, layer.print_z,
+                maintenance_root(run->plugin_storage, print_config, towers[t], layouts[t], l, tool, area)});
         }
+    }
     std::stable_sort(parts.begin(), parts.end(), [](const GeneratedPart &left, const GeneratedPart &right) {
         const c_wipe_tower_anchor &a = left.anchor, &b = right.anchor;
-        return std::make_tuple(a.group_idx, a.layer_group_idx, a.tool_group_idx, a.extrusion_idx, !left.maintenance) <
-               std::make_tuple(b.group_idx, b.layer_group_idx, b.tool_group_idx, b.extrusion_idx, !right.maintenance);
+        return std::make_tuple(a.group_idx, a.layer_group_idx, a.tool_group_idx, a.extrusion_idx, left.order) <
+               std::make_tuple(b.group_idx, b.layer_group_idx, b.tool_group_idx, b.extrusion_idx, right.order);
     });
     for (std::vector<GeneratedPart>::reverse_iterator it = parts.rbegin(); it != parts.rend(); ++it) {
         throw_if_cancelled(run);
@@ -503,7 +598,7 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
         if (!extrusion.valid() || !tool.move_extrusion(appended, part.anchor.extrusion_idx))
             throw std::runtime_error("Cannot insert generated tower extrusion.");
     }
-    clean_contour_visits(plan, m_forced_visit);
+    clean_forced_visits(plan, m_forced_visit);
 }
 
 int32_t collect_request(void *context, const c_wipe_tower_request *request)
@@ -585,10 +680,28 @@ uint32_t choose_tower(const ConstPrintingPlan &plan, const c_wipe_tower_request 
     return global;
 }
 
-void add_contour_visits(PrintingPlan &plan, const std::vector<Tower> &towers, const PluginPropertyKey<ForcedVisit> &marker)
+void check_separate_filament(const Config &print_config, const ConstPrintingPlan &plan)
 {
-    const std::pair<uint32_t, uint32_t> absent{UINT32_MAX, UINT32_MAX};
-    std::vector<std::pair<uint32_t, uint32_t>> last_change(towers.size(), absent);
+    if (print_config.get("single_extruder_multi_material").get_bool())
+        throw std::runtime_error("Separate filament sections of the wipe tower cannot be used with a single extruder "
+                                 "multi-material printer: every filament goes through the same nozzle.");
+    const ConfigOption ramming = print_config.get("filament_multitool_ramming");
+    for (uint32_t g = 0; g < plan.group_count(); ++g)
+        for (uint32_t l = 0; l < plan.group(g).layer_group_count(); ++l) {
+            const ConstPrintingLayerGroup layer = plan.group(g).layer_group(l);
+            for (uint32_t t = 0; t < layer.tool_group_count(); ++t) {
+                const extruder_index_t tool = layer.tool_group(t).extruder_id();
+                if (tool >= 0 && ramming.get_bool(uint32_t(tool)))
+                    throw std::runtime_error("Separate filament sections of the wipe tower cannot be used with "
+                                             "filament_multitool_ramming (extruder " + std::to_string(tool + 1) + ").");
+            }
+        }
+}
+
+void add_forced_visits(PrintingPlan &plan, std::vector<Tower> &towers, const PluginPropertyKey<ForcedVisit> &marker)
+{
+    const PlanLayer absent{UINT32_MAX, UINT32_MAX};
+    std::vector<PlanLayer> last_change(towers.size(), absent);
     extruder_index_t previous = EXTRUDER_ID_UNKNOWN;
     // Determine every boundary before inserting anything, so a forced visit can
     // never extend its own tower's range or another tower's range.
@@ -608,55 +721,86 @@ void add_contour_visits(PrintingPlan &plan, const std::vector<Tower> &towers, co
                         last_change[t] = {g, l};
                 }
         }
+    // A section lasts until the last layer where its tool prints something of the tower's owners,
+    // and at most until the tower's last tool change, where the tower stops.
+    for (uint32_t t = 0; t < towers.size(); ++t) {
+        Tower &tower = towers[t];
+        if (!tower.separate || last_change[t] == absent)
+            continue;
+        for (uint32_t g = 0; g < plan.group_count(); ++g)
+            for (uint32_t l = 0; l < plan.group(g).layer_group_count() && PlanLayer{g, l} <= last_change[t]; ++l) {
+                const ConstPrintingLayerGroup layer = plan.group(g).layer_group(l);
+                for (uint32_t v = 0; v < layer.tool_group_count(); ++v) {
+                    const ConstPrintingToolGroup visit = layer.tool_group(v);
+                    bool owned = false;
+                    for (uint32_t e = 0; e < visit.extrusion_count() && !owned; ++e)
+                        owned = tower.footprint.object == nullptr ||
+                            std::find(tower.owner_ids.begin(), tower.owner_ids.end(),
+                                      visit.extrusion(e).printing_catalog_id()) != tower.owner_ids.end();
+                    if (owned)
+                        tower.section_ends[visit.extruder_id()] = {g, l};
+                }
+            }
+    }
     previous = EXTRUDER_ID_UNKNOWN;
     for (uint32_t g = 0; g < plan.group_count(); ++g)
         for (uint32_t l = 0; l < plan.group(g).layer_group_count(); ++l) {
             PrintingLayerGroup layer = plan.group(g).layer_group(l);
             for (uint32_t t = 0; t < towers.size(); ++t) {
                 const Tower &tower = towers[t];
-                const int32_t contour_tool = tower.footprint.config.get("wipe_tower_extruder").get_int();
                 c_wipe_tower_anchor owner{g, l, 0, 0};
-                if (last_change[t] == absent || std::make_pair(g, l) > last_change[t] ||
-                    !first_owner_anchor(ConstPrintingLayerGroup(layer), tower, owner) ||
-                    contour_tool == 0 || !tower.footprint.config.get("wipe_tower_extruder_toolchange").get_bool())
+                if (last_change[t] == absent || PlanLayer{g, l} > last_change[t] ||
+                    !first_owner_anchor(ConstPrintingLayerGroup(layer), tower, owner))
                     continue;
-                const extruder_index_t requested = extruder_index_t(contour_tool - 1);
-                bool exists = false;
-                for (uint32_t t = 0; t < layer.tool_group_count(); ++t)
-                    exists = exists || layer.tool_group(t).extruder_id() == requested;
-                if (exists)
-                    continue;
-                extruder_index_t next = EXTRUDER_ID_UNKNOWN;
-                for (uint32_t ng = g; ng < plan.group_count() && next == EXTRUDER_ID_UNKNOWN; ++ng)
-                    for (uint32_t nl = ng == g ? l + 1 : 0; nl < plan.group(ng).layer_group_count() && next == EXTRUDER_ID_UNKNOWN; ++nl)
-                        if (plan.group(ng).layer_group(nl).tool_group_count() != 0)
-                            next = plan.group(ng).layer_group(nl).tool_group(0).extruder_id();
-                // Insert where the visit adds the fewest tool changes; ties go to the earliest position.
-                uint32_t best = 0;
-                int best_cost = std::numeric_limits<int>::max();
-                for (uint32_t pos = 0; pos <= layer.tool_group_count(); ++pos) {
-                    const extruder_index_t left = pos == 0 ? previous : layer.tool_group(pos - 1).extruder_id();
-                    const extruder_index_t right = pos == layer.tool_group_count() ? next : layer.tool_group(pos).extruder_id();
-                    const int cost = int(left != EXTRUDER_ID_UNKNOWN && left != requested) +
-                        int(right != EXTRUDER_ID_UNKNOWN && right != requested) -
-                        int(left != EXTRUDER_ID_UNKNOWN && right != EXTRUDER_ID_UNKNOWN && left != right);
-                    if (cost < best_cost) {
-                        best_cost = cost;
-                        best = pos;
-                    }
+                // A shared tower forces its contour tool; a separate tower forces every tool whose section
+                // is still active, so that each section is printed on every layer by its own filament.
+                std::vector<extruder_index_t> requested_tools;
+                if (tower.separate) {
+                    for (const auto &[tool, end] : tower.section_ends)
+                        if (PlanLayer{g, l} <= end)
+                            requested_tools.push_back(tool);
+                } else {
+                    const int32_t contour_tool = tower.footprint.config.get("wipe_tower_extruder").get_int();
+                    if (contour_tool != 0 && tower.footprint.config.get("wipe_tower_extruder_toolchange").get_bool())
+                        requested_tools.push_back(extruder_index_t(contour_tool - 1));
                 }
-                const uint32_t appended = layer.tool_group_count();
-                PrintingToolGroup forced = layer.append_tool_group(requested);
-                forced.properties().get_or_add(marker).present = 1;
-                if (!layer.move_tool_group(appended, best))
-                    throw std::runtime_error("Cannot insert a contour tool visit.");
+                for (const extruder_index_t requested : requested_tools) {
+                    bool exists = false;
+                    for (uint32_t v = 0; v < layer.tool_group_count(); ++v)
+                        exists = exists || layer.tool_group(v).extruder_id() == requested;
+                    if (exists)
+                        continue;
+                    extruder_index_t next = EXTRUDER_ID_UNKNOWN;
+                    for (uint32_t ng = g; ng < plan.group_count() && next == EXTRUDER_ID_UNKNOWN; ++ng)
+                        for (uint32_t nl = ng == g ? l + 1 : 0; nl < plan.group(ng).layer_group_count() && next == EXTRUDER_ID_UNKNOWN; ++nl)
+                            if (plan.group(ng).layer_group(nl).tool_group_count() != 0)
+                                next = plan.group(ng).layer_group(nl).tool_group(0).extruder_id();
+                    // Insert where the visit adds the fewest tool changes; ties go to the earliest position.
+                    uint32_t best = 0;
+                    int best_cost = std::numeric_limits<int>::max();
+                    for (uint32_t pos = 0; pos <= layer.tool_group_count(); ++pos) {
+                        const extruder_index_t left = pos == 0 ? previous : layer.tool_group(pos - 1).extruder_id();
+                        const extruder_index_t right = pos == layer.tool_group_count() ? next : layer.tool_group(pos).extruder_id();
+                        const int cost = int(left != EXTRUDER_ID_UNKNOWN && left != requested) +
+                            int(right != EXTRUDER_ID_UNKNOWN && right != requested) -
+                            int(left != EXTRUDER_ID_UNKNOWN && right != EXTRUDER_ID_UNKNOWN && left != right);
+                        if (cost < best_cost) {
+                            best_cost = cost;
+                            best = pos;
+                        }
+                    }
+                    const uint32_t appended = layer.tool_group_count();
+                    PrintingToolGroup forced = layer.append_tool_group(requested);
+                    forced.properties().get_or_add(marker).present = 1;
+                    if (!layer.move_tool_group(appended, best))
+                        throw std::runtime_error("Cannot insert a forced tower visit.");
+                }
             }
             if (layer.tool_group_count() != 0)
                 previous = layer.tool_group(layer.tool_group_count() - 1).extruder_id();
         }
 }
-
-void clean_contour_visits(PrintingPlan &plan, const PluginPropertyKey<ForcedVisit> &marker)
+void clean_forced_visits(PrintingPlan &plan, const PluginPropertyKey<ForcedVisit> &marker)
 {
     for (uint32_t g = 0; g < plan.group_count(); ++g)
         for (uint32_t l = 0; l < plan.group(g).layer_group_count(); ++l) {
@@ -781,8 +925,100 @@ c_wipe_tower_anchor maintenance_anchor(const ConstPrintingPlan &plan, const Towe
     return first;
 }
 
+void place_sections(Tower &tower, TowerLayout &layout, const ConstPrintingPlan &plan,
+                    const std::vector<CollectedRequest> &requests)
+{
+    std::vector<std::vector<SectionBandInput>> inputs;
+    double line_width = 0.;
+    for (const LayoutLayer &layer : layout.layers) {
+        inputs.emplace_back();
+        for (const LayoutBand &band : layer.bands) {
+            inputs.back().push_back({request_tool(plan, requests[band.request_index].request), band.y1 - band.y0});
+            line_width = std::max(line_width, band.line_width);
+        }
+    }
+    // Neighbouring purge areas keep room for the perimeters of both sections, one line spacing
+    // apart; the line width is a safe bound of the spacing on every layer.
+    const int32_t perimeters = tower.footprint.config.get(k_perimeters_key).get_int();
+    tower.sections = layout_sections(inputs, double(std::max(1, 2 * perimeters - 1)) * line_width);
+    for (size_t l = 0; l < layout.layers.size(); ++l)
+        for (size_t b = 0; b < layout.layers[l].bands.size(); ++b) {
+            LayoutBand &band = layout.layers[l].bands[b];
+            const double height = band.y1 - band.y0;
+            band.y0 = tower.sections.band_y0[l][b];
+            band.y1 = band.y0 + height;
+        }
+}
+
+void append_section_maintenance(std::vector<GeneratedPart> &parts, storage_handle *storage, const Config &print_config,
+                                const ConstPrintingPlan &plan, const Tower &tower, const uint32_t tower_idx,
+                                const TowerLayout &layout, const std::vector<TowerLayer> &candidates,
+                                const std::vector<CollectedRequest> &requests)
+{
+    const std::vector<FilamentSection> &sections = tower.sections.sections;
+    if (sections.empty())
+        return;
+    const double tower_depth = sections.back().y0 + sections.back().length;
+    for (size_t l = 0; l < layout.layers.size(); ++l) {
+        const LayoutLayer &layer = layout.layers[l];
+        if (layer.floating)
+            continue;
+        const TowerLayer &candidate = candidates[layer.source_index];
+        const PlanLayer here{candidate.group, candidate.layer};
+        // A section is printed up to its end; a tool that only reaches the tower through a purge
+        // request has no end, and its section is printed where it purges.
+        const auto active = [&](const FilamentSection &section) {
+            const std::map<extruder_index_t, PlanLayer>::const_iterator end = tower.section_ends.find(extruder_index_t(section.tool));
+            return end != tower.section_ends.end() ? here <= end->second : tower.sections.used[l].count(section.tool) != 0;
+        };
+        // The first-layer brim surrounds every section printed on that layer.
+        bool brim = l == 0;
+        double brim_y0 = tower_depth, brim_y1 = 0.;
+        for (const FilamentSection &section : sections)
+            if (active(section)) {
+                brim_y0 = std::min(brim_y0, section.y0);
+                brim_y1 = std::max(brim_y1, section.y0 + section.length);
+            }
+        for (const FilamentSection &section : sections) {
+            if (!active(section))
+                continue;
+            // The maintenance follows the first band of the section's tool on this layer, in the same visit;
+            // without band, it starts the tool's first visit of the layer.
+            c_wipe_tower_anchor anchor{UINT32_MAX, 0, 0, 0};
+            for (const LayoutBand &band : layer.bands) {
+                const c_wipe_tower_request &request = requests[band.request_index].request;
+                if (request_tool(plan, request) == section.tool) {
+                    anchor = request.incoming;
+                    break;
+                }
+            }
+            if (anchor.group_idx == UINT32_MAX) {
+                const ConstPrintingLayerGroup source = plan.group(candidate.group).layer_group(candidate.layer);
+                for (uint32_t v = 0; v < source.tool_group_count() && anchor.group_idx == UINT32_MAX; ++v)
+                    if (source.tool_group(v).extruder_id() == section.tool)
+                        anchor = {candidate.group, candidate.layer, v, 0};
+            }
+            if (anchor.group_idx == UINT32_MAX)
+                continue;
+            const std::map<int32_t, double>::const_iterator used = tower.sections.used[l].find(section.tool);
+            const MaintenanceArea area{section.y0, section.y0 + section.length,
+                                       section.y0 + (used == tower.sections.used[l].end() ? 0. : used->second),
+                                       false, brim, brim_y0, brim_y1, tower_depth};
+            parts.push_back({anchor, tower_idx, PartOrder::SectionMaintenance, layer.print_z,
+                             maintenance_root(storage, print_config, tower, layout, l, section.tool, area)});
+            brim = false;
+        }
+    }
+}
+
+extruder_index_t request_tool(const ConstPrintingPlan &plan, const c_wipe_tower_request &request)
+{
+    const c_wipe_tower_anchor &anchor = request.has_incoming ? request.incoming : request.outgoing;
+    return plan.group(anchor.group_idx).layer_group(anchor.layer_group_idx).tool_group(anchor.tool_group_idx).extruder_id();
+}
 StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &print_config, const Tower &tower,
-                                       const TowerLayout &layout, const size_t layer_idx, const extruder_index_t extruder)
+                                       const TowerLayout &layout, const size_t layer_idx, const extruder_index_t extruder,
+                                       const MaintenanceArea &area)
 {
     const Config &config = tower.footprint.config;
     const double width = tower.footprint.width;
@@ -801,12 +1037,12 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
         speed = std::max(speed, config.get("first_layer_min_speed").get_float());
     }
     StoredExtrusionEntity root(storage);
-    const std::vector<c_point> rectangle{new_scale(0., 0.), new_scale(width, 0.), new_scale(width, layer.depth),
-                                         new_scale(0., layer.depth)};
+    const std::vector<c_point> rectangle{new_scale(0., area.y0), new_scale(width, area.y0), new_scale(width, area.y1),
+                                         new_scale(0., area.y1)};
     StoredPolygon envelope = make_polygon(storage, rectangle);
     const double rectangle_area = envelope.area();
     const double radius = layout.cone_base_radius + layer.depth / 2. - layout.cone_slope * layer.print_z;
-    if (layout.cone_base_radius > 0.) {
+    if (area.cone && layout.cone_base_radius > 0.) {
         std::vector<c_point> points = rectangle;
         for (size_t n = 0; n < 80; ++n) {
             const double angle = 2. * 3.141592653589793238 * double(n) / 80.;
@@ -820,9 +1056,9 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
     // further perimeter is one line spacing outside the envelope. Zero perimeters prints none of them.
     const int32_t perimeters = config.get(k_perimeters_key).get_int();
     const size_t outer_loops = perimeters > 1 ? size_t(perimeters - 1) : 0;
-    // Append the closed rings of the envelope offset outward by the given number of line spacings.
-    const auto append_envelope_offset = [&](const size_t spacings) {
-        const StoredPolygonCollection rings = clipper_offset(ClipperOperand::from_polygon(storage, envelope),
+    // Append the closed rings of an outline offset outward by the given number of line spacings.
+    const auto append_offset = [&](const StoredPolygon &outline, const size_t spacings) {
+        const StoredPolygonCollection rings = clipper_offset(ClipperOperand::from_polygon(storage, outline),
             scale_d(double(spacings) * flow.spacing())).to_polygon_collection();
         for (const Polygon &ring : rings) {
             std::vector<c_point> points = ring.points();
@@ -830,11 +1066,15 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
             append_path(storage, root.mutable_view(), points, flow, speed);
         }
     };
-    if (layer_idx == 0 && tower.footprint.brim_width > 0.) {
-        // The brim starts outside the last perimeter and is printed from the outside in.
+    if (area.brim && tower.footprint.brim_width > 0.) {
+        // The brim starts outside the last perimeter and is printed from the outside in. It surrounds
+        // the cone envelope of a shared tower, or every section of a tower with separate sections.
+        const StoredPolygon outline = area.cone ? make_polygon(storage, envelope.points()) :
+            make_polygon(storage, {new_scale(0., area.brim_y0), new_scale(width, area.brim_y0),
+                                   new_scale(width, area.brim_y1), new_scale(0., area.brim_y1)});
         const size_t loops = size_t((tower.footprint.brim_width + flow.spacing() / 2.) / flow.spacing());
         for (size_t i = loops; i > 0; --i)
-            append_envelope_offset(outer_loops + i);
+            append_offset(outline, outer_loops + i);
     }
     if (perimeters > 0) {
         std::vector<c_point> perimeter = rectangle;
@@ -847,12 +1087,12 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
         }
     }
     for (size_t i = 1; i <= outer_loops; ++i)
-        append_envelope_offset(i);
+        append_offset(envelope, i);
     StoredExPolygonCollection fill = clipper_offset(ClipperOperand::from_polygon(storage, envelope),
         -double(flow.scaled_spacing()) / 3.).to_expolygon_collection();
-    if (layer.used > 0.) {
-        const StoredPolygon used = make_polygon(storage, {new_scale(0., 0.), new_scale(width, 0.),
-            new_scale(width, layer.used), new_scale(0., layer.used)});
+    if (area.used_y1 > area.y0) {
+        const StoredPolygon used = make_polygon(storage, {new_scale(0., area.y0), new_scale(width, area.y0),
+            new_scale(width, area.used_y1), new_scale(0., area.used_y1)});
         fill = clipper_diff(ClipperOperand::from_expolygons(storage, fill),
             ClipperOperand::from_polygon(storage, used)).to_expolygon_collection();
     }
@@ -873,7 +1113,7 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Config &pr
     params.z = layer.print_z;
     params.fill_resolution = scale_i(0.01);
     // The fill pattern is centred on the tower rectangle; a cone envelope may extend beyond it.
-    params.object_bounding_box = {{0, 0}, {scale_i(width), scale_i(layout.layers.front().depth)}};
+    params.object_bounding_box = {{0, 0}, {scale_i(width), scale_i(area.pattern_y1)}};
     params.spacing = flow.spacing();
     params.density = 1.f;
     if (layer_idx != 0) {
