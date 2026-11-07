@@ -142,7 +142,6 @@ public:
     void erase(size_t begin, size_t end);
     void replace(size_t i, const ExtrusionEntity &entity);
     void remove(size_t i);
-    ExtrusionEntityReferences chained_path_from(const Point &start_near);
     void reverse() override;
     // Returns the first child's first point; requires a nonempty collection and a child able to provide that point,
     // recursively for nested collections. Empty children are not skipped.

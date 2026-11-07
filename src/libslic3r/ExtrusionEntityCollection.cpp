@@ -37,7 +37,6 @@
 #include <thread>
 
 #include "ExtrusionEntityVisitors.hpp"
-#include "ShortestPath.hpp"
 
 namespace Slic3r {
 namespace {
@@ -250,71 +249,6 @@ void ExtrusionEntityCollection::erase(size_t begin, size_t end)
     assert(end <= children.size());
     children.erase(children.begin() + begin, children.begin() + end);
     this->m_entities_cache.clear();
-}
-
-// note: chained_path_from only this collection. You still need to chained_path_from the child collections.
-ExtrusionEntityReferences ExtrusionEntityCollection::chained_path_from(const Point &start_near)
-{
-    if (!this->can_sort()) {
-        ExtrusionEntityReferences result{};
-        bool need_reverse = false;
-        if (this->m_can_reverse) {
-            Children &children = this->children();
-            if (!children.empty()) {
-                if (children.front()->is_collection()) {
-                    assert(dynamic_cast<ExtrusionEntityCollection *>(children.front().get()) != nullptr);
-                    ExtrusionEntityCollection *front_coll = static_cast<ExtrusionEntityCollection *>(
-                        children.front().get());
-                    result = front_coll->chained_path_from(start_near);
-                    assert(!result.empty());
-                } else if (children.front()->can_reverse() &&
-                           children.front()->first_point().distance_to_square(start_near) >
-                               children.front()->last_point().distance_to_square(start_near)) {
-                    result.emplace_back(*children.front(), true);
-                } else {
-                    result.emplace_back(*children.front(), false);
-                }
-            }
-            if (children.size() > 1) {
-                if (children.back()->is_collection()) {
-                    assert(dynamic_cast<ExtrusionEntityCollection *>(children.front().get()) != nullptr);
-                    static_cast<ExtrusionEntityCollection *>(children.back().get())->chained_path_from(start_near);
-                } else if (children.back()->can_reverse() &&
-                           children.back()->first_point().distance_to_square(start_near) >
-                               children.back()->last_point().distance_to_square(start_near)) {
-                    result.emplace_back(*children.back(), true);
-                } else {
-                    result.emplace_back(*children.back(), false);
-                }
-                // can't sort myself, ask first and last thing to sort itself so the first point of each are the best ones
-
-                // now check if it's better for us to reverse
-                Point first_point = result.front().flipped() ? result.front().extrusion_entity().last_point() :
-                                                               result.front().extrusion_entity().first_point();
-                Point last_point = result.back().flipped() ? result.back().extrusion_entity().first_point() :
-                                                             result.back().extrusion_entity().last_point();
-                if (start_near.distance_to_square(first_point) > start_near.distance_to_square(last_point)) {
-                    // switch entities
-                    need_reverse = true;
-                    // this->reverse();
-                }
-            } else {
-                // only one child (useless collection)
-                need_reverse = result.front().flipped();
-            }
-            result.clear();
-        }
-        // now we are in our good order, update the internals to the final order
-        for (ExtrusionEntityUPtr &entity : this->children()) {
-            result.emplace_back(*entity, need_reverse);
-        }
-        if (need_reverse) {
-            std::reverse(result.begin(), result.end());
-        }
-        return result;
-    } else {
-        return chain_extrusion_references(this->entities(), &start_near);
-    }
 }
 
 void ExtrusionEntityCollection::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const

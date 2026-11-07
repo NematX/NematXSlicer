@@ -464,12 +464,6 @@ public:
             !this->polyline().empty() && this->polyline().front() == this->polyline().back() :
             this->is_loop();
     }
-    // Produce a list of extrusion paths into retval by clipping this path by ExPolygons.
-    // Currently not used.
-    void intersect_expolygons(const ExPolygons &collection, ExtrusionEntityCollection* retval) const;
-    // Produce a list of extrusion paths into retval by removing parts of this path by ExPolygons.
-    // Currently not used.
-    void subtract_expolygons(const ExPolygons &collection, ExtrusionEntityCollection* retval) const;
     void clip_end(coordf_t distance);
     coordf_t length() const override;
 
@@ -530,8 +524,6 @@ public:
     virtual void visit(ExtrusionVisitorConst &visitor) const override;
 
 protected:
-    void _inflate_collection(const Polylines &polylines, ExtrusionEntityCollection* collection) const;
-
     void set_attributes(const ExtrusionAttributes &attributes) { this->add_property(attributes); }
 };
 /* just set the path to can_reverse = false

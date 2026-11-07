@@ -19,7 +19,6 @@
 #include "Exception.hpp"
 #include "ExPolygon.hpp"
 #include "Extruder.hpp"
-#include "ExtrusionEntityCollection.hpp"
 #include "ExtrusionEntityVisitors.hpp"
 #include "Flow.hpp"
 
@@ -981,32 +980,11 @@ const ExtrusionPropertyOverhang *ExtrusionPath::overhang_attributes() const {
     return this->get_property<ExtrusionPropertyOverhang>();
 }
 
-void ExtrusionPath::intersect_expolygons(const ExPolygons &collection, ExtrusionEntityCollection *retval) const
-{
-    this->_inflate_collection(intersection_pl(Polylines{this->polyline().to_polyline()}, collection), retval);
-}
-
-void ExtrusionPath::subtract_expolygons(const ExPolygons &collection, ExtrusionEntityCollection *retval) const
-{
-    this->_inflate_collection(diff_pl(Polylines{this->polyline().to_polyline()}, collection), retval);
-}
-
 void ExtrusionPath::clip_end(coordf_t distance) { this->polyline().clip_end(distance); }
 
 coordf_t ExtrusionPath::length() const
 {
     return this->has_polyline() ? this->polyline().length() : ExtrusionEntity::length();
-}
-
-// Append owned clipped paths with the source's properties and ordering permissions; allocation failures propagate.
-void ExtrusionPath::_inflate_collection(const Polylines &polylines, ExtrusionEntityCollection *collection) const
-{
-    ExtrusionEntitiesPtr to_add;
-    for (const Polyline &polyline : polylines) {
-        to_add.push_back(new ExtrusionPath(ArcPolyline{polyline}, this->attributes(), this->clone_properties(), this->can_reverse()));
-        to_add.back()->set_can_rotate(this->can_rotate());
-    }
-    collection->append(std::move(to_add));
 }
 
 void ExtrusionPath::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const
