@@ -21,6 +21,10 @@
 Extrusion visitors walk host entity trees and produce diagnostic text or geometry
 measurements. The printer decodes known property payloads into named fields,
 including stationary-volume special commands, without changing the source tree.
+Volume and flow entry points borrow any base root, without requiring a legacy
+collection. They retain their terminal direct-attribute rules: volume adds to
+its running total and applies the gap-fill filter, while flow scales mm3/mm and
+width in place without changing geometry, height, ownership or child order.
 SimplifyVisitor edits exclusively owned source geometry using stored polylines
 and inherited attributes. Short-path pruning is disabled across command scopes
 and process properties, but remains active for pure generated geometry.
@@ -525,12 +529,12 @@ void ExtrusionLength::visit_leaf(const ExtrusionEntity &entity)
     dist += entity.length();
 }
 
-double ExtrusionVolume::get(const ExtrusionEntityCollection &coll) {
+double ExtrusionVolume::get(const ExtrusionEntity &coll) {
     this->traverse(coll);
     return volume;
 }
 
-void ExtrusionModifyFlow::set(ExtrusionEntityCollection &coll) {
+void ExtrusionModifyFlow::set(ExtrusionEntity &coll) {
     this->traverse(coll);
 }
 

@@ -56,6 +56,8 @@ same group flags, same entities in the same order, and the same points up to
 SCALED_EPSILON. Both trees are written as text; one linear pass separates the
 points from the rest of the text, which must be identical. A dedicated case
 checks that this comparison rejects every other difference.
+Generic-root visitor probes preserve direct terminal volume and flow rules,
+including the running volume total, gap-fill filter and geometry ownership.
 */
 
 using namespace Slic3r;
@@ -463,6 +465,51 @@ void collect_widths(const ExtrusionEntity &entity, std::vector<float> &widths)
 
 } // namespace
 
+TEST_CASE("Volume and flow visitors accept generic roots without changing terminal rules",
+          "[plugins][extrusion][native-volume-flow]")
+{
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, false);
+    root.set_can_rotate(false);
+    for (const bool gap : {false, true}) {
+        ExtrusionEntityUPtr leaf = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{
+            Point(0, 0), Point(scale_i(gap ? 5. : 10.), 0)}));
+        leaf->add_property(ExtrusionAttributes(gap ? ExtrusionRole::GapFill : ExtrusionRole::Perimeter,
+            ExtrusionFlow(gap ? 0.1 : 0.2, gap ? 0.2f : 0.4f, gap ? 0.15f : 0.2f)));
+        root.append_child(std::move(leaf));
+    }
+    const ExtrusionEntity *first = &root.child(0);
+    const ExtrusionEntity *second = &root.child(1);
+    const ExtrusionEntity &borrowed = root;
+    ExtrusionVolume volume;
+    CHECK(volume.get(borrowed) == Approx(2.5));
+    CHECK(volume.get(borrowed) == Approx(5.));
+    ExtrusionVolume filtered;
+    filtered.set_use_gap_fill(false);
+    filtered.set_flow_mult(0.5);
+    CHECK(filtered.get(borrowed) == Approx(1.));
+    ExtrusionModifyFlow(0.5).set(root);
+    REQUIRE(root.child_count() == 2);
+    CHECK(&root.child(0) == first);
+    CHECK(&root.child(1) == second);
+    CHECK_FALSE(root.can_sort());
+    CHECK_FALSE(root.can_reverse());
+    CHECK_FALSE(root.can_rotate());
+    for (size_t index = 0; index < root.child_count(); ++index) {
+        const ExtrusionEntity &leaf = root.child(index);
+        const ExtrusionAttributes *attributes = leaf.get_property<ExtrusionAttributes>();
+        REQUIRE(attributes != nullptr);
+        CHECK(attributes->mm3_per_mm == Approx(index == 0 ? 0.1 : 0.05));
+        CHECK(attributes->width == Approx(index == 0 ? 0.2 : 0.1));
+        CHECK(attributes->height == Approx(index == 0 ? 0.2 : 0.15));
+        CHECK(attributes->extrusion_role() == (index == 0 ? ExtrusionRole::Perimeter : ExtrusionRole::GapFill));
+        CHECK(leaf.polyline_ref().size() == 2);
+        CHECK(leaf.polyline_ref().front() == Point(0, 0));
+        CHECK(leaf.polyline_ref().back() == Point(scale_i(index == 0 ? 10. : 5.), 0));
+    }
+    ExtrusionVolume scaled;
+    CHECK(scaled.get(root) == Approx(1.25));
+}
+
 TEST_CASE("Thick polyline extrusion matches thin_variable_width", "[plugins][api][extrusion][arachne]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -490,7 +537,16 @@ TEST_CASE("Thick polyline extrusion matches thin_variable_width", "[plugins][api
                         Geometry::thin_variable_width({line}, ExtrusionRole::SolidInfill, flow, resolution, can_reverse);
                     REQUIRE(native.size() == 1);
                     // Fill multiplies by the float flow_mult of the recipe.
-                    ExtrusionModifyFlow(double(0.9f)).traverse(*native.front());
+                    ExtrusionEntity &native_root = *native.front();
+                    ExtrusionModifyFlow(double(0.9f)).set(native_root);
+                    const ExtrusionEntity &borrowed = native_root;
+                    ExtrusionVolume reference;
+                    ExtrusionVolume wrapper;
+                    reference.traverse(borrowed);
+                    REQUIRE(reference.volume > 0.);
+                    CHECK(wrapper.get(borrowed) == reference.volume);
+                    reference.traverse(borrowed);
+                    CHECK(wrapper.get(borrowed) == reference.volume);
                     const std::string expected = snapshot(*native.front());
                     delete native.front();
 
