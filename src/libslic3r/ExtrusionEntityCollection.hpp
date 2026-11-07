@@ -10,7 +10,9 @@
 
 /* Collections own their children through the extrusion tree. The compatibility pointer view borrows those children and is
    validated under a cache spin lock on every access; direct child queries need no pointer cache. Readers may run concurrently,
-   while all mutations require exclusive access and invalidate borrowed views. */
+   while all mutations require exclusive access and invalidate borrowed views.
+   Path and ring factories are declared on the base interface in ExtrusionEntity.hpp;
+   they accept collections too, but construct generic owned children. */
 
 #include <atomic>
 
@@ -209,89 +211,6 @@ public:
     virtual void visit(ExtrusionVisitor &visitor) override;
     virtual void visit(ExtrusionVisitorConst &visitor) const override;
 };
-
-inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Polylines &polylines, ExtrusionRole role, double mm3_per_mm, float width, float height, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines)
-        if (polyline.is_valid()) {
-            if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
-                path.polyline() = polyline;
-                dst.append(ExtrusionLoop(std::move(path)));
-            } else {
-                ExtrusionPath extrusion_path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
-                extrusion_path.polyline() = polyline;
-                dst.append(std::move(extrusion_path));
-            }
-        }
-}
-
-inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Polylines &&polylines, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines)
-        if (polyline.is_valid()) {
-            if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(path_attr, nullptr, can_reverse);
-                path.polyline() = polyline;
-                dst.append(ExtrusionLoop(std::move(path)));
-            } else {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(std::move(extrusion_path));
-            }
-        }
-    polylines.clear();
-}
-
-inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Polygons &loops, ExtrusionAttributes &&path_attr, bool can_reverse = true) {
-    //dst.reserve(dst.size() + loops.size());
-    for (Polygon & polygon : loops) {
-        if (polygon.size() >= 3 && polygon.is_valid()) {
-            ExtrusionPath path(path_attr, nullptr, can_reverse);
-            path.polyline().append(polygon.points);
-            path.polyline().append(path.polyline().front());
-            dst.append(ExtrusionLoop(std::move(path)));
-        }
-    }
-}
-
-inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Polygons &&loops, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + loops.size());
-    for (Polygon &polygon : loops) {
-        if (polygon.size() >= 3 && polygon.is_valid()) {
-            ExtrusionPath path(path_attr, nullptr, can_reverse);
-            path.polyline().append(std::move(polygon.points));
-            path.polyline().append(path.polyline().front());
-            ExtrusionLoop loop(std::move(path));
-            //default to ccw
-            if (loop.is_clockwise()) loop.reverse(); //loop.make_counter_clockwise();
-            dst.append(std::move(loop));
-        }
-    }
-    loops.clear();
-}
-
-inline void extrusion_entities_append_loops_and_paths(ExtrusionEntityCollection &dst, Polylines &&polylines, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines) {
-        if (polyline.is_valid()) {
-            if (polyline.is_closed()) {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(ExtrusionLoop(std::move(extrusion_path)));
-            } else {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(std::move(extrusion_path));
-            }
-        }
-    }
-    polylines.clear();
-}
 
 } // namespace Slic3r
 

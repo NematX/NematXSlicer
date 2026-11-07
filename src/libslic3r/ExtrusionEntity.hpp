@@ -284,6 +284,25 @@ its dynamic type.
 */
 bool simplify_extrusion_tree(ExtrusionEntity &root);
 
+// Factories append generic owned nodes to a caller-owned root under exclusive access.
+// Allocation errors can leave an appended prefix; consuming overloads can also leave
+// moved-from source elements before the vector is cleared on normal completion.
+// Copy valid polylines in order; equal XY endpoints get fixed rotatable parents and leaf-local attributes.
+void extrusion_entities_append_paths(ExtrusionEntity &dst, Polylines &polylines, ExtrusionRole role,
+                                      double mm3_per_mm, float width, float height, bool can_reverse = true);
+// Consume all source polylines, appending valid paths with the same endpoint-based closure rule.
+void extrusion_entities_append_paths(ExtrusionEntity &dst, Polylines &&polylines,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse = true);
+// Copy valid polygons into fixed rotatable rings, preserving their orientation and leaf-local attributes.
+void extrusion_entities_append_loops(ExtrusionEntity &dst, Polygons &loops,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse = true);
+// Consume all polygons; valid rings are reversed when their signed area is not positive.
+void extrusion_entities_append_loops(ExtrusionEntity &dst, Polygons &&loops,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse = true);
+// Consume all polylines; only is_closed() paths (at least three points) get ring parents.
+void extrusion_entities_append_loops_and_paths(ExtrusionEntity &dst, Polylines &&polylines,
+                                               ExtrusionAttributes &&path_attr, bool can_reverse = true);
+
 // only cary an ExtrusionProperty
 class ExtrusionNop : public ExtrusionEntity
 {
