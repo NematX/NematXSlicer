@@ -22,7 +22,28 @@
 #include <cmath>
 #include <cassert>
 
+/* Calculate travel-distance routes for points, polygon islands, extrusion units
+   and print instances. Extrusion routing reads base-stored endpoints and exact
+   XY closure, not virtual legacy projections. Reversal flags are absolute and
+   honor each unit's permission, even when the input is considered reversed.
+   Fixed root order returns its direct children without promoting nested groups.
+   Queries borrow unchanged geometry; reference results require live unchanged
+   sources. Reorder helpers separately mutate the supplied sequence and permitted
+   orientations. Allocation failures propagate without changing query inputs.
+
+       chain_extrusion_references(root)
+           |-- fixed order: borrow direct children in their existing order
+           `-- sortable: chain_extrusion_references(vector)
+               `-- chain_extrusion_entities() [stored endpoints and legal reversals]
+                   `-- chain_segments_greedy_constrained_reversals()
+*/
+
 namespace Slic3r {
+
+// Order the nonnull direct children of a Children root without changing its owned tree.
+// Fixed order requires non-reversible loop children; reversed treats only reversible children as already reversed.
+// Results borrow children that must remain alive and unchanged; allocation errors propagate.
+ExtrusionEntityReferences chain_extrusion_references(const ExtrusionEntity &eec, const Point *start_near, const bool reversed);
 
 // Naive implementation of the Traveling Salesman Problem, it works by always taking the next closest neighbor.
 // This implementation will always produce valid result even if some segments cannot reverse.
@@ -1038,16 +1059,20 @@ std::vector<std::pair<size_t, bool>> chain_segments_greedy2(SegmentEndPointFunc 
 
 std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<ExtrusionEntity*> &entities, const Point *start_near, const bool reversed)
 {
-	auto segment_end_point = [&entities, reversed](size_t idx, bool first_point) -> const Point& { return first_point == reversed ? entities[idx]->last_point() : entities[idx]->first_point(); };
+	auto segment_end_point = [&entities, reversed](size_t idx, bool first_point) -> const Point& {
+		const ExtrusionEntity &entity = *entities[idx];
+		const bool reverse_input = reversed && entity.can_reverse();
+		return first_point == reverse_input ? entity.ExtrusionEntity::last_point() : entity.ExtrusionEntity::first_point();
+	};
 	auto could_reverse 	   = [&entities](size_t idx) { const ExtrusionEntity *ee = entities[idx]; return ee->can_reverse(); };
 	std::vector<std::pair<size_t, bool>> out = chain_segments_greedy_constrained_reversals<Point, decltype(segment_end_point), decltype(could_reverse)>(
 		segment_end_point, could_reverse, entities.size(), start_near);
 	for (std::pair<size_t, bool> &segment : out) {
 		const ExtrusionEntity *ee = entities[segment.first];
-		if (ee->is_loop())
+		if (ee->ExtrusionEntity::is_loop())
 			// Ignore reversals for loops, as the start point equals the end point.
 			segment.second = false;
-		else if (reversed)
+		else if (reversed && ee->can_reverse())
 			// Input was already reversed.
 			segment.second = ! segment.second;
 		// Is can_reverse() respected by the reversals?
@@ -1057,16 +1082,20 @@ std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<
 }
 std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<const ExtrusionEntity*> &entities, const Point *start_near, const bool reversed)
 {
-	auto segment_end_point = [&entities, reversed](size_t idx, bool first_point) -> const Point& { return first_point == reversed ? entities[idx]->last_point() : entities[idx]->first_point(); };
+	auto segment_end_point = [&entities, reversed](size_t idx, bool first_point) -> const Point& {
+		const ExtrusionEntity &entity = *entities[idx];
+		const bool reverse_input = reversed && entity.can_reverse();
+		return first_point == reverse_input ? entity.ExtrusionEntity::last_point() : entity.ExtrusionEntity::first_point();
+	};
 	auto could_reverse 	   = [&entities](size_t idx) { const ExtrusionEntity *ee = entities[idx]; return ee->can_reverse(); };
 	std::vector<std::pair<size_t, bool>> out = chain_segments_greedy_constrained_reversals<Point, decltype(segment_end_point), decltype(could_reverse)>(
 		segment_end_point, could_reverse, entities.size(), start_near);
 	for (std::pair<size_t, bool> &segment : out) {
 		const ExtrusionEntity *ee = entities[segment.first];
-		if (ee->is_loop())
+		if (ee->ExtrusionEntity::is_loop())
 			// Ignore reversals for loops, as the start point equals the end point.
 			segment.second = false;
-		else if (reversed)
+		else if (reversed && ee->can_reverse())
 			// Input was already reversed.
 			segment.second = ! segment.second;
 		// Is can_reverse() respected by the reversals?
@@ -1075,20 +1104,28 @@ std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<
 	return out;
 }
 
-ExtrusionEntityReferences chain_extrusion_references(const ExtrusionEntityCollection &eec, const Point *start_near, const bool reversed)
+ExtrusionEntityReferences chain_extrusion_references(const ExtrusionEntity &eec, const Point *start_near, const bool reversed)
 {
+	assert(!eec.is_leaf());
+	const ExtrusionEntity::Children &children = eec.children();
 	if (!eec.can_sort()) {
 		ExtrusionEntityReferences out;
-		out.reserve(eec.entities().size());
-	    for (const ExtrusionEntity *ee : eec.entities()) {
+		out.reserve(children.size());
+	    for (const ExtrusionEntityUPtr &child : children) {
+			const ExtrusionEntity *ee = child.get();
 			assert(ee != nullptr);
 			// Never reverse a loop.
 			assert(!ee->is_loop() || !ee->can_reverse());
 	        out.push_back({ *ee, ee->can_reverse() && reversed });
 	    }
 		return out;
-	} else
-		return chain_extrusion_references(eec.entities(), start_near, reversed);
+	} else {
+		std::vector<const ExtrusionEntity *> entities;
+		entities.reserve(children.size());
+		for (const ExtrusionEntityUPtr &child : children)
+			entities.push_back(child.get());
+		return chain_extrusion_references(entities, start_near, reversed);
+	}
 }
 
 std::vector<std::pair<size_t, bool>> chain_extrusion_paths(std::vector<ExtrusionPath> &extrusion_paths, const Point *start_near)

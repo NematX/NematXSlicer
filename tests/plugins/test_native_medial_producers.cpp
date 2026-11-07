@@ -11,6 +11,7 @@
 
 #include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/ShortestPath.hpp"
 #include "test_native_medial_goldens.hpp"
@@ -25,6 +26,9 @@
    Queries and chaining compare live output with a canonical copy, using separate
    recorded endpoint and route expectations. Direct producer calls do not enable
    the historic perimeter or support pipeline; those require separate regressions.
+   Chaining probes mix fixed contours, reversible opens and unsortable groups.
+   Borrowed references must retain exact source identities and leave stored trees
+   unchanged, including when the input view is marked reversed.
 
        TEST_CASE
            |-- medial_inputs() -> thin_variable_width() [adopt every output]
@@ -58,6 +62,14 @@ std::string medial_probes(const ThickPolylines &inputs, ExtrusionRole role, cons
                           coord_t resolution, coord_t tolerance, bool can_reverse);
 // Compare stored trees and native/generic reader projections with independent fixture records.
 void record_medial(const std::string &name, ExtrusionEntity &root);
+// Build one fixed ordinary contour for mixed-orientation and nested chaining probes.
+ExtrusionEntityUPtr ordinary_perimeter(coord_t shift);
+// Keep an ordinary contour before or after a sortable pair under a fixed outer group.
+ExtrusionEntityUPtr ordinary_perimeter_group(bool children_before);
+// Borrow every node by identity to detect changes in ownership or handles.
+void medial_node_handles(const ExtrusionEntity &root, std::map<uint64_t, const ExtrusionEntity *> &handles);
+// Encode absolute reversal flags separately from the stored-state references.
+std::string medial_chain_text(const std::vector<std::pair<size_t, bool>> &chain);
 
 ThickPolylines medial_inputs(size_t shape)
 {
@@ -242,6 +254,46 @@ void record_medial(const std::string &name, ExtrusionEntity &root)
     CHECK(generic_chain == Slic3r::Test::native_medial_chains[golden->generic_chain]);
 }
 
+ExtrusionEntityUPtr ordinary_perimeter(coord_t shift)
+{
+    const ExtrusionAttributes attributes{ExtrusionRole::ExternalPerimeter, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    ExtrusionPaths paths;
+    paths.emplace_back(ArcPolyline(Points{{shift, 0}, {shift + 4000000, 0}, {shift + 4000000, 4000000},
+                                         {shift, 4000000}, {shift, 0}}), attributes, nullptr, false);
+    return std::make_unique<ExtrusionLoop>(std::move(paths));
+}
+
+ExtrusionEntityUPtr ordinary_perimeter_group(bool children_before)
+{
+    ExtrusionEntityUPtr group = std::make_unique<ExtrusionEntityCollection>(false, false);
+    ExtrusionEntityUPtr children = std::make_unique<ExtrusionEntityCollection>();
+    children->append_child(ordinary_perimeter(0));
+    children->append_child(ordinary_perimeter(10000000));
+    if (children_before)
+        group->append_child(std::move(children));
+    group->append_child(ordinary_perimeter(20000000));
+    if (!children_before)
+        group->append_child(std::move(children));
+    return group;
+}
+
+void medial_node_handles(const ExtrusionEntity &root, std::map<uint64_t, const ExtrusionEntity *> &handles)
+{
+    REQUIRE(handles.emplace(root.get_id(), &root).second);
+    for (const ExtrusionEntityUPtr &child : root.children()) {
+        REQUIRE(child != nullptr);
+        medial_node_handles(*child, handles);
+    }
+}
+
+std::string medial_chain_text(const std::vector<std::pair<size_t, bool>> &chain)
+{
+    std::ostringstream out;
+    for (const std::pair<size_t, bool> &item : chain)
+        out << item.first << ':' << item.second << ';';
+    return out.str();
+}
+
 } // namespace
 
 TEST_CASE("Native variable width producers separate stored output from legacy projections", "[plugins][native-medial]")
@@ -275,4 +327,206 @@ TEST_CASE("Native variable width producers separate stored output from legacy pr
                         CHECK(probes == "2,2,2,1;");
                     record_medial(name, root);
                 }
+}
+
+TEST_CASE("Native fixed contour chaining preserves permission in the reversed input view", "[plugins][native-chain-reference]")
+{
+    const Flow flow = Flow::new_from_spacing(0.45f, 0.4f, 0.2f, 1.f, false);
+    const Point start(0, 0);
+    for (const size_t shape : {size_t(2), size_t(3)}) {
+        ExtrusionEntityCollection root;
+        root.append(Geometry::thin_variable_width(medial_inputs(shape), ExtrusionRole::ThinWall, flow,
+                                                 flow.scaled_width() / 8, scale_i(0.02), false));
+        REQUIRE(root.child_count() == 1);
+        REQUIRE_FALSE(root.child(0).can_reverse());
+        ExtrusionEntityUPtr generic = root.clone_canonical();
+        const std::string before = medial_snapshot(root);
+        REQUIRE(medial_snapshot(*generic) == before);
+        std::vector<ExtrusionEntity *> native_nodes{&root.child(0)};
+        std::vector<ExtrusionEntity *> generic_nodes{&generic->child(0)};
+        std::vector<const ExtrusionEntity *> native_const{&root.child(0)};
+        std::vector<const ExtrusionEntity *> generic_const{&generic->child(0)};
+        for (const bool reversed : {false, true})
+            for (const bool const_input : {false, true}) {
+                CAPTURE(shape, reversed, const_input);
+                const std::vector<std::pair<size_t, bool>> native_chain = const_input ?
+                    chain_extrusion_entities(native_const, &start, reversed) :
+                    chain_extrusion_entities(native_nodes, &start, reversed);
+                const std::vector<std::pair<size_t, bool>> generic_chain = const_input ?
+                    chain_extrusion_entities(generic_const, &start, reversed) :
+                    chain_extrusion_entities(generic_nodes, &start, reversed);
+                REQUIRE(native_chain.size() == 1);
+                CHECK(native_chain.front().first == 0);
+                CHECK_FALSE(native_chain.front().second);
+                REQUIRE(generic_chain.size() == 1);
+                CHECK(generic_chain == native_chain);
+                CHECK(medial_chain_text(native_chain) == "0:0;");
+                CHECK_FALSE(generic_chain.front().second);
+                CHECK(medial_snapshot(root) == before);
+                CHECK(medial_snapshot(*generic) == before);
+            }
+    }
+}
+
+TEST_CASE("Chaining keeps fixed endpoints in mixed and fixed reversed input views", "[plugins][native-chain-reference]")
+{
+    const ExtrusionAttributes attributes{ExtrusionRole::ThinWall, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    const Point start(0, 0);
+    for (const bool generic : {false, true})
+        for (const bool second_reversible : {false, true}) {
+            CAPTURE(generic, second_reversible);
+            ExtrusionEntityCollection root;
+            root.append_child(std::make_unique<ExtrusionPath>(
+                ArcPolyline(Points{{0, 0}, {scale_i(100.), 0}}), attributes, nullptr, false));
+            root.append_child(std::make_unique<ExtrusionPath>(
+                ArcPolyline(Points{{scale_i(10.), 0}, {scale_i(20.), 0}}), attributes, nullptr, second_reversible));
+            ExtrusionEntityUPtr canonical = generic ? root.clone_canonical() : nullptr;
+            ExtrusionEntity &tested = generic ? *canonical : root;
+            std::vector<ExtrusionEntity *> nodes{&tested.child(0), &tested.child(1)};
+            const std::vector<const ExtrusionEntity *> const_nodes(nodes.begin(), nodes.end());
+            const std::string original = medial_snapshot(tested);
+            std::map<uint64_t, const ExtrusionEntity *> before;
+            medial_node_handles(tested, before);
+            const std::vector<std::pair<size_t, bool>> expected{{0, false}, {1, second_reversible}};
+            for (const bool reversed : {false, true}) {
+                CAPTURE(reversed);
+                const std::vector<std::pair<size_t, bool>> chain = chain_extrusion_entities(nodes, &start, reversed);
+                CHECK(chain == expected);
+                CHECK(chain_extrusion_entities(const_nodes, &start, reversed) == expected);
+                for (const std::pair<size_t, bool> &item : chain) {
+                    REQUIRE(item.first < nodes.size());
+                    CHECK((nodes[item.first]->can_reverse() || !item.second));
+                }
+                CHECK(medial_snapshot(tested) == original);
+                std::map<uint64_t, const ExtrusionEntity *> after;
+                medial_node_handles(tested, after);
+                CHECK(after == before);
+            }
+        }
+
+    for (const bool generic : {false, true}) {
+        CAPTURE(generic);
+        ExtrusionEntityCollection root;
+        root.append_child(ordinary_perimeter(0));
+        root.append_child(ordinary_perimeter(20000000));
+        ExtrusionEntityUPtr canonical = generic ? root.clone_canonical() : nullptr;
+        ExtrusionEntity &tested = generic ? *canonical : root;
+        const Point near_second(20000000, 0);
+        std::vector<ExtrusionEntity *> nodes{&tested.child(0), &tested.child(1)};
+        const std::vector<const ExtrusionEntity *> const_nodes(nodes.begin(), nodes.end());
+        const std::vector<std::pair<size_t, bool>> expected{{1, false}, {0, false}};
+        const std::string original = medial_snapshot(tested);
+        for (const bool reversed : {false, true}) {
+            CAPTURE(reversed);
+            CHECK(chain_extrusion_entities(nodes, &near_second, reversed) == expected);
+            CHECK(chain_extrusion_entities(const_nodes, &near_second, reversed) == expected);
+            CHECK(medial_snapshot(tested) == original);
+        }
+    }
+}
+
+TEST_CASE("Root chaining references preserve direct order and source ownership", "[plugins][native-chain-reference]")
+{
+    const ExtrusionAttributes attributes{ExtrusionRole::ThinWall, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    ExtrusionEntityCollection root;
+    Point start(0, 0);
+    const Point *start_near = &start;
+    bool sortable = true;
+    std::vector<std::pair<size_t, bool>> forward;
+    std::vector<std::pair<size_t, bool>> reversed_view;
+
+    SECTION("sortable opens respect fixed endpoints in both input views")
+    {
+        root.append_child(std::make_unique<ExtrusionPath>(
+            ArcPolyline(Points{{0, 0}, {scale_i(100.), 0}}), attributes, nullptr, false));
+        root.append_child(std::make_unique<ExtrusionPath>(
+            ArcPolyline(Points{{scale_i(10.), 0}, {scale_i(20.), 0}}), attributes, nullptr, true));
+        REQUIRE_FALSE(root.child(0).can_reverse());
+        REQUIRE(root.child(1).can_reverse());
+        forward = {{0, false}, {1, true}};
+        reversed_view = forward;
+    }
+    SECTION("sortable loops start near the second without reversal")
+    {
+        root.append_child(ordinary_perimeter(0));
+        root.append_child(ordinary_perimeter(20000000));
+        start = Point(20000000, 0);
+        forward = {{1, false}, {0, false}};
+        reversed_view = forward;
+    }
+    SECTION("fixed order ignores the nearby last child and reverses only the permitted open")
+    {
+        sortable = false;
+        root.set_can_sort_reverse(false, false);
+        root.append_child(std::make_unique<ExtrusionPath>(
+            ArcPolyline(Points{{0, 0}, {scale_i(100.), 0}}), attributes, nullptr, false));
+        root.append_child(std::make_unique<ExtrusionPath>(
+            ArcPolyline(Points{{scale_i(10.), 0}, {scale_i(20.), 0}}), attributes, nullptr, true));
+        root.append_child(ordinary_perimeter(20000000));
+        root.child(2).set_can_sort_reverse(false, false);
+        REQUIRE_FALSE(root.child(0).can_reverse());
+        REQUIRE(root.child(1).can_reverse());
+        REQUIRE(root.child(2).is_loop());
+        REQUIRE_FALSE(root.child(2).can_reverse());
+        start = Point(20000000, 0);
+        forward = {{0, false}, {1, false}, {2, false}};
+        reversed_view = {{0, false}, {1, true}, {2, false}};
+    }
+    SECTION("empty Children remain empty in both sorting modes")
+    {
+        sortable = GENERATE(false, true);
+        root.set_can_sort_reverse(sortable, false);
+        start_near = nullptr;
+    }
+    SECTION("fixed direct group does not promote its sortable inner pair")
+    {
+        sortable = false;
+        root.set_can_sort_reverse(false, false);
+        root.append_child(ordinary_perimeter_group(false));
+        REQUIRE(root.child_count() == 1);
+        REQUIRE_FALSE(root.child(0).can_reverse());
+        REQUIRE(root.child(0).child_count() == 2);
+        REQUIRE(root.child(0).child(1).can_sort());
+        REQUIRE(root.child(0).child(1).child_count() == 2);
+        start = Point(20000000, 0);
+        forward = {{0, false}};
+        reversed_view = forward;
+    }
+
+    REQUIRE_FALSE(root.is_leaf());
+    REQUIRE(root.can_sort() == sortable);
+    const std::string original = medial_snapshot(root);
+    std::map<uint64_t, const ExtrusionEntity *> original_handles;
+    medial_node_handles(root, original_handles);
+    std::vector<const ExtrusionEntity *> children;
+    for (const ExtrusionEntityUPtr &child : root.children())
+        children.push_back(child.get());
+
+    const ExtrusionEntity &borrowed = root;
+    for (const bool reversed : {false, true}) {
+        CAPTURE(sortable, reversed);
+        const std::vector<std::pair<size_t, bool>> &expected = reversed ? reversed_view : forward;
+        const ExtrusionEntityReferences actual = chain_extrusion_references(borrowed, start_near, reversed);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t index = 0; index < expected.size(); ++index) {
+            REQUIRE(expected[index].first < children.size());
+            CHECK(&actual[index].extrusion_entity() == children[expected[index].first]);
+            CHECK(actual[index].flipped() == expected[index].second);
+        }
+        if (sortable) {
+            const ExtrusionEntityReferences direct = chain_extrusion_references(children, start_near, reversed);
+            REQUIRE(direct.size() == actual.size());
+            for (size_t index = 0; index < direct.size(); ++index) {
+                CHECK(&actual[index].extrusion_entity() == &direct[index].extrusion_entity());
+                CHECK(actual[index].flipped() == direct[index].flipped());
+            }
+        }
+        CHECK(medial_snapshot(root) == original);
+        std::map<uint64_t, const ExtrusionEntity *> handles;
+        medial_node_handles(root, handles);
+        CHECK(handles == original_handles);
+        REQUIRE(root.child_count() == children.size());
+        for (size_t index = 0; index < children.size(); ++index)
+            CHECK(&root.child(index) == children[index]);
+    }
 }
