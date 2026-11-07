@@ -35,7 +35,8 @@ collections.
 #include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
@@ -57,8 +58,8 @@ calls generate_node() for each node that needs to be produced.
 
 generate_node() converts one node area into variable-width Arachne wall paths.
 It applies the configured perimeter count, selects external or internal flow,
-assigns perimeter and loop properties, and stores closed lines as extrusion
-loops or open lines as reversible multi-paths. It also computes the inner
+assigns perimeter and loop properties, and stores generic owned nodes for
+closed contours or reversible open sequences. It also computes the inner
 areas and inner fill areas that the following perimeter and surface stages
 will use. Invalid or empty geometry is returned without creating extrusion.
 
@@ -80,7 +81,8 @@ The normal call flow is:
                 |-- build Arachne::WallToolPaths from the node area
                 |-- make_arachne_extrusions()
                 |   |-- convert variable-width lines to paths
-                |   `-- append loops or open multi-paths
+                |   `-- append generic closed contours or open sequences
+                |       `-- make_path_sequence(): transfer attributed leaves and set parent permissions
                 |-- move generated extrusion into the node
                 |-- compute inner areas and fill areas
                 `-- publish both area collections to the host
@@ -90,6 +92,10 @@ including the optional odd-layer reversal. Loop endpoints that are only
 epsilon-close are normalized before publication. The plugin is responsible
 for Arachne geometry conversion, while tree traversal and final storage remain
 owned by the perimeter step context.
+Constructive path values retain their direct flow and perimeter metadata when
+their base content moves into generic leaves. Closed contours are fixed and
+rotatable; open sequences may reverse as a unit but may not rotate. Owned scratch
+trees release unpublished output on cancellation or allocation failure.
 */
 
 namespace slic3r_api { namespace Perimeter { namespace ArachnePerimeterGeneratorPlugin {
@@ -113,6 +119,30 @@ const raw_used_config_key k_used_config_keys[] = {
 const char *const k_defined_config_keys[] = {
     "perimeter_reverse"
 };
+
+// Transfer constructive path values into generic owned leaves with explicit parent permissions.
+Slic3r::ExtrusionEntity make_path_sequence(Slic3r::ExtrusionPaths &&paths, bool can_reverse, bool can_rotate);
+
+// Append one reversible fixed-start sequence, retaining each constructive leaf's permissions.
+void append_open_paths(Slic3r::ExtrusionEntity &dst, Slic3r::ExtrusionPaths &&paths);
+
+// Convert and annotate one Arachne line, normalizing closed endpoints before ownership enters dst.
+void append_arachne_line(Slic3r::ExtrusionEntity &dst,
+                         const Slic3r::Arachne::ExtrusionLine &line,
+                         size_t biggest_inset_idx, size_t inset_offset,
+                         const Slic3r::Layer &layer,
+                         const Slic3r::PrintRegionConfig &region_config,
+                         const Slic3r::PrintConfig &print_config,
+                         const Slic3r::Flow &external_flow, const Slic3r::Flow &internal_flow,
+                         const plugin_run_context *run_ctx);
+
+// Build one owned generic tree in Arachne's path order, checking cancellation between lines.
+Slic3r::ExtrusionEntity make_arachne_extrusions(
+    const std::vector<Slic3r::Arachne::VariableWidthLines> &perimeters, size_t inset_offset,
+    const Slic3r::Layer &layer, const Slic3r::PrintRegionConfig &region_config,
+    const Slic3r::PrintConfig &print_config,
+    const Slic3r::Flow &external_flow, const Slic3r::Flow &internal_flow,
+    const plugin_run_context *run_ctx);
 
 void initialize_arachne_perimeter_settings(orchestrator_handle *orchestrator)
 {
@@ -237,22 +267,17 @@ void annotate_paths(Slic3r::ExtrusionPaths &paths,
     }
 }
 
-void append_open_paths(Slic3r::ExtrusionEntityCollection &dst, Slic3r::ExtrusionPaths &&paths)
+void append_open_paths(Slic3r::ExtrusionEntity &dst, Slic3r::ExtrusionPaths &&paths)
 {
     if (paths.empty())
         return;
 
-    Slic3r::ExtrusionMultiPath multi_path;
-    multi_path.set_can_reverse(true);
-    for (size_t idx = 0; idx < paths.size(); ++idx) {
-        if (idx > 0)
-            paths[idx].set_can_reverse(false);
-        multi_path.paths().push_back(std::move(paths[idx]));
-    }
-    dst.append(std::move(multi_path));
+    for (size_t idx = 1; idx < paths.size(); ++idx)
+        paths[idx].set_can_reverse(false);
+    dst.append_child(std::make_unique<Slic3r::ExtrusionEntity>(make_path_sequence(std::move(paths), true, false)));
 }
 
-void append_arachne_line(Slic3r::ExtrusionEntityCollection &dst,
+void append_arachne_line(Slic3r::ExtrusionEntity &dst,
                          const Slic3r::Arachne::ExtrusionLine &line,
                          const size_t biggest_inset_idx,
                          const size_t inset_offset,
@@ -282,7 +307,7 @@ void append_arachne_line(Slic3r::ExtrusionEntityCollection &dst,
     annotate_paths(paths, absolute_inset_idx, loop_role);
 
     if (is_closed && paths.back().last_point().coincides_with_epsilon(paths.front().first_point())) {
-        Slic3r::ExtrusionLoop loop(std::move(paths), loop_role);
+        Slic3r::ExtrusionEntity loop = make_path_sequence(std::move(paths), false, true);
         // STEP_ORDERING validates the direct metadata of terminal loops. The
         // path annotations above remain useful to path consumers, but the loop
         // itself must retain the same shell and perimeter classification.
@@ -298,22 +323,22 @@ void append_arachne_line(Slic3r::ExtrusionEntityCollection &dst,
         const Slic3r::ConfigOption *perimeter_reverse_opt = region_config.option("perimeter_reverse");
         const bool need_ccw = ((perimeter_reverse_opt != nullptr && perimeter_reverse_opt->get_bool() && layer.id() % 2 == 1) ==
                                (is_contour ? ccw_contour : ccw_hole));
-        if (need_ccw != loop.is_clockwise())
+        if (need_ccw != !(Slic3r::extrusion_geometry_area(loop) > 0.))
             loop.reverse();
 
         // Arachne may close a loop with points that are epsilon-close but not
         // bit-identical. Normalize the stored endpoint before later code
         // relies on exact loop closure.
-        if (!loop.paths().empty())
-            loop.paths().front().polyline().set_front(loop.paths().back().last_point());
-        dst.append(std::move(loop));
+        if (loop.child_count() != 0)
+            loop.child(0).polyline_ref().set_front(loop.child(loop.child_count() - 1).polyline_ref().back());
+        dst.append_child(std::make_unique<Slic3r::ExtrusionEntity>(std::move(loop)));
         return;
     }
 
     append_open_paths(dst, std::move(paths));
 }
 
-Slic3r::ExtrusionEntityCollection make_arachne_extrusions(
+Slic3r::ExtrusionEntity make_arachne_extrusions(
     const std::vector<Slic3r::Arachne::VariableWidthLines> &perimeters,
     const size_t inset_offset,
     const Slic3r::Layer &layer,
@@ -323,7 +348,7 @@ Slic3r::ExtrusionEntityCollection make_arachne_extrusions(
     const Slic3r::Flow &internal_flow,
     const plugin_run_context *run_ctx)
 {
-    Slic3r::ExtrusionEntityCollection extrusion;
+    Slic3r::ExtrusionEntity extrusion(Slic3r::ExtrusionEntity::Children(), true, true, false);
     const size_t biggest_inset_idx = max_inset_idx(perimeters, run_ctx);
     for (const Slic3r::Arachne::VariableWidthLines &perimeter : perimeters) {
         throw_if_cancelled(run_ctx);
@@ -332,6 +357,15 @@ Slic3r::ExtrusionEntityCollection make_arachne_extrusions(
                                 external_flow, internal_flow, run_ctx);
     }
     return extrusion;
+}
+
+Slic3r::ExtrusionEntity make_path_sequence(Slic3r::ExtrusionPaths &&paths, bool can_reverse, bool can_rotate)
+{
+    Slic3r::ExtrusionEntity sequence(Slic3r::ExtrusionEntity::Children(), false, can_reverse, true);
+    sequence.set_can_rotate(can_rotate);
+    for (Slic3r::ExtrusionPath &path : paths)
+        sequence.append_child(std::make_unique<Slic3r::ExtrusionEntity>(std::move(static_cast<Slic3r::ExtrusionEntity &>(path))));
+    return sequence;
 }
 
 struct ArachneGeneratorState
@@ -399,7 +433,7 @@ int32_t generate_node(void *generator_context,
         const std::vector<Slic3r::Arachne::VariableWidthLines> &perimeters =
             wall_tool_paths.getToolPaths();
         throw_if_cancelled(context->run_ctx);
-        Slic3r::ExtrusionEntityCollection extrusion =
+        Slic3r::ExtrusionEntity extrusion =
             make_arachne_extrusions(perimeters, node->perimeter_idx, *state->layer, region_config, print_config,
                                     outer_flow, inner_flow, context->run_ctx);
         throw_if_cancelled(context->run_ctx);
