@@ -4,26 +4,37 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-#ifndef plugins_infill_rectilinear_edge_grid_hpp_
-#define plugins_infill_rectilinear_edge_grid_hpp_
+#ifndef plugins_common_edge_grid_hpp_
+#define plugins_common_edge_grid_hpp_
 
 /*
-Edge grid for the rectilinear pattern port
+Contour segment grid for plugin algorithms
 ==========================================
 
-Port of the EdgeGrid::Grid subset used by the infill connect helpers
-(src/libslic3r/Fill/FillBase.cpp): contour storage, rasterization of the
-contours into a uniform grid of cells, line traversal and the closest point
-query on the contours.
+Infill connection helpers use Grid to find nearby contour segments without
+scanning every edge. Create it from work rings or API geometry with a positive
+cell resolution in scaled units, then query its cells or signed closest point.
+Each cell stores contour and segment indices: these are candidates for a
+geometric test, not proof that a query intersects a segment.
 
-The implementation is a verbatim port of src/libslic3r/EdgeGrid.hpp and
-EdgeGrid.cpp, adapted to the private work buffers used by the ported
-algorithms: Point accessors replace the Eigen operator(), the signed distance
-field and the debugging or unused entry points are dropped.
+Grid borrows the source point arrays and indexes their coordinates. Keep them
+alive and unchanged while querying: reallocation invalidates the borrowed
+addresses, and coordinate edits make the cell index stale. Rebuild after edits.
+Line traversal requires both endpoints inside bbox(). Signed closest-point
+queries require closed contours; an unsuccessful search returns an invalid result.
+Grid ports the subset of the existing Slic3r implementation (the core) in
+src/libslic3r/EdgeGrid.hpp and EdgeGrid.cpp used by these algorithms, reproducing
+its rasterization and closest-point results. It omits the core's optional
+signed-distance-field grid and debug entry points; the signed closest-point
+query remains available.
 
-Like the core EdgeGrid, a Grid references the point arrays of the contours it
-was built from: the caller must keep them alive while the grid is used. API
-contours are borrowed through multipoint_const_view and are not materialized.
+    polygon_work::Polygons rings;
+    rings.emplace_back();
+    rings.back().points = {{0, 0}, {100, 0}, {100, 100}, {0, 100}};
+    EdgeGrid::Grid grid;
+    grid.create(rings, 25);
+    auto nearest = grid.closest_point_signed_distance({50, 50}, 100);
+    // Keep rings alive and unchanged until queries finish.
 */
 
 #include <algorithm>
@@ -36,25 +47,32 @@ contours are borrowed through multipoint_const_view and are not materialized.
 
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
-#include "RectilinearWorkBuffers.hpp"
+#include "PolygonWorkBuffers.hpp"
 
-namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
+namespace slic3r_api { namespace PluginCommon {
 namespace EdgeGrid {
 
-using namespace work;
+using namespace polygon_work;
 
 class Contour
 {
 public:
+    // Borrow a contour view or point array with its closure flag, or initialize an empty closed view.
     Contour() = default;
     Contour(const ContourView &view, bool open) : m_view(view), m_open(open) {}
     Contour(const Points &pts, bool open) : Contour(ContourView(pts), open) {}
 
+    // Report whether the contour omits a closing edge.
     bool open() const { return m_open; }
+    // Report whether the contour includes a closing edge.
     bool closed() const { return !m_open; }
+    // Return the number of borrowed points.
     size_t size() const { return m_view.size(); }
+    // Return the point at an in-range index by value.
     c_point operator[](size_t idx) const { return m_view[idx]; }
+    // Return the first point by value; the sequence must be nonempty.
     c_point front() const { return m_view.front(); }
+    // Return the last point by value; the sequence must be nonempty.
     c_point back() const { return m_view.back(); }
 
     // Start point of a segment idx.
@@ -90,6 +108,7 @@ public:
         return idx == m_view.size() ? 0 : idx;
     }
 
+    // Return the vertex count for a ring, or one less for an open contour.
     size_t num_segments() const { return this->size() - (m_open ? 1 : 0); }
 
 private:
@@ -100,9 +119,11 @@ private:
 class Grid
 {
 public:
+    // Initialize an empty grid, optionally with caller-supplied bounds.
     Grid() = default;
     Grid(const BoundingBox &bbox) : m_bbox(bbox) {}
 
+    // Set the initial bounds to be extended during creation.
     void set_bbox(const BoundingBox &bbox) { m_bbox = bbox; }
 
     // Fill in the grid with closed contours.
@@ -111,35 +132,45 @@ public:
     // considered closed when its first point equals its last point; the last
     // repeated point is removed when inserted into the grid.
     void create(const std::vector<Points> &polylines_or_polygons, coord_t resolution, bool open);
+    // Build the cell index from borrowed contours with positive resolution; keep source arrays stable and unchanged.
     void create(const ContourViews &contours, coord_t resolution, bool open = false);
     void create(const Polygon &polygon, coord_t resolution);
     void create(const Polygons &polygons, coord_t resolution);
     void create(const std::vector<const Polygon*> &polygons, coord_t resolution);
     void create(const slic3r_api::ExPolygon &expoly, coord_t resolution);
 
+    // Borrow the indexed contour views for the lifetime of this grid state.
     const std::vector<Contour> &contours() const { return m_contours; }
 
+    // Borrow the coordinate bounds used by cell traversal.
     const BoundingBox &bbox() const { return m_bbox; }
+    // Return the cell width and height in scaled units.
     const coord_t resolution() const { return m_resolution; }
+    // Return the number of cell rows.
     const size_t rows() const { return m_rows; }
+    // Return the number of cell columns.
     const size_t cols() const { return m_cols; }
 
-    // Closest point on the contours to pt, with the sign of the distance.
+    // Result of a signed closest-point search on closed contours.
     struct ClosestPointResult
     {
         size_t contour_idx = size_t(-1);
         size_t start_point_idx = size_t(-1);
         // Signed distance to the closest point.
         double distance = std::numeric_limits<double>::max();
-        // Parameter of the closest point on the edge starting at start_point_idx, <0, 1)
+        // Parameter of the closest point on the edge starting at start_point_idx, in [0, 1].
         double t = 0.;
 
+        // Report whether a contour was found by the search.
         bool valid() const { return contour_idx != size_t(-1); }
     };
 
+    // Search closed contours within the radius; return an invalid result when no eligible point is found.
+    // only_this_contour limits the search to that contour index; size_t(-1) searches all contours.
     ClosestPointResult closest_point_signed_distance(const Point &pt, coord_t search_radius,
                                                      size_t only_this_contour = size_t(-1)) const;
 
+    // Borrow the segment-index range for an in-range row and column.
     std::pair<std::vector<std::pair<size_t, size_t>>::const_iterator,
               std::vector<std::pair<size_t, size_t>>::const_iterator>
     cell_data_range(int64_t row, int64_t col) const {
@@ -149,12 +180,14 @@ public:
         return std::make_pair(m_cell_data.begin() + cell.begin, m_cell_data.begin() + cell.end);
     }
 
+    // Return endpoint values for an in-range contour and segment pair.
     std::pair<c_point, c_point> segment(const std::pair<size_t, size_t> &contour_and_segment_idx) const {
         const Contour &contour = m_contours[contour_and_segment_idx.first];
         const size_t iseg = contour_and_segment_idx.second;
         return std::make_pair(contour.segment_start(iseg), contour.segment_end(iseg));
     }
 
+    // Visit crossed cells until false; both line endpoints must lie inside bbox().
     template<typename VISITOR> void visit_cells_intersecting_line(Point p1, Point p2, VISITOR &visitor) const
     {
         // End points of the line segment.
@@ -298,11 +331,13 @@ public:
 private:
     struct Cell
     {
+        // Initialize an empty range of segment references.
         Cell() : begin(0), end(0) {}
         size_t begin;
         size_t end;
     };
 
+    // Build contiguous per-cell segment ranges from the borrowed contours at a positive resolution.
     void create_from_m_contours(coord_t resolution);
 
     // Bounding box around the contours.
@@ -324,6 +359,6 @@ private:
 };
 
 } // namespace EdgeGrid
-}}} // namespace slic3r_api::Infill::RectilinearPatternsPlugin
+}} // namespace slic3r_api::PluginCommon
 
-#endif // plugins_infill_rectilinear_edge_grid_hpp_
+#endif // plugins_common_edge_grid_hpp_

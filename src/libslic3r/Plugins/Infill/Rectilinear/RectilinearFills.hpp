@@ -26,7 +26,7 @@ paths. The canonical pattern-id list is declared by RectilinearPatterns.hpp.
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 
-#include "RectilinearClipper.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 #include "RectilinearConnect.hpp"
 
 namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
@@ -37,6 +37,10 @@ using namespace clipper;
 
 // Connect generated lines along the boundary through the plugin dispatchers.
 using namespace connect;
+// Select mutable work types only in this namespace; RectilinearWithPerimeter.cpp uses API views with the same type names.
+using work::ExPolygon;
+using work::Polygon;
+using work::Polyline;
 
 // The ported code calls init_spacing and _infill_direction on this base class.
 

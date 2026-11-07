@@ -16,11 +16,12 @@ normal, rising, clearance, descending and normal extrusion paths, preserving
 the per-point Z offsets and flow attributes through the plugin API.
 */
 
-#include "RectilinearWorkBuffers.hpp"
+#include "libslic3r/Plugins/Common/PolygonWorkBuffers.hpp"
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 
 namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
+namespace work = PluginCommon::polygon_work;
 namespace sawtooth {
 
 void publish_sawtooth(const run_ctx_infill_pattern &ctx,

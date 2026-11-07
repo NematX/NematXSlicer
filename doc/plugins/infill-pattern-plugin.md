@@ -406,11 +406,17 @@ handles. API batch intersection delegates open-path coordinate preparation and
 restoration to the host; Boost.Geometry indexes hook collisions. The host uses
 its existing filtered determinant predicate with an exact 128-bit fallback.
 
-`InfillWorkBuffers.hpp` owns the shared mutable points, double vectors, bounding
+`src/libslic3r/Plugins/Common/WorkBuffers.hpp` owns the shared mutable points, double vectors, bounding
 boxes and polylines, including core-compatible rounding and Douglas-Peucker
-simplification. `InfillPaths` consumes these neutral buffers directly; polygon
-containers, borrowed contour views and rectilinear geometry helpers remain in
-the rectilinear module. `InfillPaths` converts between API-owned collections and
+simplification. The same `Plugins/Common/` directory provides polygon containers,
+borrowed contour views and geometry helpers in `PolygonWorkBuffers.hpp`, Clipper
+operations in `ClipperHelpers.hpp`, and borrowed contour grid queries in
+`PluginEdgeGrid.hpp/.cpp`. These helpers use the neutral `slic3r_api::PluginCommon`
+namespace, with `work` for point and path buffers, `polygon_work` for polygon
+buffers and its `line_alg::distance_to_squared` segment-distance helper, `clipper` for Clipper helpers, and `EdgeGrid`
+for grid queries. `InfillPaths.hpp` and `InfillChaining.cpp` remain in
+`Plugins/Infill/`. `InfillPaths` consumes the neutral buffers directly and
+converts between API-owned collections and
 the private buffers without reinterpreting their layouts; the copies retain
 all points and check cancellation while moving temporary stored payloads.
 

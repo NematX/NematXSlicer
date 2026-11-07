@@ -24,7 +24,7 @@ the ported implementation on the same boundary and infill lines and require
 bit-identical output, for both connect strategies.
 */
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
 namespace rect_connect = slic3r_api::Infill::RectilinearPatternsPlugin::connect;
 
 namespace {

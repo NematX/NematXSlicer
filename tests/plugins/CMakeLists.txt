@@ -49,6 +49,9 @@ add_executable(${_TEST_NAME}_tests
     test_fff_print_gui_rules.cpp
     test_plugin_activation_config.cpp
     test_plugin_api_compatibility.cpp
+    test_plugin_common_clipper.cpp
+    test_plugin_common_edge_grid.cpp
+    test_plugin_common_work_buffers.cpp
     test_plugin_config.cpp
     test_plugin_e2e_matrix.cpp
     test_plugin_loader_diagnostics.cpp
@@ -75,9 +78,6 @@ add_executable(${_TEST_NAME}_tests
     test_native_thin_wall_flow.cpp
     test_smooth_pattern.cpp
     test_post_full_fill_volume.cpp
-    test_rectilinear_edge_grid.cpp
-    test_rectilinear_clipper.cpp
-    test_rectilinear_work_buffers.cpp
     test_rectilinear_connect.cpp
     test_rectilinear_fills.cpp
     test_rectilinear_sawtooth.cpp

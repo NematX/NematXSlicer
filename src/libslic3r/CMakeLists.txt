@@ -260,6 +260,11 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/Views.hpp
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
+	Plugins/Common/ClipperHelpers.hpp
+	Plugins/Common/PluginEdgeGrid.cpp
+	Plugins/Common/PluginEdgeGrid.hpp
+	Plugins/Common/PolygonWorkBuffers.hpp
+	Plugins/Common/WorkBuffers.hpp
 	Plugins/GCode/Exporter/BambuGCodeExporter.cpp
 	Plugins/GCode/Exporter/BambuGCodeExporter.hpp
 	Plugins/GCode/Exporter/BinaryGCodeExporter.cpp
@@ -340,7 +345,6 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/ConcentricPattern.hpp
 	Plugins/Infill/InfillChaining.cpp
 	Plugins/Infill/InfillPaths.hpp
-	Plugins/Infill/InfillWorkBuffers.hpp
 	Plugins/Infill/Lightning/LightningDistanceField.cpp
 	Plugins/Infill/Lightning/LightningDistanceField.hpp
 	Plugins/Infill/Lightning/LightningFill.cpp
@@ -376,10 +380,7 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/PatternPluginHelpers.hpp
 	Plugins/Infill/PostFullFillVolume.cpp
 	Plugins/Infill/PostFullFillVolume.hpp
-	Plugins/Infill/Rectilinear/RectilinearEdgeGrid.cpp
-	Plugins/Infill/Rectilinear/RectilinearClipper.hpp
 	Plugins/Infill/Rectilinear/RectilinearConnect.hpp
-	Plugins/Infill/Rectilinear/RectilinearEdgeGrid.hpp
 	Plugins/Infill/Rectilinear/RectilinearFills.cpp
 	Plugins/Infill/Rectilinear/RectilinearFills.hpp
 	Plugins/Infill/Rectilinear/RectilinearPatterns.cpp
@@ -388,7 +389,6 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/Rectilinear/RectilinearSawtooth.hpp
 	Plugins/Infill/Rectilinear/RectilinearWithPerimeter.cpp
 	Plugins/Infill/Rectilinear/RectilinearWithPerimeter.hpp
-	Plugins/Infill/Rectilinear/RectilinearWorkBuffers.hpp
 	Plugins/Infill/PostInfillGapFill.cpp
 	Plugins/Infill/PostInfillGapFill.hpp
 	Plugins/Infill/SimpleInfillPatterns.hpp

@@ -4,26 +4,30 @@
 #include <utility>
 #include <vector>
 
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearEdgeGrid.hpp"
+#include "libslic3r/Plugins/Common/PluginEdgeGrid.hpp"
 
 #include "libslic3r/EdgeGrid.hpp"
 #include "libslic3r/Point.hpp"
 
 /*
-Rectilinear edge grid port
+Common contour grid checks
 ==========================
 
-The ported EdgeGrid must rasterize contours and answer line traversal and
-closest point queries exactly like the core EdgeGrid::Grid, otherwise the
-ported connect helpers would diverge from the legacy fill. These tests build
-both grids from the same contours and compare their cells, segments, traversal
-sequences and closest point results.
+The core is the existing Slic3r implementation.
+Build core and plugin grids from matching contours and compare cell segment
+references, visited-cell sequences and signed closest-point results. An API
+ExPolygon supplies the contour and holes for a separate borrowed-view check.
+
+Tests
+|-- matching work contours: compare rasterization and line traversal
+|-- API ExPolygon: compare indexed contour segments
+`-- signed closest points: compare selected edges, distances and parameters
 */
 
 namespace {
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
-namespace rect_edge_grid = slic3r_api::Infill::RectilinearPatternsPlugin::EdgeGrid;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
+namespace rect_edge_grid = slic3r_api::PluginCommon::EdgeGrid;
 
 std::vector<Slic3r::Points> make_core_contours()
 {
@@ -83,7 +87,7 @@ struct CoreTraversalVisitor
 
 } // namespace
 
-TEST_CASE("Rectilinear edge grid port matches the core rasterization", "[plugins][infill][rectilinear]")
+TEST_CASE("Rectilinear edge grid port matches the core rasterization", "[plugins][infill][rectilinear][plugin-common]")
 {
     const coord_t resolution = 500000;
     std::vector<Slic3r::Points> core_contours = make_core_contours();
@@ -149,7 +153,7 @@ TEST_CASE("Rectilinear edge grid port matches the core rasterization", "[plugins
     }
 }
 
-TEST_CASE("Rectilinear edge grid port matches the core on an ExPolygon boundary", "[plugins][infill][rectilinear]")
+TEST_CASE("Rectilinear edge grid port matches the core on an ExPolygon boundary", "[plugins][infill][rectilinear][plugin-common]")
 {
     Slic3r::ExPolygon core_expolygon(Slic3r::Polygon({ Slic3r::Point(-10000000, -10000000), Slic3r::Point(10000000, -10000000),
                                                        Slic3r::Point(10000000, 10000000), Slic3r::Point(-10000000, 10000000) }));
@@ -219,7 +223,7 @@ TEST_CASE("Rectilinear edge grid port matches the core on an ExPolygon boundary"
     }
 }
 
-TEST_CASE("Rectilinear edge grid port matches the core closest point query", "[plugins][infill][rectilinear]")
+TEST_CASE("Rectilinear edge grid port matches the core closest point query", "[plugins][infill][rectilinear][plugin-common]")
 {
     const coord_t resolution = 500000;
     std::vector<Slic3r::Points> core_contours = make_core_contours();

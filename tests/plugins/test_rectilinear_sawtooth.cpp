@@ -46,7 +46,7 @@ using namespace Slic3r::Test::PerimeterPluginTests;
 
 namespace {
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
 namespace rect_fills = slic3r_api::Infill::RectilinearPatternsPlugin::fills;
 namespace sawtooth = slic3r_api::Infill::RectilinearPatternsPlugin::sawtooth;
 

@@ -15,7 +15,7 @@ DistanceField::DistanceField(coord_t radius, const work::BoundingBox &bounds, co
                               storage_handle *scratch, const plugin_run_context *run_ctx)
     : m_radius(radius), m_spacing(radius / 6), m_bounds(bounds)
 {
-    namespace clipper = RectilinearPatternsPlugin::clipper;
+    namespace clipper = PluginCommon::clipper;
     const work::BoundingBox sampling_bounds = clipper::get_extents(overhang);
     const StoredPolygonCollection stored = clipper::to_stored_polygons(scratch, overhang);
     const StoredExPolygonCollection polygons = clipper_union(ClipperOperand(scratch, stored.readonly())).to_expolygon_collection();

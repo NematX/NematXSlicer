@@ -157,7 +157,7 @@ TEST_CASE("Lightning unsupported points have a strict distance-band order", "[pl
 
 TEST_CASE("Shared infill clipping retains complete bent paths", "[plugins][lightning][paths]")
 {
-    namespace work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+    namespace work = slic3r_api::PluginCommon::polygon_work;
     const ExPolygon boundary = rectangle_with_hole_expolygon();
     const Polylines input{Polyline{Point(-scale_i(15.), 0), Point(-scale_i(6.), scale_i(6.)),
                                   Point(scale_i(6.), scale_i(6.)), Point(scale_i(15.), 0)}};

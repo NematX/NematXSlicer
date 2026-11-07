@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearWorkBuffers.hpp"
+#include "libslic3r/Plugins/Common/PolygonWorkBuffers.hpp"
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -15,15 +15,21 @@
 #include "libslic3r/Polyline.hpp"
 
 /*
-Rectilinear mutable work buffers
-================================
+Common mutable geometry checks
+==============================
 
-The fill algorithms use private mutable buffers for point operations that are
-not available on read-only API views. These tests keep the rounding,
-tolerance, clipping and validation behavior aligned with the core helpers.
+The core is the existing Slic3r implementation.
+These tests construct matching core and plugin buffers and compare coordinates,
+rounding, tolerances, clipping results and validation. Borrowed contour checks
+also edit a source point to verify that the view reads the original array.
+
+Tests
+|-- ContourView: read API and work arrays without changing their representation
+|-- path helpers: compare simplification, validation and grid alignment to core
+`-- geometry helpers: compare clipping, circle hits, orientation and box bounds
 */
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
 
 namespace {
 
@@ -42,7 +48,7 @@ Slic3r::Polyline make_core_polyline(std::mt19937 &rng, size_t count, rect_work::
 } // namespace
 
 TEST_CASE("Rectilinear contour views borrow API and work point arrays",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     const c_point api_points[] = { { 1, 2 }, { 3, 4 }, { 5, 6 } };
     const multipoint_const_view api_view{ api_points, 3, 0 };
@@ -59,7 +65,7 @@ TEST_CASE("Rectilinear contour views borrow API and work point arrays",
 }
 
 TEST_CASE("Rectilinear work buffer douglas_peucker matches the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0x5eed1234u);
     for (int trial = 0; trial < 200; ++trial) {
@@ -80,7 +86,7 @@ TEST_CASE("Rectilinear work buffer douglas_peucker matches the core implementati
 }
 
 TEST_CASE("Rectilinear work buffer ensure_valid matches the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0xc0ffee);
     for (int trial = 0; trial < 100; ++trial) {
@@ -115,7 +121,7 @@ TEST_CASE("Rectilinear work buffer ensure_valid matches the core implementation"
 }
 
 TEST_CASE("Rectilinear work buffer align_to_grid matches the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0xabcdefu);
     for (int trial = 0; trial < 500; ++trial) {
@@ -142,7 +148,7 @@ TEST_CASE("Rectilinear work buffer align_to_grid matches the core implementation
 }
 
 TEST_CASE("Rectilinear work buffer liang_barsky clipping matches the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0x1234567u);
     for (int trial = 0; trial < 500; ++trial) {
@@ -174,7 +180,7 @@ TEST_CASE("Rectilinear work buffer liang_barsky clipping matches the core implem
 }
 
 TEST_CASE("Rectilinear work buffer circle intersections match the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0x77aa33u);
     for (int trial = 0; trial < 500; ++trial) {
@@ -206,7 +212,7 @@ TEST_CASE("Rectilinear work buffer circle intersections match the core implement
 }
 
 TEST_CASE("Rectilinear work buffer orientation and extents match the core implementation",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     std::mt19937 rng(0x9911u);
     for (int trial = 0; trial < 200; ++trial) {
@@ -233,7 +239,7 @@ TEST_CASE("Rectilinear work buffer orientation and extents match the core implem
 }
 
 TEST_CASE("Rectilinear work buffer bounding box defined semantics match the core",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     const rect_work::BoundingBox work_x_degenerate(rect_work::Point(0, 0), rect_work::Point(0, 10));
     const rect_work::BoundingBox work_y_degenerate(rect_work::Point(0, 0), rect_work::Point(10, 0));

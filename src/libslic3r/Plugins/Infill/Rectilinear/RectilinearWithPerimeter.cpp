@@ -21,7 +21,7 @@ can apply the usual ordering and volume correction plugins.
 */
 
 namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
-namespace rect_work = RectilinearPatternsPlugin::work;
+namespace rect_work = PluginCommon::polygon_work;
 namespace recti {
 namespace {
 

@@ -49,10 +49,11 @@ here the chained lines are emitted without being joined.
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Plugins/Infill/InfillPaths.hpp"
-#include "libslic3r/Plugins/Infill/InfillWorkBuffers.hpp"
+#include "libslic3r/Plugins/Common/WorkBuffers.hpp"
 #include "libslic3r/Plugins/Infill/PatternPluginHelpers.hpp"
 
 namespace slic3r_api { namespace Infill {
+namespace work = PluginCommon::work;
 namespace {
 
 const char *k_id = "line";

@@ -10,7 +10,7 @@
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearClipper.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
 namespace slic3r_api { namespace Infill { namespace Lightning {
 
@@ -38,7 +38,7 @@ Parameters make_parameters(const std::vector<RegionSettings> &regions, double ma
 Inputs read_inputs(const Print &print, const Object &object, storage_handle *scratch,
                     const plugin_run_context *run_ctx)
 {
-    namespace clipper = RectilinearPatternsPlugin::clipper;
+    namespace clipper = PluginCommon::clipper;
     Inputs inputs;
     std::vector<RegionSettings> regions;
     for (uint32_t index = 0; index < object.print_region_count(); ++index) {

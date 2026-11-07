@@ -4,16 +4,39 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-#include "RectilinearEdgeGrid.hpp"
+#include "PluginEdgeGrid.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 
-namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
+/*
+Contour indexing for plugin connection queries
+==============================================
+
+This implementation supplies Grid creation and signed closest-point searches
+for infill connection helpers. Creation first collects borrowed contour views,
+discarding inputs with fewer than two points and removing a repeated endpoint
+from open inputs that are actually closed. It measures the bounds and adds a
+small margin so boundary segments fit inside the grid.
+
+Rasterization counts segment references in each cell. Prefix sums turn those
+counts into non-overlapping ranges in one flat array; a second rasterization
+fills the ranges with contour/segment pairs. This keeps each cell's candidates
+contiguous without copying source coordinates. Closest-point queries scan
+nearby cells and compute distances and signs from the referenced closed rings.
+The caller must keep source arrays alive, unchanged and at stable addresses
+until queries finish. Editing points requires rebuilding the grid.
+
+Grid
+|-- create: collect work or API contour views and normalize closure
+|   `-- create_from_m_contours: measure bounds, count hits, prefix-sum, fill pairs
+`-- closest_point_signed_distance: scan nearby cells and evaluate ring edges
+*/
+namespace slic3r_api { namespace PluginCommon {
 namespace EdgeGrid {
 
-using namespace work;
+using namespace polygon_work;
 
 void Grid::create(const std::vector<Points> &polygons, coord_t resolution, bool open_polylines)
 {
@@ -411,4 +434,4 @@ Grid::ClosestPointResult Grid::closest_point_signed_distance(const Point &pt, co
 }
 
 } // namespace EdgeGrid
-}}} // namespace slic3r_api::Infill::RectilinearPatternsPlugin
+}} // namespace slic3r_api::PluginCommon

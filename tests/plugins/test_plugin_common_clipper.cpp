@@ -5,24 +5,35 @@
 #include <vector>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearClipper.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
 #include "libslic3r/ExPolygon.hpp"
 
 /*
-These tests compare rectilinear Clipper conversions with their value-based
-counterparts. API collections borrow stored geometry; work polygons own their
-point arrays. Exact coordinate checks retain ring and point order, then verify
-that the converted output survives explicit freeing and destruction of storage.
+Common polygon operation checks
+===============================
 
-    TEST_CASE
-    |-- to_polygons(): copy contours and holes from live API views
-    |-- check_exact_view(): ensure the source has not changed
-    `-- check_exact_polygons(): compare owned output before and after freeing
+The core is the existing Slic3r implementation.
+Expose a core polygon with a hole through an API view, then compare direct-view
+offset and shrink results to operations on copied work rings. Sorted vertex
+signatures compare point sets per ring and ignore both vertex and ring order;
+they do not check edge connectivity or orientation.
+API collections borrow stored geometry; work polygons own their point arrays.
+Conversion checks compare every coordinate in stored ring and point order, then
+verify that output survives explicit freeing and destruction of the storage.
+
+Tests
+`-- API view versus work rings: offset and shrink, compared by sorted signatures
+    |-- make_boundary / view: provide the same geometry to both operation paths
+    `-- signatures: sort vertices within each ring, then sort the ring signatures
+`-- ordered conversion and ownership
+    |-- to_polygons: copy contours and holes from live API views
+    |-- check_exact_view: ensure the source has not changed
+    `-- check_exact_polygons: compare owned output before and after freeing
 */
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
-namespace rect_clipper = slic3r_api::Infill::RectilinearPatternsPlugin::clipper;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
+namespace rect_clipper = slic3r_api::PluginCommon::clipper;
 
 namespace {
 
@@ -97,7 +108,7 @@ void check_exact_view(const slic3r_api::Polygon &actual, const Slic3r::Polygon &
 } // namespace
 
 TEST_CASE("Rectilinear clipper offsets an API ExPolygon without source materialization",
-          "[plugins][infill][rectilinear]")
+          "[plugins][infill][rectilinear][plugin-common]")
 {
     Slic3r::ExPolygon core_boundary = make_boundary();
     const slic3r_api::ExPolygon api_boundary = view(core_boundary);

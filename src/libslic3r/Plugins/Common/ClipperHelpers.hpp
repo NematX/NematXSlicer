@@ -3,23 +3,37 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-#ifndef plugins_infill_rectilinear_clipper_hpp_
-#define plugins_infill_rectilinear_clipper_hpp_
+#ifndef plugins_common_clipper_helpers_hpp_
+#define plugins_common_clipper_helpers_hpp_
 
 /*
-Clipper helpers for the rectilinear infill port
-===============================================
+Geometry operations for plugin work buffers
+===========================================
 
-The rectilinear algorithms call the core ClipperUtils helpers (offset, shrink,
-union_ex, to_polygons, get_extents). This header keeps mutable result buffers
-local to the algorithm while allowing API ExPolygon views to be passed
-directly into Clipper.
+Plugin algorithms use these helpers to offset or combine mutable polygon rings
+through the public Clipper API. The core is the existing Slic3r implementation.
+Conversion helpers copy API views to owned work
+buffers, or copy work buffers into the caller's storage. The offset and shrink
+overloads taking an API ExPolygon pass that view directly to ClipperOperand,
+the shape-operation wrapper defined in Api/plugin/cpp/ClipperViews.hpp;
+they do not first copy its points into work buffers. Work-ring overloads copy
+their inputs into stored geometry before forming an operand.
 
-Every helper that needs temporary Clipper storage takes the caller storage as
-its first argument. The ported call sites pass the plugin storage handle.
-API collections borrow their source geometry. Conversion to work polygons copies
-the point arrays, retaining each ExPolygon view while traversing its holes, so
-the resulting polygons outlive the source collection and storage.
+Pass a live storage handle first to helpers that allocate temporary API objects.
+Stored* types in Api/plugin/cpp/GeometryViews.hpp own geometry handles allocated
+in that storage. Local Stored* objects release their temporary handles when they
+leave scope; storage must outlive any returned Stored* object.
+Returned work buffers own their points. Conversion, offset and boolean helpers
+leave their inputs unchanged; remove_sticks and remove_small edit work inputs
+in place.
+API collections borrow their source geometry. Conversion retains each ExPolygon
+view while traversing its holes and copies the points, so the work polygons
+outlive the source collection and storage.
+Distances use scaled coordinate units.
+
+    // storage is the caller's storage; view is a live API ExPolygon.
+    auto inset = clipper::shrink(storage, view, 100.);
+    auto editable = clipper::from_expolygon_view(view);
 */
 
 #include <algorithm>
@@ -29,15 +43,16 @@ the resulting polygons outlive the source collection and storage.
 
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 
-#include "RectilinearWorkBuffers.hpp"
+#include "PolygonWorkBuffers.hpp"
 
-namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
+namespace slic3r_api { namespace PluginCommon {
 namespace clipper {
 
-using namespace work;
+using namespace polygon_work;
 
 static constexpr const double DefaultMiterLimit = 3.;
 
+// Copy all API ring points into an owned work point array in source order.
 inline Points from_polygon_view(const slic3r_api::Polygon &polygon)
 {
     Points out;
@@ -49,6 +64,7 @@ inline Points from_polygon_view(const slic3r_api::Polygon &polygon)
     return out;
 }
 
+// Copy the API contour and holes into an owned work ExPolygon.
 inline ExPolygon from_expolygon_view(const slic3r_api::ExPolygon &expolygon)
 {
     ExPolygon converted;
@@ -61,6 +77,7 @@ inline ExPolygon from_expolygon_view(const slic3r_api::ExPolygon &expolygon)
     return converted;
 }
 
+// Copy all API polygons and their rings into an owned work collection.
 inline ExPolygons from_expolygon_collection_view(const slic3r_api::ExPolygonCollection &collection)
 {
     ExPolygons out;
@@ -70,6 +87,7 @@ inline ExPolygons from_expolygon_collection_view(const slic3r_api::ExPolygonColl
     return out;
 }
 
+// Copy work rings into caller storage and return the object owning their temporary handles.
 inline StoredPolygonCollection to_stored_polygons(storage_handle *storage, const Polygons &polygons)
 {
     StoredPolygonCollection out(storage);
@@ -113,7 +131,7 @@ inline Polygons to_polygons(const slic3r_api::ExPolygonCollection &collection)
     return out;
 }
 
-// union_ex(polygons)
+// Union work rings through ClipperOperand and copy the resulting contours and holes into owned buffers.
 inline ExPolygons union_ex(storage_handle *storage, const Polygons &polygons)
 {
     if (polygons.empty())
@@ -125,7 +143,7 @@ inline ExPolygons union_ex(storage_handle *storage, const Polygons &polygons)
     return from_expolygon_collection_view(collection.readonly());
 }
 
-// offset(polygons, delta, join_type, miter_limit)
+// Offset closed work rings by delta using the supplied join style and miter limit; return owned rings.
 inline Polygons offset(storage_handle *storage, const Polygons &polygons, double delta,
                        clipper_join_type_t join_type = CLIPPER_JOIN_MITER, double miter_limit = 3.)
 {
@@ -147,19 +165,21 @@ inline Polygons offset(storage_handle *storage, const slic3r_api::ExPolygon &exp
     return to_polygons(collection.readonly());
 }
 
-// shrink(polygons, delta, join_type, miter_limit)
+// Offset work rings by negative delta using the supplied join style and miter limit; return owned rings.
 inline Polygons shrink(storage_handle *storage, const Polygons &polygons, double delta,
                        clipper_join_type_t join_type = CLIPPER_JOIN_MITER, double miter_limit = 3.)
 {
     return offset(storage, polygons, -delta, join_type, miter_limit);
 }
 
+// Offset by the negative of delta, returning owned result rings without changing the input.
 inline Polygons shrink(storage_handle *storage, const slic3r_api::ExPolygon &expolygon, double delta,
                        clipper_join_type_t join_type = CLIPPER_JOIN_MITER, double miter_limit = 3.)
 {
     return offset(storage, expolygon, -delta, join_type, miter_limit);
 }
 
+// Return coordinate bounds containing the supplied points or rings.
 inline BoundingBox get_extents(const Polygon &polygon) { return BoundingBox(polygon.points); }
 inline BoundingBox get_extents(const Polygons &polygons) {
     BoundingBox out;
@@ -175,7 +195,7 @@ inline BoundingBox get_extents(const ExPolygon &expolygon) {
 }
 inline BoundingBox get_extents(const Polyline &polyline) { return BoundingBox(polyline.points); }
 
-// Port of the Polygon.cpp stick / small area filters used by the ported code.
+// Test whether the middle point repeats a neighbour or nearly retraces a collinear segment.
 static inline bool is_stick(const Point &p1, const Point &p2, const Point &p3)
 {
     Point v1 = p2 - p1;
@@ -188,7 +208,7 @@ static inline bool is_stick(const Point &p1, const Point &p2, const Point &p3)
     double l2_2 = double(v2.x()) * double(v2.x()) + double(v2.y()) * double(v2.y());
     if (dir == 0)
         // p1, p2, p3 may make a perpendicular corner, or there is a zero edge length.
-        // Remove p2 if it is coincident with p1 or p2.
+        // Remove p2 if it is coincident with p1 or p3.
         return l2_1 == 0 || l2_2 == 0;
     // p3 turns back to p1 after p2. Are p1, p2, p3 collinear?
     // Calculate distance from p3 to a segment (p1, p2) or from p1 to a segment(p2, p3),
@@ -198,6 +218,7 @@ static inline bool is_stick(const Point &p1, const Point &p2, const Point &p3)
     return dist2 < EPSILON * EPSILON;
 }
 
+// Remove repeated neighbours and nearly collinear reversals in place; return whether vertices were removed.
 inline bool remove_sticks(Polygon &poly)
 {
     bool modified = false;
@@ -226,6 +247,8 @@ inline bool remove_sticks(Polygon &poly)
     return modified;
 }
 
+// Clean rings in place and drop rings with fewer than three vertices.
+// Return whether per-ring cleanup removed vertices; dropping an already-short ring alone does not set the flag.
 inline bool remove_sticks(Polygons &polys)
 {
     bool modified = false;
@@ -243,6 +266,8 @@ inline bool remove_sticks(Polygons &polys)
     return modified;
 }
 
+// Clean the contour and holes in place and drop holes with fewer than three vertices.
+// Return the OR of the contour and hole-cleanup flags.
 inline bool remove_sticks(ExPolygon &expoly)
 {
     // Clean the holes even when the contour changed, like the core helper:
@@ -253,6 +278,7 @@ inline bool remove_sticks(ExPolygon &expoly)
     return modified;
 }
 
+// Remove rings whose absolute area is below min_area and report whether any were removed.
 inline bool remove_small(Polygons &polys, double min_area)
 {
     bool modified = false;
@@ -271,6 +297,6 @@ inline bool remove_small(Polygons &polys, double min_area)
 }
 
 } // namespace clipper
-}}} // namespace slic3r_api::Infill::RectilinearPatternsPlugin
+}} // namespace slic3r_api::PluginCommon
 
-#endif // plugins_infill_rectilinear_clipper_hpp_
+#endif // plugins_common_clipper_helpers_hpp_
