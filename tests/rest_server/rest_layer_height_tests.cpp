@@ -212,6 +212,31 @@ TEST_CASE("REST layer height profiles validate requests", "[rest_layer_height]")
         http::status::bad_request, "invalid_request");
 }
 
+// Store a ten-micron profile through HTTP using the shared small-nozzle limits, retaining it after an invalid replacement.
+TEST_CASE("REST small-nozzle profiles round-trip ten-micron layers", "[rest_layer_height]")
+{
+    ensure_engine_initialized();
+    RestServerFixture fixture({}, true, true);
+    const std::string route = session_with_cube(fixture);
+    const std::shared_ptr<SessionContext> session = find_session(fixture, route.substr(9));
+    const std::string object_id = list_scene(fixture, route).at("objects").at(0).at("id").get<std::string>();
+    set_options(session, {{"nozzle_diameter", "0.05"}, {"min_layer_height", "0"},
+        {"max_layer_height", "0"}, {"first_layer_height", "0.04"}, {"layer_height", "0.025"}, {"z_step", "0"}});
+    const nlohmann::json limits = get_layer_height_profile(fixture, route, object_id);
+    CHECK(limits.at("min_layer_height").get<double>() == Approx(0.01));
+    CHECK(limits.at("max_layer_height").get<double>() == Approx(0.0375));
+    const nlohmann::json points = nlohmann::json::array({{0., 0.01}, {20., 0.01}});
+    const nlohmann::json saved = set_layer_height_profile(fixture, route, object_id, {{"profile", points}});
+    CHECK(saved.at("valid") == true);
+    CHECK(saved.at("applied") == true);
+    CHECK(saved.at("profile") == points);
+    CHECK(get_layer_height_profile(fixture, route, object_id) == saved);
+    CHECK(list_scene(fixture, route).at("objects").at(0).at("variable_layer_height") == true);
+    set_error(fixture, route, object_id, {{"profile", {{0., 0.0005}, {20., 0.0005}}}},
+        http::status::unprocessable_entity, "invalid_layer_height_profile");
+    CHECK(get_layer_height_profile(fixture, route, object_id) == saved);
+}
+
 // Mutate one local object through the HTTP routes and verify response data, no-op revisions, and its list flag.
 TEST_CASE("REST layer height profiles replace and reset", "[rest_layer_height]")
 {

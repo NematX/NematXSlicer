@@ -8,6 +8,7 @@
 
 #include <limits>
 
+#include "Api/plugin/cpp/LayerHeightLimits.hpp"
 #include "Config/FFFPrintConfig.hpp"
 #include "Flow.hpp"
 #include "libslic3r.h"
@@ -26,11 +27,23 @@
     #include <cassert>
 #endif
 
+/* Resolve host slicing parameters and variable layer-height profiles from print,
+   object and extruder settings. SDK LayerHeightLimits helpers define the common
+   policy in millimeters: a 0.01 mm floor, an eighth of the nozzle diameter for an
+   unset minimum, and 75 percent of it for an unset or disabled maximum. Callers retain
+   their z-step rounding and minimum/maximum reconciliation. These are software
+   limits, not a guarantee of physical printer resolution.
+
+       SlicingParameters::create_from_config()
+           |-- min_layer_height_from_nozzle(): resolve and round each minimum
+           `-- max_layer_height_from_nozzle(): resolve, clamp and round each maximum
+       Slicing::min_layer_height_from_nozzle() / max_layer_height_from_nozzle()
+           `-- expose the same policy to dynamic-config profile tools
+*/
+
 namespace Slic3r
 {
 
-static const double MIN_LAYER_HEIGHT = 0.01;
-static const double MIN_LAYER_HEIGHT_DEFAULT = 0.07;
 // fields are with 8-number precision after the dot
 double check_z_step(const double val, const double z_step) {
     if (z_step <= EPSILON) return val;
@@ -54,8 +67,9 @@ inline bool test_z_step(const double val, const double z_step) {
 // idx_nozzle began at 0
 inline double min_layer_height_from_nozzle(const PrintConfig &print_config, uint16_t idx_nozzle)
 {
-    double min_layer_height = print_config.min_layer_height.get_effective_value(print_config.nozzle_diameter.get_at(idx_nozzle), idx_nozzle);
-    return check_z_step( (min_layer_height == 0.) ? (MIN_LAYER_HEIGHT_DEFAULT) : std::max(MIN_LAYER_HEIGHT, min_layer_height), print_config.z_step);
+    const double nozzle_dmr = print_config.nozzle_diameter.get_at(idx_nozzle);
+    double min_layer_height = print_config.min_layer_height.get_effective_value(nozzle_dmr, idx_nozzle);
+    return check_z_step(slic3r_api::min_layer_height_mm(min_layer_height, nozzle_dmr), print_config.z_step);
 }
 
 // Maximum layer height for the variable layer height algorithm, 3/4 of a nozzle diameter by default,
@@ -66,7 +80,9 @@ inline double max_layer_height_from_nozzle(const PrintConfig &print_config, uint
     double min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);
     double nozzle_dmr = print_config.nozzle_diameter.get_at(idx_nozzle);
     double max_layer_height = print_config.max_layer_height.get_effective_value(nozzle_dmr, idx_nozzle);
-    return check_z_step(std::max(min_layer_height, (max_layer_height == 0. || !print_config.max_layer_height.is_enabled()) ? (0.75 * nozzle_dmr) : max_layer_height), print_config.z_step);
+    return check_z_step(std::max(min_layer_height,
+                                 slic3r_api::max_layer_height_mm(max_layer_height, print_config.max_layer_height.is_enabled(), nozzle_dmr)),
+                        print_config.z_step);
 }
 
 // Minimum layer height for the variable layer height algorithm.
@@ -74,7 +90,8 @@ inline double max_layer_height_from_nozzle(const PrintConfig &print_config, uint
 double Slicing::min_layer_height_from_nozzle(const DynamicPrintConfig &print_config, uint16_t idx_nozzle)
 {
     double min_layer_height = print_config.get_computed_value("min_layer_height", idx_nozzle);
-    return check_z_step((min_layer_height == 0.) ? (MIN_LAYER_HEIGHT_DEFAULT) : std::max(MIN_LAYER_HEIGHT, min_layer_height), print_config.opt_float("z_step"));
+    const double nozzle_dmr = print_config.opt_float("nozzle_diameter", idx_nozzle);
+    return check_z_step(slic3r_api::min_layer_height_mm(min_layer_height, nozzle_dmr), print_config.opt_float("z_step"));
 }
 
 // Maximum layer height for the variable layer height algorithm, 3/4 of a nozzle diameter by default,
@@ -85,7 +102,9 @@ double Slicing::max_layer_height_from_nozzle(const DynamicPrintConfig &print_con
     double min_layer_height = min_layer_height_from_nozzle(print_config, idx_nozzle);
     double max_layer_height = print_config.get_computed_value("max_layer_height", idx_nozzle);
     double nozzle_dmr       = print_config.opt_float("nozzle_diameter", idx_nozzle);
-    return check_z_step(std::max(min_layer_height, (max_layer_height == 0. || !print_config.is_enabled("max_layer_height", idx_nozzle)) ? (0.75 * nozzle_dmr) : max_layer_height), print_config.opt_float("z_step"));
+    return check_z_step(std::max(min_layer_height,
+                                 slic3r_api::max_layer_height_mm(max_layer_height, print_config.is_enabled("max_layer_height", idx_nozzle), nozzle_dmr)),
+                        print_config.opt_float("z_step"));
 }
 
 

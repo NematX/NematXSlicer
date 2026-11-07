@@ -14,6 +14,7 @@
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
+#include "libslic3r/Api/plugin/cpp/LayerHeightLimits.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Flow.hpp"
@@ -99,8 +100,9 @@ struct NativeGridParams
 // Resolve percent heights against the nozzle; zero uses the slicer's minimum default and the result is rounded to the machine Z step.
 double native_min_layer_height(const PrintConfig &print, uint16_t id)
 {
-    const double height = print.min_layer_height.get_effective_value(print.nozzle_diameter.get_at(id), id);
-    return check_z_step(height == 0 ? 0.07 : std::max(0.01, height), print.z_step);
+    const double nozzle = print.nozzle_diameter.get_at(id);
+    const double height = print.min_layer_height.get_effective_value(nozzle, id);
+    return check_z_step(slic3r_api::min_layer_height_mm(height, nozzle), print.z_step);
 }
 // Resolve percent heights against the nozzle; a disabled or zero limit uses three quarters of its diameter and respects the configured minimum.
 double native_max_layer_height(const PrintConfig &print, uint16_t id)
@@ -108,7 +110,8 @@ double native_max_layer_height(const PrintConfig &print, uint16_t id)
     const double minimum = native_min_layer_height(print, id);
     const double nozzle = print.nozzle_diameter.get_at(id);
     const double maximum = print.max_layer_height.get_effective_value(nozzle, id);
-    return check_z_step(std::max(minimum, maximum == 0 || !print.max_layer_height.is_enabled() ? 0.75 * nozzle : maximum), print.z_step);
+    return check_z_step(std::max(minimum, slic3r_api::max_layer_height_mm(maximum, print.max_layer_height.is_enabled(), nozzle)),
+                        print.z_step);
 }
 
 // Resolve nozzle limits and contact distances for an already sliced object; this instance owns its flows and leaves the object's settings unchanged.
@@ -952,6 +955,35 @@ TEST_CASE("Support params apply native layer height order with mixed nozzles", "
         CHECK(params.layer_height == native.max_layer_height);
         CHECK(params.layer_height == Approx(0.15));
     }
+}
+
+TEST_CASE("Support params use the unset minimum layer height of small nozzles", "[plugins][support-common]")
+{
+    // With min_layer_height at 0 on 0.05 mm nozzles, the support parameters and the host slicing parameters both use the shared unset minimum.
+    DynamicPrintConfig config = SG::config("grid", false, 3, false);
+    config.set_deserialize_strict("nozzle_diameter", "0.05,0.05");
+    config.set_deserialize_strict("min_layer_height", "0,0");
+    config.set_deserialize_strict("max_layer_height", "0.04,0.04");
+    config.set_deserialize_strict("layer_height", "0.025");
+    config.set_deserialize_strict("first_layer_height", "0.04");
+    config.set_deserialize_strict("z_step", "0");
+    config.set_deserialize_strict("support_material_extruder", "1");
+    config.set_deserialize_strict("support_material_interface_extruder", "2");
+    Print print;
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->add_volume(SG::slab());
+    model_object->add_instance();
+    model_object->ensure_on_bed();
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    const PrintObject &object = print.object(0);
+    const SlicingParameters &native = object.slicing_parameters();
+    REQUIRE(native.min_layer_height == Approx(slic3r_api::min_layer_height_mm(0., 0.05)));
+    REQUIRE(native.layer_height == Approx(0.025));
+    const Common::SupportParams params = SG::params(print, object);
+    CHECK(params.layer_height == native.layer_height);
+    CHECK(params.support_min_height == Approx(slic3r_api::min_layer_height_mm(0., 0.05)));
 }
 
 TEST_CASE("Support enum helpers read every serialized value", "[plugins][support-common]")

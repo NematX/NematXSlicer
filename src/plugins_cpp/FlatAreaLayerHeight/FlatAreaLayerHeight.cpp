@@ -19,7 +19,21 @@
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_height.h"
+#include "libslic3r/Api/plugin/cpp/LayerHeightLimits.hpp"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+
+/* Supply an explicit layer plan whose boundaries can meet significant horizontal
+   model surfaces. Scan volume meshes for flat areas, filter by the configured
+   threshold, then fit layer heights between retained anchors. SDK height helpers
+   resolve nozzle limits before integer z-step rounding; the plugin owns its
+   temporary plan and publishes descriptors through the borrowed host context.
+
+       setup_run_impl(): retain scan progress for the borrowed object
+       run_impl()
+           |-- inspect flat surfaces and retain qualifying Z anchors
+           |-- min_layer_height_from_nozzle() / max_layer_height_from_nozzle()
+           `-- fit and publish the explicit layer plan
+*/
 
 namespace slic3r_api { namespace FlatAreaLayerHeightPlugin {
 
@@ -31,11 +45,6 @@ const raw_used_config_key k_used_config_keys[] = {
     { "layer_height_min_flat_area", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINT }
 };
 const char *k_defined_config_keys[] = { "layer_height_min_flat_area" };
-
-// Keep a physical lower bound even if printer settings allow zero or extremely
-// small layer heights. The generated layer plan must remain usable by later FFF
-// steps that expect positive layer thicknesses.
-#define MIN_LAYER_HEIGHT 0.005
 
 enum ProgressPhase : uint32_t
 {
@@ -145,7 +154,7 @@ std::set<extruder_index_t> object_extruders(Print print,
 coord_t min_layer_height_from_nozzle(const Config &print_config, extruder_index_t extruder_idx)
 {
     // min_layer_height may be expressed relative to nozzle diameter. Resolve it
-    // for one extruder, apply the physical minimum, then snap to z_step.
+    // for one extruder, apply the SDK layer height limits, then snap to z_step.
     const ConfigOption nozzle_diameter_opt = print_config.get("nozzle_diameter");
     const uint32_t nozzle_idx = extruder_idx != EXTRUDER_ID_UNKNOWN &&
         uint32_t(extruder_idx) < nozzle_diameter_opt.size() ? uint32_t(extruder_idx) : 0;
@@ -153,10 +162,8 @@ coord_t min_layer_height_from_nozzle(const Config &print_config, extruder_index_
     const ConfigOption min_layer_height_opt = print_config.get("min_layer_height");
     const uint32_t value_idx = extruder_idx != EXTRUDER_ID_UNKNOWN &&
         uint32_t(extruder_idx) < min_layer_height_opt.size() ? uint32_t(extruder_idx) : 0;
-    double value = min_layer_height_opt.get_effective_value(nozzle_diameter, value_idx);
-    if (value == 0.0)
-        value = nozzle_diameter / 2.0;
-    return check_z_step(scale_i(std::max(MIN_LAYER_HEIGHT, value)), scale_i(print_config.get("z_step").get_float()));
+    const double value = min_layer_height_opt.get_effective_value(nozzle_diameter, value_idx);
+    return check_z_step(scale_i(min_layer_height_mm(value, nozzle_diameter)), scale_i(print_config.get("z_step").get_float()));
 }
 
 coord_t max_layer_height_from_nozzle(const Config &print_config, extruder_index_t extruder_idx)
@@ -171,9 +178,8 @@ coord_t max_layer_height_from_nozzle(const Config &print_config, extruder_index_
     const ConfigOption max_layer_height_opt = print_config.get("max_layer_height");
     const uint32_t value_idx = extruder_idx != EXTRUDER_ID_UNKNOWN &&
         uint32_t(extruder_idx) < max_layer_height_opt.size() ? uint32_t(extruder_idx) : 0;
-    double value = max_layer_height_opt.get_effective_value(nozzle_diameter, value_idx);
-    if (value == 0.0 || !max_layer_height_opt.is_enabled(value_idx))
-        value = 0.75 * nozzle_diameter;
+    const double value = max_layer_height_mm(max_layer_height_opt.get_effective_value(nozzle_diameter, value_idx),
+                                             max_layer_height_opt.is_enabled(value_idx), nozzle_diameter);
     const coord_t min_layer_height = min_layer_height_from_nozzle(print_config, extruder_idx);
     return check_z_step(std::max(min_layer_height, scale_i(value)), scale_i(print_config.get("z_step").get_float()));
 }

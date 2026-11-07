@@ -7,6 +7,7 @@
 #include <set>
 
 #include "SupportPaths.hpp"
+#include "libslic3r/Api/plugin/cpp/LayerHeightLimits.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
@@ -29,14 +30,23 @@
 
    object_layers() lists borrowed object-layer views in layer-id order; object_has_support_demand() checks their islands for demand.
    The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
-   are shared by the demand modifiers and the tree family, so that both slice the volumes alike. */
+   are shared by the demand modifiers and the tree family, so that both slice the volumes alike.
+   Extruder height limits use LayerHeightLimits.hpp before millimeter z-step
+   rounding, matching the host's shared policy without changing flow derivation.
+
+       SupportParams::SupportParams()
+           |-- object_extruders(): resolve contributing nozzle identities
+           |-- min_layer_height_from_nozzle() / max_layer_height_from_nozzle()
+           |   `-- SDK height policy -> check_z_step_mm(): retain caller rounding
+           `-- host flow queries: derive owned support dimensions and densities
+*/
 
 namespace slic3r_api::Support::Common {
 namespace {
 
 // Nozzle diameter of a zero-based extruder; an index past the end reads the first nozzle.
 double nozzle_diameter(const Config &print_config, uint32_t extruder_idx);
-// Smallest layer height of an extruder: the configured minimum, 0.07 mm when unset, rounded to z_step.
+// Smallest layer height of an extruder: the configured minimum through min_layer_height_mm(), rounded to z_step.
 double min_layer_height_from_nozzle(const Config &print_config, uint32_t extruder_idx, double z_step);
 // Largest layer height of an extruder: the configured maximum, 3/4 of the nozzle when unset, never below the minimum.
 double max_layer_height_from_nozzle(const Config &print_config, uint32_t extruder_idx, double z_step);
@@ -50,9 +60,9 @@ double nozzle_diameter(const Config &print_config, uint32_t extruder_idx)
 
 double min_layer_height_from_nozzle(const Config &print_config, uint32_t extruder_idx, double z_step)
 {
-    const double height = print_config.get("min_layer_height")
-                              .get_effective_value(nozzle_diameter(print_config, extruder_idx), extruder_idx);
-    return check_z_step_mm(height == 0 ? 0.07 : std::max(0.01, height), z_step);
+    const double nozzle = nozzle_diameter(print_config, extruder_idx);
+    const double height = print_config.get("min_layer_height").get_effective_value(nozzle, extruder_idx);
+    return check_z_step_mm(min_layer_height_mm(height, nozzle), z_step);
 }
 
 double max_layer_height_from_nozzle(const Config &print_config, uint32_t extruder_idx, double z_step)
@@ -63,7 +73,7 @@ double max_layer_height_from_nozzle(const Config &print_config, uint32_t extrude
     const double maximum = max_layer_height.get_effective_value(nozzle, extruder_idx);
     // Index -1 asks whether the option as a whole is enabled, like the native is_enabled().
     const bool enabled = config_option_is_enabled(max_layer_height.handle(), -1) != 0;
-    return check_z_step_mm(std::max(minimum, maximum == 0 || !enabled ? 0.75 * nozzle : maximum), z_step);
+    return check_z_step_mm(std::max(minimum, max_layer_height_mm(maximum, enabled, nozzle)), z_step);
 }
 
 uint32_t extruder_index(int32_t one_based)

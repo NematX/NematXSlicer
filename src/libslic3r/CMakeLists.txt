@@ -232,6 +232,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/gcode/Tool.cpp
 	Api/plugin/cpp/gcode/Tool.hpp
 	Api/plugin/cpp/KDTreeIndirect.hpp
+	Api/plugin/cpp/LayerHeightLimits.hpp
 	Api/plugin/cpp/LineDistancer.hpp
 	Api/plugin/cpp/MeshQueryViews.hpp
 	Api/plugin/cpp/OrderingEngine.hpp
