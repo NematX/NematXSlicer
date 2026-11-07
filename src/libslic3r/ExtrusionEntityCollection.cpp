@@ -12,7 +12,16 @@
 /* Const pointer-view access serializes cache validation and rebuilding with a scope-owned flag guard. Owned children remain
    immutable during concurrent reads; mutators retain the caller's exclusive-access requirement.
    reverse() inverts an entire caller-authorized unit, including fixed children
-   and their command phases, then clears the borrowed pointer-order cache. */
+   and their command phases, then clears the borrowed pointer-order cache.
+   swap() exchanges the complete nodes: identity, owned geometry, permissions,
+   properties and their detached resource buffers travel together. It requires
+   exclusive access and invalidates both pointer caches without allocating.
+   This differs from swap_content(), which preserves the two outer identities.
+
+       entities() -> EntitiesCacheLock -> rebuild_entities_cache()
+       reverse() -> reverse owned children and order -> invalidate pointer cache
+       swap() -> exchange properties/resources and node state -> invalidate both caches
+*/
 
 #include <algorithm>
 #include <thread>
@@ -131,9 +140,9 @@ void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
     src_children.clear();
 }
 
-// Exchange owned content, identity and ordering permissions, invalidating both borrowed pointer caches without allocation.
 void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
+    std::swap(static_cast<ExtrusionPropertyContainer &>(*this), static_cast<ExtrusionPropertyContainer &>(c));
     std::swap(this->m_content, c.m_content);
     std::swap(this->m_can_sort, c.m_can_sort);
     std::swap(this->m_can_reverse, c.m_can_reverse);

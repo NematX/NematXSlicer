@@ -12,7 +12,9 @@
    validated under a cache spin lock on every access; direct child queries need no pointer cache. Readers may run concurrently,
    while all mutations require exclusive access and invalidate borrowed views.
    Path and ring factories are declared on the base interface in ExtrusionEntity.hpp;
-   they accept collections too, but construct generic owned children. */
+   they accept collections too, but construct generic owned children.
+   swap() exchanges complete node identities and resources, unlike swap_content(),
+   which exchanges their content while retaining the two outer identities. */
 
 #include <atomic>
 
@@ -89,7 +91,8 @@ public:
     bool can_sort() const { return ExtrusionEntity::can_sort(); }
     bool can_reverse() const override { return can_sort() || this->m_can_reverse; }
     void clear();
-    // Exchange content, identity and ordering permissions and invalidate both borrowed pointer caches.
+    // Exchange content, identity, ordering permissions and owned properties with their resources; invalidate both pointer caches.
+    // Both trees require exclusive access; reacquire borrowed views after mutation. No allocation is performed.
     void swap (ExtrusionEntityCollection &c);
     void append(const ExtrusionEntity &entity) { this->append_child(ExtrusionEntityUPtr(entity.clone())); m_entities_cache.clear(); }
     void append(ExtrusionEntity &&entity) { this->append_child(ExtrusionEntityUPtr(entity.clone_move())); m_entities_cache.clear(); }

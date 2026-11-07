@@ -23,6 +23,9 @@
    allocation-dependent IDs before a deterministic trace is compared with its
    named immutable digest. These are not Clipper island-order goldens or evidence
    for callback routing and real generator outputs.
+   The complete-node swap probe separately checks transferred resource buffers,
+   their next IDs, live child handles and warmed pointer views. It is distinct
+   from content-only publication swaps, which retain the outer identities.
 
        TEST_CASE
            |-- make_leaf() -> mark_scope() [seed exact owned metadata]
@@ -74,6 +77,73 @@ void repopulate(ExtrusionEntityCollection &root);
 void record(const std::string &name, const Trace &trace, size_t expected_snapshots);
 
 } // namespace
+
+TEST_CASE("Publication swaps transfer owned property buffers and future resource IDs",
+          "[plugins][extrusion][native-publication]")
+{
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    ExtrusionEntityCollection destination;
+    std::unique_ptr<ExtrusionEntityCollection> source = std::make_unique<ExtrusionEntityCollection>();
+    destination.append_child(make_leaf(1, Point(0, 0), Point(1000, 0)));
+    source->append_child(make_leaf(2, Point(2000, 0), Point(3000, 0)));
+    const ExtrusionEntity *destination_child = destination.entities().front();
+    const ExtrusionEntity *source_child = source->entities().front();
+    const uint64_t destination_node_id = destination.get_id();
+    const uint64_t source_node_id = source->get_id();
+    destination.set_can_sort_reverse(false, false);
+    destination.set_can_rotate(false);
+    const std::string destination_text(180, 'd');
+    const std::string source_text(220, 's');
+    destination.add_property(ExtrusionPropertyCustomGcodeText("replaced"));
+    const extrusion_data_id destination_id = destination.add_property(ExtrusionPropertyCustomGcodeText(destination_text)).text_id;
+    const extrusion_data_id source_id = source->add_property(ExtrusionPropertyCustomGcodeText(source_text)).text_id;
+    REQUIRE(destination_id != source_id);
+    uint32_t destination_size = 0;
+    uint32_t source_size = 0;
+    const void *destination_buffer = Access::stored_data(destination, destination_id, &destination_size);
+    const void *source_buffer = Access::stored_data(*source, source_id, &source_size);
+    REQUIRE(destination_buffer != nullptr);
+    REQUIRE(source_buffer != nullptr);
+    CHECK(destination_size == destination_text.size() + 1);
+    CHECK(source_size == source_text.size() + 1);
+
+    destination.swap(*source);
+
+    CHECK(destination.get_id() == source_node_id);
+    CHECK(source->get_id() == destination_node_id);
+    CHECK(destination.can_sort());
+    CHECK(destination.can_reverse());
+    CHECK(destination.can_rotate());
+    CHECK_FALSE(source->can_sort());
+    CHECK_FALSE(source->can_reverse());
+    CHECK_FALSE(source->can_rotate());
+    REQUIRE(destination.entities().size() == 1);
+    REQUIRE(source->entities().size() == 1);
+    CHECK(destination.entities().front() == source_child);
+    CHECK(source->entities().front() == destination_child);
+
+    const ExtrusionPropertyCustomGcode *destination_property = destination.get_property<ExtrusionPropertyCustomGcode>();
+    const ExtrusionPropertyCustomGcode *source_property = source->get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(destination_property != nullptr);
+    REQUIRE(source_property != nullptr);
+    CHECK(destination_property->text_id == source_id);
+    CHECK(source_property->text_id == destination_id);
+    CHECK(destination.custom_gcode_string(*destination_property) == source_text);
+    CHECK(source->custom_gcode_string(*source_property) == destination_text);
+    CHECK(Access::stored_data(destination, source_id, &source_size) == source_buffer);
+    CHECK(Access::stored_data(*source, destination_id, &destination_size) == destination_buffer);
+    CHECK(source_size == source_text.size() + 1);
+    CHECK(destination_size == destination_text.size() + 1);
+
+    const std::string next_source_text(240, 'n');
+    CHECK(source->add_property(ExtrusionPropertyCustomGcodeText(next_source_text)).text_id == destination_id + 1);
+    CHECK(scope_text(*source) == next_source_text);
+    source.reset();
+    CHECK(scope_text(destination) == source_text);
+    const std::string next_destination_text(260, 'm');
+    CHECK(destination.add_property(ExtrusionPropertyCustomGcodeText(next_destination_text)).text_id == source_id + 1);
+    CHECK(scope_text(destination) == next_destination_text);
+}
 
 TEST_CASE("Native publication role queries retain separate Collection and base projections",
           "[plugins][extrusion][native-publication]")
