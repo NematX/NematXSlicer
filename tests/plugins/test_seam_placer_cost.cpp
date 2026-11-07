@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <fstream>
 #include <future>
@@ -30,6 +31,7 @@
 #include "libslic3r/Api/plugin/cpp/SeamPlacerViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/GCode/SeamPlacer.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -45,6 +47,7 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/TriangleSelector.hpp"
+#include "libslic3r/TriangleSetSampling.hpp"
 
 // Cost seam tests construct real placement sessions and model geometry to check candidate scoring, visibility and config defaults.
 
@@ -55,7 +58,26 @@ These focused checks exercise built-in metadata and published immutable
 sessions over real generated PrintingPlans. Functional cases ask the service
 adapter to validate every returned point, so line/arc projection cannot
 silently return a point outside the requested loop.
+
+Dedicated visibility cases carry [seam-visibility], which authorizes the real
+ray model without changing its density. Hidden guard probes are run by
+test_seam_visibility_guard.py in child processes: rejection exits before rays,
+and empty native inputs check permission without doing expensive work.
+
+    Visibility guard probes
+    |-- create_cost_session(): enter through an enabled regional setting
+    |-- SeamCostModel::calculate_cost_visibility(): enter from a worker
+    `-- SeamPlacerImpl::raycast_visibility(): enter the native compatibility path
 */
+
+namespace Slic3r::SeamPlacerImpl {
+// Native implementation entry from GCode/SeamPlacer.cpp. Empty inputs let the
+// subprocess probes test its gate before any raycasting or geometry access.
+std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &tree,
+                                     const indexed_triangle_set &triangles,
+                                     const TriangleSetSamples &samples,
+                                     size_t negative_volumes_start_index, bool deactivate);
+}
 
 namespace {
 
@@ -802,6 +824,53 @@ TEST_CASE("Plugin test defaults disable seam visibility in full and applied conf
     check_disabled(prepared.print.object(0).layer(0).region(0).region().config());
 }
 
+// The Python subprocess gate selects this before an unmarked probe to check
+// that one case's permission does not authorize a later case.
+TEST_CASE("Seam visibility authorized probe", "[.][seam-visibility]")
+{
+    SECTION("native") {
+        const AABBTreeIndirect::Tree<3, float> tree;
+        const indexed_triangle_set triangles;
+        const TriangleSetSamples samples{};
+        CHECK(Slic3r::SeamPlacerImpl::raycast_visibility(tree, triangles, samples, 0, false).empty());
+        std::puts("Authorized seam visibility probe completed");
+        std::fflush(stdout);
+    }
+}
+
+// Unmarked visibility must exit with code 71 before rays are cast. The Python
+// gate distinguishes that exit from crashes, timeouts and ordinary Catch errors.
+TEST_CASE("Seam visibility guard probe", "[.][seam-visibility-guard-probe]")
+{
+    SECTION("plugin") {
+        CostFixture fixture({{"seam_visibility", "1"}});
+        fixture.add(rectangle_loop(-5, -5, 5, 5), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+        const slic3r_api::SeamPlacer placer = create_cost_session(fixture.prepared.print);
+        FAIL("Unmarked Cost visibility was not blocked");
+    }
+    SECTION("worker") {
+        CostFixture fixture;
+        const slic3r_api::Object object(reinterpret_cast<const object_handle *>(fixture.object));
+        std::async(std::launch::async, [object] {
+            Slic3r::SeamCostModel::calculate_cost_visibility(object, {});
+        }).get();
+        FAIL("Worker visibility was not blocked");
+    }
+    SECTION("native") {
+        const AABBTreeIndirect::Tree<3, float> tree;
+        const indexed_triangle_set triangles;
+        const TriangleSetSamples samples{};
+        Slic3r::SeamPlacerImpl::raycast_visibility(tree, triangles, samples, 0, false);
+        FAIL("Unmarked native visibility was not blocked");
+    }
+    SECTION("native disabled") {
+        const AABBTreeIndirect::Tree<3, float> tree;
+        const indexed_triangle_set triangles;
+        const TriangleSetSamples samples{};
+        CHECK(Slic3r::SeamPlacerImpl::raycast_visibility(tree, triangles, samples, 0, true).empty());
+    }
+}
+
 TEST_CASE("Cost seam projects candidates and supports parallel placement",
           "[plugins][seam-placer][cost]")
 {
@@ -1420,7 +1489,7 @@ TEST_CASE("Cost seam prefers candidates embedded more than half a millimeter",
 }
 
 TEST_CASE("Cost seam visibility switch changes the selected model-facing point",
-          "[plugins][seam-placer][cost][visibility]")
+          "[plugins][seam-placer][cost][visibility][seam-visibility]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const ExtrusionEntity loop(false, ArcPolyline(Points{
@@ -1455,7 +1524,7 @@ TEST_CASE("Cost seam visibility switch changes the selected model-facing point",
 }
 
 TEST_CASE("Cost seam visibility reports local progress",
-          "[plugins][seam-placer][cost][progress]")
+          "[plugins][seam-placer][cost][progress][seam-visibility]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     CostFixture fixture({{"seam_visibility", "1"}, {"seam_angle_cost", "0"},
@@ -1477,7 +1546,7 @@ TEST_CASE("Cost seam visibility reports local progress",
 }
 
 TEST_CASE("Cost seam visibility samples at the legacy layer slice Z",
-          "[plugins][seam-placer][cost][visibility]")
+          "[plugins][seam-placer][cost][visibility][seam-visibility]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const ExtrusionEntity loop = rectangle_loop(-10, -10, 10, 10, true);
@@ -1653,7 +1722,7 @@ TEST_CASE("Cost seam sessions reject repeated initialization without changing st
 }
 
 TEST_CASE("Cost seam cancellation never publishes a partial session",
-          "[plugins][seam-placer][cost][cancellation]")
+          "[plugins][seam-placer][cost][cancellation][seam-visibility]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 

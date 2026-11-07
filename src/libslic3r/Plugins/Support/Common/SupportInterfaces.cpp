@@ -19,12 +19,23 @@
    The file has three entry points. project_interface_contacts() and carve_interfaces() build the interfaces, in this order for a family
    whose base slabs do not cover the contacts. expand_first_layer_foot() then widens the first base slab. The widening uses the
    finalized contacts and interfaces (it keeps the foot clear of those on the bed), so it runs after carve_interfaces().
-   The support ignores the brim and the skirt: it uses all the room it wants on the first layer. */
+    The support ignores the brim and the skirt: it uses all the room it wants on the first layer.
+    Projection and carving change polygons, not contact Z or contact order. Each
+    entry validates the enabled contact lists once before its base-slab loop.
+
+        project_interface_contacts() / carve_interfaces()
+        |-- assert_contact_order(): validate the binary-search precondition
+        `-- interface_contacts(): select reaching contacts for each base slab
+*/
 
 namespace slic3r_api::Support::Common {
 namespace {
 using Polys = StoredPolygonCollection;
 constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
+
+// Check the stable binary-search preconditions for lists that will be queried;
+// an empty base list or disabled interface side needs no sorted contacts.
+void assert_contact_order(const SupportParams &p, const GeneratedSupport &out);
 
 // Collect the top and bottom contacts whose interface windows reach base slab i, in the order of out.top and out.bottom.
 void interface_contacts(const SupportParams &p, const GeneratedSupport &out, size_t i, GeneratorLayers &top, GeneratorLayers &bottom);
@@ -33,6 +44,7 @@ void interface_contacts(const SupportParams &p, const GeneratedSupport &out, siz
 // Copy the footprints of the reaching contacts into each base slab; contacts keep their own footprints.
 void project_interface_contacts(const SupportParams &p, GeneratedSupport &out)
 {
+    assert_contact_order(p, out);
     for (size_t i = 0; i < out.base.size(); ++i) {
         GeneratorLayers top, bottom;
         interface_contacts(p, out, i, top, bottom);
@@ -44,6 +56,7 @@ void project_interface_contacts(const SupportParams &p, GeneratedSupport &out)
 // Unite the reaching contact footprints, intersect them with each base slab, and split the result into top and bottom interfaces.
 void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
 {
+    assert_contact_order(p, out);
     const ClipperContext clipper(out.storage);
     const double smoothing = p.interface_flow.spacing * 1.5;
     const double radius = p.interface_flow.spacing / p.interface_density;
@@ -128,6 +141,18 @@ void expand_first_layer_foot(const Object &object, const std::vector<Layer> &lay
 }
 
 namespace {
+void assert_contact_order(const SupportParams &p, const GeneratedSupport &out)
+{
+    assert(out.base.empty() || p.top_interfaces == 0 ||
+        std::is_sorted(out.top.begin(), out.top.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+    assert(out.base.empty() || p.bottom_interfaces == 0 ||
+        std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+}
+
 // Appends borrowed contacts in non-decreasing print Z: top contacts have print_z >= base.print_z and bottom_z <= the top
 // window's print_z; bottom contacts have print_z in [the bottom window's bottom_z, base.bottom_z]. Equal print Z is included.
 // i indexes out.base, result vectors borrow contacts, and allocation failures propagate.
@@ -136,9 +161,6 @@ void interface_contacts(const SupportParams &p, const GeneratedSupport &out, siz
     const GeneratorLayer &base = *out.base[i];
     if (p.top_interfaces > 0) {
         const coord_t z = out.base[std::min(out.base.size() - 1, i + p.top_interfaces - 1)]->print_z;
-        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
-            return a->print_z < b->print_z;
-        }));
         for (GeneratorLayers::const_iterator it = std::lower_bound(out.top.begin(), out.top.end(), base.print_z,
                  [](const GeneratorLayer *contact, coord_t value) { return contact->print_z < value; }); it != out.top.end(); ++it) {
             GeneratorLayer *contact = *it;
@@ -148,9 +170,6 @@ void interface_contacts(const SupportParams &p, const GeneratedSupport &out, siz
     }
     if (p.bottom_interfaces > 0) {
         const coord_t z = out.base[i + 1 > p.bottom_interfaces ? i + 1 - p.bottom_interfaces : 0]->bottom_z;
-        assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
-            return a->print_z < b->print_z;
-        }));
         const GeneratorLayers::const_iterator first = std::lower_bound(out.bottom.begin(), out.bottom.end(), z,
             [](const GeneratorLayer *contact, coord_t value) { return contact->print_z < value; });
         const GeneratorLayers::const_iterator end = std::upper_bound(first, out.bottom.end(), base.bottom_z,

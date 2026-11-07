@@ -6,6 +6,7 @@
 #include "SeamCostModel.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -20,10 +21,37 @@
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 
+/* Scalar seam costs and visibility sampling for built-in seam placement.
+   Angle and travel costs use local geometry. Visibility builds an object-space
+   mesh scene, samples its surface and casts rays before scoring candidates.
+   The optional observer runs before this work and does not alter sample density.
+
+       calculate_cost_visibility()
+       |-- check_visibility_calculation(): let the test runtime reject accidental work
+       |-- build_visibility_model(): own the scene, samples and search tree
+       `-- calculate_point_visibility(): interpolate costs for the requested points
+*/
+
 namespace Slic3r {
 namespace SeamCostModel {
 
 using namespace slic3r_api;
+
+namespace {
+std::atomic<VisibilityCalculationObserver> visibility_observer{nullptr};
+}
+
+void set_visibility_calculation_observer(VisibilityCalculationObserver observer)
+{
+    visibility_observer.store(observer, std::memory_order_release);
+}
+
+void check_visibility_calculation(const char *path)
+{
+    const VisibilityCalculationObserver observer = visibility_observer.load(std::memory_order_acquire);
+    if (observer != nullptr)
+        observer(path);
+}
 
 // Keep the legacy visibility density in every configuration. Changing the
 // sample count changes the selected seam, so Debug must use the same cost
@@ -324,6 +352,7 @@ std::vector<float> calculate_cost_visibility(const slic3r_api::Object &object,
                                              const mesh_query_cancel *cancel,
                                              const std::function<void(double)> &report_progress)
 {
+    check_visibility_calculation("plugin");
     VisibilityModel model;
     build_visibility_model(object, model, cancel, report_progress);
     std::vector<float> visibility;

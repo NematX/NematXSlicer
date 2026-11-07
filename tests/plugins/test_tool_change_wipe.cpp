@@ -7,6 +7,8 @@ Reader-derived statistics are checked against role/tool volumes and an
 explicit post-export CLI read, preserving source-layer areas and metadata.
 Overlapping model parts exercise typed surfaces and closed overhang fragments;
 materialized Travel connectors into synthetic towers need machine travel speed.
+Pressure-advance command checks use short 20 mm-wide boxes: they retain the first
+and normal-layer tool changes without generating a tall object for each option.
 
 Representative direct calls (branches are not a timeline):
 
@@ -2936,11 +2938,12 @@ TEST_CASE("Tool change exports the requested pressure advance",
     pressure_advance->set_enabled(enabled_tool1, 1);
     Print print;
     Model model;
-    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    Test::init_print({make_cube(20., 20., 1.4), make_cube(20., 20., 1.4)}, print, model, config);
     for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"})
         model.objects()[1].config.set_deserialize_strict(key, "2");
     print.apply(model, config);
     REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.object(0).layer_count() >= 3);
     const boost::filesystem::path checkout = boost::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
     const std::string path = (checkout / "build" / "temp" /
         (std::string("toolchange_pressure_advance_") + (semm ? "semm" : "multi") +
@@ -3054,11 +3057,12 @@ TEST_CASE("SEMM pressure advance carries no drive address",
     pressure_advance->set_enabled(true, 1);
     Print print;
     Model model;
-    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    Test::init_print({make_cube(20., 20., 1.4), make_cube(20., 20., 1.4)}, print, model, config);
     for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"})
         model.objects()[1].config.set_deserialize_strict(key, "2");
     print.apply(model, config);
     REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.object(0).layer_count() >= 3);
     const boost::filesystem::path checkout = boost::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
     const std::string path = (checkout / "build" / "temp" / "toolchange_pressure_advance_reprap.gcode").string();
     GCodeProcessorResult result;

@@ -408,3 +408,11 @@ if (TARGET python_plugin_loader)
 endif()
 
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "[plugins]" ${CATCH_EXTRA_ARGS})
+
+# Hidden probes intentionally stop their process, so a separate driver checks
+# the guard's status and diagnostic without aborting the ordinary plugin suite.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME plugins_seam_visibility_guard
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_seam_visibility_guard.py"
+        "$<TARGET_FILE:${_TEST_NAME}_tests>")
+set_tests_properties(plugins_seam_visibility_guard PROPERTIES TIMEOUT 180 LABELS "plugins;seam-visibility")

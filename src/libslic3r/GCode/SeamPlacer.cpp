@@ -40,6 +40,7 @@
 #include "libslic3r/TriangleSetSampling.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/PointUtils.hpp"
+#include "libslic3r/Plugins/SeamPlacer/SeamCostModel.hpp"
 
 //#define DEBUG_FILES
 
@@ -48,9 +49,31 @@
 #include "libslic3r/SVG.hpp"
 #endif
 
+/* Retained native seam placement prepares model occlusion, gathers perimeter
+   candidates and scores or aligns them for the legacy G-code path. Visibility
+   uses the same optional test observer as the plugin seam model; disabled
+   visibility does not require permission.
+
+       SeamPlacer::init()
+       |-- compute_global_occlusion(): check permission before preparing enabled visibility
+       |   `-- raycast_visibility(): check permission before casting rays
+       |-- gather_seam_candidates(): collect perimeter points
+       `-- calculate_candidates_visibility(): score those points from the model
+*/
+
 namespace Slic3r {
 
 namespace SeamPlacerImpl {
+
+// Cast the unchanged hemisphere grid, or return unit visibility when disabled.
+// The optional observer checks permission before enabled raycasting begins.
+std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &raycasting_tree,
+        const indexed_triangle_set &triangles, const TriangleSetSamples &samples,
+        size_t negative_volumes_start_index, bool deactivate);
+// Transform and sample the model, then compute occlusion. Enabled visibility
+// is checked before mesh preparation as well as at the raycasting entry.
+void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po,
+        std::function<void(void)> throw_if_canceled);
 
 std::map<std::pair<const ModelVolume*, const ModelInstance*>, TriangleMeshForSeam> cache_volume_to_bb;
 
@@ -144,12 +167,13 @@ Vec3f sample_power_cosine_hemisphere(const Vec2f &samples, float power) {
     return Vec3f(cos(term1) * term3, sin(term1) * term3, term2);
 }
 
-// raycast evrything and store the weight, or set everything to 1 if 'deactivate'
 std::vector<float> raycast_visibility(const AABBTreeIndirect::Tree<3, float> &raycasting_tree,
         const indexed_triangle_set &triangles,
         const TriangleSetSamples &samples,
         size_t negative_volumes_start_index,
         bool deactivate) {
+    if (!deactivate)
+        SeamCostModel::check_visibility_calculation("native");
     BOOST_LOG_TRIVIAL(debug)
     << "SeamPlacer: raycast visibility of " << samples.positions.size() << " samples over " << triangles.indices.size()
             << " triangles: end";
@@ -779,9 +803,14 @@ std::pair<size_t, size_t> find_previous_and_next_perimeter_point(const std::vect
     return {size_t(prev),size_t(next)};
 }
 
-// Computes all global model info - transforms object, performs raycasting
 void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po,
         std::function<void(void)> throw_if_canceled) {
+    const ConfigOption *visibility_option = po->config().option("seam_visibility");
+    const bool has_seam_visibility = visibility_option != nullptr && visibility_option->is_enabled() &&
+        visibility_option->type() == coBool && visibility_option->get_bool() &&
+        po->config().seam_position.value == SeamPosition::spCost;
+    if (has_seam_visibility)
+        SeamCostModel::check_visibility_calculation("native");
     BOOST_LOG_TRIVIAL(debug)
     << "SeamPlacer: gather occlusion meshes: start";
     auto obj_transform = po->trafo_centered();
@@ -855,10 +884,6 @@ void compute_global_occlusion(GlobalModelInfo &result, const PrintObject *po,
     throw_if_canceled();
     BOOST_LOG_TRIVIAL(debug)
     << "SeamPlacer: build AABB tree: end";
-    const ConfigOption *visibility_option = po->config().option("seam_visibility");
-    const bool has_seam_visibility = visibility_option != nullptr && visibility_option->is_enabled() &&
-        visibility_option->type() == coBool && visibility_option->get_bool() &&
-        po->config().seam_position.value == SeamPosition::spCost;
     result.mesh_samples_visibility = raycast_visibility(raycasting_tree, triangle_set, result.mesh_samples,
             negative_volumes_start_index, !has_seam_visibility);
     throw_if_canceled();

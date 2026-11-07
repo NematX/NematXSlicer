@@ -167,7 +167,7 @@ TEST_CASE("Mesh query sampling and hits agree with the native engine", "[plugins
     CHECK(traversal_hits[1].distance == Approx(20));
     CHECK(traversal_hits[1].triangle_id == 0);
 }
-TEST_CASE("Mesh query visibility retains the native cost policy", "[plugins][mesh-queries][seam-cost]") {
+TEST_CASE("Mesh query visibility retains the native cost policy", "[plugins][mesh-queries][seam-cost][seam-visibility]") {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Model model;
     Slic3r::Print print;

@@ -57,7 +57,15 @@
 
    The native ExPolygons booleans (diff_ex, intersection_ex, union_ex) drop
    small rings and unite the rest again; Common::native_expolygons() does the
-   same. The AGG raster works on plain point copies. */
+    same. The AGG raster works on plain point copies. Contact lists keep their
+    print-Z order while base slabs are trimmed, so that invariant is checked
+    once before the slab loop; overlap checks remain specific to each slab.
+
+        base_layers()
+        |-- validate contact print-Z order
+        |-- select and trim each base slab
+        `-- trim_by_object(): enforce the model clearance
+*/
 
 namespace slic3r_api::Support::Grid {
 namespace {
@@ -410,14 +418,18 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out)
 {
     const ClipperContext &clipper = run.clipper;
+    // This loop changes polygons, not contact Z or list order.
+    assert(out.base.empty() || std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+        return a->print_z < b->print_z;
+    }));
+    assert(out.base.empty() || std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+        return a->print_z < b->print_z;
+    }));
     for (Common::GeneratorLayer *base : out.base) {
         const std::vector<Layer>::const_iterator above = std::upper_bound(run.layers.begin(), run.layers.end(), base->print_z,
             [](coord_t z, const Layer &layer) { return z < layer.print_z(); });
         const int below = int(above - run.layers.begin()) - 1;
         Polys polys = (below < 0 ? areas.front() : areas[below]).readonly().clone(run.storage);
-        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
-            return a->print_z < b->print_z;
-        }));
         if (below < 0)
             for (Common::GeneratorLayers::const_iterator it = out.top.cbegin(), end = std::upper_bound(out.top.cbegin(), out.top.cend(), run.layers[0].print_z(),
                      [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != end; ++it) {
@@ -432,18 +444,12 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, Common::Genera
         assert(std::all_of(out.bottom.begin(), out.bottom.end(), [base](const Common::GeneratorLayer *bottom) {
             return !(base->print_z > bottom->print_z + SCALED_EPSILON && base->bottom_z < bottom->print_z - SCALED_EPSILON);
         }));
-        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
-            return a->print_z < b->print_z;
-        }));
         for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.top.cbegin(), out.top.cend(), base->bottom_z,
                  [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.top.cend(); ++it) {
             const Common::GeneratorLayer *top = *it;
             if (top->bottom_z < base->print_z && top->print_z > base->bottom_z &&
                 base->print_z <= top->print_z && base->bottom_z >= top->bottom_z) trimming.append_copy_from(top->polygons);
         }
-        assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
-            return a->print_z < b->print_z;
-        }));
         for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.bottom.cbegin(), out.bottom.cend(), base->bottom_print_z(),
                  [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.bottom.cend(); ++it) {
             const Common::GeneratorLayer *bottom = *it;

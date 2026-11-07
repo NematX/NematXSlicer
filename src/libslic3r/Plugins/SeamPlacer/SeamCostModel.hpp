@@ -10,6 +10,10 @@ This private implementation surface contains the scalar and geometric costs
 used by the built-in Cost seam provider. The model deliberately lives beside
 the provider: it has no dependency on the legacy GCode seam placer and is not
 part of the plugin ABI.
+
+An optional process-wide observer gates visibility work in test executables.
+Install it before starting workers; it must remain callable until all workers
+finish. Ordinary applications leave it unset and retain the same cost model.
 */
 
 #ifndef libslic3r_Plugins_SeamPlacer_SeamCostModel_hpp_
@@ -27,6 +31,14 @@ class Object;
 
 namespace Slic3r {
 namespace SeamCostModel {
+
+// Called before visibility preparation or raycasting; path identifies the caller.
+// A test observer may reject the work. It must be safe to call from worker threads.
+using VisibilityCalculationObserver = void (*)(const char *path);
+// Replace the observer outside active calculations; nullptr leaves visibility unrestricted.
+void set_visibility_calculation_observer(VisibilityCalculationObserver observer);
+// Invoke the installed observer, if any, before entering an expensive visibility stage.
+void check_visibility_calculation(const char *path);
 
 struct WeightedSplinePoint {
     double x = 0;

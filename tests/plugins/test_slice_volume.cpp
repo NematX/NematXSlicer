@@ -11,7 +11,17 @@
    Each dump is made twice from scratch and the two must be equal before anything is written or compared.
 
        $env:SLIC3R_SLICING_DUMP="<root>\build\temp\slicing-baseline\baseline.txt"
-       plugins_tests "[slicing-dump]" */
+       plugins_tests "[slicing-dump]"
+
+   Native/API parity has a separate case per mesh and mirror variant, so process
+   runners can distribute them. Every case retains the full parameter matrix
+   and uses one thread on both sides to keep ring start points deterministic.
+
+       slicing parity case
+       `-- check_helper_slicing()
+           |-- native_slices(): reference for all parameter settings
+           `-- slice_to_expolygons(): public API checked against that reference
+*/
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -364,6 +374,10 @@ struct HelperParams {
     double resolution;
 };
 
+// Compare all unchanged parameter settings for one mesh/mirror pair, with one
+// thread on both sides and a nonempty-result check local to that pair.
+void check_helper_slicing(const char *name, bool mirror);
+
 // The parameters of the identity test: every mode, the closing / extra offset branches (both signs), the mode below a layer,
 // the model resolution and the resolution, and distances smaller than one scaled unit (they truncate to 0 or to a unit).
 const std::vector<HelperParams> &helper_param_cases()
@@ -529,45 +543,76 @@ constexpr size_t cancel_layer_count = 12;
 // publishing.
 constexpr int raw_slice_checks = 5;
 
-} // namespace
-
-TEST_CASE("slice_to_expolygons helper is identical to the native slicing", "[plugins][slice-volume][slicing-helper]")
+void check_helper_slicing(const char *name, bool mirror)
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    struct MeshCase {
-        const char *name;
-        bool mirror;
-    };
-    const std::vector<MeshCase> meshes{{"A", false}, {"extruder_idler", false}, {"sloping_hole", false},
-                                       {"cube_with_concave_hole", false}, {"two_hollow_squares", false}, {"overhang", false},
-                                       {"A", true}, {"extruder_idler", true}};
     // One thread on both sides: the native slicer chains its segments in a parallel loop, so the first point of a ring varies otherwise.
     tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
     tbb::task_arena arena(1);
     size_t expolygon_total = 0, comparisons = 0;
     arena.execute([&] {
-        for (const MeshCase &mesh_case : meshes) {
-            const TriangleMesh mesh = slicing_dump_mesh(mesh_case.name);
-            const slic3r_api::TriangleMesh view(reinterpret_cast<const triangle_mesh_handle *>(&mesh));
-            for (const HelperParams &settings : helper_param_cases()) {
-                const c_mesh_slicing_params params = helper_slicing_params(settings, mesh_case.mirror);
-                const std::vector<float> zs = helper_slice_zs(mesh, params, 14);
-                const std::vector<ExPolygons> native = native_slices(mesh, params, zs);
-                PluginStorage storage;
-                const std::vector<slic3r_api::StoredExPolygonCollection> api =
-                    view.slice_to_expolygons(reinterpret_cast<storage_handle *>(&storage), params, zs, nullptr);
-                const std::string difference = compare_helper_slices(native, api);
-                INFO(mesh_case.name << (mesh_case.mirror ? " mirrored" : "") << ", parameters #"
-                     << (&settings - helper_param_cases().data()));
-                CHECK(difference == "");
-                ++comparisons;
-                for (const slic3r_api::StoredExPolygonCollection &layer : api)
-                    expolygon_total += layer.size();
-            }
+        const TriangleMesh mesh = slicing_dump_mesh(name);
+        const slic3r_api::TriangleMesh view(reinterpret_cast<const triangle_mesh_handle *>(&mesh));
+        for (const HelperParams &settings : helper_param_cases()) {
+            const c_mesh_slicing_params params = helper_slicing_params(settings, mirror);
+            const std::vector<float> zs = helper_slice_zs(mesh, params, 14);
+            const std::vector<ExPolygons> native = native_slices(mesh, params, zs);
+            PluginStorage storage;
+            const std::vector<slic3r_api::StoredExPolygonCollection> api =
+                view.slice_to_expolygons(reinterpret_cast<storage_handle *>(&storage), params, zs, nullptr);
+            const std::string difference = compare_helper_slices(native, api);
+            INFO(name << (mirror ? " mirrored" : "") << ", parameters #"
+                 << (&settings - helper_param_cases().data()));
+            CHECK(difference == "");
+            ++comparisons;
+            for (const slic3r_api::StoredExPolygonCollection &layer : api)
+                expolygon_total += layer.size();
         }
     });
     // The slices must not be empty, or the comparison would prove nothing.
     CHECK(expolygon_total > comparisons * 5);
+}
+} // namespace
+
+// Each case runs the full parameter matrix and rejects vacuous results.
+TEST_CASE("slice_to_expolygons matches native slicing (A)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("A", false);
+}
+// Keep the detailed idler mesh as its own scheduling unit.
+TEST_CASE("slice_to_expolygons matches native slicing (extruder_idler)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("extruder_idler", false);
+}
+// Preserve the sloped-hole geometry across every slicing mode.
+TEST_CASE("slice_to_expolygons matches native slicing (sloping_hole)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("sloping_hole", false);
+}
+// Preserve concave-hole coverage across every slicing mode.
+TEST_CASE("slice_to_expolygons matches native slicing (cube_with_concave_hole)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("cube_with_concave_hole", false);
+}
+// Preserve multiple hollow components across every slicing mode.
+TEST_CASE("slice_to_expolygons matches native slicing (two_hollow_squares)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("two_hollow_squares", false);
+}
+// Preserve the overhang mesh across every slicing mode.
+TEST_CASE("slice_to_expolygons matches native slicing (overhang)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("overhang", false);
+}
+// Keep negative-determinant transform coverage for the letter mesh.
+TEST_CASE("slice_to_expolygons matches native slicing (A mirrored)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("A", true);
+}
+// Keep negative-determinant transform coverage for the detailed idler mesh.
+TEST_CASE("slice_to_expolygons matches native slicing (extruder_idler mirrored)", "[plugins][slice-volume][slicing-helper]")
+{
+    check_helper_slicing("extruder_idler", true);
 }
 
 TEST_CASE("slice_to_expolygons helper handles an empty list of layers", "[plugins][slice-volume][slicing-helper]")

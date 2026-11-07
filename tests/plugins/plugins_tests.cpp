@@ -2,6 +2,13 @@
 // initializes the shared plugin test runtime before any test case runs.
 // SLIC3R_TEST_TIMINGS optionally selects an append-only TSV with flushed started/ended records per case. Fields are
 // event, escaped name, escaped source file, line, steady-clock milliseconds, status, passed/failed/allowed assertions, pid.
+// Visibility raytracing is forbidden unless the current case explicitly carries [seam-visibility]. The observer runs in
+// either the plugin or native path, including workers, and exits with code 71 so a broad exception assertion cannot hide it.
+//
+//     PluginTestRuntimeListener
+//     |-- testRunStarting(): install the visibility observer and initialize plugin defaults
+//     |-- testCaseStarting(): set this case's explicit permission
+//     `-- testCaseEnded(): revoke permission before the next case
 //
 // This file also holds a test-only crash diagnostic, active only when the environment variable
 // SLIC3R_CRASH_TRACE is set (nothing is installed otherwise):
@@ -241,8 +248,12 @@ CATCH_REGISTER_LISTENER(HeapCheckListener)
 #endif // _WIN32
 
 #include "plugin_test_helpers.hpp"
+#include "libslic3r/Plugins/SeamPlacer/SeamCostModel.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -255,6 +266,23 @@ CATCH_REGISTER_LISTENER(HeapCheckListener)
 #endif
 
 namespace {
+
+// Reject unmarked visibility work on any thread; the process exit cannot be swallowed by a tested error handler.
+void guard_seam_visibility(const char *path);
+
+std::atomic<bool> visibility_allowed{false};
+std::atomic<const char *> visibility_test_name{"(startup)"};
+
+void guard_seam_visibility(const char *path)
+{
+    if (visibility_allowed.load(std::memory_order_acquire))
+        return;
+    std::fprintf(stderr, "Forbidden seam visibility calculation (%s) in test '%s'. "
+        "Only dedicated visibility tests may use [seam-visibility].\n",
+        path, visibility_test_name.load(std::memory_order_acquire));
+    std::fflush(stderr);
+    std::_Exit(71);
+}
 
 // Optional per-process TSV timing output: escaped name/file fields preserve tabs, newlines and backslashes. Start/end rows
 // are flushed separately so interrupted cases remain identifiable; the listener owns its stream and monotone start time.
@@ -351,9 +379,28 @@ public:
     // state before cases; registration exceptions propagate and missing plugins log then assert.
     void testRunStarting(const Catch::TestRunInfo &) override
     {
+        Slic3r::SeamCostModel::set_visibility_calculation_observer(&guard_seam_visibility);
         Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     }
+
+    // Catch owns the case name throughout execution; workers may read it while this case is active.
+    void testCaseStarting(const Catch::TestCaseInfo &info) override;
+    // Revoke this case's permission before the next case or any teardown work outside it.
+    void testCaseEnded(const Catch::TestCaseStats &) override;
 };
+
+void PluginTestRuntimeListener::testCaseStarting(const Catch::TestCaseInfo &info)
+{
+    visibility_test_name.store(info.name.c_str(), std::memory_order_release);
+    visibility_allowed.store(std::find(info.tags.begin(), info.tags.end(), "seam-visibility") != info.tags.end(),
+                             std::memory_order_release);
+}
+
+void PluginTestRuntimeListener::testCaseEnded(const Catch::TestCaseStats &)
+{
+    visibility_allowed.store(false, std::memory_order_release);
+    visibility_test_name.store("(between tests)", std::memory_order_release);
+}
 
 CATCH_REGISTER_LISTENER(PluginTestRuntimeListener)
 
