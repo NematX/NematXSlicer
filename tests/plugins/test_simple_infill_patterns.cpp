@@ -32,12 +32,64 @@ Honeycomb, 3D honeycomb, Hilbert curve, Archimedean chords and octagram spiral
 are standalone INFILL_PATTERN plugins. These tests exercise STEP_INFILL end to
 end: they build a sliced cube, run perimeter and surface generation, then run
 the infill step with only the plugins it needs.
+
+The registration case also covers line, concentric and the rectilinear family,
+including grid, triangles, stars, cubic and the hidden supportbase provider.
+Generation cases inspect published infill for grid, line and concentric. A
+recipe modifier redirects sparse non-bridge recipes to supportbase and checks
+both pattern resolution and publication in the SUPPORT bucket.
+
+Hole cases replace the sliced layers by ring cross-sections and sample the
+published leaf-path segments against their fill surfaces; joining paths across
+the empty hole must be detected. Honeycomb cases compare sorted interior points
+between unchanged and shifted layer cross-sections, so boundary clipping and
+path order do not hide a lattice shift. ScopedActivePlugins restores the prior
+plugin selection after each restricted generation run.
+
+The test cases have distinct preparation and inspection phases:
+
+    Registration case
+    `-- initialize the runtime; look up each listed provider and check INFILL_PATTERN
+
+    Generation and supportbase cases
+    |-- prepare_cube_print() with the requested sparse pattern
+    |-- activate the required perimeter, surface, infill and pattern plugins
+    |-- run_until_infill()
+    |   |-- clear and run StepGeneratePerimeter
+    |   |-- clear and run StepSurfaceGeneration
+    |   `-- clear and run StepGenerateInfill
+    |       `-- SupportBaseSelector modifies sparse recipes in the supportbase case
+    `-- after return, count_infill_paths() or count_support_paths()
+        `-- count_paths_in_bucket() measures shallow output in INFILLS or SUPPORT
+
+    Hole cases
+    |-- prepare_cube_print(), then replace_all_layer_islands() with a square-hole ring
+    |-- select the tested pattern and run_until_infill()
+    |-- require more than one counted infill item
+    |-- count_infill_paths_crossing_holes()
+    |   |-- walk extrusion children recursively to their printable leaves
+    |   |-- sample each segment at its ends and quarter intervals
+    |   `-- count paths with a sample outside all region-island fill surfaces
+    `-- require that crossing count to be zero
+
+    Honeycomb alignment cases
+    |-- prepare reference and shifted-second-layer cross-sections separately
+    |-- run_until_infill() for each prepared print
+    |-- interior_infill_points() after each run
+    |   `-- collect and sort interior leaf-path points from layer one
+    `-- require enough reference points and equal point sets
 */
 
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
 
 namespace {
+
+// Count one path per ungrouped entity and the direct children of each logical group in the selected bucket.
+// This shallow count does not recurse through nested groups or count all leaf paths.
+// INFILLS and SUPPORT checks use it to require output; hole cases require more than
+// one counted item, then inspect leaf-path geometry separately for crossings.
+size_t count_paths_in_bucket(const Print &print, ExtrusionRole role);
 
 constexpr const char *SUPPORT_BASE_SELECTOR = "tests.infill.supportbase_selector";
 const char *k_no_dependencies[] = { nullptr };
@@ -172,8 +224,7 @@ size_t count_paths_in_bucket(const Print &print, const ExtrusionRole role)
                     if (!region_island.has_extrusion(role))
                         continue;
                     for (const ExtrusionEntity *entity : region_island.extrusion(role).entities())
-                        paths += entity->is_collection() ?
-                            static_cast<const ExtrusionEntityCollection *>(entity)->entities().size() : 1;
+                        paths += entity->is_collection() ? entity->child_count() : 1;
                 }
     return paths;
 }
