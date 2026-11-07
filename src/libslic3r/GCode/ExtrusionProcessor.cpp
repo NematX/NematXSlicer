@@ -12,7 +12,36 @@
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintRegion.hpp"
 
+/* Estimate geometric support and curled-edge proximity, split native extrusion
+   paths into overhang fragments, and resolve their speed and flow limits. The
+   root overload borrows any non-leaf ExtrusionEntity, but dispatches only native
+   Path, Loop, MultiPath and Collection descendants. Generic descendants remain
+   rejected rather than silently omitted. Root properties are not inherited into
+   the result; queried ordering and rotation permissions are retained.
+
+   Each result owns independent path geometry and properties. Direct paths with
+   local Z offsets bypass splitting. Neither source geometry nor source handles
+   change, and processing or allocation errors propagate to the caller.
+
+       calculate_and_split_overhanging_extrusions(root)
+           |-- native Collection: recurse through its borrowed children
+           |-- native Loop/MultiPath: rebuild native paths in source order
+           `-- native Path: calculate_and_split_overhanging_extrusions(path)
+               `-- estimate_points_properties() [support distance and curled proximity]
+       calculate_overhang_speed() [resolve speed ratio and fan demand]
+       apply_overhang_flow() [update the fragment's regional flow]
+*/
+
 namespace Slic3r { namespace ExtrusionProcessor {
+
+// Split recognized native children of a borrowed non-leaf root into an independently owned Collection.
+// Keep queried ordering permissions, not root properties. Copy direct ExtrusionPath children with Z offsets without splitting.
+// Reject other child types; processing errors propagate.
+ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(
+    const ExtrusionEntity                         &ecc,
+    const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
+    const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
+    const double &nozzle_diameter);
 
 //
 //class CalculateAndSliptOverhangingExtrusionsVisitor : public ExtrusionVisitorConst {
@@ -200,18 +229,19 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
 //    double get(const ExtrusionEntityCollection &coll);
 //};
 
-// Split a nonnull borrowed collection into owned overhang paths while retaining its ordering permissions; geometry errors propagate.
-ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const ExtrusionEntityCollection            *ecc,
+ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const ExtrusionEntity                         &ecc,
                                                                      const AABBTreeLines::LinesDistancer<Linef> &unscaled_prev_layer,
                                                                      const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
                                                                      const double &nozzle_diameter)
 {
     ExtrusionEntityCollection result{};
-    result.set_can_sort_reverse(ecc->can_sort(), ecc->can_reverse());
-    result.set_can_rotate(ecc->can_rotate());
-    for (const auto *e : ecc->entities()) {
+    result.set_can_sort_reverse(ecc.can_sort(), ecc.can_reverse());
+    result.set_can_rotate(ecc.can_rotate());
+    assert(!ecc.is_leaf());
+    for (const ExtrusionEntityUPtr &child : ecc.children()) {
+        const ExtrusionEntity *e = child.get();
         if (auto *col = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
-            result.append(calculate_and_split_overhanging_extrusions(col, unscaled_prev_layer, prev_layer_curled_lines, nozzle_diameter));
+            result.append(calculate_and_split_overhanging_extrusions(*col, unscaled_prev_layer, prev_layer_curled_lines, nozzle_diameter));
         } else if (auto *loop = dynamic_cast<const ExtrusionLoop *>(e)) {
 #ifdef _DEBUG
     Point last_pt = loop->last_point();

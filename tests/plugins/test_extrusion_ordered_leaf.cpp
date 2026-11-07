@@ -35,6 +35,7 @@ previews distinguish the rounded input from the exact point they will publish.
 Ordinary-copy tests retain native descendants and distinguish root destruction effects.
 Loop-builder probes reject short polygons before invariant checks and preserve
 borrowed point arrays, while consuming overloads clear all processed inputs.
+Direct overhang tests compare copied native descendants and the exact fields of numeric fragments.
 Flattening tests distinguish whole-wrapper appends from child prefixes. Donation materializes local geometry as an owned child.
 */
 
@@ -65,6 +66,7 @@ Flattening tests distinguish whole-wrapper appends from child prefixes. Donation
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
+#include "libslic3r/GCode/ExtrusionProcessor.hpp"
 
 namespace {
 
@@ -75,6 +77,12 @@ slic3r_api::MutableExtrusionEntity mutable_view(Slic3r::ExtrusionEntity &entity)
 void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &copy);
 // Compare independently owned stored state, retaining the dynamic types of descendants but not requiring the same root shell.
 void check_ordinary_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &copy);
+// Build a native fixture path with optional dynamic overhang fields and an explicit Z profile.
+Slic3r::ExtrusionPath overhang_fixture_path(const Slic3r::Points &points, bool dynamic, bool with_z);
+// Record the flat native result's full attributes, overhang fields and geometry with trace-local identity names.
+// Reject other properties or shapes rather than silently omitting state; inputs remain borrowed and unchanged.
+std::string overhang_fragment_state(const Slic3r::ExtrusionEntityCollection &result,
+                                    const std::array<uint64_t, 2> &source_ids);
 // Copy borrowed points without modifying them into an owned native Path with complete attributes; construction failures propagate.
 Slic3r::ExtrusionPath flatten_fixture_path(const Slic3r::Points &points);
 // Return an owned discontinuous native tree with the requested root sorting permission; construction failures propagate.
@@ -1845,6 +1853,187 @@ TEST_CASE("Invalid ordered leaf arguments leave the entity unchanged",
     CHECK(root.child_count() == 0);
     CHECK(root.get_property<Slic3r::ExtrusionPropertySpeed>() != nullptr);
 }
+
+TEST_CASE("Native overhang root processing preserves dispatch copies and numeric fragments",
+          "[plugins][extrusion][native-overhang-root]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    const std::vector<Linef> rectangle{
+        Linef(Vec2d(-2., -2.), Vec2d(2., -2.)), Linef(Vec2d(2., -2.), Vec2d(2., 2.)),
+        Linef(Vec2d(2., 2.), Vec2d(-2., 2.)), Linef(Vec2d(-2., 2.), Vec2d(-2., -2.))};
+    const AABBTreeLines::LinesDistancer<Linef> previous(rectangle);
+    const AABBTreeLines::LinesDistancer<CurledLine> no_curled;
+    const double nozzle = 0.4;
+
+    SECTION("empty root projects permissions but not direct root properties")
+    {
+        ExtrusionEntityCollection source(false, true);
+        source.set_can_rotate(false);
+        source.add_property(ExtrusionPropertySpeed(19.f));
+        const ExtrusionEntityCollection before(source);
+        const ExtrusionEntity &borrowed_source = source;
+        const ExtrusionEntityCollection result =
+            ExtrusionProcessor::calculate_and_split_overhanging_extrusions(borrowed_source, previous, no_curled, nozzle);
+        CHECK(result.child_count() == 0);
+        CHECK(result.can_sort() == source.can_sort());
+        CHECK(result.can_reverse() == source.can_reverse());
+        CHECK(result.can_rotate() == source.can_rotate());
+        CHECK(result.get_id() != source.get_id());
+        CHECK(Access::property_count(result) == 0);
+        check_ordinary_copy(source, before);
+    }
+    SECTION("mixed native children retain their order types and exact copies including Z bypass")
+    {
+        ExtrusionEntityCollection source(false, false);
+        source.set_can_rotate(false);
+        source.add_property(ExtrusionPropertySpeed(23.f));
+        source.append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false)));
+        source.append_child(std::make_unique<ExtrusionLoop>(overhang_fixture_path(
+            Points{{0, 0}, {scale_i(1.), 0}, {scale_i(1.), scale_i(1.)}, {0, 0}}, false, false)));
+        const ExtrusionPaths joined{
+            overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false),
+            overhang_fixture_path(Points{{scale_i(1.), 0}, {scale_i(2.), 0}}, false, false)};
+        source.append_child(std::make_unique<ExtrusionMultiPath>(joined));
+        std::unique_ptr<ExtrusionEntityCollection> nested = std::make_unique<ExtrusionEntityCollection>(true, false);
+        nested->set_can_rotate(false);
+        nested->add_property(ExtrusionPropertySpeed(29.f));
+        nested->append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{0, 0}, {0, scale_i(1.)}}, false, false)));
+        source.append_child(std::move(nested));
+        source.append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{scale_i(-3.), 0}, {scale_i(3.), 0}}, true, true)));
+        REQUIRE(source.child_count() == 5);
+        const std::array<const ExtrusionEntity *, 5> addresses{
+            &source.child(0), &source.child(1), &source.child(2), &source.child(3), &source.child(4)};
+        const ExtrusionEntityCollection before(source);
+        const ExtrusionEntity &borrowed_source = source;
+        const ExtrusionEntityCollection result =
+            ExtrusionProcessor::calculate_and_split_overhanging_extrusions(borrowed_source, previous, no_curled, nozzle);
+        REQUIRE(result.child_count() == 5);
+        CHECK(result.get_id() != source.get_id());
+        CHECK(result.can_sort() == source.can_sort());
+        CHECK(result.can_reverse() == source.can_reverse());
+        CHECK(result.can_rotate() == source.can_rotate());
+        CHECK(Access::property_count(result) == 0);
+        for (const size_t index : {size_t(0), size_t(1), size_t(2), size_t(4)}) {
+            CHECK(typeid(result.child(index)) == typeid(source.child(index)));
+            check_ordinary_copy(source.child(index), result.child(index));
+        }
+        REQUIRE(typeid(result.child(3)) == typeid(ExtrusionEntityCollection));
+        REQUIRE(result.child(3).child_count() == 1);
+        CHECK(result.child(3).get_id() != source.child(3).get_id());
+        CHECK(result.child(3).can_sort() == source.child(3).can_sort());
+        CHECK(result.child(3).can_reverse() == source.child(3).can_reverse());
+        CHECK(result.child(3).can_rotate() == source.child(3).can_rotate());
+        CHECK(Access::property_count(result.child(3)) == 0);
+        check_ordinary_copy(source.child(3).child(0), result.child(3).child(0));
+        check_ordinary_copy(source, before);
+        for (size_t index = 0; index < addresses.size(); ++index)
+            CHECK(&source.child(index) == addresses[index]);
+    }
+    SECTION("real planar fragments are independent and survive their input owners")
+    {
+        const AABBTreeLines::LinesDistancer<CurledLine> curled(std::vector<CurledLine>{
+            CurledLine(Point(scale_i(2.25), scale_i(-1.)), Point(scale_i(2.25), scale_i(1.)), 0.3f)});
+        for (const bool with_curled : {false, true}) {
+            CAPTURE(with_curled);
+            std::unique_ptr<ExtrusionEntityCollection> result;
+            std::array<uint64_t, 2> source_ids;
+            std::string state;
+            {
+                ExtrusionEntityCollection source(false, false);
+                source.set_can_rotate(false);
+                source.append_child(std::make_unique<ExtrusionPath>(overhang_fixture_path(
+                    Points{{scale_i(-3.), 0}, {0, 0}, {scale_i(3.), 0}}, true, false)));
+                const ExtrusionEntity *address = &source.child(0);
+                source_ids = {source.get_id(), address->get_id()};
+                const ExtrusionEntityCollection before(source);
+                const ExtrusionEntity &borrowed_source = source;
+                result = std::make_unique<ExtrusionEntityCollection>(
+                    ExtrusionProcessor::calculate_and_split_overhanging_extrusions(
+                        borrowed_source, previous, with_curled ? curled : no_curled, nozzle));
+                REQUIRE(result->child_count() > 0);
+                CHECK(result->get_id() != source.get_id());
+                const ExtrusionPath *first = dynamic_cast<const ExtrusionPath *>(&result->child(0));
+                const ExtrusionPath *last = dynamic_cast<const ExtrusionPath *>(&result->child(result->child_count() - 1));
+                REQUIRE(first != nullptr);
+                REQUIRE(last != nullptr);
+                CHECK(first->first_point() == Point(scale_i(-3.), 0));
+                CHECK(last->last_point() == Point(scale_i(3.), 0));
+                bool positive_proximity = false;
+                for (const ExtrusionEntityUPtr &child : result->children()) {
+                    const ExtrusionPropertyOverhang *overhang = child->get_property<ExtrusionPropertyOverhang>();
+                    REQUIRE(overhang != nullptr);
+                    CHECK(child.get() != address);
+                    CHECK(child->get_id() != address->get_id());
+                    positive_proximity = positive_proximity || overhang->proximity_to_curled_lines > 0.f;
+                }
+                CHECK(positive_proximity == with_curled);
+                check_ordinary_copy(source, before);
+                CHECK(&source.child(0) == address);
+                state = overhang_fragment_state(*result, source_ids);
+            }
+            REQUIRE(result != nullptr);
+            CHECK(overhang_fragment_state(*result, source_ids) == state);
+            const std::string expected = with_curled ?
+                "Collection,2,0,0,0,16;"
+                "Path,3,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.a666660000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:-3000000,0,0/-2599999,0,0/;"
+                "Path,4,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.a666660000000p-1,0x1.b333300000000p-2,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2599999,0,0/-2199999,0,0/;"
+                "Path,5,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.b333300000000p-2,0x1.cccccc0000000p-3,0x1.5d879a0000000p-13,0,0,1,1,2,0,0:-2199999,0,0/-2000000,0,0/;"
+                "Path,6,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0x1.8937980000000p-10,0,0,1,1,2,0,0:-2000000,0,0/-1599999,0,0/;"
+                "Path,7,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.5ebd640000000p-8,0,0,1,1,2,0,0:-1599999,0,0/-1199999,0,0/;"
+                "Path,8,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.7b42820000000p-7,0,0,1,1,2,0,0:-1199999,0,0/-799999,0,0/;"
+                "Path,9,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.4a693c0000000p-6,0,0,1,1,2,0,0:-799999,0,0/-399999,0,0/;"
+                "Path,10,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.fe073e0000000p-6,0,0,1,1,2,0,0:-399999,0,0/0,0,0/;"
+                "Path,11,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.6c3d980000000p-5,0,0,1,1,2,0,0:0,0,0/400000,0,0/;"
+                "Path,12,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.ece2a60000000p-5,0,0,1,1,2,0,0:400000,0,0/800000,0,0/;"
+                "Path,13,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.40795e0000000p-4,0,0,1,1,2,0,0:800000,0,0/1200000,0,0/;"
+                "Path,14,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.9436ec0000000p-4,0,0,1,1,2,0,0:1200000,0,0/1600000,0,0/;"
+                "Path,15,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x1.cccccc0000000p-3,0x1.f1a9fe0000000p-4,0,0,1,1,2,0,0:1600000,0,0/2000000,0,0/;"
+                "Path,16,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.4000000000000p-1,0x1.4000000000000p-1,0x1.2c694a0000000p-3,0,0,1,1,2,0,0:2000000,0,0/2400000,0,0/;"
+                "Path,17,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.0666660000000p+0,0x1.0666660000000p+0,0x1.0545900000000p-3,0,0,1,1,2,0,0:2400000,0,0/2800000,0,0/;"
+                "Path,18,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.39999a0000000p+0,0x1.c1b9c40000000p-4,0,0,1,1,2,0,0:2800000,0,0/3000000,0,0/;"
+                :
+                "Collection,2,0,0,0,9;"
+                "Path,3,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.a666660000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:-3000000,0,0/-2599999,0,0/;"
+                "Path,4,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.a666660000000p-1,0x1.b333300000000p-2,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2599999,0,0/-2199999,0,0/;"
+                "Path,5,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.b333300000000p-2,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2199999,0,0/-2000000,0,0/;"
+                "Path,6,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2000000,0,0/-1599999,0,0/;"
+                "Path,7,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x0.0000000000000p+0,0,0,1,1,9,0,0:-1599999,0,0/-1199999,0,0/-799999,0,0/-399999,0,0/0,0,0/400000,0,0/800000,0,0/1200000,0,0/1600000,0,0/;"
+                "Path,8,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0,0,1,1,2,0,0:1600000,0,0/2000000,0,0/;"
+                "Path,9,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.4000000000000p-1,0x1.4000000000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:2000000,0,0/2400000,0,0/;"
+                "Path,10,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.0666660000000p+0,0x1.0666660000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:2400000,0,0/2800000,0,0/;"
+                "Path,11,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.39999a0000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:2800000,0,0/3000000,0,0/;";
+            CHECK(state == expected);
+        }
+    }
+    SECTION("generic polyline and generic group children retain rejection")
+    {
+        for (const bool group : {false, true}) {
+            CAPTURE(group);
+            ExtrusionEntityCollection source;
+            std::unique_ptr<ExtrusionEntity> child;
+            if (group) {
+                child = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, false);
+                child->append_child(std::make_unique<ExtrusionPath>(
+                    overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false)));
+            } else {
+                child = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {scale_i(1.), 0}}));
+            }
+            source.append_child(std::move(child));
+            const ExtrusionEntity *address = &source.child(0);
+            const ExtrusionEntityCollection before(source);
+            const ExtrusionEntity &borrowed_source = source;
+            REQUIRE_THROWS_AS(ExtrusionProcessor::calculate_and_split_overhanging_extrusions(
+                borrowed_source, previous, no_curled, nozzle), InvalidArgument);
+            check_ordinary_copy(source, before);
+            CHECK(&source.child(0) == address);
+        }
+    }
+}
+
 TEST_CASE("Native flatten destinations preserve wrappers prefixes caches and local donation",
           "[plugins][extrusion][native-flatten-destination]")
 {
@@ -2088,6 +2277,72 @@ void check_ordinary_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::Ex
         CHECK(typeid(copy.child(index)) == typeid(source.child(index)));
         check_ordinary_copy(source.child(index), copy.child(index));
     }
+}
+
+Slic3r::ExtrusionPath overhang_fixture_path(const Slic3r::Points &points, bool dynamic, bool with_z)
+{
+    using namespace Slic3r;
+    ExtrusionAttributes attributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.12, 0.45f, 0.2f));
+    attributes.no_seam = 1;
+    ExtrusionPath path(ArcPolyline(points), attributes, ExtrusionPropertyUPtr{}, false);
+    path.set_can_rotate(true);
+    if (dynamic)
+        path.add_property(ExtrusionPropertyOverhang(17.f, 19.f, 0.f, false, false, true, true));
+    if (with_z) {
+        path.polyline().set_z_offset(0, 100);
+        path.polyline().set_z_offset(points.size() - 1, 900);
+    }
+    return path;
+}
+
+std::string overhang_fragment_state(const Slic3r::ExtrusionEntityCollection &result,
+                                    const std::array<uint64_t, 2> &source_ids)
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    std::map<uint64_t, size_t> identities{{source_ids[0], 0}, {source_ids[1], 1}};
+    const auto identity = [&identities](uint64_t id) {
+        const std::map<uint64_t, size_t>::const_iterator found = identities.find(id);
+        if (found != identities.end())
+            return found->second;
+        const size_t next = identities.size();
+        identities.emplace(id, next);
+        return next;
+    };
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::hexfloat;
+    REQUIRE(Access::property_count(result) == 0);
+    out << "Collection," << identity(result.get_id()) << ',' << result.can_sort() << ',' << result.can_reverse()
+        << ',' << result.can_rotate() << ',' << result.child_count() << ';';
+    for (const ExtrusionEntityUPtr &child : result.children()) {
+        const ExtrusionPath *path = dynamic_cast<const ExtrusionPath *>(child.get());
+        REQUIRE(path != nullptr);
+        REQUIRE(path->has_polyline());
+        REQUIRE(Access::property_count(*path) == 2);
+        const ExtrusionAttributes *attributes = path->get_property<ExtrusionAttributes>();
+        const ExtrusionPropertyOverhang *overhang = path->get_property<ExtrusionPropertyOverhang>();
+        REQUIRE(attributes != nullptr);
+        REQUIRE(overhang != nullptr);
+        const ArcPolyline &polyline = path->polyline_ref();
+        out << "Path," << identity(path->get_id()) << ',' << path->can_sort() << ',' << path->can_reverse()
+            << ',' << path->can_rotate() << ',' << attributes->mm3_per_mm << ',' << attributes->width
+            << ',' << attributes->height << ',' << attributes->role << ',' << unsigned(attributes->no_seam)
+            << ',' << overhang->start_distance_from_prev_layer << ',' << overhang->end_distance_from_prev_layer
+            << ',' << overhang->proximity_to_curled_lines << ',' << unsigned(overhang->has_full_overhangs_flow)
+            << ',' << unsigned(overhang->has_full_overhangs_speed) << ',' << unsigned(overhang->has_dynamic_overhangs_flow)
+            << ',' << unsigned(overhang->has_dynamic_overhangs_speed) << ',' << polyline.size()
+            << ',' << polyline.has_z_offset() << ',' << polyline.has_arc() << ':';
+        for (size_t index = 0; index < polyline.size(); ++index) {
+            out << polyline.get_point(index).x() << ',' << polyline.get_point(index).y() << ','
+                << (polyline.has_z_offset() ? polyline.z_offset(index) : 0);
+            if (polyline.has_arc())
+                out << ',' << polyline.get_arc(index).radius << ',' << unsigned(polyline.get_arc(index).orientation);
+            out << '/';
+        }
+        out << ';';
+    }
+    return out.str();
 }
 
 Slic3r::ExtrusionPath flatten_fixture_path(const Slic3r::Points &points)

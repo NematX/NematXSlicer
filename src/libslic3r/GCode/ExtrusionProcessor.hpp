@@ -36,6 +36,16 @@
 #include "libslic3r/SupportSpotsGenerator.hpp"
 #include "libslic3r/SVG.hpp"
 
+/* Supply point-support estimates and native overhang splitting to geometry and
+   G-code consumers. estimate_points_properties() projects support distances and
+   curvature. calculate_and_split_overhanging_extrusions() returns owned native
+   fragments; its root overload borrows any non-leaf root but still requires
+   native descendants. This is not an arbitrary canonical-tree processor.
+   Inputs remain unchanged. Results preserve the documented geometry, direct
+   fragment properties and queried permissions, not inherited root properties.
+   Use calculate_overhang_speed() with a concrete extruder to resolve limits.
+*/
+
 namespace Slic3r {
 
 class FullPrintConfig;
@@ -259,9 +269,11 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
 //                                                          const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
 //                                                          const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines);
 
-// Return owned split paths with the borrowed source collection's ordering permissions.
+// Split a borrowed non-leaf root's native Path, Loop, MultiPath and Collection children into an owned Collection.
+// Keep queried ordering permissions, not root properties. Copy direct ExtrusionPath children with Z offsets without splitting.
+// Reject other child types; processing errors propagate.
 ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(
-    const ExtrusionEntityCollection                 *ecc,
+    const ExtrusionEntity                         &ecc,
     const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
     const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
     const double &nzl_diam);
