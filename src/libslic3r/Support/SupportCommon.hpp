@@ -15,12 +15,30 @@
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
 
+/* Shared native support geometry and publication for grid/tree consumers.
+   Prepare contact areas, generate fill and publish it to support layers using
+   the helpers below. When interface heights overlap, pass a uniform owned
+   extrusion root and bottom-up overlapping layers to modulation before
+   publication. That operation keeps the root but rebuilds its descendants.
+*/
+
 namespace Slic3r {
 
 class PrintObject;
 class Layer;
+class ExtrusionEntity;
 
 namespace FFFSupport {
+
+// Reduce native support flow where unsynchronized interface layers overlap, keeping continuous units.
+// The caller supplies layers sorted bottom-up; the first effective attributes supply one template for this uniform cache.
+// Borrow the root exclusively; its identity and properties survive rebuilding its descendants.
+// Template values, geometry and endpoints are owned before rebuilding the existing root's descendants.
+// An empty overlapping_layers list leaves every handle unchanged; rebuilding invalidates descendant handles and cached views.
+// Allocation and geometry errors propagate; failures after replacement starts may leave partial output.
+void modulate_extrusion_by_overlapping_layers(ExtrusionEntity &extrusions_in_out,
+                                             const SupportGeneratorLayer &this_layer,
+                                             const SupportGeneratorLayersPtr &overlapping_layers);
 
 // Remove bridges from support contact areas.
 // To be called if the dont_support_bridges object config option is enabled.

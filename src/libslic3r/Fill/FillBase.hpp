@@ -24,7 +24,6 @@
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/libslic3r.h"

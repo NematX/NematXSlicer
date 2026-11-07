@@ -25,6 +25,8 @@
    relationships, not absolute IDs or dynamic types. Separate checks require
    generic owned nodes and complete marked parent/leaf attributes. Concentric
    ears retain their distinct leaf flow and unmarked parent scopes.
+   Concentric fill cases additionally cover branching shells, narrow gaps and
+   recipe-dependent flow correction before publication.
 
        TEST_CASE -> brim_loops() / brim_frontiers(): prepare clipping inputs
            |-- extrude_brim_from_tree() or make_brim_ears(): build owned output
@@ -52,6 +54,8 @@ std::string tree_digest(const ExtrusionEntity &entity);
 std::vector<std::vector<BrimLoop>> brim_loops(size_t shape);
 // Return a full frontier or two disjoint regions that remove the outer ring.
 Polygons brim_frontiers(size_t shape);
+// Construct connected, holed and branching concentric inputs.
+ExPolygons concentric_shapes();
 // Require direct generic construction at every node of an owned producer subtree.
 void require_generic_tree(const ExtrusionEntity &entity);
 // Check parent/leaf property scopes without changing the generated tree.
@@ -66,6 +70,14 @@ const char *const brim_digests[2][5] = {
      "0be76d8b27c8bab917d2de58ce60cfdc136530dc"}
 };
 
+const char *const concentric_digests[3][2][2] = {
+    {{"e3cff0fc49400945aca8f620e743e4ded650b9b8", "e3cff0fc49400945aca8f620e743e4ded650b9b8"},
+     {"5c830643502533ba8d024f0ec79933d5127175ad", "e61da0bb5a6f7b7ad4ba6a0501941b98873b06ed"}},
+    {{"6d5e1202aa916ba7dd96a802b162ef6b6192b598", "6d5e1202aa916ba7dd96a802b162ef6b6192b598"},
+     {"164fd9aca9d50d2efb8be9a454c69914cda1fba8", "6deba6785493ffee2f52547c78358180e016f74f"}},
+    {{"b5206b818cd0233f27aaebff6ca1f54813b8540b", "b5206b818cd0233f27aaebff6ca1f54813b8540b"},
+     {"282a0a765c4217f5ce8a5d271850abe56b36305a", "06b8c7eabf4106a074853919eaf6313056de0294"}}
+};
 
 void write_tree(const ExtrusionEntity &entity, std::ostringstream &out, std::map<uint64_t, size_t> &ids)
 {
@@ -144,6 +156,16 @@ Polygons brim_frontiers(size_t shape)
     return {rectangle_expolygon(-1., -1., 21., 21.).contour};
 }
 
+ExPolygons concentric_shapes()
+{
+    ExPolygons shapes{rectangle_expolygon(-3., -2., 3., 2.), rectangle_with_hole_expolygon()};
+    const ExPolygons dumbbell = union_ex(ExPolygons{rectangle_expolygon(-6., -3., -2., 3.),
+        rectangle_expolygon(-2., -0.7, 2., 0.7), rectangle_expolygon(2., -3., 6., 3.)});
+    REQUIRE(dumbbell.size() == 1);
+    shapes.push_back(dumbbell.front());
+    return shapes;
+}
+
 void require_generic_tree(const ExtrusionEntity &entity)
 {
     REQUIRE(typeid(entity) == typeid(ExtrusionEntity));
@@ -215,6 +237,54 @@ TEST_CASE("Native brim trees retain clipping nesting and complete properties",
                 }
             }
     }
+}
+
+TEST_CASE("Native concentric trees retain ordered branches rings and gap fills",
+          "[plugins][native-nesting][native-concentric]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const PrintConfig print;
+    PrintRegionConfig region;
+    region.parent = &print;
+    const ExPolygons shapes = concentric_shapes();
+    for (size_t shape = 0; shape < shapes.size(); ++shape)
+        for (const float density : {0.3f, 1.f})
+            for (const bool adjust : {false, true}) {
+                CAPTURE(shape, density, adjust);
+                const Surface surface(stPosInternal | stDensSolid, shapes[shape]);
+                const std::unique_ptr<Fill> filler(Fill::new_from_type(ipConcentric));
+                filler->set_bounding_box(get_extents(surface.expolygon));
+                filler->no_overlap_expolygons = {surface.expolygon};
+                FillParams params;
+                params.config = &region;
+                params.density = density;
+                params.add_gap_fill = true;
+                params.dont_adjust = !adjust;
+                params.fill_exactly = adjust;
+                params.fill_resolution = scale_i(0.0125);
+                params.role = ExtrusionRole::SolidInfill;
+                params.flow_mult = 0.7f;
+                params.flow = Flow::new_from_width(0.45f, 0.4f, 0.2f, 1.f, false);
+                filler->init_spacing(params.flow.spacing(), params);
+                ExtrusionEntitiesPtr raw;
+                filler->fill_surface_extrusion(&surface, params, raw);
+                ExtrusionEntityCollection output;
+                output.append(std::move(raw));
+                REQUIRE_FALSE(output.empty());
+                CHECK(output.total_volume() > 0.);
+                CHECK(tree_digest(output) == concentric_digests[shape][density == 1.f][adjust]);
+                const ExPolygons own_regions = offset_ex(surface.expolygon, -scale_d(0.5 * filler->get_spacing()));
+                REQUIRE_FALSE(own_regions.empty());
+                REQUIRE(output.child_count() >= own_regions.size());
+                for (size_t index = 0; index < own_regions.size(); ++index) {
+                    const ExtrusionEntity &root = output.child(index);
+                    REQUIRE(typeid(root) == typeid(ExtrusionEntity));
+                    REQUIRE(root.child_count() != 0);
+                    require_generic_tree(root);
+                }
+                for (const ExtrusionEntityUPtr &child : output.children())
+                    require_generic_tree(*child);
+            }
 }
 
 TEST_CASE("Native concentric brim ears retain their distinct leaf flow",

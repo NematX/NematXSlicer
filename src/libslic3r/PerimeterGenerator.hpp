@@ -20,6 +20,14 @@
 #include "RegionSettings.hpp"
 #include "SurfaceCollection.hpp"
 
+/* Provide native classic and Arachne perimeter generation to layer consumers.
+   Resolve Parameters from layer flow and region settings, create a generator,
+   then process a surface into caller-owned perimeter/gap destinations and fill
+   domains. The detail helpers expose the same thin-wall orientation, cumulative
+   flow and wrapper-removal rules used internally; their input contracts are
+   limited to native producer geometry, not arbitrary plugin command trees.
+*/
+
 //#define _DEBUG_OVERHANGS
 
 namespace Slic3r::Arachne {
@@ -29,6 +37,32 @@ namespace Slic3r {
 class Layer;
 }
 namespace Slic3r::PerimeterGenerator {
+
+namespace detail {
+
+// Classify a continuous, nonempty native thin-wall contour by epsilon XY closure and more than two stored segments.
+// This local PG policy reads geometry without changing the canonical exact-closure predicate or stored points.
+bool thin_wall_is_contour(const ExtrusionEntity &thin_wall);
+// Orient a native thin-wall contour counterclockwise without replacing paths; open paths and flukes stay unchanged.
+// Requires segment-bearing contour paths. Geometry allocation errors propagate before any reversal.
+void orient_thin_wall(ExtrusionEntity &thin_wall);
+// Remove one sole non-contour Children wrapper from a native per-slice PG result, transferring all three permissions.
+// The source is limited to PG contours, open thin walls and fixed before/after perimeter groups, not arbitrary plugin trees.
+// Root identity and properties stay unchanged; the removed wrapper's properties are not transferred.
+// Move existing child owners once without recursion, rebuilding geometry or allocating replacement nodes.
+void unwrap_single_perimeter_group(ExtrusionEntity &peri_entities);
+
+// Mutate the native cache's leaf geometry and direct flow, then append independent scratch copies.
+// Geometric leaves must have nonempty polylines and direct flow attributes.
+// Consume first_point at the first geometric leaf; a snap mutates the source, a travel belongs only to scratch.
+// Copies retain identity, permissions and owned property resources. Allocation errors can leave processed leaves updated.
+void append_thin_wall_flow(ExtrusionEntity &entity, ExtrusionPaths &paths, const Point *&first_point,
+                           float percent_extrusion, bool no_seam, coordf_t resolution_sqr);
+// Connect the scratch's last path to pt, snapping only below the squared threshold; source trees are untouched.
+// Requires nonempty scratch with nonempty geometry on its last path. Allocation errors propagate.
+void ensure_thin_wall_return(ExtrusionPaths &paths, const Point &pt, bool no_seam, coordf_t resolution_sqr);
+
+} // namespace detail
 
 struct Parameters
 {
@@ -252,8 +286,12 @@ private:
     ExPolygons unmillable;
     coord_t mill_extra_size;
 
-    ProcessSurfaceResult process_classic(const Parameters &params, int& contour_count, int& holes_count, const ExPolygon& surface_expolygon, ExtrusionEntityCollection &loops, ExtrusionEntityCollection &gapfill);
-    ProcessSurfaceResult process_arachne(const Parameters &params, int& loop_number, const ExPolygon& surface_expolygon, ExtrusionEntityCollection &loops);
+    // Append ordinary copies of perimeter groups and adopt gap-fill pointers; return the computed surface areas.
+    // Borrow both destinations exclusively; reacquire views after mutation. Allocation failures may leave partial output.
+    ProcessSurfaceResult process_classic(const Parameters &params, int& contour_count, int& holes_count, const ExPolygon& surface_expolygon, ExtrusionEntity &loops, ExtrusionEntity &gapfill);
+    // Append an ordinary copy of the generated Arachne group and return the computed surface areas.
+    // Borrow loops exclusively; reacquire views after mutation. Allocation failures may leave partial output.
+    ProcessSurfaceResult process_arachne(const Parameters &params, int& loop_number, const ExPolygon& surface_expolygon, ExtrusionEntity &loops);
 
     ExPolygons processs_no_bridge(const Parameters params, const ExPolygon& island_expolygon, ExPolygons &fill_surfaces);
     ExtrusionPaths create_overhangs_classic(const Parameters &params,
@@ -295,8 +333,9 @@ private:
         const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls, int count_since_overhang = -1) const;
     ExtrusionEntityCollection _traverse_extrusions(const Parameters &params,
         std::vector<PerimeterGeneratorArachneExtrusion>& pg_extrusions);
-    // try to merge thin walls to a current perimeter exrusion or just add it to the end of the list.
-    void _merge_thin_walls(const Parameters &params, ExtrusionEntityCollection &extrusions, ThickPolylines &thin_walls) const;
+    // Mutate perimeter paths to anchor thin walls, possibly reversing them; adopt unanchored output pointers in order.
+    // Borrow extrusions exclusively and reacquire views after mutation; allocation failures may leave partial changes.
+    void _merge_thin_walls(const Parameters &params, ExtrusionEntity &extrusions, ThickPolylines &thin_walls) const;
     // like _traverse_loops but with merging all perimeter into one continuous loop
     ExtrusionLoop _traverse_and_join_loops(const Parameters &params,
         const PerimeterGeneratorLoop &loop, const PerimeterGeneratorLoops &childs, const Point entryPoint) const;

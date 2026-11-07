@@ -559,7 +559,8 @@ PolylineWithEnds extract_perimeter_polylines(const Layer *layer, const SeamPosit
     for (const LayerSliceIsland &layer_island : layer->islands()) {
         for (const LayerRegionIsland &region_island : layer_island.regions_islands()) {
             if(!region_island.has_extrusion(LayerRegionIsland::PERIMETERS)) continue;
-            for (const ExtrusionEntity *ex_entity : region_island.extrusion(LayerRegionIsland::PERIMETERS)) {
+            for (const ExtrusionEntityUPtr &child : region_island.extrusion(LayerRegionIsland::PERIMETERS).children()) {
+                const ExtrusionEntity *ex_entity = child.get();
                 const LayerRegion *lregion = *region_island.regions().begin();
                 visitor.set_current_layer_region(lregion);
                 assert(!ex_entity->empty());
@@ -1296,7 +1297,7 @@ void SeamPlacer::calculate_overhangs_and_layer_embedding(const PrintObject *po) 
                     for (const LayerSliceIsland &layer_island_ptr : po->layer(layer_idx).islands()) {
                         for (const LayerRegionIsland &region_island_ptr : layer_island_ptr.regions_islands()) {
                             if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS) &&
-                                region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS).size() > 0) {
+                                region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS).child_count() > 0) {
                                 islands_with_perimeter++;
                             }
                         }

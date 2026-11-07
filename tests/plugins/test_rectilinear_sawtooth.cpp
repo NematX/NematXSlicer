@@ -5,6 +5,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <typeinfo>
 #include <vector>
 
 #include "perimeter_test_helpers.hpp"
@@ -148,6 +149,7 @@ void compare_tree(const ExtrusionEntity &core,
                   const std::string &path)
 {
     INFO(path);
+    REQUIRE(typeid(core) == typeid(ExtrusionEntity));
     REQUIRE(core.is_leaf() == ported.is_leaf());
     REQUIRE(core.child_count() == ported.child_count());
     CHECK(core.can_sort() == ported.sortable());
@@ -160,20 +162,20 @@ void compare_tree(const ExtrusionEntity &core,
         return;
     }
 
-    const ExtrusionPath *core_path = dynamic_cast<const ExtrusionPath *>(&core);
-    REQUIRE(core_path != nullptr);
+    const ArcPolyline *core_line = core.polyline_or_null();
+    REQUIRE(core_line != nullptr);
     const std::vector<c_point> ported_points = ported.points();
-    REQUIRE(core_path->polyline().size() == ported_points.size());
-    CHECK(core_path->polyline().has_z_offset() == ported.has_z_offsets());
-    REQUIRE(core_path->polyline().has_z_offset());
+    REQUIRE(core_line->size() == ported_points.size());
+    CHECK(core_line->has_z_offset() == ported.has_z_offsets());
+    REQUIRE(core_line->has_z_offset());
     REQUIRE(ported.has_z_offsets());
     for (size_t idx = 0; idx < ported_points.size(); ++idx) {
-        CHECK(core_path->polyline().get_point(idx).x() == ported_points[idx].x);
-        CHECK(core_path->polyline().get_point(idx).y() == ported_points[idx].y);
-        CHECK(core_path->polyline().z_offset(idx) == ported.z_offset(uint32_t(idx)));
+        CHECK(core_line->get_point(idx).x() == ported_points[idx].x);
+        CHECK(core_line->get_point(idx).y() == ported_points[idx].y);
+        CHECK(core_line->z_offset(idx) == ported.z_offset(uint32_t(idx)));
     }
 
-    const ExtrusionAttributes *core_attributes = core_path->get_property<ExtrusionAttributes>();
+    const ExtrusionAttributes *core_attributes = core.get_property<ExtrusionAttributes>();
     const slic3r_api::EPropertyAttributes *ported_attributes =
         ported.get(slic3r_api::EPropertyAttributes::key);
     REQUIRE(core_attributes != nullptr);

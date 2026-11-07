@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 
 #include <boost/container/static_vector.hpp>
@@ -21,6 +22,7 @@
 #include "libslic3r/ClipperZUtils.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
+#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
@@ -46,7 +48,29 @@
     #include "libslic3r/SVG.hpp"
 #endif
 
+/* Supply shared contact geometry, support fill and layer publication to native
+   support generators. Contact areas exclude bridges before filling; overlapping
+   unsynchronized interface layers reduce bead height to avoid excessive bonding.
+   Modulation first owns continuous geometry and a uniform flow template, then
+   splits and reconnects fragments in their source order. Rebuilding retains the
+   root identity and properties but invalidates descendant borrows. Layers passed
+   to modulation must be sorted bottom-up; failures can leave partial output.
+
+       remove_bridges_from_contacts(): subtract supported bridge regions
+       fill_expolygons_generate_paths(): generate owned support fill geometry
+       modulate_extrusion_by_overlapping_layers()
+           |-- collect_extrusion_geometry_units(): own paths and effective flow
+           |-- clip against overlapping layer polygons, highest first
+           `-- reconnect fragments into generic leaves or fixed continuous groups
+*/
+
 namespace Slic3r::FFFSupport {
+
+// Rebuild the exclusively borrowed support tree with reduced flow using caller-sorted overlapping layers.
+// Own geometry before replacement, keep root identity/properties, and invalidate descendant borrows; failures may leave partial output.
+void modulate_extrusion_by_overlapping_layers(ExtrusionEntity &extrusions_in_out,
+                                             const SupportGeneratorLayer &this_layer,
+                                             const SupportGeneratorLayersPtr &overlapping_layers);
 
 /* Convert a mandatory one-based support extruder setting before storing it in a layer island. */
 static extruder_index_t checked_support_extruder_index(int64_t one_based_id);
@@ -1307,38 +1331,9 @@ static std::string dbg_index_to_color(int idx)
 }
 #endif /* SLIC3R_DEBUG */
 
-class GetFirstPath : public ExtrusionVisitorConst
-{
-public:
-    const ExtrusionPath *extrusion_path_template = nullptr;
-    virtual void default_use(const ExtrusionEntity &entity) override
-    {
-        if (const ExtrusionPath *path = dynamic_cast<const ExtrusionPath*>(&entity)) {
-            extrusion_path_template = path;
-            return;
-        }
-        if (!entity.is_leaf())
-            for (const ExtrusionEntityUPtr &child : entity.children()) {
-                if (extrusion_path_template != nullptr)
-                    return;
-                if (child)
-                    child->visit(*this);
-            }
-    }
-};
-
-// When extruding a bottom interface layer over an object, the bottom interface layer is extruded in a thin air, therefore
-// it is being extruded with a bridging flow to not shrink excessively (the die swell effect).
-// Tiny extrusions are better avoided and it is always better to anchor the thread to an existing support structure if possible.
-// Therefore the bottom interface spots are expanded a bit. The expanded regions may overlap with another bottom interface layers,
-// leading to over extrusion, where they overlap. The over extrusion is better avoided as it often makes the interface layers
-// to stick too firmly to the object.
-//
-// Modulate thickness (increase bottom_z) of extrusions_in_out generated for this_layer
-// if they overlap with overlapping_layers, whose print_z is above this_layer.bottom_z() and below this_layer.print_z.
-static void modulate_extrusion_by_overlapping_layers(
+void modulate_extrusion_by_overlapping_layers(
     // Extrusions generated for this_layer.
-    ExtrusionEntityCollection            &extrusions_in_out,
+    ExtrusionEntity                      &extrusions_in_out,
     const SupportGeneratorLayer          &this_layer,
     // Multiple layers overlapping with this_layer, sorted bottom up.
     const SupportGeneratorLayersPtr      &overlapping_layers)
@@ -1348,16 +1343,24 @@ static void modulate_extrusion_by_overlapping_layers(
         // The extrusions do not overlap with any other extrusion.
         return;
 
-    // TODO: should preserve the unsortable things
-    ExtrusionEntityCollection flatten_extrusions_in_out = extrusions_in_out.flatten(false);
-
-    // Get the initial extrusion parameters.
-    GetFirstPath getFirstPathVisitor;
-    flatten_extrusions_in_out.entities().front()->visit(getFirstPathVisitor);
-    const ExtrusionPath *extrusion_path_template = getFirstPathVisitor.extrusion_path_template;
-    assert(extrusion_path_template != nullptr);
-    ExtrusionRole extrusion_role  = extrusion_path_template->role();
-    float         extrusion_width = extrusion_path_template->width();
+    // Own every continuous path and template value before replacing the source cache.
+    std::optional<ExtrusionAttributes> extrusion_template;
+    Polylines original_polylines;
+    std::vector<std::pair<Point, Point>> path_ends;
+    for (const ExtrusionGeometryUnit &unit : collect_extrusion_geometry_units(extrusions_in_out)) {
+        for (const ExtrusionGeometryRun &run : extrusion_geometry_runs(unit)) {
+            if (!extrusion_template)
+                extrusion_template = *run.leaves.front().attributes;
+            Polyline polyline = extrusion_geometry_polyline(run).to_polyline();
+            path_ends.emplace_back(polyline.front(), polyline.back());
+            original_polylines.emplace_back(std::move(polyline));
+        }
+    }
+    assert(extrusion_template.has_value());
+    if (!extrusion_template)
+        return;
+    const ExtrusionRole extrusion_role = extrusion_template->extrusion_role();
+    const float extrusion_width = extrusion_template->width;
 
     struct ExtrusionPathFragment
     {
@@ -1369,10 +1372,9 @@ static void modulate_extrusion_by_overlapping_layers(
     // The last path_fragment is from this_layer.
     std::vector<ExtrusionPathFragment> path_fragments(
         n_overlapping_layers + 1, 
-        ExtrusionPathFragment{ extrusion_path_template->attributes() });
-    // Don't use it, it will be released.
-    extrusion_path_template = nullptr;
+        ExtrusionPathFragment{ *extrusion_template });
     for(auto & frag : path_fragments) assert(frag.polylines.empty());
+    path_fragments.back().polylines = std::move(original_polylines);
 
 #ifdef SLIC3R_DEBUG
     static int iRun = 0;
@@ -1382,11 +1384,8 @@ static void modulate_extrusion_by_overlapping_layers(
         const SupportGeneratorLayer &overlapping_layer = *overlapping_layers[i_overlapping_layer];
         bbox.merge(get_extents(overlapping_layer.polygons));
     }
-    for (ExtrusionEntitiesPtr::const_iterator it = extrusions_in_out.entities().begin(); it != extrusions_in_out.entities().end(); ++ it) {
-        ExtrusionPath *path = dynamic_cast<ExtrusionPath*>(*it);
-        assert(path != nullptr);
-        bbox.merge(get_extents(path->polyline().as_polyline()));
-    }
+    for (const Polyline &polyline : path_fragments.back().polylines)
+        bbox.merge(get_extents(polyline));
     SVG svg(debug_out_path("support-fragments-%d-%lf.svg", iRun, this_layer.unscaled_print_z()).c_str(), bbox);
     const float transparency = 0.5f;
     // Filled polygons for the overlapping regions.
@@ -1402,10 +1401,9 @@ static void modulate_extrusion_by_overlapping_layers(
         svg.draw(to_polylines(overlapping_layer.polygons), dbg_index_to_color(int(i_overlapping_layer)), scale_(0.1));
     }
     // Fill extrusion, the source.
-    for (ExtrusionEntitiesPtr::const_iterator it = extrusions_in_out.entities().begin(); it != extrusions_in_out.entities().end(); ++ it) {
-        ExtrusionPath *path = dynamic_cast<ExtrusionPath*>(*it);
+    for (size_t index = 0; index < path_fragments.back().polylines.size(); ++index) {
         std::string color_name;
-        switch ((it - extrusions_in_out.entities().begin()) % 9) {
+        switch (index % 9) {
             case 0: color_name = "magenta"; break;
             case 1: color_name = "deepskyblue"; break;
             case 2: color_name = "coral"; break;
@@ -1416,26 +1414,13 @@ static void modulate_extrusion_by_overlapping_layers(
             case 7: color_name = "brown"; break;
             default: color_name = "orchid"; break;
         }
-        svg.draw(path->polyline().as_polyline(), color_name, scale_(0.2));
+        svg.draw(path_fragments.back().polylines[index], color_name, scale_(0.2));
     }
 #endif /* SLIC3R_DEBUG */
 
-    // End points of the original paths.
-    std::vector<std::pair<Point, Point>> path_ends; 
-    // Collect the paths of this_layer.
-    {
-        Polylines &polylines = path_fragments.back().polylines;
-        for (const ExtrusionEntity *ee : flatten_extrusions_in_out.entities()) {
-            for (ArcPolyline &polyline : ee->as_polylines()) {
-                polylines.emplace_back(polyline.to_polyline());
-            }
-            path_ends.emplace_back(std::pair<Point, Point>(polylines.back().points.front(), polylines.back().points.back()));
-        }
-        assert_valid(polylines);
-    }
-    // Destroy the original extrusion paths, their polylines were moved to path_fragments already.
-    // This will be the destination for the new paths.
-    extrusions_in_out.clear();
+    assert_valid(path_fragments.back().polylines);
+    // Source geometry and template values are owned now; reuse only the root storage.
+    extrusions_in_out.children().clear();
 
     // Fragment the path segments by overlapping layers. The overlapping layers are sorted by an increasing print_z.
     // Trim by the highest overlapping layer first.
@@ -1470,7 +1455,7 @@ static void modulate_extrusion_by_overlapping_layers(
 #endif /* SLIC3R_DEBUG */
 
     // Now chain the split segments using hashing and a nearly exact match, maintaining the order of segments.
-    // Create a single ExtrusionPath or ExtrusionEntityCollection per source ExtrusionPath.
+    // Rebuild one leaf or fixed continuous sequence per original path.
     // Map of fragment start/end points to a pair of <i_overlapping_layer, i_polyline_in_layer>
     // Because a non-exact matching is used for the end points, a multi-map is used.
     // As the clipper library may reverse the order of some clipped paths, store both ends into the map.
@@ -1519,7 +1504,8 @@ static void modulate_extrusion_by_overlapping_layers(
         const Point &pt_end   = path_ends[i_path].second;
         Point pt_current = pt_start;
         // Find a chain of fragments with the original / reduced print height.
-        ExtrusionMultiPath multipath;
+        ExtrusionEntity multipath(ExtrusionEntity::Children{}, false, false, true);
+        multipath.set_can_rotate(false);
         for (;;) {
             // Find a closest end point to pt_current.
             std::pair<const ExtrusionPathFragmentEnd*, coordf_t> end_and_dist2 = map_fragment_starts.find(pt_current);
@@ -1540,18 +1526,20 @@ static void modulate_extrusion_by_overlapping_layers(
             Polyline              &frag_polyline = frag.polylines[fragment_end_min.polyline_idx];
             frag_polyline.assert_valid();
             // Path to append the fragment to.
-            ExtrusionPath         *path = multipath.paths().empty() ? nullptr : &multipath.paths().back();
+            ExtrusionEntity *path = multipath.child_count() == 0 ? nullptr : multipath.children().back().get();
             if (path != nullptr) {
                 // Verify whether the path is compatible with the current fragment.
-                assert(this_layer.layer_type == SupporLayerType::BottomContact || path->height() != frag.flow.height || path->mm3_per_mm() != frag.flow.mm3_per_mm);
-                if (path->height() != frag.flow.height || path->mm3_per_mm() != frag.flow.mm3_per_mm)
+                const ExtrusionAttributes &attributes = *path->get_property<ExtrusionAttributes>();
+                assert(this_layer.layer_type == SupporLayerType::BottomContact || attributes.height != frag.flow.height || attributes.mm3_per_mm != frag.flow.mm3_per_mm);
+                if (attributes.height != frag.flow.height || attributes.mm3_per_mm != frag.flow.mm3_per_mm)
                     path = nullptr;
                 // Merging with the previous path. This can only happen if the current layer was reduced by a base layer, which was split into a base and interface layer.
             }
             if (path == nullptr) {
                 // Allocate a new path.
-                multipath.paths().emplace_back(ExtrusionAttributes{extrusion_role, frag.flow}, nullptr, multipath.can_reverse());
-                path = &multipath.paths().back();
+                ExtrusionEntityUPtr leaf = std::make_unique<ExtrusionEntity>(multipath.can_reverse(), ArcPolyline{});
+                leaf->add_property(ExtrusionAttributes{extrusion_role, frag.flow});
+                path = &multipath.append_child(std::move(leaf));
             }
             // The Clipper library may flip the order of the clipped polylines arbitrarily.
             // Reverse the source polyline, if connecting to the end.
@@ -1561,36 +1549,45 @@ static void modulate_extrusion_by_overlapping_layers(
             //assert(frag_polyline.front() == pt_current); // find an exemple where there's a 1 unit diff in y. worth figthing for?
             assert(frag_polyline.front().coincides_with_epsilon(pt_current));
             frag_polyline.points.front() = pt_current;
-            // Don't repeat the first point.
-            if (! path->polyline().empty())
-                path->polyline().pop_back();
+            // The fragment starts at the end of the path: append() keeps that point once. The path is not
+            // shortened first, since a one-point path is invalid.
             // Consume the fragment's polyline, remove it from the input fragments, so it will be ignored the next time.
             frag_polyline.assert_valid();
-            path->polyline().append(std::move(frag_polyline));
-            assert(path->polyline().is_valid());
+            path->polyline_ref().append(std::move(frag_polyline));
+            assert(path->polyline_ref().is_valid());
             frag_polyline.points.clear();
-            pt_current = path->polyline().back();
+            pt_current = path->polyline_ref().back();
             if (pt_current == pt_end) {
                 // End of the path.
                 break;
             }
         }
-        if (!multipath.paths().empty()) {
-            if (multipath.paths().size() == 1) {
+        if (multipath.child_count() != 0) {
+            if (multipath.child_count() == 1) {
                 // This path was not fragmented.
-                extrusions_in_out.append(ExtrusionEntitiesPtr{ new ExtrusionPath(std::move(multipath.paths().front())) });
+                extrusions_in_out.append_child(std::move(multipath.children().front()));
             } else {
-                // This path was fragmented. Copy the collection as a whole object, so the order inside the collection will not be changed
-                // during the chaining of extrusions_in_out.
-                extrusions_in_out.append(ExtrusionEntitiesPtr{ new ExtrusionMultiPath(std::move(multipath)) });
+                // Keep fragment order inside one fixed unit during outer chaining.
+                extrusions_in_out.append_child(std::make_unique<ExtrusionEntity>(std::move(multipath)));
             }
         }
     }
     // If there are any non-consumed fragments, add them separately.
     //FIXME this shall not happen, if the Clipper works as expected and all paths split to fragments could be re-connected.
     for (ExtrusionPathFragment &fragment : path_fragments) {
-        extrusion_entities_append_paths(extrusions_in_out, std::move(fragment.polylines),
-                                        {extrusion_role, fragment.flow});
+        for (const Polyline &polyline : fragment.polylines) {
+            if (!polyline.is_valid())
+                continue;
+            ExtrusionEntityUPtr leaf = std::make_unique<ExtrusionEntity>(true, ArcPolyline(polyline));
+            leaf->add_property(ExtrusionAttributes{extrusion_role, fragment.flow});
+            if (polyline.front() == polyline.back()) {
+                ExtrusionEntity::Children children;
+                children.emplace_back(std::move(leaf));
+                extrusions_in_out.append_child(std::make_unique<ExtrusionEntity>(std::move(children), false, false, true));
+            } else {
+                extrusions_in_out.append_child(std::move(leaf));
+            }
+        }
     }
 }
 

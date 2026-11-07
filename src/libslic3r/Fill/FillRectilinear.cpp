@@ -29,7 +29,7 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/PointUtils.hpp"
 #include "libslic3r/ShortestPath.hpp"
@@ -51,7 +51,27 @@
 // We want our version of assert.
 #include "libslic3r/libslic3r.h"
 
+/* Generate rectilinear pattern centerlines by intersecting scan lines with a
+   surface and connecting them according to the selected pattern's ordering.
+   Borrowed boundary views are used only while the owned clipping data is alive.
+   The Sawtooth extrusion pass turns those centerlines into fixed continuous
+   sequences: deposition, vertical lift, clearance move and return each retain
+   their own flow and explicit Z samples. Output geometry is owned by the caller.
+
+       FillRectilinear::fill_surface(): scan and connect a surface
+       FillRectilinearSawtooth::fill_surface_extrusion()
+           |-- fill_surface(): obtain rectilinear centerlines
+           |-- append_sawtooth_path(): add a leaf with local flow
+           |-- append_sawtooth_point(): preserve XY and each Z sample
+           `-- release nonempty owned sequences in source order
+*/
+
 namespace Slic3r {
+
+// Append an empty fixed leaf with local flow to the current Sawtooth sequence.
+static ExtrusionEntity &append_sawtooth_path(ExtrusionEntity &sequence, const ExtrusionAttributes &attributes);
+// Append one XY point and its explicit Z sample, including repeated XY positions on vertical moves.
+static void append_sawtooth_point(ExtrusionEntity &path, const Point &point, coord_t z_offset);
 
 // Having a segment of a closed polygon, calculate its Euclidian length.
 // The segment indices seg1 and seg2 signify an end point of an edge in the forward direction of the loop,
@@ -3357,6 +3377,21 @@ std::vector<SegmentedIntersectionLine> FillScatteredRectilinear::_vert_lines_for
 }
 
 
+static ExtrusionEntity &append_sawtooth_path(ExtrusionEntity &sequence, const ExtrusionAttributes &attributes)
+{
+    ExtrusionEntityUPtr path = std::make_unique<ExtrusionEntity>(false, ArcPolyline{});
+    path->add_property(attributes);
+    return sequence.append_child(std::move(path));
+}
+
+static void append_sawtooth_point(ExtrusionEntity &path, const Point &point, coord_t z_offset)
+{
+    ArcPolyline &polyline = path.polyline_ref();
+    assert(!polyline.has_arc());
+    polyline.append(point);
+    polyline.set_z_offset(polyline.size() - 1, z_offset);
+}
+
 void
 FillRectilinearSawtooth::fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) const {
     const coord_t scaled_nozzle_diam = scale_i(params.flow.nozzle_diameter());
@@ -3372,26 +3407,24 @@ FillRectilinearSawtooth::fill_surface_extrusion(const Surface *surface, const Fi
         BOOST_LOG_TRIVIAL(info) << "Sawtooth infill can't \"fill exactly\", setting ignored.";
     }
     if (!polylines_out.empty()) {
-        ExtrusionEntityCollection *eec = new ExtrusionEntityCollection();
-        /// pass the no_sort attribute to the extrusion path
-        eec->set_can_sort_reverse(!this->no_sort(), !this->no_sort());
+        ExtrusionEntityUPtr eec = std::make_unique<ExtrusionEntity>(
+            ExtrusionEntity::Children{}, !this->no_sort(), !this->no_sort(), false);
 
         ExtrusionRole good_role = getRoleFromSurfaceType(params, surface);
 
         for (const Polyline &poly : polylines_out) {
             if (!poly.is_valid()) continue;
 
-            ExtrusionMultiPath *extrusions = new ExtrusionMultiPath();
-            extrusions->paths().push_back(ExtrusionPath(ExtrusionAttributes{good_role,
-                                                                          {params.flow.mm3_per_mm() * params.flow_mult,
-                                                                           params.flow.width() * params.flow_mult, params.flow.height()}},
-                                                      nullptr, false));
-            ExtrusionPath *current_extrusion = &(extrusions->paths().back());
+            ExtrusionEntityUPtr extrusions = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, true);
+            extrusions->set_can_rotate(false);
+            ExtrusionEntity *current_extrusion = &append_sawtooth_path(*extrusions, {good_role,
+                {params.flow.mm3_per_mm() * params.flow_mult,
+                 params.flow.width() * params.flow_mult, params.flow.height()}});
             const Points &pts = poly.points;
             coord_t next_zhop = tooth_spacing_min + (coord_t)abs((safe_rand() / (float)RAND_MAX) * (tooth_spacing_max - tooth_spacing_min));
             size_t idx = 1;
 
-            current_extrusion->push_back(pts[0], 0);
+            append_sawtooth_point(*current_extrusion, pts[0], 0);
             Point last = pts[0];
             coord_t line_length = (coord_t)pts[idx - 1].distance_to(pts[idx]);
             coord_t maxLength = poly.length();
@@ -3409,7 +3442,7 @@ FillRectilinearSawtooth::fill_surface_extrusion(const Surface *surface, const Fi
                     //update maxlength
                     maxLength -= line_length;
                     //add the point
-                    current_extrusion->push_back(pts[idx], 0);
+                    append_sawtooth_point(*current_extrusion, pts[idx], 0);
                     //new point & recompute length to the new point
                     last = pts[idx];
                     idx++;
@@ -3423,54 +3456,42 @@ FillRectilinearSawtooth::fill_surface_extrusion(const Surface *surface, const Fi
                     last = last.interpolate(next_zhop / (double)line_length, pts[idx]);
                     //Create point at pos
                     if (last != pts[idx - 1]) {
-                        current_extrusion->push_back(last, 0);
+                        append_sawtooth_point(*current_extrusion, last, 0);
                     }
 
                     //add new extrusion that go up with nozzle_flow
-                    extrusions->paths().push_back(
-                        ExtrusionPath(ExtrusionAttributes{good_role,
-                                                          {params.flow.nozzle_diameter() * params.flow.nozzle_diameter() * PI / 4,
-                                                           params.flow.nozzle_diameter(), params.flow.nozzle_diameter()}},
-                                      nullptr, false));
-                    current_extrusion = &(extrusions->paths().back());
-                    current_extrusion->push_back(last, 0);
-                    current_extrusion->push_back(last, tooth_zhop);
+                    current_extrusion = &append_sawtooth_path(*extrusions, {good_role,
+                        {params.flow.nozzle_diameter() * params.flow.nozzle_diameter() * PI / 4,
+                         params.flow.nozzle_diameter(), params.flow.nozzle_diameter()}});
+                    append_sawtooth_point(*current_extrusion, last, 0);
+                    append_sawtooth_point(*current_extrusion, last, tooth_zhop);
 
                     //add new extrusion that move a bit to let the place for the nozzle tip
-                    extrusions->paths().push_back(
-                        ExtrusionPath(ExtrusionAttributes{good_role,
-                                                          {0, params.flow.nozzle_diameter() / 10, params.flow.nozzle_diameter() / 10}},
-                                      nullptr, false));
-                    current_extrusion = &(extrusions->paths().back());
+                    current_extrusion = &append_sawtooth_path(*extrusions, {good_role,
+                        {0, params.flow.nozzle_diameter() / 10, params.flow.nozzle_diameter() / 10}});
                     //add first point
-                    current_extrusion->push_back(last, tooth_zhop);
+                    append_sawtooth_point(*current_extrusion, last, tooth_zhop);
                     //add next point at scaled_nozzle_diam distance
                     line_length = (coord_t)last.distance_to(pts[idx]);
                     last = last.interpolate(scaled_nozzle_diam / (double)line_length, pts[idx]);
-                    current_extrusion->push_back(last, tooth_zhop);
+                    append_sawtooth_point(*current_extrusion, last, tooth_zhop);
 
                     // add new extrusion that go down with no nozzle_flow / sqrt(2)
-                    extrusions->paths().push_back(
-                        ExtrusionPath(ExtrusionAttributes{good_role,
-                                                          {params.flow.mm3_per_mm() / std::sqrt(2),
-                                                           float(params.flow.width() / std::sqrt(2)), params.flow.height()}},
-                                      nullptr, false));
-                    current_extrusion = &(extrusions->paths().back());
-                    current_extrusion->push_back(last, tooth_zhop);
+                    current_extrusion = &append_sawtooth_path(*extrusions, {good_role,
+                        {params.flow.mm3_per_mm() / std::sqrt(2),
+                         float(params.flow.width() / std::sqrt(2)), params.flow.height()}});
+                    append_sawtooth_point(*current_extrusion, last, tooth_zhop);
                     //add next point at scaled_nozzle_diam distance
                     line_length = (coord_t)last.distance_to(pts[idx]);
                     last = last.interpolate(scaled_nozzle_diam / (double)line_length, pts[idx]);
-                    current_extrusion->push_back(last, 0);
+                    append_sawtooth_point(*current_extrusion, last, 0);
 
                     // now go back to normal flow
-                    extrusions->paths().push_back(
-                        ExtrusionPath(ExtrusionAttributes{good_role,
-                                                          {params.flow.mm3_per_mm() * params.flow_mult,
-                                                           params.flow.width() * params.flow_mult, params.flow.height()}},
-                                      nullptr, false));
-                    current_extrusion = &(extrusions->paths().back());
+                    current_extrusion = &append_sawtooth_path(*extrusions, {good_role,
+                        {params.flow.mm3_per_mm() * params.flow_mult,
+                         params.flow.width() * params.flow_mult, params.flow.height()}});
                     //add first point
-                    current_extrusion->push_back(last, 0);
+                    append_sawtooth_point(*current_extrusion, last, 0);
                     line_length = (coord_t)last.distance_to(pts[idx]);
 
                     //re-init
@@ -3478,24 +3499,22 @@ FillRectilinearSawtooth::fill_surface_extrusion(const Surface *surface, const Fi
                 }
             }
             while (idx < poly.size()) {
-                current_extrusion->push_back(pts[idx], 0);
+                append_sawtooth_point(*current_extrusion, pts[idx], 0);
                 idx++;
             }
-            if (current_extrusion->size() < 2) extrusions->paths().pop_back();
+            if (current_extrusion->polyline_ref().size() < 2) extrusions->children().pop_back();
 #ifdef _DEBUG
-            for (ExtrusionPath &b : extrusions->paths()) {
-                assert(b.polyline().has_z_offset());
-                assert(b.polyline().is_valid());
+            for (const ExtrusionEntityUPtr &b : extrusions->children()) {
+                assert(b->polyline_ref().has_z_offset());
+                assert(b->polyline_ref().is_valid());
             }
 #endif
-            if (!extrusions->paths().empty()) eec->append(ExtrusionEntitiesPtr{ extrusions });
-            else delete extrusions;
+            if (extrusions->child_count() != 0) eec->append_child(std::move(extrusions));
         }
         // === end ===
         if (!eec->empty()) {
-            out.push_back(eec);
-        } else {
-            delete eec;
+            out.push_back(eec.get());
+            eec.release();
         }
     }
 }

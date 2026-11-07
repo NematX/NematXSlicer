@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -228,6 +229,7 @@ slic3r_api::StoredExtrusionEntity render_plugin(PluginStorage &storage, const Ex
 void compare_tree(const ExtrusionEntity &core, const slic3r_api::ExtrusionEntity &ported, const std::string &path)
 {
     INFO(path);
+    REQUIRE(typeid(core) == typeid(ExtrusionEntity));
     REQUIRE(core.is_leaf() == ported.is_leaf());
     REQUIRE(core.child_count() == ported.child_count());
     CHECK(core.can_sort() == ported.sortable());

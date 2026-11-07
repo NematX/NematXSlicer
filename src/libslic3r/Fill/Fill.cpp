@@ -11,6 +11,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -29,10 +30,28 @@
 #include "libslic3r/Surface.hpp"
 
 #include "FillBase.hpp"
+#include "FillCache.hpp"
 #include "FillRectilinear.hpp"
 #include "FillLightning.hpp"
 #include "FillConcentric.hpp"
 #include "FillEnsuring.hpp"
+
+/* Generate the native Layer fill caches and ironing output. Surface grouping
+   resolves compatible region recipes before pattern generation; normalization
+   and volume checks run on owned temporary trees before publication. Infill
+   buckets are selected by sparse/solid extruders and retain priority order.
+   Publication consumes cache owners, preserving the existing copy-versus-move
+   rules for singleton and multi-cache rows. Surfaces and regions are borrowed
+   only while their layer is alive; output belongs to that layer.
+
+       Layer::make_fills() -> _make_fills()
+           |-- group_fills(): resolve shared surface recipes
+           |-- Fill::fill_surface_extrusion(): generate and normalize owned trees
+           `-- FillCacheDetail::store_fill(): publish priority groups by extruder
+       generate_sparse_infill_polylines_for_anchoring()
+           `-- use cached geometry or generate temporary pattern output
+       Layer::make_ironing() -> _make_ironing(): publish top-surface ironing
+*/
 
 namespace Slic3r {
 
@@ -788,120 +807,7 @@ void Layer::_make_fills(LayerSliceIsland& island,
         export_group_fills_to_svg(debug_out_path("Layer-fill_surfaces-10_fill-final-%d.svg", iRun ++).c_str(), surface_fills);
     }
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
-    std::vector<std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>>> fills_by_priority;
-    auto store_fill = [&fills_by_priority, &island, this](LayerRegionSetCPtrs regions) {
-        if (fills_by_priority.empty()) {
-            assert(false);//not possible
-        }
-        int nb_sparse = 0;
-        int nb_solid = 0;
-        int nb_others = 0;
-        for (std::vector<std::pair<const SurfaceFill *, std::unique_ptr<ExtrusionEntityCollection>>>
-                 &fills_same_prio : fills_by_priority) {
-            for (std::pair<const SurfaceFill *, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
-                if (ecc.first->surface.has_fill_sparse()) {
-                    nb_sparse++;
-                } else if (ecc.first->surface.has_fill_solid()) {
-                    nb_solid++;
-                } else {
-                    nb_others++;
-                }
-            }
-        }
-        assert(nb_others == 0);
-        // find our LayerRegionIsland or create it
-        assert(!regions.empty());
-        const extruder_index_t sparse_fill_extruder = checked_config_extruder_index(
-            (*regions.begin())->region().config().infill_extruder.value);
-        const extruder_index_t solid_fill_extruder = checked_config_extruder_index(
-            (*regions.begin())->region().config().solid_infill_extruder.value);
-        LayerRegionIsland *region_island_sparse = nb_sparse == 0 ?
-            nullptr :
-            &island.get_or_add_region_island(regions, sparse_fill_extruder);
-        LayerRegionIsland *region_island_solid = nb_solid == 0 ?
-            nullptr :
-            &island.get_or_add_region_island(regions, solid_fill_extruder);
-        assert(!region_island_sparse || !region_island_sparse->has_extrusion(LayerRegionIsland::INFILLS));
-        assert(!region_island_solid || !region_island_solid->has_extrusion(LayerRegionIsland::INFILLS));
-        ExtrusionEntityCollection *root_sparse = region_island_sparse ?
-            &region_island_sparse->mutable_extrusion(LayerRegionIsland::INFILLS) :
-            nullptr;
-        ExtrusionEntityCollection *root_solid = region_island_solid ?
-            &region_island_solid->mutable_extrusion(LayerRegionIsland::INFILLS) :
-            nullptr;
-        if (fills_by_priority.size() > 1) {
-            // multiple priority, create an intermediate collection
-            if (root_sparse) {
-                root_sparse->set_can_sort_reverse(false, false);
-                assert(root_sparse->empty());
-            }
-            if (root_solid) {
-                root_solid->set_can_sort_reverse(false, false);
-                assert(root_solid->empty());
-            }
-            // note: it's a bit complicated because can be  root_sparse == root_solid
-            for (std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>> &fills_same_prio : fills_by_priority) {
-                if (fills_same_prio.size() == 1) {
-                    if (!fills_same_prio.front().second->empty()) {
-                        assert(fills_same_prio.front().first->surface.has_fill_sparse() ? root_sparse : root_solid);
-                        (fills_same_prio.front().first->surface.has_fill_sparse() ? root_sparse : root_solid)->append(fills_same_prio.front().second);
-                    }
-                } else if (fills_same_prio.size() > 1) {
-                    ExtrusionEntityCollection eec_same_prio_sparse;
-                    ExtrusionEntityCollection eec_same_prio_solid;
-                    for (std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
-                        if (!ecc.second->empty()) {
-                            // if sparse_fill_extruder == solid_fill_extruder, force to go in the same collection
-                            ((ecc.first->surface.has_fill_sparse() || root_solid == root_sparse) ?
-                                 eec_same_prio_sparse :
-                                 eec_same_prio_solid)
-                                .append(ecc.second);
-                        }
-                    }
-                    assert(!eec_same_prio_sparse.empty() || !eec_same_prio_solid.empty());
-                    if (!eec_same_prio_sparse.empty()) {
-                        if (root_sparse) {
-                            root_sparse->append(eec_same_prio_sparse);
-                        } else {
-                            assert(root_solid);
-                            // if sparse_fill_extruder == solid_fill_extruder and nb_sparse == 0
-                            root_solid->append(eec_same_prio_sparse);
-                        }
-                    }
-                    if (!eec_same_prio_solid.empty()) {
-                        assert(root_solid);
-                        root_solid->append(eec_same_prio_solid);
-                    }
-                }
-            }
-            assert(!root_sparse || !root_sparse->empty());
-            assert(!root_solid || !root_solid->empty());
-        } else {
-            std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>> &fills_same_prio = fills_by_priority.front();
-            if (fills_same_prio.size() == 1) {
-                if (fills_same_prio.front().first->surface.has_fill_sparse()) {
-                    assert(root_sparse);
-                    root_sparse->append_move_from(*fills_same_prio.front().second);
-                } else {
-                    assert(root_solid);
-                    root_solid->append_move_from(*fills_same_prio.front().second);
-                }
-            } else {
-                for (std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
-                    if (!ecc.second->empty()) {
-                        if (ecc.first->surface.has_fill_sparse()) {
-                            assert(root_sparse);
-                            root_sparse->append(ecc.second);
-                        } else {
-                            assert(root_solid);
-                            root_solid->append(ecc.second);
-                        }
-                    }
-                }
-            }
-        }
-        fills_by_priority.clear();
-    };
+    std::vector<std::vector<std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>>>> fills_by_priority;
     //surface_fills is sorted by region_id
     LayerRegionSetCPtrs current_regions;
     unsigned int current_extruder = (std::numeric_limits<unsigned int>::max)();
@@ -910,7 +816,7 @@ void Layer::_make_fills(LayerSliceIsland& island,
         // store the region fill when changing region (if there is something to store in fills_by_priority).
         if (current_regions != surface_fill.regions || current_extruder != surface_fill.params.extruder) {
             if (!current_regions.empty() && !fills_by_priority.empty()) {
-                store_fill(current_regions);
+                FillCacheDetail::store_fill(fills_by_priority, island, current_regions);
             }
             //current_regions.clear();
             //current_regions.insert(current_regions.end(), surface_fill.regions.begin(), surface_fill.regions.end());
@@ -1099,7 +1005,7 @@ void Layer::_make_fills(LayerSliceIsland& island,
                 }
                 // note: fills_by_priority[idx] is a vector that store all the entities of this priority, but that can be in multiple islands
                 //       the collection in fills_by_priority[idx][idx2) can be reordered, so put evrythgin in a new unorderable collection if it'ts needed
-                fills_by_priority[(size_t)surface_fill.params.priority].emplace_back(&surface_fill, new ExtrusionEntityCollection());
+                fills_by_priority[(size_t)surface_fill.params.priority].emplace_back(&surface_fill.surface, new ExtrusionEntity(ExtrusionEntity::Children{}, true, true, false));
                 f->fill_surface_extrusion(&surface_fill.surface, surface_fill.params, *fills_by_priority[(size_t)surface_fill.params.priority].back().second);
                 // normalize result, just in case the filling algorihtm is messing things up (some are).
                 fills_by_priority[(size_t)surface_fill.params.priority].back().second->visit(normalize_visitor);
@@ -1117,9 +1023,9 @@ void Layer::_make_fills(LayerSliceIsland& island,
                         compute_volume_no_gap_fill.set_flow_mult(ratio);
                     }
                     //check that it doesn't overextrude
-                    for(size_t idx = 0; idx < fills_by_priority[(size_t)surface_fill.params.priority].back().second->size(); ++idx){
-                        compute_volume.traverse(*fills_by_priority[(size_t)surface_fill.params.priority].back().second->entities()[idx]);
-                        compute_volume_no_gap_fill.traverse(*fills_by_priority[(size_t)surface_fill.params.priority].back().second->entities()[idx]);
+                    for (const ExtrusionEntityUPtr &child : fills_by_priority[(size_t)surface_fill.params.priority].back().second->children()) {
+                        compute_volume.traverse(*child);
+                        compute_volume_no_gap_fill.traverse(*child);
                     }
                     ExPolygons temp = f->no_overlap_expolygons.empty() ?
                                         ExPolygons{surface_fill.surface.expolygon} :
@@ -1151,8 +1057,125 @@ void Layer::_make_fills(LayerSliceIsland& island,
     }
     // add last infill if a region is selected and any infill was created in it.
     if (!current_regions.empty() && !fills_by_priority.empty()) {
-        store_fill(current_regions);
+        FillCacheDetail::store_fill(fills_by_priority, island, current_regions);
     }
+}
+
+void FillCacheDetail::store_fill(
+    std::vector<std::vector<std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>>>> &fills_by_priority,
+    LayerSliceIsland &island, LayerRegionSetCPtrs regions)
+{
+    if (fills_by_priority.empty()) {
+        assert(false);//not possible
+    }
+    int nb_sparse = 0;
+    int nb_solid = 0;
+    int nb_others = 0;
+    for (std::vector<std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>>>
+             &fills_same_prio : fills_by_priority) {
+        for (std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>> &ecc : fills_same_prio) {
+            if (ecc.first->has_fill_sparse()) {
+                nb_sparse++;
+            } else if (ecc.first->has_fill_solid()) {
+                nb_solid++;
+            } else {
+                nb_others++;
+            }
+        }
+    }
+    assert(nb_others == 0);
+    // find our LayerRegionIsland or create it
+    assert(!regions.empty());
+    const extruder_index_t sparse_fill_extruder = checked_config_extruder_index(
+        (*regions.begin())->region().config().infill_extruder.value);
+    const extruder_index_t solid_fill_extruder = checked_config_extruder_index(
+        (*regions.begin())->region().config().solid_infill_extruder.value);
+    LayerRegionIsland *region_island_sparse = nb_sparse == 0 ?
+        nullptr :
+        &island.get_or_add_region_island(regions, sparse_fill_extruder);
+    LayerRegionIsland *region_island_solid = nb_solid == 0 ?
+        nullptr :
+        &island.get_or_add_region_island(regions, solid_fill_extruder);
+    assert(!region_island_sparse || !region_island_sparse->has_extrusion(LayerRegionIsland::INFILLS));
+    assert(!region_island_solid || !region_island_solid->has_extrusion(LayerRegionIsland::INFILLS));
+    ExtrusionEntity *root_sparse = region_island_sparse ?
+        &region_island_sparse->mutable_extrusion(LayerRegionIsland::INFILLS) :
+        nullptr;
+    ExtrusionEntity *root_solid = region_island_solid ?
+        &region_island_solid->mutable_extrusion(LayerRegionIsland::INFILLS) :
+        nullptr;
+    if (fills_by_priority.size() > 1) {
+        // multiple priority, create an intermediate collection
+        if (root_sparse) {
+            root_sparse->set_can_sort_reverse(false, false);
+            assert(root_sparse->empty());
+        }
+        if (root_solid) {
+            root_solid->set_can_sort_reverse(false, false);
+            assert(root_solid->empty());
+        }
+        // note: it's a bit complicated because can be  root_sparse == root_solid
+        for (std::vector<std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>>> &fills_same_prio : fills_by_priority) {
+            if (fills_same_prio.size() == 1) {
+                if (!fills_same_prio.front().second->empty()) {
+                    assert(fills_same_prio.front().first->has_fill_sparse() ? root_sparse : root_solid);
+                    (fills_same_prio.front().first->has_fill_sparse() ? root_sparse : root_solid)->append_child(std::move(fills_same_prio.front().second));
+                }
+            } else if (fills_same_prio.size() > 1) {
+                ExtrusionEntity eec_same_prio_sparse(ExtrusionEntity::Children{}, true, true, false);
+                ExtrusionEntity eec_same_prio_solid(ExtrusionEntity::Children{}, true, true, false);
+                for (std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>> &ecc : fills_same_prio) {
+                    if (!ecc.second->empty()) {
+                        // if sparse_fill_extruder == solid_fill_extruder, force to go in the same collection
+                        ((ecc.first->has_fill_sparse() || root_solid == root_sparse) ?
+                             eec_same_prio_sparse :
+                             eec_same_prio_solid)
+                            .append_child(std::move(ecc.second));
+                    }
+                }
+                assert(!eec_same_prio_sparse.empty() || !eec_same_prio_solid.empty());
+                if (!eec_same_prio_sparse.empty()) {
+                    if (root_sparse) {
+                        root_sparse->append_child(eec_same_prio_sparse);
+                    } else {
+                        assert(root_solid);
+                        // if sparse_fill_extruder == solid_fill_extruder and nb_sparse == 0
+                        root_solid->append_child(eec_same_prio_sparse);
+                    }
+                }
+                if (!eec_same_prio_solid.empty()) {
+                    assert(root_solid);
+                    root_solid->append_child(eec_same_prio_solid);
+                }
+            }
+        }
+        assert(!root_sparse || !root_sparse->empty());
+        assert(!root_solid || !root_solid->empty());
+    } else {
+        std::vector<std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>>> &fills_same_prio = fills_by_priority.front();
+        if (fills_same_prio.size() == 1) {
+            ExtrusionEntity *root = fills_same_prio.front().first->has_fill_sparse() ? root_sparse : root_solid;
+            assert(root);
+            ExtrusionEntity::Children &dst = root->children();
+            ExtrusionEntity::Children &src = fills_same_prio.front().second->children();
+            dst.reserve(dst.size() + src.size());
+            dst.insert(dst.end(), std::make_move_iterator(src.begin()), std::make_move_iterator(src.end()));
+            src.clear();
+        } else {
+            for (std::pair<const Surface *, std::unique_ptr<ExtrusionEntity>> &ecc : fills_same_prio) {
+                if (!ecc.second->empty()) {
+                    if (ecc.first->has_fill_sparse()) {
+                        assert(root_sparse);
+                        root_sparse->append_child(std::move(ecc.second));
+                    } else {
+                        assert(root_solid);
+                        root_solid->append_child(std::move(ecc.second));
+                    }
+                }
+            }
+        }
+    }
+    fills_by_priority.clear();
 }
 
 //TODO: 
@@ -1279,7 +1302,7 @@ Polylines Layer::_generate_sparse_infill_polylines_for_anchoring(const LayerSlic
                 if (f->can_fill_surface_single) {
                     polylines = f->fill_surface(&surface_fill.surface, params);
                 } else {
-                    ExtrusionEntityCollection coll;
+                    ExtrusionEntity coll(ExtrusionEntity::Children{}, true, true, false);
                     f->fill_surface_extrusion(&surface_fill.surface, params, coll);
                     //extract polylines from paths
                     GetPathsVisitor visitor;
@@ -1535,7 +1558,7 @@ void Layer::_make_ironing(LayerSliceIsland &island)
         const extruder_index_t fill_extruder =
             checked_config_extruder_index(region_config.solid_infill_extruder.value);
         LayerRegionIsland &region_island = island.get_or_add_region_island(region_ironed, fill_extruder);
-        ExtrusionEntityCollection &eec_root = region_island.mutable_extrusion(LayerRegionIsland::IRONINGS);
+        ExtrusionEntity &eec_root = region_island.mutable_extrusion(LayerRegionIsland::IRONINGS);
         assert(eec_root.empty());
         eec_root.set_can_sort_reverse(true, true);
         for (ExPolygon &expoly : ironing_areas) {
@@ -1548,10 +1571,10 @@ void Layer::_make_ironing(LayerSliceIsland &island)
             }
             if (! polylines.empty()) {
                 // Save into layer.
-                ExtrusionEntityCollection *eec = &eec_root;
+                ExtrusionEntity *eec = &eec_root;
                 if (ironing_areas.size() > 1) {
-                    eec = new ExtrusionEntityCollection();
-                    eec_root.append(ExtrusionEntityUPtr(eec));
+                    eec = new ExtrusionEntity(ExtrusionEntity::Children{}, true, true, false);
+                    eec_root.append_child(ExtrusionEntityUPtr(eec));
                 }
                 // Don't sort the ironing infill lines as they are monotonicly ordered.
                 eec->set_can_sort_reverse(false, false);

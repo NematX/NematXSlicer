@@ -20,6 +20,7 @@
 #include "libslic3r/Fill/FillRectilinear.hpp"
 #include "libslic3r/Fill/FillSmooth.hpp"
 #include "libslic3r/Surface.hpp"
+#include "libslic3r/Thread.hpp"
 
 /* Check generic path and ring builders directly, before source publication.
    Hand-built inputs cover valid and invalid paths, exact endpoint closure,
@@ -31,6 +32,9 @@
    in the shared table are not evidence for producers until their cases run.
    ControlledFill supplies empty or one-line output to the generic acquisition
    overload, checking that prepared root state and existing child handles survive.
+   Native recipe cases cover six filler families on five shapes and four declared
+   recipes. They qualify their named producer references, including delegated
+   Arachne boundaries. Controlled paths separately check exact volume clamps.
 
        TEST_CASE
            |-- extrusion_entities_append_paths/loops/loops_and_paths()
@@ -56,6 +60,10 @@ void require_generic_fill(const ExtrusionEntity &entity, const std::string &path
                           const Slic3r::Test::NativeFillGolden &golden, bool &found_delegate);
 // Compare complete stored output and require direct generic construction of owned subtrees.
 void record_fill(const std::string &name, const ExtrusionEntity &entity);
+// Construct wide, holed, narrow, branching and tailed native surfaces.
+ExPolygons producer_shapes();
+// Find a segment-bearing leaf for a numeric flow oracle, without a Path cast.
+const ExtrusionEntity *first_fill_leaf(const ExtrusionEntity &entity);
 
 // Supply fixed centerlines to exercise shared extrusion acquisition independently of pattern geometry.
 class ControlledFill : public Fill
@@ -154,8 +162,159 @@ void record_fill(const std::string &name, const ExtrusionEntity &entity)
     CHECK(found_delegate == (golden->delegate_count != 0));
 }
 
+ExPolygons producer_shapes()
+{
+    ExPolygons shapes{rectangle_expolygon(0., 0., 6., 4.), rectangle_with_hole_expolygon(),
+        rectangle_expolygon(0., 0., 12., 0.3)};
+    const ExPolygons branching = union_ex(ExPolygons{rectangle_expolygon(-6., -3., -2., 3.),
+        rectangle_expolygon(-2.1, -0.15, 2.1, 0.15), rectangle_expolygon(2., -3., 6., 3.)});
+    const ExPolygons tailed = union_ex(ExPolygons{rectangle_expolygon(0., 0., 6., 4.),
+        rectangle_expolygon(5.9, 1.8, 10., 2.1)});
+    REQUIRE(branching.size() == 1);
+    REQUIRE(tailed.size() == 1);
+    shapes.push_back(branching.front());
+    shapes.push_back(tailed.front());
+    return shapes;
+}
+
+const ExtrusionEntity *first_fill_leaf(const ExtrusionEntity &entity)
+{
+    if (entity.polyline_or_null() != nullptr)
+        return &entity;
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (const ExtrusionEntity *leaf = first_fill_leaf(*child))
+            return leaf;
+    return nullptr;
+}
 
 } // namespace
+
+TEST_CASE("Native fill producers retain complete recipes and delegated boundaries", "[plugins][native-fill]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const PrintConfig print;
+    PrintObjectConfig object;
+    object.parent = &print;
+    PrintRegionConfig region;
+    region.parent = &object;
+    const ExPolygons shapes = producer_shapes();
+    for (size_t family = 0; family < 6; ++family)
+        for (size_t shape = 0; shape < shapes.size(); ++shape)
+            for (size_t recipe = 0; recipe < 4; ++recipe) {
+                CAPTURE(family, shape, recipe);
+                std::unique_ptr<Fill> filler;
+                if (family == 0) filler.reset(Fill::new_from_type(ipRectilinear));
+                else if (family == 1) filler.reset(Fill::new_from_type(ipMonotonic));
+                else if (family == 2) filler.reset(Fill::new_from_type(ipRectiWithPerimeter));
+                else if (family == 3) filler = std::make_unique<FillSmooth>();
+                else if (family == 4) filler = std::make_unique<FillRectilinearSawtooth>();
+                else filler.reset(Fill::new_from_type(ipConcentric));
+                REQUIRE(filler != nullptr);
+                const Surface surface(stPosInternal | stDensSolid, shapes[shape]);
+                FillParams params;
+                params.config = &region;
+                params.density = recipe == 0 ? 0.35f : 1.f;
+                params.dont_adjust = recipe != 2;
+                params.fill_exactly = recipe == 2;
+                params.monotonic = recipe >= 2;
+                params.add_gap_fill = family != 5 && recipe != 0;
+                params.use_arachne = family == 5;
+                params.layer_height = 0.2f;
+                params.fill_resolution = scale_i(0.0125);
+                params.role = ExtrusionRole::SolidInfill;
+                params.flow_mult = 0.73f;
+                params.flow = Flow::new_from_width(0.45f, 0.4f, 0.2f, recipe == 2 ? 0.75f : 1.f, false);
+                params.anchor_length = 1000.f;
+                params.anchor_length_max = 1000.f;
+                filler->set_config(&print, &object);
+                filler->set_bounding_box(get_extents(surface.expolygon));
+                filler->angle = 0.37f;
+                filler->layer_id = 2;
+                filler->z = 0.6;
+                filler->overlap = 0.2;
+                if (recipe != 3)
+                    filler->no_overlap_expolygons = {surface.expolygon};
+                filler->init_spacing(params.flow.spacing(), params);
+                Slic3r::thread_data().seed_random_generator(42);
+                ExtrusionEntitiesPtr raw;
+                filler->fill_surface_extrusion(&surface, params, raw);
+                ExtrusionEntityCollection output;
+                output.append(std::move(raw));
+                CHECK(raw.empty());
+                record_fill("producer-" + std::to_string(family) + '-' + std::to_string(shape) + '-' + std::to_string(recipe), output);
+            }
+}
+
+TEST_CASE("Native fill volume clamps preserve exact conditional multipliers", "[plugins][native-fill]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PrintRegionConfig region;
+    const Surface surface(stPosInternal | stDensSolid, rectangle_expolygon(0., 0., 1., 1.));
+    for (const bool long_path : {false, true})
+        for (const bool adjust : {false, true}) {
+            CAPTURE(long_path, adjust);
+            Polyline line;
+            if (long_path) {
+                for (size_t index = 0; index < 8; ++index) {
+                    line.points.emplace_back(scale_i(index % 2 == 0 ? 0.05 : 0.95), scale_i(0.1 + index * 0.1));
+                    line.points.emplace_back(scale_i(index % 2 == 0 ? 0.95 : 0.05), scale_i(0.1 + index * 0.1));
+                }
+            } else {
+                line.points = {Point(scale_i(0.1), scale_i(0.5)), Point(scale_i(0.3), scale_i(0.5))};
+            }
+            ControlledFill filler(Polylines{line});
+            FillParams params;
+            params.config = &region;
+            params.density = 1.f;
+            params.dont_adjust = !adjust;
+            params.fill_exactly = adjust;
+            params.fill_resolution = scale_i(0.0125);
+            params.role = ExtrusionRole::SolidInfill;
+            params.flow_mult = 0.73f;
+            params.flow = Flow::new_from_width(0.45f, 0.4f, 0.2f, 1.f, false);
+            filler.no_overlap_expolygons = {surface.expolygon};
+            filler.init_spacing(params.flow.spacing(), params);
+            ExtrusionEntitiesPtr raw;
+            filler.fill_surface_extrusion(&surface, params, raw);
+            ExtrusionEntityCollection output;
+            output.append(std::move(raw));
+            const ExtrusionEntity *leaf = first_fill_leaf(output);
+            REQUIRE(leaf != nullptr);
+            const ExtrusionAttributes *attributes = leaf->get_property<ExtrusionAttributes>();
+            REQUIRE(attributes != nullptr);
+            const double multiplier = adjust ? (long_path ? 0.8 : 1.3) : 1.;
+            CHECK(attributes->mm3_per_mm == params.flow.mm3_per_mm() * params.flow_mult * multiplier);
+            CHECK(attributes->width == float(params.flow.width() * params.flow_mult * multiplier));
+            record_fill("clamp-" + std::to_string(long_path) + '-' + std::to_string(adjust), output);
+        }
+}
+
+// Reject short inputs before checking the polygon invariant, without consuming a borrowed source.
+TEST_CASE("Native generic loop destinations ignore polygons with fewer than three vertices", "[plugins][native-fill]")
+{
+    const ExtrusionAttributes attributes{ExtrusionRole::SolidInfill, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    for (const bool consume : {false, true}) {
+        CAPTURE(consume);
+        // Populate public points directly so constructor checks do not preempt the input filter.
+        Polygons loops(3);
+        loops[1].points = {Point(0, 0)};
+        loops[2].points = {Point(0, 0), Point(1000000, 0)};
+        const std::vector<Points> before{loops[0].points, loops[1].points, loops[2].points};
+        ExtrusionEntity output(ExtrusionEntity::Children{}, true, true, false);
+        if (consume)
+            extrusion_entities_append_loops(output, std::move(loops), ExtrusionAttributes(attributes), false);
+        else
+            extrusion_entities_append_loops(output, loops, ExtrusionAttributes(attributes), false);
+        CHECK(output.child_count() == 0);
+        if (consume) {
+            CHECK(loops.empty());
+        } else {
+            REQUIRE(loops.size() == before.size());
+            for (size_t index = 0; index < loops.size(); ++index)
+                CHECK(loops[index].points == before[index]);
+        }
+    }
+}
 
 TEST_CASE("Native geometry builders preserve overload specific inputs and closure", "[plugins][native-fill]")
 {
