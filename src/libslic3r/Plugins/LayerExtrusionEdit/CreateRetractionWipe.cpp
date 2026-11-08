@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <map>
@@ -23,23 +24,67 @@
 #include "libslic3r/Api/plugin/cpp/PrintingEntityPropertyTraversal.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
-#include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
-#include "libslic3r/Layer.hpp"
+#include "AvoidCrossing/LayerInputCache.hpp"
+#include "AvoidCrossing/PerimeterCrossing.hpp"
 
 /*
 Retraction-wipe implementation
 ==============================
 
-Each layer worker streams compact scope roots in output order. Incoming work
-may turn the target's semantic Unretract into an inside-start approach.
-Outgoing work may distribute the source's semantic Retract over a wipe copied
-from source.content. No source geometry or neighbour pointer is retained after
-the callback.
+CreateRetractionWipe distributes the part of a retraction remaining after the
+stationary amount configured by retract_before_wipe over recently printed
+motion. It runs in the ordered layer-edit step after retraction requests have
+been created.
 
-Open wipe paths are assembled directly while recursively walking the source
-tree backwards. The vector of resulting segments is the only variable-size
-temporary representation: it is required for arc-preserving clipping and for
-assigning the new leaf geometry.
+ExtrusionScopeHelpers.hpp defines a scope as printable content with optional
+transition phases: travel moves to the scope, before holds its approach events,
+content holds printable motion, and after holds departure events. In each
+adjacent pair visited in output order, source means the earlier scope and
+target means the later scope.
+
+Incoming work may turn the target's unretract request into an inside-start
+approach. Outgoing work may keep part of the source's retraction stationary
+and distribute the rest over a wipe, with a final stationary request if the
+wipe is too short. When the last printed leaf is not a loop, the wipe walks
+source content backwards and stops before a bridge, a discontinuity or a leaf
+without role attributes; only that connected tail is kept.
+A final loop instead continues forward
+from its seam without visiting older leaves. Segment vectors preserve lines,
+arcs and endpoint Z offsets while the wipe is assembled and clipped.
+No source geometry or neighbour pointer is retained after the callback.
+
+When wipe_only_crossing is enabled, the target's region identifies the layer
+and its tool group selects the nozzle radius and material areas. The straight
+gap is tested after removing the target instance's XY shift from both ends.
+Global skirt and brim paths have no instance shift and stay in platter XY.
+This is only a gate for adding a wipe; it never routes the gap around objects.
+
+PerimeterCrossing prepares two versions of the target's filled areas. For an
+object it clips to the selected tool's areas, insets one version by 1.5 nozzle
+radii, and removes top surfaces from both. For support it expands the support
+layer's own slices by 1.5 radii, without tool clipping or top removal; it does
+not collect object layers already printed at that height. Both versions are
+simplified with the nozzle radius. The wipe gate queries the offset version's
+boundaries, not extrusion centre lines; a false result does not prove that
+the gap lies inside material.
+
+Each run owns copied layer inputs and a crossing cache per target layer and
+tool. LayerInputCache resolves public handles and copies geometry using the
+context's persistent plugin storage for temporary API allocations. That storage
+is shared by parallel calls; the returned geometry copies own their buffers
+independently of it. The plan and run context are borrowed for the
+run; inputs outlive the crossing caches that refer to them. No cache is shared
+between workers or refreshed after print edits. Cancellation propagates.
+
+    run_impl: visit adjacent printable scopes in output order
+    |-- add_inside_start: move an eligible unretract into an approach to the seam
+    `-- add_outgoing_wipe: distribute the source retract over its printed tail
+        |-- source_wipe_path: collect the reversed connected tail, or a forward final loop
+        |-- WipeCrossingChecker::crosses: gate wipes on the direct gap if requested
+        |   |-- LayerInputCache::get: resolve and copy the target layer
+        |   |-- PerimeterCrossing::prepare: prepare target areas for the tool
+        |   `-- PerimeterCrossing::can_cross_perimeter: test the offset boundaries
+        `-- fit_wipe_length: repeat loops before clipping and assigning wipe motion
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetractionWipePlugin {
@@ -50,6 +95,7 @@ void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator);
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
+namespace AC = AvoidCrossing;
 
 const char *const k_dependencies[] = {
     "layer_extrusion_edit.transition_scope.default",
@@ -83,28 +129,31 @@ struct WipePath
     bool stopped = false;
 };
 
-/* Own one optimized perimeter-crossing cache for the current layer worker. */
+/* Own the worker's layer-input cache and crossing caches indexed by layer and tool. */
 class WipeCrossingChecker
 {
 public:
+    // Copy the settings view and borrow the plan and run context for this worker; own all copied crossing inputs.
     WipeCrossingChecker(const Config &print_config,
                         const PrintingPlan &plan,
                         const plugin_run_context *run_ctx);
 
-    /* Return whether the direct source-to-target movement crosses a perimeter. */
+    // Test the direct gap in target coordinates against offset boundaries; missing target regions, a null layer handle or empty leaves return false.
+    // Copy inputs on first use; an absent layer throws, and exceptions from cancellation or geometry preparation propagate.
     bool crosses(const WipeLeaf &source, const ScopeEntity &target_scope,
                  const WipeLeaf &target);
 
 private:
-    /* Identify one reusable router by its target layer and active extruder. */
+    /* Identify one crossing cache by its target layer and active extruder. */
     struct Key
     {
-        const Slic3r::Layer *layer = nullptr;
+        const layer_handle *layer = nullptr;
         extruder_index_t extruder_id = EXTRUDER_ID_UNKNOWN;
 
+        // Order public layer handles and tools for worker-local cache lookup.
         bool operator<(const Key &rhs) const
         {
-            return layer < rhs.layer ||
+            return std::less<const layer_handle *>()(layer, rhs.layer) ||
                 (layer == rhs.layer && extruder_id < rhs.extruder_id);
         }
     };
@@ -112,7 +161,8 @@ private:
     Config m_print_config;
     const PrintingPlan &m_plan;
     const plugin_run_context *m_run_ctx = nullptr;
-    std::map<Key, std::unique_ptr<Slic3r::AvoidCrossingPerimeters>> m_routers;
+    AC::LayerInputCache m_inputs;
+    std::map<Key, AC::PerimeterCrossing> m_crossings;
 };
 
 /* Built-in provider which converts semantic retraction into wipe motion. */
@@ -205,7 +255,7 @@ void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
                        coord_t depth);
 
-/* Add an inside-to-seam approach and initialize its inherited process fields on the borrowed target; invalid geometry or offsets throw and ownership remains with the target tree. */
+/* Add an inside-to-seam approach when the target starts with an eligible external loop; ineligible or missing geometry returns unchanged, while an out-of-range Z offset or a failed segment assignment throws. The borrowed target keeps ownership. */
 void add_inside_start(
     const ScopeEntity &target,
     const Config &print_config,
@@ -218,7 +268,7 @@ void set_wipe_attributes(MutableExtrusionEntity entity,
 /* Return the configured wipe speed or its travel-speed fallback. */
 double wipe_speed(const Config &print_config, extruder_index_t extruder_id);
 
-/* Convert a borrowed source retract into initial E motion, wipe geometry and residual E; the scope tree is changed in place, invalid geometry throws, and no caller ownership is transferred. */
+/* Convert an eligible source Retract into initial E motion, a wipe and residual E; ineligible transitions return unchanged. The scope tree is changed in place without transferring ownership; path collection, crossing checks and failed geometry edits may throw, as may a lost Retract. */
 void add_outgoing_wipe(
     const ScopeEntity &source,
     const ScopeEntity *target,
@@ -701,50 +751,36 @@ bool WipeCrossingChecker::crosses(
         return false;
 
     const Layer layer_view = region_island.region(0).layer();
-    const uint32_t printing_catalog_id = target_scope.printing_extrusion.printing_catalog_id();
-    const Slic3r::Layer *layer =
-        reinterpret_cast<const Slic3r::Layer *>(layer_view.handle());
-    if (layer == nullptr)
+    if (layer_view.handle() == nullptr)
         return false;
 
     const extruder_index_t extruder_id = target_scope.tool_group.extruder_id();
-    const Key cache_key{layer, extruder_id};
-    std::map<Key, std::unique_ptr<Slic3r::AvoidCrossingPerimeters>>::iterator found =
-        m_routers.find(cache_key);
-    if (found == m_routers.end()) {
-        std::unique_ptr<Slic3r::AvoidCrossingPerimeters> router =
-            std::make_unique<Slic3r::AvoidCrossingPerimeters>();
-        router->init_layer(*layer);
-        found = m_routers.emplace(cache_key, std::move(router)).first;
-    }
+    const Key cache_key{layer_view.handle(), extruder_id};
+    // Keep copied geometry stable while the per-tool crossing cache borrows it.
+    const AC::Input &input = m_inputs.get(
+        Print(plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->print), layer_view, m_run_ctx);
+    AC::PerimeterCrossing &crossing = m_crossings[cache_key];
 
     const double nozzle_diameter = m_print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const coord_t nozzle_radius = std::max<coord_t>(
         1, scale_i(nozzle_diameter * 0.5));
-    const std::vector<const Slic3r::Layer *> printed_layers{layer};
-    const Slic3r::AvoidCrossingPerimeters::PerimeterCrossingContext context{
-        *layer,
-        printed_layers,
-        printing_catalog_id,
-        extruder_id,
-        nozzle_radius,
-        [this]() { throw_if_cancelled(m_run_ctx); }
-    };
-    found->second->prepare_crossing_test(context);
+    crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
+        nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); });
 
+    // Crossing areas use target-local XY; global auxiliary paths have a zero shift.
     const c_point shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
     const c_extrusion_segment source_last =
         source.entity.segment(source.entity.segment_count() - 1);
     const c_extrusion_segment target_first = target.entity.segment(0);
-    Slic3r::Polyline direct;
+    PluginCommon::work::Polyline direct;
     direct.points = {
-        Slic3r::Point{source_last.point_b.x - shift.x,
+        PluginCommon::work::Point{source_last.point_b.x - shift.x,
                       source_last.point_b.y - shift.y},
-        Slic3r::Point{target_first.point_a.x - shift.x,
+        PluginCommon::work::Point{target_first.point_a.x - shift.x,
                       target_first.point_a.y - shift.y}
     };
-    return found->second->can_cross_perimeter(direct, true);
+    return crossing.can_cross_perimeter(direct, true);
 }
 
 void add_outgoing_wipe(

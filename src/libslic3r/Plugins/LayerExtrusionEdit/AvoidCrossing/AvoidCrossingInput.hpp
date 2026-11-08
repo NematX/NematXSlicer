@@ -30,6 +30,12 @@ including auxiliary targets; it returns false when there are no normal layers.
 Geometry and settings are copied; no host handle is retained. Keep Input
 alive while consumers borrow its target. Workers own separate inputs and geometry.
 Allocation storage may be shared; the host synchronizes its allocation bookkeeping.
+LayerIdentity first selects an owner: global_object chooses Print::auxiliary_object,
+otherwise object indexes the print objects. Then auxiliary selects that owner's
+auxiliary layer collection rather than its normal layer collection, and layer
+indexes that collection. The global owner holds platter-space skirt and brim
+layers. External geometry still visits only the ordinary print objects.
+An owner without normal layers cannot mark a target as first_layer.
 */
 
 #include <cstdint>
@@ -46,12 +52,14 @@ class Object;
 class Layer;
 namespace LayerExtrusionEdit { namespace AvoidCrossing {
 
-// Select an indexed print object, then its normal or auxiliary layer collection and a layer in it.
+// Select the owner first (global auxiliary owner or indexed print object), then its layer collection.
+// auxiliary selects auxiliary layers, not the owner; object is ignored for the global owner and caches set it to zero.
 struct LayerIdentity
 {
     uint32_t object = 0;
     uint32_t layer = 0;
     bool auxiliary = false;
+    bool global_object = false;
 };
 
 // Settings and geometry for every public region, including regions without slices.

@@ -396,6 +396,7 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/SmoothPattern.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.hpp
+	Plugins/LayerExtrusionEdit/AvoidCrossing/LayerInputCache.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/PerimeterCrossing.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/PerimeterCrossing.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelBoundary.cpp

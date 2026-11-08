@@ -51,7 +51,8 @@ worker callback, so their mutable caches are not shared between workers.
     `-- ScopeTravelConnector::run: find gaps and insert the returned XY paths
         `-- LayerTravelPlanner::path: select straight travel or a detour
             |-- endpoint_enables_avoidance: check each endpoint's regional setting
-            |-- input_for: find the indexed layer and copy its input
+            |-- input_for: obtain the target layer input
+            |   `-- LayerInputCache::get: retain its copied geometry, settings and spacing
             |-- router_for: retain layer/tool state and defer external input
             |-- PerimeterCrossing::prepare/can_cross_perimeter: test the direct path
             `-- TravelRouter::travel_to: choose a route within the detour budget
@@ -61,6 +62,7 @@ worker callback, so their mutable caches are not shared between workers.
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -73,6 +75,7 @@ worker callback, so their mutable caches are not shared between workers.
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "AvoidCrossing/PerimeterCrossing.hpp"
+#include "AvoidCrossing/LayerInputCache.hpp"
 #include "AvoidCrossing/TravelRouter.hpp"
 #include "TravelConnectionHelpers.hpp"
 
@@ -159,7 +162,7 @@ private:
     Config m_print_config;
     const PrintingPlan &m_plan;
     const plugin_run_context *m_run_ctx = nullptr;
-    std::map<const layer_handle *, AC::Input> m_inputs;
+    AC::LayerInputCache m_inputs;
     std::map<RouterKey, std::unique_ptr<RoutingState>> m_routers;
 };
 
@@ -260,28 +263,7 @@ bool LayerTravelPlanner::endpoint_enables_avoidance(const TravelEndpoint &endpoi
 
 const AC::Input &LayerTravelPlanner::input_for(const Layer &layer)
 {
-    const auto found = m_inputs.find(layer.handle());
-    if (found != m_inputs.end())
-        return found->second;
-
-    // Recover the indexed identity needed by build_input from the borrowed layer handle.
-    for (uint32_t object_idx = 0; object_idx < m_print.object_count(); ++object_idx) {
-        throw_if_cancelled(m_run_ctx);
-        const Object object = m_print.object(object_idx);
-        if (object.handle() != layer.object().handle())
-            continue;
-        for (const bool auxiliary : {false, true}) {
-            const uint32_t count = auxiliary ? object.auxiliary_layer_count() : object.layer_count();
-            for (uint32_t idx = 0; idx < count; ++idx) {
-                throw_if_cancelled(m_run_ctx);
-                const Layer candidate = auxiliary ? object.auxiliary_layer(idx) : object.layer(idx);
-                if (candidate.handle() == layer.handle())
-                    return m_inputs.emplace(layer.handle(), AC::build_input(
-                        m_run_ctx->plugin_storage, m_print, {object_idx, idx, auxiliary})).first->second;
-            }
-        }
-    }
-    throw std::runtime_error("A travel target layer is absent from the public print tree.");
+    return m_inputs.get(m_print, layer, m_run_ctx);
 }
 
 RoutingState &LayerTravelPlanner::router_for(

@@ -34,7 +34,12 @@ For support it appends holes from the last object layer strictly below target Z 
 SCALED_EPSILON, even when that layer is at the target Z and repeats the exact-Z
 holes. Holes retain their clockwise order and
 instance shifts remain separate for the boundary consumer to place and reverse.
-
+LayerIdentity first selects an owner: global_object chooses Print::auxiliary_object,
+otherwise object indexes the print objects. Then auxiliary selects that owner's
+auxiliary layer collection rather than its normal layer collection, and layer
+indexes that collection. The global owner holds platter-space skirt and brim
+layers. External geometry still visits only the ordinary print objects.
+An owner without normal layers cannot mark a target as first_layer.
 
     build_input: retain the target and additional support boundary input
     |-- copy_layer: copy geometry and compute regional flow averages
@@ -62,7 +67,7 @@ bool is_first_layer(const Object &object, const Layer &layer);
 // Native union_safety_offset_ex grows fill areas by ten scaled coordinate units.
 static constexpr double ClipperSafetyOffset = 10.;
 
-// Copy layer geometry and average flows; identity must refer to an existing public layer.
+// Copy layer geometry and average flows from an existing normal object or the global auxiliary object.
 static LayerInput copy_layer(storage_handle *storage, const Print &print, LayerIdentity identity);
 // Copy region settings and rebuild fill areas in island order; temporary handles stay in caller storage.
 static RegionInput copy_region(storage_handle *storage, const Layer &layer, const LayerRegion &region, bool support);
@@ -101,7 +106,7 @@ Input build_input(storage_handle *storage, const Print &print, LayerIdentity tar
     input.target = std::make_unique<const LayerInput>(copy_layer(storage, print, target));
     // Copy the object-layer perimeter slices used as additional boundary input for support targets.
     if (input.target->support) {
-        const Object object = print.object(target.object);
+        const Object object = target.global_object ? print.auxiliary_object() : print.object(target.object);
         const std::optional<uint32_t> below = first_layer_below_print_z(object, input.target->print_z + SCALED_EPSILON);
         if (below) {
             const Layer lower = object.layer(*below);
@@ -118,7 +123,7 @@ Input build_input(storage_handle *storage, const Print &print, LayerIdentity tar
 ExternalInput build_external_input(const Print &print, LayerIdentity target)
 {
     ExternalInput input;
-    const Object target_object = print.object(target.object);
+    const Object target_object = target.global_object ? print.auxiliary_object() : print.object(target.object);
     const Layer target_layer = target.auxiliary ? target_object.auxiliary_layer(target.layer) : target_object.layer(target.layer);
     const coord_t z = target_layer.print_z();
     const bool support = target_layer.properties().get(LayerSupportProperty::key) != nullptr;
@@ -161,7 +166,7 @@ ExternalInput build_external_input(const Print &print, LayerIdentity target)
 
 static LayerInput copy_layer(storage_handle *storage, const Print &print, LayerIdentity identity)
 {
-    const Object object = print.object(identity.object);
+    const Object object = identity.global_object ? print.auxiliary_object() : print.object(identity.object);
     const Layer layer = identity.auxiliary ? object.auxiliary_layer(identity.layer) : object.layer(identity.layer);
     LayerInput out;
     out.identity = identity;
