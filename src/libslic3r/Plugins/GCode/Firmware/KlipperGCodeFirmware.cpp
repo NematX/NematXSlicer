@@ -11,7 +11,7 @@
 #include <stdexcept>
 #include <utility>
 
-#include "libslic3r/Geometry/ArcWelder.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 
 /*
 Klipper firmware implementation
@@ -187,11 +187,10 @@ std::string KlipperGCodeFirmwareSession::encode_move(const PreparedMove &move,
     // https://github.com/Klipper3d/klipper/blob/master/docs/G-Codes.md?plain=1
     const c_vec3d start_position = *gantry().position();
     const c_vec3d end_position = *move.destination;
-    const Slic3r::Vec2d start(start_position.x, start_position.y);
-    const Slic3r::Vec2d end(end_position.x, end_position.y);
-    const Slic3r::Vec2d center = Slic3r::Geometry::ArcWelder::arc_center(
+    const c_vec2d start{ start_position.x, start_position.y };
+    const c_vec2d center = arc_center(
         start,
-        end,
+        c_vec2d{ end_position.x, end_position.y },
         double(move.radius_mm),
         move.arc_orientation == RAW_EXTRUSION_ARC_ORIENTATION_CCW);
 
@@ -204,8 +203,8 @@ std::string KlipperGCodeFirmwareSession::encode_move(const PreparedMove &move,
         formatter.emit_axis('Y', end_position.y, formatter.m_gcode_precision_xyz);
     if (start_position.z != end_position.z)
         formatter.emit_axis('Z', end_position.z, formatter.m_gcode_precision_xyz);
-    formatter.emit_axis('I', center.x() - start.x(), formatter.m_gcode_precision_xyz);
-    formatter.emit_axis('J', center.y() - start.y(), formatter.m_gcode_precision_xyz);
+    formatter.emit_axis('I', center.x - start.x, formatter.m_gcode_precision_xyz);
+    formatter.emit_axis('J', center.y - start.y, formatter.m_gcode_precision_xyz);
     if (move.extrusion)
         formatter.emit_axis('E', *move.extrusion, formatter.m_gcode_precision_e);
     if (include_speed)

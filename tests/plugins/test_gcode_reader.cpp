@@ -35,7 +35,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/GCode/Reader/BambuGCodeReaderItems.hpp"
-#include "libslic3r/Plugins/GCode/Reader/BuiltinGCodeReaderBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 #include "libslic3r/Plugins/GCode/Reader/KlipperGCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/Reader/Marlin2GCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReader.hpp"

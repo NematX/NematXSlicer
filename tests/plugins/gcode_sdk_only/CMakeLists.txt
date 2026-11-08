@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.16)
+project(gcode_sdk_only LANGUAGES CXX)
+enable_testing()
+
+set(SLIC3R_HOST_LIBRARY "" CACHE FILEPATH "Host C ABI import library")
+set(SLIC3R_HOST_RUNTIME_DIR "" CACHE PATH "Directory containing the host DLL and dependencies")
+set(SLIC3R_RUNTIME_DEPENDENCY_DIRS "" CACHE STRING "Additional runtime DLL directories (semicolon-separated)")
+if(NOT EXISTS "${SLIC3R_HOST_LIBRARY}")
+    message(FATAL_ERROR "Set SLIC3R_HOST_LIBRARY to the built host import library.")
+endif()
+
+# Only the public SDK is present in this sandbox. Including host C++ headers
+# accidentally must fail, even on a developer machine with a complete checkout.
+get_filename_component(_root "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(_sandbox "${CMAKE_CURRENT_BINARY_DIR}/sandbox")
+file(COPY "${_root}/src/libslic3r/Api/plugin" DESTINATION "${_sandbox}/libslic3r/Api")
+file(COPY "${_root}/src/fast_float" DESTINATION "${_sandbox}/thirdparty")
+set(SLIC3R_SDK_FAST_FLOAT_INCLUDE_DIR "${_sandbox}/thirdparty" CACHE PATH "fast_float headers" FORCE)
+add_subdirectory("${_sandbox}/libslic3r/Api/plugin" sdk)
+add_library(gcode_sdk_probe SHARED probe.cpp reader_probe.cpp)
+target_compile_definitions(gcode_sdk_probe PRIVATE SLIC3R_PLUGIN_EXPORTS)
+target_link_libraries(gcode_sdk_probe PRIVATE slic3r::plugin_sdk_cpp "${SLIC3R_HOST_LIBRARY}")
+if(WIN32)
+    target_compile_definitions(gcode_sdk_probe PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+add_executable(gcode_sdk_smoke smoke.cpp)
+target_link_libraries(gcode_sdk_smoke PRIVATE gcode_sdk_probe)
+add_test(NAME gcode_sdk_smoke COMMAND gcode_sdk_smoke)
+if(WIN32 AND SLIC3R_HOST_RUNTIME_DIR)
+    string(REPLACE ";" "\\;" _probe_path "${SLIC3R_HOST_RUNTIME_DIR};${SLIC3R_RUNTIME_DEPENDENCY_DIRS};$ENV{PATH}")
+    set_tests_properties(gcode_sdk_smoke PROPERTIES
+        ENVIRONMENT "PATH=${_probe_path}")
+endif()

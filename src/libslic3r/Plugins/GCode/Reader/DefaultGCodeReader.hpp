@@ -5,7 +5,7 @@
 #ifndef slic3r_Plugins_GCode_Reader_DefaultGCodeReader_hpp_
 #define slic3r_Plugins_GCode_Reader_DefaultGCodeReader_hpp_
 
-#include "BuiltinGCodeReaderBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 
 /*
 Built-in G-code reader registration

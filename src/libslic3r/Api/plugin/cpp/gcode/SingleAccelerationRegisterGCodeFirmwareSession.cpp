@@ -10,7 +10,6 @@
 #include <stdexcept>
 
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
-#include "libslic3r/Config/FFFPrintConfig.hpp"
 
 /*
 Single acceleration-register firmware session implementation
@@ -31,9 +30,8 @@ void SingleAccelerationRegisterGCodeFirmwareSession::setup_firmware(const Config
     // Ignore means that machine limits must not influence generated motion.
     // Other policies may use the extrusion limit as a conservative value to
     // restore after a travel command changed the one shared register.
-    const int32_t usage = config.enum_or_default(
-        "machine_limits_usage", int32_t(Slic3r::MachineLimitsUsage::Ignore));
-    if (usage == int32_t(Slic3r::MachineLimitsUsage::Ignore))
+    const ConfigOption usage = config.get("machine_limits_usage");
+    if (!usage.valid() || !usage.is_enabled() || usage.serialize() == "ignore")
         return;
 
     const double fallback = config.vector_float_or_default(

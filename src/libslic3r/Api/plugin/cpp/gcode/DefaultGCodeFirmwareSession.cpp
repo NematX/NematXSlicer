@@ -21,7 +21,6 @@
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeLineParser.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeStateTracker.hpp"
-#include "libslic3r/ExtrusionRole.hpp"
 
 /*
 Translate an ordered printing plan into printer commands for a firmware session.

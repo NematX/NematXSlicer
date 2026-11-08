@@ -49,6 +49,8 @@ struct MachineEnvelope
     double min_extruding_feedrate = 0.0;
 };
 
+// Resolve finite machine limits only for the serialized emit_to_gcode policy.
+// The config remains borrowed and unchanged; invalid limits throw.
 std::optional<MachineEnvelope> configured_machine_envelope(const Config &config);
 
 }} // namespace slic3r_api::GCodeGeneration

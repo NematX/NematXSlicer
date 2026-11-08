@@ -11,7 +11,6 @@
 #include <string>
 
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
-#include "libslic3r/Config/FFFPrintConfig.hpp"
 
 /*
 Firmware-neutral machine envelope implementation
@@ -39,12 +38,10 @@ void validate_limit(const char *setting, double value)
 
 std::optional<MachineEnvelope> configured_machine_envelope(const Config &config)
 {
-    // MachineLimitsUsage is a core enum, while Config deliberately exposes a
-    // stable integer through the plugin API. Compare the two at this boundary
-    // so firmware implementations never depend on the enum representation.
-    if (config.enum_or_default("machine_limits_usage",
-                               int32_t(Slic3r::MachineLimitsUsage::TimeEstimateOnly)) !=
-        int32_t(Slic3r::MachineLimitsUsage::EmitToGCode))
+    // Use the serialized enum name, not the host's private enum ordinals. This
+    // keeps an external firmware independent of internal configuration headers.
+    const ConfigOption usage = config.get("machine_limits_usage");
+    if (!usage.valid() || !usage.is_enabled() || usage.serialize() != "emit_to_gcode")
         return std::nullopt;
 
     MachineEnvelope envelope;
