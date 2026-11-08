@@ -1326,12 +1326,13 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 // try with a visitor that look at epsilon distance, and modify the start point to the intersection
                 FirstEpsilonIntersectionVisitor visitor_epsilon(start_grid, start_end_line.a, start_end_line.b);
                 start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
-                assert(visitor_epsilon.intersect);
                 visitor.intersect = visitor_epsilon.intersect;
                 visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
                 visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
-                assert(start != start_end_line.a);
-                start = start_end_line.a;
+                if (visitor_epsilon.intersect) {
+                    assert(start != start_end_line.a);
+                    start = start_end_line.a;
+                }
             }
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
@@ -1356,15 +1357,16 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             end_grid.visit_cells_intersecting_line(start, end, visitor);
             if (!visitor.intersect) {
                 // probably a epsilon-difference for the intersection to happen.
-                // try with a visitor that look at epsilon distance, and modify the start point to the intersection
-                FirstEpsilonIntersectionVisitor visitor_epsilon(end_grid, start_end_line.a, start_end_line.b);
-                assert(visitor_epsilon.intersect);
-                start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
+                // On a nearby segment match, project the end onto it and possibly move it away from start to obtain a crossing; otherwise leave it for brute force.
+                FirstEpsilonIntersectionVisitor visitor_epsilon(end_grid, start_end_line.b, start_end_line.a);
+                end_grid.visit_cells_intersecting_line(end, start, visitor_epsilon);
                 visitor.intersect = visitor_epsilon.intersect;
                 visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
                 visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
-                assert(start != start_end_line.a);
-                start = start_end_line.a;
+                if (visitor_epsilon.intersect) {
+                    assert(end != start_end_line.b);
+                    end = start_end_line.b;
+                }
             }
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);

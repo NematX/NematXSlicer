@@ -39,6 +39,23 @@ TEST_CASE("Core travel router keeps an outside-box travel direct", "[plugins][av
     REQUIRE((result.points == Points{from, to}));
 }
 
+TEST_CASE("Core travel router handles arrival epsilon and failed grid searches", "[plugins][avoid-crossing-router]")
+{
+    const size_t layer_index = GENERATE(size_t(1), size_t(2));
+    CAPTURE(layer_index);
+    Print print;
+    Model model;
+    prepare_scene(print, model);
+    const Layer &layer = print.object(0).layers()[layer_index];
+    AvoidCrossingPerimeters router;
+    router.init_layer(layer);
+    const Point from = layer_index == 1 ? Point(-1000000, 2000000) : Point(2000000, 10000);
+    const Point to = layer_index == 1 ? Point(8000000, 8000000) : Point(14000000, 2000000);
+    const Polyline result = router.travel_to({layer, from, Point(0, 0), extruder_index_t(0), 0., false}, to);
+    REQUIRE(result.size() >= 2);
+    CHECK(result.first_point() == from);
+    CHECK(result.last_point() == to);
+}
 
 static void prepare_scene(Print &print, Model &model)
 {
