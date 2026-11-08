@@ -351,6 +351,13 @@ class SmoothTemperature(unittest.TestCase):
             smooth = export(f"ranges-{layers}", options + (f"print_temperature_smooth_change = {layers}",), objects)
             self.assertEqual(without_comments(smooth), without_comments(host), f"N = {layers}")
 
+    def test_disabling_smoothing_cancels_the_active_ramp(self) -> None:
+        # The second range disables smoothing without changing the requested target.
+        result = export("cancel-active-ramp", (), [Object("box", config={"print_temperature": "200"}, ranges=[
+            (0.3, 0.9, {"print_temperature": "230", "print_temperature_smooth_change": "8"}),
+            (0.9, 4.5, {"print_temperature": "230", "print_temperature_smooth_change": "0"})])])
+        self.assertEqual(result.layers(), [200, 204, 208] + [230] * 12)
+
     def test_partial_modifier_is_an_override(self) -> None:
         # Two perimeters keep the modifier's paths apart: regions differing only by temperature share their perimeters.
         modifier = Volume((-1, -1, 1.2, 5, 11, 2.4), True, {"print_temperature": "250", "perimeters": "2"})

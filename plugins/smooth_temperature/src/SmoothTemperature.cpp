@@ -36,8 +36,8 @@ plan order:
 - read every regional root of the layer: instance, tool and temperature;
 - update the ramp of each instance and tool printed on the layer: created at
   once on its first layer, restarted from its current value when its general
-  temperature changes, otherwise advanced by one layer. A tool's ramp waits on
-  the layers where it does not print the instance;
+  temperature changes or N <= 1 cancels smoothing, otherwise advanced by one
+  layer. A tool's ramp waits on the layers where it does not print the instance;
 - walk the requests in firmware order (layer requests, then for each visit the
   incoming setpoint, the roots and the standby) while tracking the last setpoint
   of each tool. The incoming setpoint after a tool change takes the value of the
@@ -218,6 +218,9 @@ private:
 
 void smooth_decisions(const Print &print, PrintingPlan &plan, LayerDecisions &decisions)
 {
+    // Preserve the base's exact request placement when no printed region enables smoothing.
+    LayerDecisions base_decisions = decisions;
+    bool smoothing_enabled = false;
     std::map<RampKey, InstanceRamp> ramps;
     // Last setpoint of each tool in firmware order, whether kept from the base or written here.
     std::map<extruder_index_t, int16_t> written;
@@ -233,13 +236,15 @@ void smooth_decisions(const Print &print, PrintingPlan &plan, LayerDecisions &de
             // Each instance and tool printed here counts one layer of its ramp.
             for (auto &[key, instance] : instances) {
                 const std::pair<std::optional<int16_t>, uint32_t> general = general_target(print, key.second, instance);
+                smoothing_enabled = smoothing_enabled || general.second > 1;
                 instance.general = general.first;
                 if (!general.first)
                     continue;
                 const std::map<RampKey, InstanceRamp>::iterator ramp = ramps.find(key);
                 if (ramp == ramps.end())
                     ramps.emplace(key, InstanceRamp::created(*general.first));
-                else if (ramp->second.target != *general.first)
+                // Disabling smoothing also cancels a ramp whose target did not change.
+                else if (ramp->second.target != *general.first || general.second <= 1)
                     ramp->second.request(*general.first, general.second);
                 else
                     ramp->second.advance();
@@ -281,6 +286,8 @@ void smooth_decisions(const Print &print, PrintingPlan &plan, LayerDecisions &de
             }
         }
     }
+    if (!smoothing_enabled)
+        decisions = std::move(base_decisions);
 }
 
 void collect_roots(const Print &print,
