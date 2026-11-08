@@ -229,7 +229,9 @@ std::vector<c_point> LayerTravelPlanner::path(const TravelEndpoint &source,
         reinterpret_cast<const Slic3r::Layer *>(target_layer_view.handle());
     if (target_layer == nullptr)
         return straight(source, target, extruder_id);
-    if (m_print_config.bool_or_default("avoid_crossing_not_first_layer", true) && target_layer->id() == 0)
+    // Object layer zero defines the first-layer height; support layers at that height also qualify.
+    if (m_print_config.bool_or_default("avoid_crossing_not_first_layer", true) && target_object.layer_count() != 0 &&
+        target_layer_view.print_z() == target_object.layer(0).print_z())
         return straight(source, target, extruder_id);
 
     const c_point target_shift = target_object.instance_shift(static_cast<size_t>(target_instance_idx));

@@ -89,13 +89,18 @@ while grid queries within half the travel length find a ring only for arrival.
 The next route point must be the departure's projection onto the square
 boundary edge, rather than an arbitrary vertex.
 
+When avoid_crossing_not_first_layer is enabled, the expected route stays
+direct at the first object layer's Z, including support at that height. Scene
+checks verify this exemption by height rather than by layer identifier.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
     |   |-- StepExtrusionOrdering, StepLayerExtrusionEdition: order paths and insert travels
     |   |-- collect_leaves: retain ordered geometry, provenance and travel-phase marks
     |   |-- enabled_endpoint, oracle_path: compute core routes and compare every point
-    |   `-- lookup_at_point: check the controlled modifier-edge retry
+    |   |-- lookup_at_point: check the controlled modifier-edge retry
+    |   `-- oracle_path, check_scene: check enabled first-layer exemption for support by Z
     `-- Core-only checks
         |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
         |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
@@ -147,6 +152,7 @@ void collect_leaves(const ExtrusionEntity &entity, const PrintingExtrusion &owne
 // Return false without source-region provenance; resolved counts only ambiguous lookups resolved by the retry.
 bool enabled_endpoint(const Leaf &leaf, bool first, const PrintingPlan &plan, size_t *resolved = nullptr);
 // Return the core route, optionally bypassing activation to prove a disabled endpoint prevented a detour.
+// With avoid_crossing_not_first_layer enabled, the first object layer Z also exempts support at that height.
 Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &plan,
                    const Print &print, Routers &routers, bool ignore_activation = false);
 // Build a shallow square ring from four joined bars; the returned mesh owns its triangles.
@@ -543,7 +549,7 @@ void check_scene(const Scene scenario)
             config.set_deserialize_strict({{"avoid_crossing_perimeters_max_detour", "0.001"}});
         if (scenario == Scene::Percentage)
             config.set_deserialize_strict({{"avoid_crossing_perimeters_max_detour", "0.001%"}});
-        if (scenario == Scene::FirstLayer)
+        if (scenario == Scene::FirstLayer || scenario == Scene::Support)
             config.set_deserialize_strict({{"avoid_crossing_not_first_layer", "1"}});
         if (scenario == Scene::Units && pass > 0) {
             std::ostringstream value;
@@ -642,7 +648,7 @@ void check_scene(const Scene scenario)
                         collect_leaves(*extrusion.root, extrusion, tool.extruder_id, layer, leaves);
 
         size_t compared = 0, deviated = 0, first_layer_travels = 0;
-        size_t external = 0, second_tool = 0, support = 0;
+        size_t external = 0, second_tool = 0, support = 0, first_layer_support_travels = 0;
         size_t disabled_detours = 0, resolved = 0, selected = 0;
         Routers routers;
         for (size_t idx = 0; idx < leaves.size(); ++idx) {
@@ -694,16 +700,24 @@ void check_scene(const Scene scenario)
             second_tool += leaves[idx + 1].tool == 1;
             const ExtrusionAttributes *target_attributes = leaves[idx + 1].entity->get_property<ExtrusionAttributes>();
             support += target_attributes != nullptr && target_attributes->extrusion_role().is_support();
+            // This scene enables avoid_crossing_not_first_layer, so support at the first object layer Z stays direct.
+            if (scenario == Scene::Support && target_attributes != nullptr &&
+                target_attributes->extrusion_role().is_support() &&
+                leaves[idx + 1].layer->print_z == print.object(0).layers().front().scaled_print_z()) {
+                CHECK(actual.size() == 2);
+                ++first_layer_support_travels;
+            }
             const LayerRegionIsland *region = leaves[idx + 1].owner->region_island;
             const slic3r_api::LayerRegionIsland region_view(reinterpret_cast<const layer_region_island_handle *>(region));
             if (scenario == Scene::FirstLayer && region != nullptr &&
-                reinterpret_cast<const Layer *>(region_view.region(0).layer().handle())->id() == 0) {
+                region_view.region(0).layer().print_z() == region_view.region(0).layer().object().layer(0).print_z()) {
                 CHECK(actual.size() == 2);
                 ++first_layer_travels;
             }
         }
         std::cout << "avoid-crossing parity: scene=" << static_cast<int>(scenario) << " pass=" << pass << ": compared=" << compared
-                  << " deviated=" << deviated << " disabled_detours=" << disabled_detours << " resolved=" << resolved << std::endl;
+                  << " deviated=" << deviated << " disabled_detours=" << disabled_detours << " resolved=" << resolved
+                  << " first_layer_support=" << first_layer_support_travels << std::endl;
         REQUIRE(compared > 0);
         if (scenario == Scene::Hole || scenario == Scene::Islands || scenario == Scene::Top)
             CHECK(deviated > 0);
@@ -721,6 +735,7 @@ void check_scene(const Scene scenario)
         }
         if (scenario == Scene::Support) {
             CHECK(support > 0);
+            CHECK(first_layer_support_travels > 0);
             CHECK(deviated > 0);
         }
         if (scenario == Scene::Regional) {
@@ -859,7 +874,9 @@ Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &p
     const slic3r_api::LayerRegionIsland region(reinterpret_cast<const layer_region_island_handle *>(target.owner->region_island));
     const slic3r_api::Layer layer_view = region.region(0).layer();
     const Layer &layer = *reinterpret_cast<const Layer *>(layer_view.handle());
-    if (print.config().avoid_crossing_not_first_layer && layer.id() == 0)
+    // When the exemption is enabled, use the first object layer Z for both object and support targets.
+    if (print.config().avoid_crossing_not_first_layer &&
+        layer.scaled_print_z() == layer.object()->layers().front().scaled_print_z())
         return straight;
     const slic3r_api::ConstPrintingPlan view(reinterpret_cast<const printing_plan_handle *>(&plan));
     const c_point api_shift = layer_view.object().instance_shift(
