@@ -52,6 +52,10 @@ storage owner checked before mutation. Publication callbacks then copy or move
 the prepared result into the live tree at the permitted processing boundary.
 Bridge metadata and native-flow queries let plugins describe prepared surfaces
 without guessing the host's surface flags or flow calculation.
+Default configuration queries borrow Print-owned settings without creating the
+auxiliary object. Concurrent readers require stable defaults, as other views do.
+The region resolver delegates to PrintObject::default_region_config(), so host
+callers and SDK views share one rule for objects without regions.
 
 Scratch setters keep ownership unchanged, validate arguments and contain failures
 before returning through C. Null, range and phase rules are documented with their functions
@@ -1399,6 +1403,25 @@ config_handle *print_get_config_mutable(print_handle *me)
 const config_handle *print_get_config(const print_handle *me)
 {
     return me == nullptr ? nullptr : Slic3r::ApiHost::to_config_handle(&Slic3r::to_print(me)->config());
+}
+
+const config_handle *print_get_default_region_config(const print_handle *me)
+{
+    return me == nullptr ? nullptr : Slic3r::ApiHost::to_config_handle(&Slic3r::to_print(me)->default_region_config());
+}
+
+const config_handle *print_resolve_default_region_config(const print_handle *me, const object_handle *object)
+{
+    if (me == nullptr)
+        return nullptr;
+    const Slic3r::PrintRegionConfig &from_print = Slic3r::to_print(me)->default_region_config();
+    return Slic3r::ApiHost::to_config_handle(
+        object == nullptr ? &from_print : &Slic3r::to_object(object)->default_region_config(from_print));
+}
+
+const config_handle *print_get_default_object_config(const print_handle *me)
+{
+    return me == nullptr ? nullptr : Slic3r::ApiHost::to_config_handle(&Slic3r::to_print(me)->default_object_config());
 }
 
 const_strings_t print_records_channels(const print_handle *me)

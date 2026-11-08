@@ -549,6 +549,21 @@ TEST_CASE("Property freeze rejects the previous data-tree ABI major",
     CHECK(validate_plugin_api_requirements(requirements).compatible());
 }
 
+// The new queries add functions without changing existing data-tree layouts.
+TEST_CASE("Default configuration queries preserve compatibility with earlier data-tree 5 packages",
+          "[plugins][abi][default-region]")
+{
+    static_assert(SLIC3R_PLUGIN_API_DATA_TREE_MAJOR == 5u);
+    for (uint16_t minor : {uint16_t(0), uint16_t(1), uint16_t(2), uint16_t(3)}) {
+        CAPTURE(minor);
+        const std::vector<PluginApiRequirement> requirements = {
+            {"slic3r_plugin_types.h", {SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR, SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR}},
+            {"slic3r_data_tree.h", {5, minor}}
+        };
+        CHECK(validate_plugin_api_requirements(requirements).compatible());
+    }
+}
+
 // Sparse support algorithms require the role layout without a separate branch selector.
 TEST_CASE("Support toolpath rejects the previous role ABI major", "[plugins][abi][support-toolpath]")
 {

@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 2u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 4u
 
 /*
 Data-tree access for a sliced Print.
@@ -1079,6 +1079,37 @@ It is available only outside pipeline steps (STEP_NONE).
 */
 SLIC3R_HOST_API config_handle *print_get_config_mutable(print_handle *me);
 SLIC3R_HOST_API const config_handle *print_get_config(const print_handle *me);
+
+/*
+Borrow the Print's default region configuration: the region settings of the
+print preset, before any object or volume override. It is replaced by apply()
+and must not be read while apply() runs. Null returns null; never free the
+result. Read-only: unlike print_get_auxiliary_object(), it never creates
+anything, so parallel callbacks may call it. (API 5.3)
+*/
+SLIC3R_HOST_API const config_handle *print_get_default_region_config(const print_handle *me);
+
+/*
+Borrow an object's default region configuration using the host's fallback rule.
+The object must belong to this Print. Its first region contains the preset plus
+object overrides, without volume overrides. A null object or an object without
+regions gives the Print's default, as print_get_default_region_config() does.
+A null Print returns null. Never free the result; reacquire it after apply().
+This query creates nothing and changes no configuration. Parallel readers are
+allowed while apply()/clear() are stopped. No exceptions escape. (API 5.4)
+*/
+SLIC3R_HOST_API const config_handle *print_resolve_default_region_config(
+    const print_handle *me, const object_handle *object);
+
+/*
+Borrow the object settings of the print preset before any object override,
+including global wipe tower settings. An object's own settings are returned by
+object_get_config(). A null Print returns null. Never free the result; reacquire
+it after apply(). This query creates nothing and changes no configuration.
+Parallel readers are allowed while apply()/clear() are stopped. No exceptions
+escape. (API 5.4)
+*/
+SLIC3R_HOST_API const config_handle *print_get_default_object_config(const print_handle *me);
 
 /*
 Variable record channels owned by one Print.

@@ -51,6 +51,19 @@ Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-t
 shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
 must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
 
+Data-tree 5.3 adds read-only access to the Print's default region configuration
+without constructing the auxiliary object. Existing 5.x packages remain
+compatible; the new query changes no structure layout or existing signature.
+
+Data-tree 5.4 adds `print_get_default_object_config()` for preset object settings
+and `print_resolve_default_region_config(print, object)` for the host's regional
+fallback rule. `print_get_default_region_config(print)` keeps its one-parameter
+signature. These are read-only borrowed views; reacquire them after `apply()` and
+stop readers before `apply()` or `clear()`. No auxiliary object is created.
+Existing 5.x packages remain compatible without reconstruction. The C++
+`Object::default_region_config(print)` and its Python counterpart delegate to the
+host resolver instead of duplicating that rule in each language.
+
 The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument

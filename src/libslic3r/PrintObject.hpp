@@ -82,6 +82,8 @@ public:
     // Size of an object: XYZ in scaled coordinates. The size might not be quite snug in XY plane.
     const Vec3crd&               size() const           { return m_size; }
     const PrintObjectConfig&     config() const         { return m_config; }
+    // Borrow region zero, containing the Print defaults plus this object's own
+    // region overrides. With no regions, borrow from_print instead. Neither is changed.
     const PrintRegionConfig&     default_region_config(const PrintRegionConfig &from_print) const;
     const Transform3d&           trafo() const          { return m_trafo; }
     // Trafo with the center_offset() applied after the transformation, to center the object in XY before slicing.

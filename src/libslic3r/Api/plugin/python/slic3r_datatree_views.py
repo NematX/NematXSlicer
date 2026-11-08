@@ -30,6 +30,12 @@ Read configuration:
     density = config.float("fill_density")
     enabled = config.bool("support_material")
 
+Print.default_region_config() reads the preset's regional defaults without
+creating an auxiliary object. Its borrowed result must be reacquired after apply().
+Print.default_object_config() reads preset object settings, such as the global
+wipe tower position. Object.default_region_config(print) uses the host's fallback
+for objects without regions. These queries never create geometry or edit settings.
+
 Inspect region-island extrusions:
 
     region_island = island.region_island(0)
@@ -1949,6 +1955,16 @@ class Object(DataTreeView):
     def config(self) -> Config:
         return Config(self.api, self.api.host.object_get_config(self.c_handle()))
 
+    @abi_requires_headers("slic3r_data_tree.h")
+    def default_region_config(self, print_view: "Print") -> Config:
+        """Borrow this object's regional defaults using the host's fallback rule.
+
+        print_view must own this object. Without regions, return its Print's
+        defaults. Read only while apply()/clear() are stopped; reacquire after apply().
+        """
+        return Config(self.api, self.api.host.print_resolve_default_region_config(
+            print_view.c_handle(), self.c_handle()))
+
     def max_z(self) -> int:
         return int(self.api.host.object_get_max_z(self.c_handle()))
 
@@ -2161,6 +2177,24 @@ class MutableObject(Object):
 class Print(DataTreeView):
     def config(self) -> Config:
         return Config(self.api, self.api.host.print_get_config(self.c_handle()))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def default_region_config(self) -> Config:
+        """Borrow preset regional defaults, without creating an auxiliary object.
+
+        Read only while apply()/clear() are stopped; reacquire after apply().
+        The Print retains ownership and neither geometry nor settings are changed.
+        """
+        return Config(self.api, self.api.host.print_get_default_region_config(self.c_handle()))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def default_object_config(self) -> Config:
+        """Borrow preset object settings, including global wipe tower settings.
+
+        This query creates nothing and changes no settings. Read only while
+        apply()/clear() are stopped; reacquire the borrowed view after apply().
+        """
+        return Config(self.api, self.api.host.print_get_default_object_config(self.c_handle()))
 
     @abi_requires_headers("slic3r_data_tree.h")
     def register_print_region_config(self, config: Config) -> PrintRegion:
