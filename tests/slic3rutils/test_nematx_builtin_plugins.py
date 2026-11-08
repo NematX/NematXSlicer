@@ -23,12 +23,14 @@ SOURCES = (
     "plugins/wipetower/src/TowerFootprints.cpp", "plugins/wipetower/src/FilamentSections.cpp",
     "plugins/wipetower/src/rectilinear/RectilinearFills.cpp",
     "plugins/wipetower/src/rectilinear/RectilinearEdgeGrid.cpp",
+    "plugins/smooth_temperature/src/SmoothTemperature.cpp",
 )
 IDS = (
     "nematx_second_layer_flow", "nematx_corner_stretch", "nematx_fan_first_layer_program",
     "nematx_fan_speedup", "nematx_hole_size_curve", "rectilineararoundholes",
     "gridvarspeed", "nematx_gridvarspeed_speed", "nematx_gridvarspeed_recipe",
     "gcode.firmware.nematx", "gcode.reader.nematx", "nematx_regional_fan", "nematx_wipetower",
+    "nematx_smooth_temperature",
 )
 
 
@@ -75,7 +77,7 @@ endforeach()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         targets = (binary / "targets.txt").read_text().split(";")
         modules = [target for target in targets if target.startswith("nematx_builtin_")]
-        self.assertEqual(len(modules), 10)
+        self.assertEqual(len(modules), 11)
         activated = (binary / "activations.txt").read_text().splitlines()
         self.assertEqual(set(activated), {plugin_id + " = 1" for plugin_id in IDS})
         registry = (binary / "NematXBuiltinPlugins.cpp").read_text()

@@ -90,6 +90,9 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
             plugins/wipetower/src/rectilinear/RectilinearFills.cpp
             plugins/wipetower/src/rectilinear/RectilinearEdgeGrid.cpp
         PLUGIN_IDS nematx_wipetower)
+    # The module derives from the host's LayerTemperature, already in libslic3r.
+    nematx_add_builtin_module(smooth_temperature
+        SOURCES plugins/smooth_temperature/src/SmoothTemperature.cpp PLUGIN_IDS nematx_smooth_temperature)
     message(STATUS "NematX plugins embedded from ${NEMATX_PLUGINS_SOURCE_DIR}")
 elseif(SLIC3R_APP_KEY STREQUAL "NematXSlicer")
     message(STATUS "NematX built-in plugins disabled; standalone packages remain supported")
