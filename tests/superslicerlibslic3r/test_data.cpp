@@ -293,8 +293,8 @@ void init_print(Print& print, std::initializer_list<TestMesh> meshes, Slic3r::Mo
     print.apply(model, config); // apply config for the arrange_objects
     arrange_objects(model, arr2::InfiniteBed{}, arr2::ArrangeSettings().set_distance_from_objects(10.f));//print.config().min_object_distance()) });
     model.center_instances_around_point(Slic3r::Vec2d(100,100));
-    for (auto* mo : model.objects) {
-        print.auto_assign_extruders(mo);
+    for (ModelObject &mo : model.objects()) {
+        print.auto_assign_extruders(&mo);
         //print.add_model_object(mo);
     }
     print.apply(model, config);
@@ -332,8 +332,8 @@ void init_print(Print& print, std::vector<TriangleMesh> meshes, Slic3r::Model& m
     arrange_objects(model, arr2::InfiniteBed{}, arr2::ArrangeSettings().set_distance_from_objects(10.f) );//print.config().min_object_distance())});
     model.center_instances_around_point(Slic3r::Vec2d(100,100));
 	print.apply(model, config);
-	for (ModelObject* mo : model.objects) {
-        print.auto_assign_extruders(mo);
+	for (ModelObject &mo : model.objects()) {
+        print.auto_assign_extruders(&mo);
     }
 	
     print.validate();

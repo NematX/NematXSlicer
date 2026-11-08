@@ -12,7 +12,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 // Converts slicer geometry to Clipper paths for boolean operations and offsets. Open-path clipping
-// restores slicer coordinates and locates fragments by arc length (distance along the subject).
+// restores slicer coordinates and locates fragments by arc length (distance along the subject),
+// through a per-subject segment index (SubjectSegments) that returns exactly what a full scan returns.
 #include "ClipperUtils.hpp"
 
 #include "Geometry.hpp"
@@ -46,12 +47,13 @@ using SubjectInterval = std::pair<double, double>;
 // Returns owned inside/outside fragments from borrowed providers, dropping tiny covered intervals.
 template<typename PathsProvider1, typename PathsProvider2>
 static std::pair<Polylines, Polylines> _split_pl(PathsProvider1 &&subject, PathsProvider2 &&clip);
+class SubjectSegments;
 // Orients owned fragments and rejoins nearby intervals; subject and optional gap output are borrowed.
 static void _clipper_pl_rejoin(Polylines &pieces, const Points &subject, std::vector<SubjectInterval> *gaps);
-// Orients a nondegenerate borrowed piece and returns its interval along the borrowed subject.
-static SubjectInterval _place_subject_piece(Polyline &piece, const Points &subject);
-// Returns the closest arc-length position of a borrowed point along a borrowed subject.
-static double _subject_position(const Points &subject, const Point &pt);
+// Orients a nondegenerate borrowed piece and returns its interval along the indexed subject.
+static SubjectInterval _place_subject_piece(Polyline &piece, const SubjectSegments &subject);
+// Returns the closest arc-length position of a borrowed point along the indexed subject.
+static double _subject_position(const SubjectSegments &subject, const Point &pt);
 
 #ifdef CLIPPER_UTILS_DEBUG
 // For debugging the Clipper library, for providing bug reports to the Clipper author.
@@ -1626,30 +1628,262 @@ struct PreparedPolylineClip
     Points single_subject;
 };
 
+/*
+Segments of one subject path, prepared once for all the pieces cut from it.
+
+Each piece end and each first-segment midpoint is located on the subject segment closest to it.
+A scan of every segment, for every piece, costs pieces x segments. This class keeps the arc length
+at each subject point and, for long subjects, a uniform grid of the cells covered by each segment
+bounding box. A search collects the segments of the cells around the point, ring by ring, until
+every segment left outside the collected square is provably farther than the closest one found.
+It then evaluates the collected segments in index order with the expressions of the full scan, so
+it returns exactly the scan result, ties included (the first segment at the minimal distance).
+Short subjects, and subjects whose long segments would cover too many cells, are scanned in full.
+The subject is borrowed and must outlive the index; the search buffers make one index usable by
+one thread at a time.
+*/
+class SubjectSegments
+{
+public:
+    explicit SubjectSegments(const Points &subject);
+    const Points &points() const { return m_subject; }
+    // Total arc length of the subject.
+    double length() const;
+    // Arc length, from the start of the subject, of the subject point closest to point.
+    double position(const Vec2d &point) const;
+    // Vector of the closest segment of nonzero length to point, or zero when there is none.
+    Vec2d closest_direction(const Vec2d &point) const;
+
+private:
+    // Squared distance from point to segment idx (joining subject[idx - 1] and subject[idx]),
+    // with the projection parameter t, evaluated exactly like the original full scans.
+    double distance_sqr(size_t idx, const Vec2d &point, double &t) const;
+    // With the grid: segment indices, in increasing order, that include every segment at the
+    // minimal distance from point; segments of zero length are left out when skip_degenerate is set.
+    const std::vector<size_t> &candidates(const Vec2d &point, bool skip_degenerate) const;
+
+    const Points &m_subject;
+    // With the grid: arc length at each subject point, accumulated in order like the original scans.
+    std::vector<double> m_lengths;
+    // Uniform grid, stored as compressed rows: the segments of cell c are
+    // m_cell_segments[m_cell_start[c] .. m_cell_start[c + 1]).
+    bool m_has_grid = false;
+    double m_min_x = 0., m_min_y = 0., m_cell = 1.;
+    size_t m_columns = 0, m_rows = 0;
+    std::vector<size_t> m_cell_start;
+    std::vector<size_t> m_cell_segments;
+    // Search buffers: the last search that collected each segment, and the collected indices.
+    mutable std::vector<size_t> m_seen;
+    mutable size_t m_search = 0;
+    mutable std::vector<size_t> m_found;
+};
+
+SubjectSegments::SubjectSegments(const Points &subject) : m_subject(subject)
+{
+    // A grid only pays off for long subjects; about one segment per cell. Without a grid, the
+    // searches are the original scans and nothing is allocated here.
+    if (subject.size() < 65)
+        return;
+    const size_t segments = subject.size() - 1;
+    const BoundingBox box(subject);
+    const double width = double(box.max.x() - box.min.x()) + 1.;
+    const double height = double(box.max.y() - box.min.y()) + 1.;
+    // The second bound limits each side to 2 x segments cells for very thin subjects.
+    m_cell = std::max({std::sqrt(width * height / double(segments)), std::max(width, height) / double(2 * segments), 1.});
+    m_min_x = double(box.min.x());
+    m_min_y = double(box.min.y());
+    m_columns = size_t(width / m_cell) + 1;
+    m_rows = size_t(height / m_cell) + 1;
+    const auto cell_x = [this](double x) { return std::min(m_columns - 1, size_t(std::max(0., std::floor((x - m_min_x) / m_cell)))); };
+    const auto cell_y = [this](double y) { return std::min(m_rows - 1, size_t(std::max(0., std::floor((y - m_min_y) / m_cell)))); };
+    // Count the cells of every segment box; long segments covering many cells disable the grid.
+    std::vector<size_t> counts(m_columns * m_rows + 1, 0);
+    size_t total = 0;
+    for (size_t idx = 1; idx < subject.size(); ++idx) {
+        const Point &a = subject[idx - 1], &b = subject[idx];
+        const size_t x0 = cell_x(double(std::min(a.x(), b.x()))), x1 = cell_x(double(std::max(a.x(), b.x())));
+        const size_t y0 = cell_y(double(std::min(a.y(), b.y()))), y1 = cell_y(double(std::max(a.y(), b.y())));
+        total += (x1 - x0 + 1) * (y1 - y0 + 1);
+        if (total > 16 * segments)
+            return;
+        for (size_t y = y0; y <= y1; ++y)
+            for (size_t x = x0; x <= x1; ++x)
+                ++counts[y * m_columns + x];
+    }
+    m_cell_start.assign(counts.size(), 0);
+    for (size_t cell = 1; cell < counts.size(); ++cell)
+        m_cell_start[cell] = m_cell_start[cell - 1] + counts[cell - 1];
+    m_cell_segments.assign(total, 0);
+    std::vector<size_t> fill(m_cell_start.begin(), m_cell_start.end() - 1);
+    for (size_t idx = 1; idx < subject.size(); ++idx) {
+        const Point &a = subject[idx - 1], &b = subject[idx];
+        const size_t x0 = cell_x(double(std::min(a.x(), b.x()))), x1 = cell_x(double(std::max(a.x(), b.x())));
+        const size_t y0 = cell_y(double(std::min(a.y(), b.y()))), y1 = cell_y(double(std::max(a.y(), b.y())));
+        for (size_t y = y0; y <= y1; ++y)
+            for (size_t x = x0; x <= x1; ++x)
+                m_cell_segments[fill[y * m_columns + x]++] = idx;
+    }
+    m_lengths.assign(subject.size(), 0.);
+    for (size_t idx = 1; idx < subject.size(); ++idx) {
+        const Vec2d start = subject[idx - 1].cast<double>();
+        const Vec2d segment = subject[idx].cast<double>() - start;
+        m_lengths[idx] = m_lengths[idx - 1] + std::sqrt(segment.squaredNorm());
+    }
+    m_seen.assign(subject.size(), 0);
+    m_has_grid = true;
+}
+
+double SubjectSegments::length() const
+{
+    if (m_has_grid)
+        return m_lengths.back();
+    // Accumulated in subject order, like the grid lengths and the original scans.
+    double length = 0.;
+    for (size_t idx = 1; idx < m_subject.size(); ++idx) {
+        const Vec2d start = m_subject[idx - 1].cast<double>();
+        const Vec2d segment = m_subject[idx].cast<double>() - start;
+        length += std::sqrt(segment.squaredNorm());
+    }
+    return length;
+}
+
+double SubjectSegments::distance_sqr(size_t idx, const Vec2d &point, double &t) const
+{
+    const Vec2d start = m_subject[idx - 1].cast<double>();
+    const Vec2d segment = m_subject[idx].cast<double>() - start;
+    const double segment_length_sqr = segment.squaredNorm();
+    t = segment_length_sqr > 0. ? std::clamp((point - start).dot(segment) / segment_length_sqr, 0., 1.) : 0.;
+    return (start + t * segment - point).squaredNorm();
+}
+
+const std::vector<size_t> &SubjectSegments::candidates(const Vec2d &point, bool skip_degenerate) const
+{
+    assert(m_has_grid);
+    m_found.clear();
+    ++m_search;
+    const long long columns = (long long)m_columns, rows = (long long)m_rows;
+    const long long cx = std::clamp((long long)std::floor((point.x() - m_min_x) / m_cell), 0ll, columns - 1);
+    const long long cy = std::clamp((long long)std::floor((point.y() - m_min_y) / m_cell), 0ll, rows - 1);
+    double best = std::numeric_limits<double>::infinity();
+    const auto visit = [&](long long x, long long y) {
+        if (x < 0 || y < 0 || x >= columns || y >= rows)
+            return;
+        const size_t cell = size_t(y * columns + x);
+        for (size_t at = m_cell_start[cell]; at < m_cell_start[cell + 1]; ++at) {
+            const size_t idx = m_cell_segments[at];
+            if (m_seen[idx] == m_search)
+                continue;
+            m_seen[idx] = m_search;
+            const Vec2d start = m_subject[idx - 1].cast<double>();
+            if (skip_degenerate && (m_subject[idx].cast<double>() - start).squaredNorm() == 0.)
+                continue;
+            m_found.push_back(idx);
+            double t;
+            best = std::min(best, this->distance_sqr(idx, point, t));
+        }
+    };
+    for (long long ring = 0;; ++ring) {
+        if (ring == 0)
+            visit(cx, cy);
+        else
+            for (long long d = -ring; d <= ring; ++d) {
+                visit(cx + d, cy - ring);
+                visit(cx + d, cy + ring);
+                if (d != -ring && d != ring) {
+                    visit(cx - ring, cy + d);
+                    visit(cx + ring, cy + d);
+                }
+            }
+        if (cx - ring <= 0 && cy - ring <= 0 && cx + ring >= columns - 1 && cy + ring >= rows - 1)
+            break;
+        // Every segment not collected lies outside the square of the visited cells, beyond the
+        // grid border on a side that reaches it. The margins absorb the rounding of cell indices
+        // and of the evaluated squared distances.
+        const double inf = std::numeric_limits<double>::infinity();
+        const double gap = std::min({cx - ring <= 0 ? inf : point.x() - (m_min_x + double(cx - ring) * m_cell),
+                                     cx + ring >= columns - 1 ? inf : m_min_x + double(cx + ring + 1) * m_cell - point.x(),
+                                     cy - ring <= 0 ? inf : point.y() - (m_min_y + double(cy - ring) * m_cell),
+                                     cy + ring >= rows - 1 ? inf : m_min_y + double(cy + ring + 1) * m_cell - point.y()}) - 2.;
+        if (gap > 0. && best < gap * gap * (1. - 1e-9))
+            break;
+    }
+    std::sort(m_found.begin(), m_found.end());
+    return m_found;
+}
+
+double SubjectSegments::position(const Vec2d &point) const
+{
+    double best_distance_sqr = std::numeric_limits<double>::max();
+    double best_position = 0.;
+    if (!m_has_grid) {
+        // The full scan, accumulating the arc length along the subject.
+        double length = 0.;
+        for (size_t idx = 1; idx < m_subject.size(); ++idx) {
+            const Vec2d start = m_subject[idx - 1].cast<double>();
+            const Vec2d segment = m_subject[idx].cast<double>() - start;
+            const double segment_length_sqr = segment.squaredNorm();
+            const double t = segment_length_sqr > 0. ? std::clamp((point - start).dot(segment) / segment_length_sqr, 0., 1.) : 0.;
+            const double distance_sqr = (start + t * segment - point).squaredNorm();
+            const double segment_length = std::sqrt(segment_length_sqr);
+            if (distance_sqr < best_distance_sqr) {
+                best_distance_sqr = distance_sqr;
+                best_position = length + t * segment_length;
+            }
+            length += segment_length;
+        }
+        return best_position;
+    }
+    for (const size_t idx : this->candidates(point, false)) {
+        double t;
+        const double distance_sqr = this->distance_sqr(idx, point, t);
+        if (distance_sqr < best_distance_sqr) {
+            best_distance_sqr = distance_sqr;
+            const Vec2d segment = m_subject[idx].cast<double>() - m_subject[idx - 1].cast<double>();
+            best_position = m_lengths[idx - 1] + t * std::sqrt(segment.squaredNorm());
+        }
+    }
+    return best_position;
+}
+
+Vec2d SubjectSegments::closest_direction(const Vec2d &point) const
+{
+    double best_distance_sqr = std::numeric_limits<double>::max();
+    Vec2d subject_direction = Vec2d::Zero();
+    if (!m_has_grid) {
+        // The full scan over the segments of nonzero length.
+        for (size_t idx = 1; idx < m_subject.size(); ++idx) {
+            const Vec2d start = m_subject[idx - 1].cast<double>();
+            const Vec2d segment = m_subject[idx].cast<double>() - start;
+            const double segment_length_sqr = segment.squaredNorm();
+            if (segment_length_sqr == 0.)
+                continue;
+            const double t = std::clamp((point - start).dot(segment) / segment_length_sqr, 0., 1.);
+            const double distance_sqr = (start + t * segment - point).squaredNorm();
+            if (distance_sqr < best_distance_sqr) {
+                best_distance_sqr = distance_sqr;
+                subject_direction = segment;
+            }
+        }
+        return subject_direction;
+    }
+    for (const size_t idx : this->candidates(point, true)) {
+        double t;
+        const double distance_sqr = this->distance_sqr(idx, point, t);
+        if (distance_sqr < best_distance_sqr) {
+            best_distance_sqr = distance_sqr;
+            subject_direction = m_subject[idx].cast<double>() - m_subject[idx - 1].cast<double>();
+        }
+    }
+    return subject_direction;
+}
+
 // Arc length, from the start of subject, of the subject point closest to pt. Cut points lie on the
 // subject up to the rounding of the cut, so this locates each piece end along the subject. A subject
 // that passes within a few units of itself may locate such a point on the wrong pass.
 // Inputs are borrowed and unchanged; a closed subject's repeated start maps to zero here.
-static double _subject_position(const Points &subject, const Point &pt)
+static double _subject_position(const SubjectSegments &subject, const Point &pt)
 {
-    const Vec2d point = pt.cast<double>();
-    double best_distance_sqr = std::numeric_limits<double>::max();
-    double best_position = 0.;
-    double length = 0.;
-    for (size_t idx = 1; idx < subject.size(); ++idx) {
-        const Vec2d start = subject[idx - 1].cast<double>();
-        const Vec2d segment = subject[idx].cast<double>() - start;
-        const double segment_length_sqr = segment.squaredNorm();
-        const double t = segment_length_sqr > 0. ? std::clamp((point - start).dot(segment) / segment_length_sqr, 0., 1.) : 0.;
-        const double distance_sqr = (start + t * segment - point).squaredNorm();
-        const double segment_length = std::sqrt(segment_length_sqr);
-        if (distance_sqr < best_distance_sqr) {
-            best_distance_sqr = distance_sqr;
-            best_position = length + t * segment_length;
-        }
-        length += segment_length;
-    }
-    return best_position;
+    return subject.position(pt.cast<double>());
 }
 
 // Projects the first segment's floating-point midpoint to find its direction along the subject,
@@ -1657,36 +1891,20 @@ static double _subject_position(const Points &subject, const Point &pt)
 // Clipping has removed duplicate adjacent points and one-point pieces; assertions reject violations.
 // The subject is borrowed and unchanged. For closed subjects, arrival at the repeated start is the
 // total length; nearby passes remain subject to the nearest-projection ambiguity of _subject_position.
-static SubjectInterval _place_subject_piece(Polyline &piece, const Points &subject)
+static SubjectInterval _place_subject_piece(Polyline &piece, const SubjectSegments &subject)
 {
-    assert(piece.size() >= 2 && subject.size() >= 2);
+    const Points &points = subject.points();
+    assert(piece.size() >= 2 && points.size() >= 2);
     const Vec2d direction = piece.points[1].cast<double>() - piece.front().cast<double>();
     assert(direction.squaredNorm() > 0.);
     const Vec2d midpoint = piece.front().cast<double>() + 0.5 * direction;
-    double best_distance_sqr = std::numeric_limits<double>::max();
-    Vec2d subject_direction = Vec2d::Zero();
-    double length = 0.;
-    for (size_t idx = 1; idx < subject.size(); ++idx) {
-        const Vec2d start = subject[idx - 1].cast<double>();
-        const Vec2d segment = subject[idx].cast<double>() - start;
-        const double segment_length_sqr = segment.squaredNorm();
-        length += std::sqrt(segment_length_sqr);
-        if (segment_length_sqr == 0.)
-            continue;
-        const double t = std::clamp((midpoint - start).dot(segment) / segment_length_sqr, 0., 1.);
-        const double distance_sqr = (start + t * segment - midpoint).squaredNorm();
-        if (distance_sqr < best_distance_sqr) {
-            best_distance_sqr = distance_sqr;
-            subject_direction = segment;
-        }
-    }
-    if (direction.dot(subject_direction) < 0.)
+    if (direction.dot(subject.closest_direction(midpoint)) < 0.)
         piece.reverse();
     const double start = _subject_position(subject, piece.front());
     double end = _subject_position(subject, piece.back());
-    if (subject.front() == subject.back()) {
-        if (piece.back() == subject.front() || end < start)
-            end = length;
+    if (points.front() == points.back()) {
+        if (piece.back() == points.front() || end < start)
+            end = subject.length();
         return {start, end};
     }
     return {std::min(start, end), std::max(start, end)};
@@ -1710,10 +1928,13 @@ static void _clipper_pl_rejoin(Polylines &pieces, const Points &subject, std::ve
         double   start;
         double   end;
     };
+    if (pieces.empty())
+        return;
     std::vector<PlacedPiece> placed;
     placed.reserve(pieces.size());
+    const SubjectSegments segments(subject);
     for (Polyline &piece : pieces) {
-        const SubjectInterval interval = _place_subject_piece(piece, subject);
+        const SubjectInterval interval = _place_subject_piece(piece, segments);
         placed.push_back({std::move(piece), interval.first, interval.second});
     }
     std::sort(placed.begin(), placed.end(), [](const PlacedPiece &a, const PlacedPiece &b) { return a.start < b.start; });
@@ -1872,12 +2093,13 @@ static std::pair<Polylines, Polylines> _split_pl(PathsProvider1 &&subject, Paths
     // subject. The lambda borrows pieces and gaps, erases only pieces inside a glued stretch, never
     // a longer one, and leaves already oriented surviving pieces in the same direction.
     const auto drop_pieces_in = [&input](Polylines &pieces, const std::vector<SubjectInterval> &gaps) {
-        if (gaps.empty())
+        if (gaps.empty() || pieces.empty())
             return;
         const double eps = double(SCALED_EPSILON);
+        const SubjectSegments segments(input.single_subject);
         pieces.erase(std::remove_if(pieces.begin(), pieces.end(),
                                     [&](Polyline &piece) {
-                                         const SubjectInterval interval = _place_subject_piece(piece, input.single_subject);
+                                         const SubjectInterval interval = _place_subject_piece(piece, segments);
                                         return std::any_of(gaps.begin(), gaps.end(), [&](const SubjectInterval &gap) {
                                              return interval.first > gap.first - eps && interval.second < gap.second + eps;
                                         });

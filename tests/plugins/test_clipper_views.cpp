@@ -714,6 +714,48 @@ TEST_CASE("SDK boolean conversion preserves generated geometry and topological o
     }
 }
 
+// A long subject whose x only increases: a steep zigzag crossing a holed square hundreds of times.
+// It is long enough for the open-path clipping to index its segments when it locates the pieces.
+// Single-subject pieces must come sorted and oriented along the subject, which here means by
+// increasing x, and the two sides of split_pl() must still cover the whole subject length.
+TEST_CASE("Open path clipping keeps the pieces of a long subject ordered along it", "[plugins][clipper]")
+{
+    Slic3r::Polyline subject;
+    for (int index = 0; index <= 600; ++index)
+        subject.points.push_back(point_mm(-15. + 0.05 * double(index), index % 2 == 0 ? -12. : 12.));
+    Slic3r::ExPolygon clip(rectangle_mm(-10., -10., 10., 10.));
+    clip.holes.push_back(rectangle_mm(-3., -3., 3., 3.));
+    clip.holes.front().make_clockwise();
+    const Slic3r::ExPolygons clips{clip};
+    // Each piece runs towards increasing x and starts where the previous one ended or later.
+    const auto check_ordered = [](const Slic3r::Polylines &pieces) {
+        for (size_t index = 0; index < pieces.size(); ++index) {
+            REQUIRE(pieces[index].size() >= 2);
+            CHECK(pieces[index].front().x() < pieces[index].back().x());
+            if (index > 0)
+                CHECK(pieces[index - 1].back().x() <= pieces[index].front().x());
+        }
+    };
+    const auto total_length = [](const Slic3r::Polylines &pieces) {
+        double length = 0.;
+        for (const Slic3r::Polyline &piece : pieces)
+            length += piece.length();
+        return length;
+    };
+    const Slic3r::Polylines inside = Slic3r::intersection_pl(subject, clips);
+    const Slic3r::Polylines outside = Slic3r::diff_pl(subject, clips);
+    // About 400 segments cross the square, and those over the hole are cut twice more.
+    CHECK(inside.size() > 400);
+    CHECK(outside.size() > 200);
+    check_ordered(inside);
+    check_ordered(outside);
+    const std::pair<Slic3r::Polylines, Slic3r::Polylines> split = Slic3r::split_pl(subject, clips);
+    check_ordered(split.first);
+    check_ordered(split.second);
+    CHECK(total_length(split.first) + total_length(split.second) == Approx(subject.length()).epsilon(1e-6));
+    CHECK(total_length(inside) + total_length(outside) == Approx(subject.length()).epsilon(1e-6));
+}
+
 TEST_CASE("Batch polyline clipping matches core directed paths and owns results", "[plugins][clipper][clipper-batch]")
 {
     const bool difference = GENERATE(false, true);

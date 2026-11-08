@@ -18,28 +18,33 @@ SCENARIO("Various Clipper operations - xs/t/11_clipper.t", "[ClipperUtils]") {
     const Slic3r::Polygon hole_in_square{{1600, 1400}, {1400, 1400}, {1400, 1600}, {1600, 1600}};
     const Slic3r::ExPolygon square_with_hole(square, hole_in_square);
     GIVEN("square_with_hole") {
+        // The same square with a hole, 100 times larger: the offset hole stays far above
+        // SCALED_EPSILON, under which the Clipper cleaning removes rings and vertices.
+        const Slic3r::ExPolygon square_with_hole(
+            Slic3r::Polygon{{200000, 100000}, {200000, 200000}, {100000, 200000}, {100000, 100000}},
+            Slic3r::Polygon{{160000, 140000}, {140000, 140000}, {140000, 160000}, {160000, 160000}});
         WHEN("offset") {
-            Polygons result = Slic3r::offset(square_with_hole, 50.f);
+            Polygons result = Slic3r::offset(square_with_hole, 5000.f);
             THEN("offset matches") {
-                REQUIRE(result == Polygons { 
-                    { { 2050, 2050 }, { 950, 2050 }, { 950, 950 }, { 2050, 950 }, },
-                    { { 1550, 1450 }, { 1450, 1450 }, { 1450, 1550 }, { 1550, 1550 } } });
+                REQUIRE(result == Polygons {
+                    { { 205000, 205000 }, { 95000, 205000 }, { 95000, 95000 }, { 205000, 95000 }, },
+                    { { 155000, 145000 }, { 145000, 145000 }, { 145000, 155000 }, { 155000, 155000 } } });
             }
         }
         WHEN("offset_ex") {
-            ExPolygons result = Slic3r::offset_ex(square_with_hole, 50.f);
+            ExPolygons result = Slic3r::offset_ex(square_with_hole, 5000.f);
             THEN("offset matches") {
-                REQUIRE(result == ExPolygons { { 
-                    { { 2050, 2050 }, { 950, 2050 }, { 950, 950 }, { 2050, 950 }, },
-                    { { 1450, 1450 }, { 1450, 1550 }, { 1550, 1550 }, { 1550, 1450 } } } } );
+                REQUIRE(result == ExPolygons { {
+                    { { 205000, 205000 }, { 95000, 205000 }, { 95000, 95000 }, { 205000, 95000 }, },
+                    { { 145000, 145000 }, { 145000, 155000 }, { 155000, 155000 }, { 155000, 145000 } } } } );
             }
         }
         WHEN("offset2_ex") {
-            ExPolygons result = Slic3r::offset2_ex({square_with_hole}, 50.f, -20.f);
+            ExPolygons result = Slic3r::offset2_ex({square_with_hole}, 5000.f, -2000.f);
             THEN("offset matches") {
                 REQUIRE(result == ExPolygons { {
-                    { { 2030, 2030 }, { 970, 2030 }, { 970, 970 }, { 2030, 970 } },
-                    { { 1430, 1430 }, { 1430, 1570 }, { 1570, 1570 }, { 1570, 1430 } } } } );
+                    { { 203000, 203000 }, { 97000, 203000 }, { 97000, 97000 }, { 203000, 97000 } },
+                    { { 143000, 143000 }, { 143000, 157000 }, { 157000, 157000 }, { 157000, 143000 } } } } );
             }
         }
     }
@@ -379,7 +384,7 @@ TEST_CASE("Testing offset and offset_ex ", "[ClipperUtils]") {
         std::vector<std::pair<double, double>> unscaled_array = {{0, 0}, {10, 0}, {10, 4.5}, {7, 4.5}, {7,3}, {3,3}, {3,7}, {7,7}, {7,5.5}, {10,5.5}, {10,10}, {0,10}};
         Slic3r::Polygon src_polygon;
         for(auto pt: unscaled_array)
-            src_polygon.points.emplace_back(scale_t(pt.first), scale_t(pt.second));
+            src_polygon.points.emplace_back(scale_i(pt.first), scale_i(pt.second));
         REQUIRE(src_polygon.is_valid());
 
         Polygons result = Slic3r::offset(src_polygon, scale_d(1), ClipperLib::JoinType::jtMiter, 3);
@@ -669,6 +674,8 @@ TEST_CASE("test polygon diagonal intersections", "[Polygon]") {
     }
 }
 TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
+    // Outside points are moved out of the box by a third of SCALED_EPSILON, see clip_clipper_polygon_with_subject_bbox().
+    const coord_t margin = SCALED_EPSILON / 3;
     SECTION("test polygon intersections") {
         Slic3r::Polygon polygon = BoundingBox(Points{Point{-10000, -10000}, Point{10000, 10000}}).polygon();
         Line line({15000,-15000},{-15000,15000});
@@ -697,12 +704,12 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
                                   Point{-173847350, -14417785}, Point{171185171, -14417798},
                                   Point{173847352, -18182674}, Point{173847352, -65431407}});
         BoundingBox bbox(Points{{-177855358, -65231006}, {177855360, -8549200}});
-        Slic3r::Polygon result({Point{172845342,-8749616},Point{-177855391,-8749601},Point{-177855391,-18668915},Point{-173847350,-18668917},Point{-173847350,-14417785},Point{171185171,-14417798},Point{173847352,-18182674},Point{173847352,-65231039},Point{177855393,-65231039},Point{177855393,-15834840}});
+        Slic3r::Polygon result({Point{172845342,-8749616},Point{-177855358 - margin, -8749601},Point{-177855358 - margin, -18668915},Point{-173847350,-18668917},Point{-173847350,-14417785},Point{171185171,-14417798},Point{173847352,-18182674},Point{173847352, -65231006 - margin},Point{177855360 + margin, -65231006 - margin},Point{177855360 + margin, -15834839}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         SVG svg("result_outside.svg");
         svg.draw(bbox.polygon(), "grey");
-        svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        svg.draw(simplified.split_at_first_point(), "green", scale_t(0.006));
+        svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        svg.draw(simplified.split_at_first_point(), "green", scale_i(0.006));
         svg.Close();
         test_valid(simplified, result);
 
@@ -711,8 +718,8 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         svg=SVG("result_outside.svg");
         svg.draw(bbox.polygon(), "grey");
-        svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        svg.draw(simplified.split_at_first_point(), "green", scale_t(0.006));
+        svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        svg.draw(simplified.split_at_first_point(), "green", scale_i(0.006));
         svg.Close();
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -722,7 +729,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon scr_poly({Point{5000,5000},Point{15000,-10000},Point{15000,-15000},Point{-15000,15000},Point{-10000,15000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
         //Slic3r::Polygon result({Point{10000,-2500},Point{10000,-10000},Point{-10000,10000},Point{-2500,10000},Point{5000,5000}});
-        Slic3r::Polygon result({Point{10033,-2500},Point{10033,-10033},Point{-10033,10033},Point{-2500,10033},Point{5000,5000}});
+        Slic3r::Polygon result({Point{10000 + margin, -2501},Point{10000 + margin, -10000 - margin},Point{-10000 - margin, 10000 + margin},Point{-2501, 10000 + margin},Point{5000,5000}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -738,7 +745,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon scr_poly({Point{20000,-10000},Point{10000,-20000},Point{-20000,10000},Point{-10000,20000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
         //Slic3r::Polygon result({Point{-10000,0},Point{-10000,10000},Point{0,10000},Point{10000,0},Point{10000,-10000},Point{0,-10000}});
-        Slic3r::Polygon result({Point{-10033,0},Point{-10033,10033},Point{0,10033},Point{10033,0},Point{10033,-10033},Point{0,-10033}});
+        Slic3r::Polygon result({Point{-10000 - margin, 1},Point{-10000 - margin, 10000 + margin},Point{-1, 10000 + margin},Point{10000 + margin, -1},Point{10000 + margin, -10000 - margin},Point{1, -10000 - margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         //bbox.scale(100);
@@ -747,9 +754,9 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         //result.scale(100);
         //SVG svg("result_outside.svg");
         //svg.draw(bbox.polygon(), "grey");
-        //svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        //svg.draw(simplified.split_at_first_point(), "green", scale_t(0.004));
-        //svg.draw(result.split_at_first_point(), "blue", scale_t(0.002));
+        //svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        //svg.draw(simplified.split_at_first_point(), "green", scale_i(0.004));
+        //svg.draw(result.split_at_first_point(), "blue", scale_i(0.002));
         //svg.Close();
         test_valid(simplified, result);
     }
@@ -776,8 +783,8 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         SVG svg("result_outside.svg");
         svg.draw(bbox.polygon(), "grey");
-        svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        svg.draw(simplified.split_at_first_point(), "green", scale_t(0.006));
+        svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        svg.draw(simplified.split_at_first_point(), "green", scale_i(0.006));
         svg.Close();
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -793,7 +800,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{15000, 15000},Point{15000,5000},Point{5000,5000},Point{5000,-5000},Point{20000,-5000},Point{20000,20000},Point{-20000,20000},Point{-20000,-5000},Point{-5000,-5000},Point{-5000,5000},Point{-15000,5000},Point{-15000,15000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{5000,-5000},Point{10033,-5000},Point{10033,10033},Point{-10033,10033},Point{-10033,-5000},Point{-5000,-5000},Point{-5000,5000},Point{-10000,5000},Point{-10000,10000},Point{10000,10000},Point{10000,5000},Point{5000,5000}});
+        Slic3r::Polygon result({Point{5000,-5000},Point{10000 + margin, -5000},Point{10000 + margin, 10000 + margin},Point{-10000 - margin, 10000 + margin},Point{-10000 - margin, -5000},Point{-5000,-5000},Point{-5000,5000},Point{-10000,5000},Point{-10000,10000},Point{10000,10000},Point{10000,5000},Point{5000,5000}});
         //Slic3r::Polygon result({Point{5000,-5000},Point{13000,-5000},Point{13000,13000},Point{-13000,13000},Point{-13000,-5000},Point{-5000,-5000},Point{-5000,5000},Point{-10000,5000},Point{-10000,10000},Point{10000,10000},Point{10000,5000},Point{5000,5000}});
         //bbox.scale(100);
         //scr_poly.scale(100);
@@ -801,9 +808,9 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         //SVG svg("result_double.svg");
         //svg.draw(bbox.polygon(), "grey");
-        //svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.08));
-        //svg.draw(simplified.split_at_first_point(), "green", scale_t(0.06));
-        //svg.draw(result.split_at_first_point(), "blue", scale_t(0.02));
+        //svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.08));
+        //svg.draw(simplified.split_at_first_point(), "green", scale_i(0.06));
+        //svg.draw(result.split_at_first_point(), "blue", scale_i(0.02));
         //svg.Close();
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -818,7 +825,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{15000, -15000},Point{15000,-5000},Point{5000,-5000},Point{5000,5000},Point{20000,5000},Point{20000,-20000},Point{-20000,-20000},Point{-20000,5000},Point{-5000,5000},Point{-5000,-5000},Point{-15000,-5000},Point{-15000,-15000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{5000,5000},Point{10033,5000},Point{10033,-10033},Point{-10033,-10033},Point{-10033,5000},Point{-5000,5000},Point{-5000,-5000},Point{-10000,-5000},Point{-10000,-10000},Point{10000,-10000},Point{10000,-5000},Point{5000,-5000}});
+        Slic3r::Polygon result({Point{5000,5000},Point{10000 + margin, 5000},Point{10000 + margin, -10000 - margin},Point{-10000 - margin, -10000 - margin},Point{-10000 - margin, 5000},Point{-5000,5000},Point{-5000,-5000},Point{-10000,-5000},Point{-10000,-10000},Point{10000,-10000},Point{10000,-5000},Point{5000,-5000}});
         //Slic3r::Polygon result({Point{5000,-5000},Point{13000,-5000},Point{13000,13000},Point{-13000,13000},Point{-13000,-5000},Point{-5000,-5000},Point{-5000,5000},Point{-10000,5000},Point{-10000,10000},Point{10000,10000},Point{10000,5000},Point{5000,5000}});
         //bbox.scale(100);
         //scr_poly.scale(100);
@@ -826,9 +833,9 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         SVG svg("result_double.svg");
         svg.draw(bbox.polygon(), "grey");
-        svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.08));
-        svg.draw(simplified.split_at_first_point(), "green", scale_t(0.06));
-        svg.draw(result.split_at_first_point(), "blue", scale_t(0.02));
+        svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.08));
+        svg.draw(simplified.split_at_first_point(), "green", scale_i(0.06));
+        svg.draw(result.split_at_first_point(), "blue", scale_i(0.02));
         svg.Close();
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -843,16 +850,16 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{-7000,20000},Point{-7000,0},Point{-3000,0},Point{-3000,15000},Point{3000,15000},Point{3000,0},Point{7000,0},Point{7000,20000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{-3000,0},Point{-3000,10000},Point{3000,10000},Point{3000,0},Point{7000,0},Point{7000,10033},Point{-7000,10033},Point{-7000,0}});
+        Slic3r::Polygon result({Point{-3000,0},Point{-3000,10000},Point{3000,10000},Point{3000,0},Point{7000,0},Point{7000, 10000 + margin},Point{-7000, 10000 + margin},Point{-7000,0}});
         //bbox.scale(100);
         //scr_poly.scale(100);
         //result.scale(100);
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         //SVG svg("result_doublararze.svg");
         //svg.draw(bbox.polygon(), "grey");
-        //svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.08));
-        //svg.draw(simplified.split_at_first_point(), "green", scale_t(0.06));
-        //svg.draw(result.split_at_first_point(), "blue", scale_t(0.02));
+        //svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.08));
+        //svg.draw(simplified.split_at_first_point(), "green", scale_i(0.06));
+        //svg.draw(result.split_at_first_point(), "blue", scale_i(0.02));
         //svg.Close();
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -867,9 +874,9 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
         Slic3r::Polygon result({Point{3000,0},Point{7000,0},Point{7000,10000},
             Point{10000,10000},Point{10000,-10000},Point{-10000,-10000},Point{-10000,10000},
-            Point{-7000,10000},Point{-7000,0},Point{-3000,0},Point{-3000,10033},
-            Point{-10033,10033},Point{-10033,-10033},Point{10033,-10033},Point{10033,10033},
-            Point{3000,10033}});
+            Point{-7000,10000},Point{-7000,0},Point{-3000,0},Point{-3000, 10000 + margin},
+            Point{-10000 - margin, 10000 + margin},Point{-10000 - margin, -10000 - margin},Point{10000 + margin, -10000 - margin},Point{10000 + margin, 10000 + margin},
+            Point{3000, 10000 + margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
        test_valid(simplified, result);
@@ -878,12 +885,12 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{5000,5000},Point{5000,20000},Point{20000,20000},Point{9000,-20000},Point{-9000,-20000},Point{-20000,20000},Point{-5000,20000},Point{-5000,5000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{5000,10033},Point{10033,10033},Point{10033,-10033},Point{-10033,-10033},Point{-10033,10033},Point{-5000,10033},Point{-5000,5000},Point{5000,5000}});
+        Slic3r::Polygon result({Point{5000, 10000 + margin},Point{10000 + margin, 10000 + margin},Point{10000 + margin, -10000 - margin},Point{-10000 - margin, -10000 - margin},Point{-10000 - margin, 10000 + margin},Point{-5000, 10000 + margin},Point{-5000,5000},Point{5000,5000}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
 
         scr_poly = Slic3r::Polygon({Point{20000,20000},Point{9000,-20000},Point{5000,-20000},Point{5000,-5000},Point{-5000,-5000},Point{-5000,-20000},Point{-9000,-20000},Point{-20000,20000}});
         bbox = BoundingBox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        result = Slic3r::Polygon({Point{-5000,-5000},Point{-5000,-10033},Point{-10033,-10033},Point{-10033,10033},Point{10033,10033},Point{10033,-10033},Point{5000,-10033},Point{5000,-5000}});
+        result = Slic3r::Polygon({Point{-5000,-5000},Point{-5000, -10000 - margin},Point{-10000 - margin, -10000 - margin},Point{-10000 - margin, 10000 + margin},Point{10000 + margin, 10000 + margin},Point{10000 + margin, -10000 - margin},Point{5000, -10000 - margin},Point{5000,-5000}});
         simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -892,7 +899,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{5000,5000},Point{-5000,5000},Point{-5000,11000},Point{-10000,11000},Point{-10000,-10000},Point{9000,-10000},Point{10000,-9000},Point{10000,11000},Point{5000,11000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{5000,5000},Point{-5000,5000},Point{-5000,10033},Point{-10033,10033},Point{-10033,-10033},Point{9000,-10033},Point{10033,-9000},Point{10033,10033},Point{5000,10033}});
+        Slic3r::Polygon result({Point{5000,5000},Point{-5000,5000},Point{-5000, 10000 + margin},Point{-10000 - margin, 10000 + margin},Point{-10000 - margin, -10000 - margin},Point{9001, -10000 - margin},Point{10000 + margin, -9001},Point{10000 + margin, 10000 + margin},Point{5000, 10000 + margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -901,7 +908,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
     {
         Slic3r::Polygon scr_poly({Point{10000,-11000},Point{10000,9000},Point{9000,11000},Point{-10000,11000},Point{-10000,-11000}});
         BoundingBox bbox(Points{Point{-10000, -10000}, Point{10000, 10000}});
-        Slic3r::Polygon result({Point{10033,-10033},Point{10033,9000},Point{9500,10033},Point{-10033,10033},Point{-10033,-10033}});
+        Slic3r::Polygon result({Point{10000 + margin, -10000 - margin},Point{10000 + margin, 9002},Point{9501, 10000 + margin},Point{-10000 - margin, 10000 + margin},Point{-10000 - margin, -10000 - margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         //bbox.scale(100);
@@ -910,9 +917,9 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         //result.scale(100);
         //SVG svg("result_outside.svg");
         //svg.draw(bbox.polygon(), "grey");
-        //svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        //svg.draw(simplified.split_at_first_point(), "green", scale_t(0.004));
-        //svg.draw(result.split_at_first_point(), "blue", scale_t(0.002));
+        //svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        //svg.draw(simplified.split_at_first_point(), "green", scale_i(0.004));
+        //svg.draw(result.split_at_first_point(), "blue", scale_i(0.002));
         //svg.Close();
         test_valid(simplified, result);
     }
@@ -929,10 +936,11 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         //                        Point{-177855358, 448416}, Point{-177855358, -9450496}, Point{-173847350, -9450499},
         //                        Point{-173847350, -5199366}, Point{171185171, -5199378}, Point{173847352, -8964255},
         //                        Point{173847352, -56212987}, Point{177855360, -56212986}});
-        Slic3r::Polygon result({Point{177855359, -6616421}, Point{173688466, -723553}, Point{173008572, 448449},
-                                Point{-177855391, 448449}, Point{-177855391, -9450496}, Point{-173847350, -9450499},
+        Slic3r::Polygon result({Point{177855359, -6616421}, Point{173688466, -723553}, Point{173008572, 448416 + margin},
+                                Point{-177855358 - margin, 448416 + margin}, Point{-177855358 - margin, -9450496}, Point{-173847350, -9450499},
                                 Point{-173847350, -5199366}, Point{171185171, -5199378}, Point{173847352, -8964255},
-                                Point{173847352, -56212987}, Point{177855360, -56212986}});
+                                Point{173847352, -56212987}, Point{177855360 + margin, -56212986},
+                                Point{177855360 + margin, -31414704}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -942,7 +950,7 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
         Slic3r::Polygon scr_poly({Point{177855360,-66162759},Point{177855360,  -41886897},Point{172845341,-34801667},Point{-177855358,-34801652},Point{-177855358,-66162790}});
         BoundingBox bbox(Points{Point{-177855358, -65962390}, Point{177855360, -35002053}});
         //Slic3r::Polygon result({Point{177855360,-41886897},Point{177855360,-35002053},Point{-177855358,-35002053},Point{-177855358,-65962390},Point{177855360,-65962390}});
-        Slic3r::Polygon result({Point{177855393,-41886897}, Point{172987035,-35002020},Point{-177855391,-35002020},Point{-177855391,-65962423},Point{177855393,-65962423}});
+        Slic3r::Polygon result({Point{177855360 + margin, -41886896}, Point{172987035, -35002053 + margin},Point{-177855358 - margin, -35002053 + margin},Point{-177855358 - margin, -65962390 - margin},Point{177855360 + margin, -65962390 - margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         test_valid(simplified, result);
@@ -955,10 +963,10 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
                                   Point{-163039514, 48459919}, Point{-163039514, 51215270}, Point{73560749, 51215280},
                                   Point{73560749, 48459927}, Point{84454971, 48459913}});
         BoundingBox bbox(Points{Point{-173495281,49961989},Point{175880124,55253604}});
-        Slic3r::Polygon result({Point{171218246, 51215293}, Point{172104466, 49961956}, Point{175880157, 49961956},
-                                Point{175880157, 52417077}, Point{173874394, 55253637}, Point{-173495314, 55253637},
-                                Point{-173495314, 49961956}, Point{-163039514, 49961956}, Point{-163039514, 51215270},
-                                Point{73560749, 51215280}, Point{73560749, 49961956}, Point{84454971, 49961956},
+        Slic3r::Polygon result({Point{171218246, 51215293}, Point{172104466, 49961989 - margin}, Point{175880124 + margin, 49961989 - margin},
+                                Point{175880124 + margin, 52417077}, Point{173874394, 55253604 + margin}, Point{-173495281 - margin, 55253604 + margin},
+                                Point{-173495281 - margin, 49961989 - margin}, Point{-163039514, 49961989 - margin}, Point{-163039514, 51215270},
+                                Point{73560749, 51215280}, Point{73560749, 49961989 - margin}, Point{84454971, 49961989 - margin},
                                 Point{84454971, 51215293}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
@@ -972,13 +980,13 @@ TEST_CASE("test clip_clipper_polygon_with_subject_bbox ", "[ClipperUtils]") {
                                   Point{-162015614, 49389765}, Point{72536849, 49389774}, Point{72536849, 48237631},
                                   Point{85478871, 48237615}});
         BoundingBox bbox(Points{Point{-174400943,49457120},Point{177062922,55758472}});
-        Slic3r::Polygon result({Point{177062955,51716188},Point{174204592,55758505},Point{-174400976,55758505},Point{-174400976,49457087},Point{177062955,49457087}});
+        Slic3r::Polygon result({Point{177062922 + margin, 51716188},Point{174204592, 55758472 + margin},Point{-174400943 - margin, 55758472 + margin},Point{-174400943 - margin, 49457120 - margin},Point{177062922 + margin, 49457120 - margin}});
         Slic3r::Polygon simplified = Slic3r::ClipperUtils::clip_clipper_polygon_with_subject_bbox(scr_poly, bbox);
         REQUIRE(scr_poly.is_clockwise() == result.is_clockwise());
         //SVG svg("result_okish.svg");
         //svg.draw(bbox.polygon(), "grey");
-        //svg.draw(scr_poly.split_at_first_point(), "red", scale_t(0.008));
-        //svg.draw(simplified.split_at_first_point(), "green", scale_t(0.006));
+        //svg.draw(scr_poly.split_at_first_point(), "red", scale_i(0.008));
+        //svg.draw(simplified.split_at_first_point(), "green", scale_i(0.006));
         //svg.Close();
         test_valid(simplified, result);
     }
