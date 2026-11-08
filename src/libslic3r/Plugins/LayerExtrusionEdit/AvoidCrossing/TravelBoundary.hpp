@@ -7,7 +7,7 @@
 /*
 Travel boundaries for one layer and one tool
 ==========================================
-The perimeter-avoiding travel router owns one TravelBoundary to obtain rings along
+TravelRouter (TravelRouter.hpp) owns one TravelBoundary to obtain rings along
 which it can detour instead of crossing perimeters. The travel provider in
 AvoidCrossingPerimetersTravel.cpp keeps
 one router per layer and tool. This component builds geometry, not travel paths.
@@ -20,7 +20,11 @@ their construction and the exact correspondence with the core implementation.
 Call init_layer once with the target layer copied by AvoidCrossingInput.hpp.
 On the first route needing a boundary, call build_internal with a zero-based tool
 or build_external with the external input (AvoidCrossingInput.hpp). Read the results
-through internal_boundary() and external_boundary().
+through internal_boundary() and external_boundary(). The non-const internal accessor
+lets routing lazily add a grid for the ring selected for an island jump: its contour
+or the hole enclosing the other island, keyed by its index in boundaries.
+Each grid is created when a jump first uses that ring.
+The non-const external accessor gives routing its geometry.
 Boundary owns its rings and excluded top areas; grids borrow their point arrays.
 These arrays must not change after indexing. Neither Boundary nor TravelBoundary
 can be copied or moved, so their owners must keep them at a stable address.
@@ -94,8 +98,12 @@ public:
     void build_external(storage_handle *storage, const LayerInput &layer, const ExternalInput &external);
     // Return internal geometry, empty until build_internal.
     const Boundary &internal_boundary() const { return m_internal; }
+    // Borrow internal geometry so routing can lazily add selected-ring grids keyed by their index in boundaries.
+    Boundary &internal_boundary() { return m_internal; }
     // Return external geometry, empty until build_external.
     const Boundary &external_boundary() const { return m_external; }
+    // Borrow external geometry for routing queries.
+    Boundary &external_boundary() { return m_external; }
     // Return init_layer's inset; routing only tests emptiness to leave travels direct when no interior exists (except support).
     const PluginCommon::polygon_work::ExPolygons &layer_slices_offset() const { return m_lslices_offset; }
     // Return inset branch counts for diagnostics without changing geometry construction.

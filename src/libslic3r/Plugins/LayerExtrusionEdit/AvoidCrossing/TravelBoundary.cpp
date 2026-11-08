@@ -13,7 +13,7 @@
 /*
 Travel boundaries for the avoid-crossing router
 ==============================================
-The perimeter-avoiding travel router replaces perimeter-crossing travels with detours
+TravelRouter (TravelRouter.hpp) replaces perimeter-crossing travels with detours
 along rings inside printed areas. This file builds internal rings from the copied
 layer and external rings from the external input, both defined in AvoidCrossingInput.hpp;
 it does no routing. Construction must reproduce

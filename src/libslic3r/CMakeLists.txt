@@ -400,6 +400,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/AvoidCrossing/PerimeterCrossing.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelBoundary.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelBoundary.hpp
+	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelRouter.cpp
+	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelRouter.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp
 	Plugins/LayerExtrusionEdit/CoolingSlowdown.cpp
