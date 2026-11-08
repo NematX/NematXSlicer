@@ -103,6 +103,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
 #include "libslic3r/Plugins/PluginLoader.hpp"
 #include "libslic3r/Plugins/SeamPlacer/AlignedSeamPlacer.hpp"
@@ -880,6 +881,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin::
             register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin(
+            orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultSpeedPlugin::register_default_speed_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultAccelerationPlugin::register_default_acceleration_plugin(
@@ -1058,6 +1061,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "slic3r.test.seam_placer.regional");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.transition_scope.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.entry_state.default");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.first_layer_flow");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");

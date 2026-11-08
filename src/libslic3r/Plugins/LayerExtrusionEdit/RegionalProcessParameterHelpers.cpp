@@ -38,9 +38,6 @@ StoredExPolygonCollection translated_area(storage_handle *storage,
                                           const ExPolygonCollection &source,
                                           c_point shift);
 
-// Select a validated deposit's point in projected masks, or return the first-region value when no unique mask contains it.
-float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition &partition);
-
 LayerIsland owning_layer_island(const LayerRegionIsland &region_island)
 {
     if (!region_island.valid() || region_island.region_count() == 0)
@@ -91,7 +88,8 @@ StoredExPolygonCollection translated_area(storage_handle *storage,
     return clipper_union(clipper(translated_paths.readonly())).to_expolygon_collection();
 }
 
-// Inspect immutable masks using the borrowed one-point deposit; return a copied value, using first-region fallback for missing or conflicting areas, without splitting or transferring ownership.
+} // namespace
+
 float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition &partition)
 {
     const c_point point = leaf.point(0);
@@ -113,8 +111,6 @@ float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition 
     }
     return value;
 }
-
-} // namespace
 
 bool RegionalSourceKey::operator<(const RegionalSourceKey &rhs) const
 {

@@ -135,6 +135,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
 #include "libslic3r/Plugins/SkirtBrim/DefaultBrimSkirtTrim.hpp"
 #include "libslic3r/Plugins/SkirtBrim/DefaultBrimGenerator.hpp"
@@ -828,6 +829,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters",
         slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin::
             register_avoid_crossing_perimeters_travel_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.first_layer_flow",
+        slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.speed.default",
         slic3r_api::LayerExtrusionEdit::DefaultSpeedPlugin::register_default_speed_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.acceleration.default",

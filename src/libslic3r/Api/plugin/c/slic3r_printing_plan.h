@@ -332,6 +332,11 @@ A printing extrusion is one printable cloned root plus the source information
 needed to interpret it. region_island and role identify where the clone came
 from. printing_catalog_id identifies its source through the surrounding plan's
 catalog; UINT32_MAX means no object instance is associated with the extrusion.
+
+From STEP_ORDERING validation on, region_island is either NULL (synthetic work
+without a source region) or valid: it has at least one region, and all its
+regions are on the same layer of the same object. Later steps may read the
+source layer and object from any of its regions.
 */
 SLIC3R_HOST_API const layer_region_island_handle *printing_extrusion_get_region_island(
     const printing_extrusion_handle *me);

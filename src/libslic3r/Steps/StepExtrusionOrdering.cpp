@@ -117,7 +117,11 @@ struct SourceObjectResult {
     const PrintObject *object;
 };
 
-/* Distinguish an absent source from an island whose source context is corrupt. */
+/*
+Distinguish an absent source from an island whose source context is corrupt.
+A valid source has at least one region, and all its regions are on the same
+layer of the same object: later steps read the source layer from any region.
+*/
 SourceObjectResult source_object(const LayerRegionIsland *region_island)
 {
     if (region_island == nullptr)
@@ -125,18 +129,16 @@ SourceObjectResult source_object(const LayerRegionIsland *region_island)
     if (region_island->regions().empty())
         return { SourceObjectStatus::Invalid, nullptr };
 
-    const PrintObject *object = nullptr;
+    const Layer *layer = nullptr;
     for (const LayerRegion *region : region_island->regions()) {
         if (region == nullptr || region->layer() == nullptr || region->layer()->object() == nullptr)
             return { SourceObjectStatus::Invalid, nullptr };
-        const PrintObject *candidate = region->layer()->object();
-        if (object != nullptr && object != candidate)
+        if (layer != nullptr && layer != region->layer())
             return { SourceObjectStatus::Invalid, nullptr };
-        object = candidate;
+        layer = region->layer();
     }
-    return object == nullptr ?
-        SourceObjectResult{ SourceObjectStatus::Invalid, nullptr } :
-        SourceObjectResult{ SourceObjectStatus::Valid, object };
+    // One layer belongs to one object, so the regions share their object too.
+    return { SourceObjectStatus::Valid, layer->object() };
 }
 
 /* Format one post-ordering contract violation without hiding its tree path. */

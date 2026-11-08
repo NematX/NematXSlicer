@@ -251,6 +251,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/SeamPlacerViews.cpp
 	Api/plugin/cpp/SeamPlacerViews.hpp
 	Api/plugin/cpp/SkirtBrimStepViews.hpp
+	Api/plugin/cpp/StringHelpers.hpp
 	Api/plugin/cpp/VolumeViews.hpp
 	Api/plugin/cpp/Views.cpp
 	Api/plugin/cpp/Views.hpp
@@ -416,6 +417,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/DefaultTravel.hpp
 	Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.cpp
 	Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp
+	Plugins/LayerExtrusionEdit/FirstLayerFlow.cpp
+	Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.cpp
 	Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.cpp

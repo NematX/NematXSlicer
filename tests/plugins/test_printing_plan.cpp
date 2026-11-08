@@ -664,6 +664,61 @@ TEST_CASE("STEP_ORDERING post validation rejects unresolved tool groups",
     CHECK(error.find("no concrete extruder") != std::string::npos);
 }
 
+TEST_CASE("STEP_ORDERING post validation rejects a source whose regions are on different layers",
+          "[printing][plan][step-ordering]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+
+    // Two auxiliary layers of the same object, each with its own region.
+    PluginStorage storage;
+    const ExPolygons subject{ rectangle_expolygon(10., 10., 30., 30.) };
+    std::vector<const LayerRegion *> regions;
+    for (const double print_z : { 0.2, 0.4 }) {
+        const slic3r_api::AuxiliaryLayerBuildResult result =
+            slic3r_api::build_auxiliary_layer_regions_from_subject(
+                reinterpret_cast<storage_handle *>(&storage),
+                slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+                slic3r_api::Object(reinterpret_cast<const object_handle *>(&print.object(0))),
+                slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
+                scale_i(0.2), scale_i(print_z), scale_i(print_z - 0.1));
+        REQUIRE(result.created);
+        REQUIRE(result.layer.region_count() > 0);
+        regions.push_back(reinterpret_cast<const LayerRegion *>(result.layer.region(0).handle()));
+    }
+    REQUIRE(regions[0]->layer() != regions[1]->layer());
+
+    // The plugin API cannot build such a source; build it natively.
+    auto validation_error = [&print](const LayerRegionIsland &source) {
+        PrintingPlan &native_plan = print.mutable_printing_plan();
+        native_plan.groups.clear();
+        slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&native_plan));
+        append_test_layer(plan_view.append_group(), std::vector<extruder_index_t>({0}), scale_i(0.2));
+        PrintingExtrusion &extrusion =
+            native_plan.groups.front().layers.front().tool_groups.front().extrusions.emplace_back();
+        extrusion.region_island = &source;
+        extrusion.root = test_path({Point(0, 0), Point(scale_i(1.), 0)});
+        std::string error;
+        CHECK_FALSE(Steps::StepExtrusionOrdering::validate_post(print, &error));
+        return error;
+    };
+
+    const LayerRegionIsland mixed({ regions[0], regions[1] }, EXTRUDER_ID_UNKNOWN);
+    const std::string mixed_error = validation_error(mixed);
+    INFO(mixed_error);
+    CHECK(mixed_error.find("extrusion source region island is invalid") != std::string::npos);
+
+    // Control: a single-layer source passes this check. The plan then fails on
+    // the missing object instance, which is unrelated to the source layers.
+    const LayerRegionIsland single({ regions[0] }, EXTRUDER_ID_UNKNOWN);
+    const std::string single_error = validation_error(single);
+    INFO(single_error);
+    CHECK(single_error.find("region island is invalid") == std::string::npos);
+    print.mutable_printing_plan().groups.clear();
+}
+
 TEST_CASE("PrintingPlan extrusion ordering leaves non-sortable nodes unchanged", "[printing][plan]")
 {
     // A non-sortable collection is an upstream contract: its child order may

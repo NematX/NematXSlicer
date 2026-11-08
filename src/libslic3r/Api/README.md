@@ -31,6 +31,8 @@ Useful C++ entry points:
   providers and executes their `setup` / `setup_run` / `run` lifecycle.
 - `plugin/cpp/GuiRuleHelpers.hpp` builds and registers GUI activation rules
   with `GuiCondition`, `GuiRule`, `any_of` and `all_of`.
+- `plugin/cpp/StringHelpers.hpp` formats numbers without trailing zeros and
+  with a '.' decimal separator (`to_string_nozero`), for messages and text output.
 
 note: items with tag Planned are currently ideas that are not implemented and so may not work and may need extensive modifications.
 Other items are already implemented, but may need some modifications in the future to fit into the framework

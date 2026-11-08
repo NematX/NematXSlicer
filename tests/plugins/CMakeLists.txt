@@ -158,6 +158,7 @@ test_support_tree_family.cpp
     test_step_pipeline_invalidation.cpp
     test_step_selector_snapshot.cpp
     test_step_selector_traits.cpp
+    test_string_helpers.cpp
     test_dense_infill.cpp
     test_support_demand_buildplate_only.cpp
     test_support_demand_modifiers.cpp
