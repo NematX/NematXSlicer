@@ -4,13 +4,22 @@
    A support slab is the volume between a layer's top Z and its printable bottom;
    nearby slabs can shorten an extrusion's height without moving its top Z. The
    internal helpers are exposed so tests can drive them with synthetic slabs
-   instead of a full sliced print. */
+   instead of a full sliced print.
+
+   An optional InterfaceFill replaces only the fill of dense passes above the
+   bed. Contact loops, base passes, bed flanges, flow modulation and publication
+   retain their usual handling. This is an internal host C++ extension, not a
+   C ABI promise for external DLLs. The callback is synchronous; all context
+   views and the output are borrowed for that invocation only.
+   For example: generate_paths(context, SurfaceRole::TopInterface, custom_fill). */
 #ifndef plugins_support_toolpath_paths_hpp_
 #define plugins_support_toolpath_paths_hpp_
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "SupportToolpathLegacy.hpp"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 
@@ -19,8 +28,25 @@ class Object;
 }
 
 namespace slic3r_api::Support::Toolpath {
+// Borrow the effective geometry and recipe of one dense pass before modulation and publication.
+struct InterfaceFillContext {
+    const plugin_run_context *context;
+    const run_ctx_support_toolpath &payload;
+    storage_handle *storage;
+    const Object &object;
+    const ExPolygonCollection &areas;
+    const layer_handle *layer;
+    const std::string &pattern;
+    // Exact millimeter spacing of the effective flow before scaled-coordinate rounding.
+    double flow_spacing;
+    const raw_infill_pattern_params &recipe;
+};
+// Append owned children to the borrowed output while preserving their properties.
+// Do not retain context views or output handles; exceptions propagate to the provider.
+using InterfaceFill = std::function<void(const InterfaceFillContext &pass, MutableExtrusionEntity output)>;
 // Generate one surface role with the pattern plugins and publish paths through the data tree.
-void generate_paths(const plugin_run_context *context, SurfaceRole role);
+// An empty callback retains ordinary fill; a supplied callback fills only non-base passes above the bed.
+void generate_paths(const plugin_run_context *context, SurfaceRole role, const InterfaceFill &interface_fill = {});
 
 namespace Internal {
 // One support slab below the current one: its top Z and its footprint.

@@ -38,8 +38,11 @@
    Contact providers first return automatically fused components by clearing only
    their contact bit. Interface providers fill those areas when their turn arrives.
    Filling precedes island assignment, so nearby contours can join in the union.
+   A synchronous InterfaceFill may replace dense fill above the bed after
+   contact handling and recipe selection, but before modulation and publication.
    generate_paths -> process_layer -> hand_back_contacts -> should_fuse_contact
-                                  -> fill_layer_pass -> publish_layer_paths
+                                  -> fill_layer_pass -> InterfaceFill or ordinary fill
+                                                     -> Internal::modulate -> publish_layer_paths
 
    Every geometric operation goes through the plugin API: Clipper views for the
    booleans and offsets, data-tree views for the layers, the pattern service for
@@ -131,13 +134,15 @@ uint32_t first_layer_at(const Object &object, coord_t z, bool bottom);
 // Return fused contacts then generate this role's paths with borrowed object-local Z indices and storage-owned temporaries.
 // Layers own the published paths; cancellation and pattern/assignment failures propagate to PluginBase.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
-                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer);
+                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer,
+                   const InterfaceFill &interface_fill);
 // Fill one role/bridge pass and modulate against lower slabs; pass polygons lose loop footprints, temporaries belong to storage
 // until publication moves paths into layers, and pattern/assignment/cancellation failures propagate.
 void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
                       const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
                       SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
-                       float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs);
+                       float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs,
+                       const InterfaceFill &interface_fill);
 // Moves generated children to the first intersecting island, using the role's bucket and tool.
 void publish_layer_paths(const plugin_run_context *context, storage_handle *storage, layer_handle *layer,
                          StoredExtrusionEntity &out, const Common::SupportParams &geometry, bool as_base);
@@ -569,7 +574,8 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLa
 }
 
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
-                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer)
+                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer,
+                   const InterfaceFill &interface_fill)
 {
     Common::Counters::add(Common::Counters::totals.modulation_layers);
     const Common::SupportParams &geometry = params.geometry;
@@ -600,14 +606,15 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
             throw std::runtime_error("Sparse support surfaces cannot use bridge flow");
         Pass pass(std::move(polygons), contact, as_base, bridge != 0);
         fill_layer_pass(context, payload, storage, object, geometry, support_layers, role, layer, z, height, bottom,
-            base_angle, angle, contact_pattern, pass, lower_slabs);
+            base_angle, angle, contact_pattern, pass, lower_slabs, interface_fill);
     }
 }
 
 void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
                      const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
                      SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
-                     float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs)
+                     float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs,
+                     const InterfaceFill &interface_fill)
 {
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
@@ -658,6 +665,11 @@ void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_to
     StoredExtrusionEntity paths(storage);
     if (flange && base_filler)
         Common::append_base_flange(context, payload, storage, paths.mutable_view(), fused, layer, geometry);
+    else if (interface_fill && !pass.as_base && !flange) {
+        const c_flow_mm precise_flow = object.support_flow_mm(pass.bridge ? interface_role : flow_role,
+            geometry.layer_height, unscaled(height), pass.bridge ? OBJECT_SUPPORT_FLOW_BRIDGE : 0);
+        interface_fill({context, payload, storage, object, fused, layer, pattern, precise_flow.spacing, recipe}, paths.mutable_view());
+    }
     else
         Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
     // The first bottom role also collects lower sparse and non-bridge bottom slabs.
@@ -748,7 +760,7 @@ std::string Internal::surface_pattern(bool as_base, bool contact, bool bridge, b
 // Borrow context only during this call; layers own published paths. Stopping propagates silent PluginCancelled
 // (the cause has its message, the step names it, or the runner rethrows the print cancellation); ordinary refusals
 // propagate std::runtime_error.
-void generate_paths(const plugin_run_context *context, SurfaceRole role)
+void generate_paths(const plugin_run_context *context, SurfaceRole role, const InterfaceFill &interface_fill)
 {
     std::vector<coord_t> support_z;
     SupportLayerIndex support_layers;
@@ -756,7 +768,7 @@ void generate_paths(const plugin_run_context *context, SurfaceRole role)
         // Builds unique support-Z ranks and a print-Z-ordered index of borrowed marked layers with auxiliary-list positions once
         // per object on its first marked layer. The index and handles live through this synchronous for_support_layers call;
         // process_layer publishes paths into layer-owned islands, and allocation/generation failures propagate.
-        [context, role, &support_z, &support_layers](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
+        [context, role, &support_z, &support_layers, &interface_fill](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
             if (support_z.empty()) {
                 for (uint32_t index = 0; index < object_count_auxiliary_layer(payload.object); ++index) {
                     const layer_handle *support_layer = object_get_auxiliary_layer(payload.object, index);
@@ -768,7 +780,7 @@ void generate_paths(const plugin_run_context *context, SurfaceRole role)
                 std::sort(support_z.begin(), support_z.end());
                 support_z.erase(std::unique(support_z.begin(), support_z.end()), support_z.end());
             }
-            process_layer(context, payload, context->plugin_storage, object, params, support_z, support_layers, role, layer);
+            process_layer(context, payload, context->plugin_storage, object, params, support_z, support_layers, role, layer, interface_fill);
         });
 }
 } // namespace slic3r_api::Support::Toolpath

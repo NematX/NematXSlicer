@@ -10,6 +10,7 @@
 #include "libslic3r/Plugins/Support/Common/SupportCloseZ.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -27,8 +28,12 @@
     Two cases drive the internal helpers directly: synthetic slabs for height
     modulation and plain arguments for the filler pattern choice. A variable-height grid/tree case runs the full support
     toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow.
+    Callback probes use synthetic marked layers to distinguish dense replacement
+    from ordinary base/flange filling, publication, modulation and failure propagation.
     Selector probes check ranked dense alternatives for each style and explicit overrides.
 
+        TEST_CASE -> publish_test_surfaces(): own typed auxiliary layers
+            `-- Toolpath::generate_paths(): callback or ordinary fill -> publication
         selector TEST_CASE -> register metadata probes -> resolve automatic/explicit choices
 */
 
@@ -192,6 +197,123 @@ layer_region_island_handle *publish_test_surfaces(Print &print, PluginStorage &s
     return region;
 }
 
+}
+
+// Custom dense fills run above the bed only; flanges, sparse paths and interfaces printed as base retain ordinary fill.
+TEST_CASE("Support interface fill callbacks keep base and flange handling", "[plugins][support-toolpath-legacy][support-interface-hook]")
+{
+    namespace Toolpath = slic3r_api::Support::Toolpath;
+    const int mode = GENERATE(0, 1, 2, 3, 4);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config("grid", false, mode == 2 ? 0 : 3));
+    SG::prefix(print);
+    const bool sparse = mode == 3;
+    const raw_surface_type type = RAW_SURFACE_TYPE_MOD_SUPPORT | (sparse ?
+        RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE : RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID);
+    const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))}))};
+    PluginStorage storage;
+    publish_test_surfaces(print, storage, areas, {type}, scale_i(mode == 1 ? 0.2 : 0.6));
+    run_ctx_support_toolpath payload{};
+    payload.print = SG::print_view(print).handle();
+    payload.object = SG::object_view(print.object(0)).handle();
+    size_t pattern_calls = 0;
+    payload.host_context = &pattern_calls;
+    payload.resolve_pattern_id = [](const run_ctx_support_toolpath *, const char *) -> infill_pattern_runtime_id { return 1; };
+    payload.generate_pattern = [](const run_ctx_support_toolpath *ctx, infill_pattern_runtime_id, const layer_handle *, const layer_island_handle *,
+        const layer_region_island_handle *, const layer_region_handle *, const surface_handle *, const expolygon_collection_handle *,
+        const raw_infill_pattern_params *, extrusion_entity_handle *) -> int32_t {
+        ++*static_cast<size_t *>(ctx->host_context);
+        return 1;
+    };
+    plugin_run_context context{};
+    context.step = STEP_SUPPORT_TOOLPATH;
+    context.print = payload.print;
+    context.data = &payload;
+    context.plugin_storage = SG::handle(storage);
+    size_t calls = 0;
+    const Toolpath::InterfaceFill callback = [&](const Toolpath::InterfaceFillContext &pass, slic3r_api::MutableExtrusionEntity) {
+        ++calls;
+        CHECK(pass.context == &context);
+        CHECK(pass.payload.object == payload.object);
+        CHECK(pass.storage == context.plugin_storage);
+        REQUIRE(pass.areas.size() == 1);
+        CHECK(pass.recipe.flow.mm3_per_mm > 0.);
+        CHECK(pass.flow_spacing > 0.);
+        CHECK(pass.pattern == "rectilinear");
+        CHECK(pass.recipe.extrusion_role == RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE);
+        if (mode == 4) throw std::runtime_error("interface probe failure");
+    };
+    const Toolpath::SurfaceRole role = sparse ? Toolpath::SurfaceRole::Sparse : Toolpath::SurfaceRole::TopInterface;
+    if (mode == 4)
+        REQUIRE_THROWS_WITH(Toolpath::generate_paths(&context, role, callback), "interface probe failure");
+    else
+        Toolpath::generate_paths(&context, role, callback);
+    CHECK(calls == (mode == 0 || mode == 4 ? 1 : 0));
+    if (mode == 0 || mode == 4)
+        CHECK(pattern_calls == 0);
+}
+
+// Callback geometry is owned before its local wrapper dies, then modulated and published in the interface tool's bucket.
+TEST_CASE("Support interface callback paths undergo modulation and publication", "[plugins][support-toolpath-legacy][support-interface-hook]")
+{
+    namespace Toolpath = slic3r_api::Support::Toolpath;
+    namespace Common = slic3r_api::Support::Common;
+    const bool overlap = GENERATE(false, true);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config());
+    SG::prefix(print);
+    PluginStorage storage;
+    const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0),
+        Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))}))};
+    const raw_surface_type top = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID;
+    if (overlap)
+        publish_test_surfaces(print, storage, areas, {raw_surface_type(top | RAW_SURFACE_TYPE_MOD_CONTACT)},
+            scale_to_layer_coord(0.5), scale_to_layer_coord(0.1));
+    publish_test_surfaces(print, storage, areas, {top});
+    run_ctx_support_toolpath payload{};
+    payload.print = SG::print_view(print).handle();
+    payload.object = SG::object_view(print.object(0)).handle();
+    payload.resolve_pattern_id = [](const run_ctx_support_toolpath *, const char *) -> infill_pattern_runtime_id { return 1; };
+    plugin_run_context context{};
+    context.step = STEP_SUPPORT_TOOLPATH;
+    context.print = payload.print;
+    context.data = &payload;
+    context.plugin_storage = SG::handle(storage);
+    size_t calls = 0;
+    double original_volume_per_mm = 0.;
+    Toolpath::generate_paths(&context, Toolpath::SurfaceRole::TopInterface,
+        [&](const Toolpath::InterfaceFillContext &pass, slic3r_api::MutableExtrusionEntity output) {
+            ++calls;
+            REQUIRE(unscaled(pass.recipe.flow.height) == Approx(0.2));
+            original_volume_per_mm = pass.recipe.flow.mm3_per_mm;
+            slic3r_api::StoredExtrusionEntity path(pass.storage,
+                std::vector<c_point>{{scale_i(1.), scale_i(2.)}, {scale_i(3.), scale_i(2.)}});
+            path.get_or_add(slic3r_api::EPropertyAttributes::key) =
+                Common::path_attributes(pass.recipe.extrusion_role, pass.recipe.flow);
+            REQUIRE(output.append_child_move(path.mutable_view()) != EXTRUSION_INDEX_INVALID);
+        });
+    REQUIRE(calls == 1);
+    size_t count = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) {
+                if (!region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) continue;
+                CHECK(region.extruder_id() == 1);
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+                for (const ExtrusionEntity *leaf : leaves) {
+                    ++count;
+                    const ExtrusionAttributes *flow = leaf->get_property<ExtrusionAttributes>();
+                    REQUIRE(flow != nullptr);
+                    CHECK(flow->role == ExtrusionRole::SupportMaterialInterface);
+                    CHECK(flow->height == Approx(overlap ? 0.1 : 0.2));
+                    CHECK(flow->mm3_per_mm == Approx(original_volume_per_mm * (overlap ? 0.5 : 1.)));
+                    CHECK(unscaled(leaf->length()) == Approx(2.));
+                }
+            }
+    CHECK(count == 1);
 }
 
 // Ranking replaces dense roles for every family; explicit selections and removal retain their meaning.
