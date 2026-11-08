@@ -82,6 +82,14 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
         PLUGIN_IDS gcode.firmware.nematx gcode.reader.nematx)
     nematx_add_builtin_module(regional_fan
         SOURCES plugins/regional_fan/src/RegionalFan.cpp PLUGIN_IDS nematx_regional_fan)
+    nematx_add_builtin_module(wipetower
+        SOURCES plugins/wipetower/src/WipeTowerManager.cpp
+            plugins/wipetower/src/WipeTowerLayout.cpp
+            plugins/wipetower/src/TowerFootprints.cpp
+            plugins/wipetower/src/FilamentSections.cpp
+            plugins/wipetower/src/rectilinear/RectilinearFills.cpp
+            plugins/wipetower/src/rectilinear/RectilinearEdgeGrid.cpp
+        PLUGIN_IDS nematx_wipetower)
     message(STATUS "NematX plugins embedded from ${NEMATX_PLUGINS_SOURCE_DIR}")
 elseif(SLIC3R_APP_KEY STREQUAL "NematXSlicer")
     message(STATUS "NematX built-in plugins disabled; standalone packages remain supported")
