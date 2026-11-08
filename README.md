@@ -15,6 +15,7 @@ A collection of plugins for NematXSlicer.
 - [nematx_fan_speedup](plugins/fan_speedup/README.md): fan anticipation and kickstart (`fan_speedup_time`, `fan_kickstart`)
 - [nematx_smooth_temperature](plugins/smooth_temperature/README.md): general nozzle temperature changes spread over several layers (`print_temperature_smooth_change`)
 - [nematx-wipetower](plugins/wipetower/README.md): wipe tower manager of the NematX printers (`step_wipetower_plugin = nematx_wipetower`)
+- [nematx-support-interface-perimeters](plugins/support_interface_perimeters/README.md): configurable contour loops around support contacts and interfaces
 
 ## Build targets
 
