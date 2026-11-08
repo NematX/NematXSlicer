@@ -394,6 +394,8 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/SimpleInfillPatterns.hpp
 	Plugins/Infill/SmoothPattern.cpp
 	Plugins/Infill/SmoothPattern.hpp
+	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.cpp
+	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp
 	Plugins/LayerExtrusionEdit/CoolingSlowdown.cpp

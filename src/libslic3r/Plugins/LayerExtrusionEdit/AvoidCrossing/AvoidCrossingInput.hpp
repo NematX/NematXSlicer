@@ -1,0 +1,120 @@
+///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
+///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
+
+#ifndef slic3r_plugins_avoid_crossing_input_hpp_
+#define slic3r_plugins_avoid_crossing_input_hpp_
+
+/*
+Crossing tests and travel routing need layer geometry that remains usable after
+temporary API storage is released. This interface copies that geometry and the
+settings needed to prepare it; it does not test or route a travel itself.
+
+Select an existing layer with LayerIdentity, then call build_input. Input owns a
+stable, immutable LayerInput containing the target slices, the filled areas
+published by perimeter processing, and spacing averages in scaled coordinates.
+Each RegionInput retains raw slices, reconstructed fill areas, top surfaces and
+regional settings, including regions with no slices. For support targets, Input
+also copies object-layer perimeter slices strictly below print Z + SCALED_EPSILON.
+
+An external boundary is a routing ring built from object holes placed at their
+instance shifts in print coordinates, rather than from the target's local filled
+areas. Call build_external_input only when such routing is needed. ExternalInput
+owns holes and shifts separately in object order, plus the mean spacing at the
+target Z. Support additionally appends holes from the last object layer strictly
+below Z + SCALED_EPSILON; same-Z holes may therefore occur twice.
+
+layer_at_print_z finds an exact object-layer Z; first_layer_below_print_z finds
+the last object layer strictly below a supplied Z. Neither searches auxiliary
+layers. Geometry and settings are copied; no host handle is retained. Keep Input
+alive while consumers borrow its target. Workers own separate inputs and geometry.
+Each worker supplies its own temporary allocation storage.
+*/
+
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include "libslic3r/Plugins/Common/PolygonWorkBuffers.hpp"
+
+struct storage_handle;
+namespace slic3r_api {
+class Print;
+class Object;
+namespace LayerExtrusionEdit { namespace AvoidCrossing {
+
+// Select an indexed print object, then its normal or auxiliary layer collection and a layer in it.
+struct LayerIdentity
+{
+    uint32_t object = 0;
+    uint32_t layer = 0;
+    bool auxiliary = false;
+};
+
+// Settings and geometry for every public region, including regions without slices.
+struct RegionInput
+{
+    PluginCommon::polygon_work::ExPolygons raw_slices;
+    PluginCommon::polygon_work::ExPolygons fill_expolygons;
+    PluginCommon::polygon_work::ExPolygons top_surfaces;
+    int perimeter_extruder = 0;
+    int infill_extruder = 0;
+    int solid_infill_extruder = 0;
+    bool avoid_crossing_top = false;
+    int perimeters = 0;
+    bool ironing = false;
+    bool avoid_travel_island = false;
+    double avoid_travel_island_weight = 0.;
+};
+
+// Own exact ring sequences and mean perimeter spacing and external width, both in scaled units.
+struct LayerInput
+{
+    LayerIdentity identity;
+    coord_t print_z = 0;
+    bool support = false;
+    // True for object layer zero and every layer, including support, at its exact print Z.
+    bool first_layer = false;
+    PluginCommon::polygon_work::ExPolygons lslices;
+    PluginCommon::polygon_work::ExPolygons perimeter_slices;
+    std::vector<RegionInput> regions;
+    coord_t default_perimeter_spacing = 0;
+    coord_t perimeter_spacing = 0;
+    float external_perimeter_width = 0.f;
+};
+
+// Holes retain source CW orientation; consumers reverse them before expand.
+// Support appends the last object layer strictly below Z + SCALED_EPSILON, possibly duplicating same-Z holes.
+struct ExternalObjectInput
+{
+    uint32_t object = 0;
+    PluginCommon::polygon_work::Polygons holes;
+    PluginCommon::work::Points instance_shifts;
+};
+
+// Own the immutable target and, for support, perimeter slices from strictly below Z + SCALED_EPSILON.
+struct Input
+{
+    std::unique_ptr<const LayerInput> target;
+    PluginCommon::polygon_work::ExPolygons lower_perimeter_slices;
+};
+
+// Independently owned external boundary data, constructed only when requested by a consumer.
+struct ExternalInput
+{
+    std::vector<ExternalObjectInput> external_objects;
+    coord_t external_perimeter_spacing = 0;
+};
+
+// Find an exact scaled Z among object layers only; return no index when absent.
+std::optional<uint32_t> layer_at_print_z(const Object &object, coord_t z);
+// Find the last object layer strictly below the supplied scaled Z; auxiliary layers are ignored.
+std::optional<uint32_t> first_layer_below_print_z(const Object &object, coord_t z);
+// Given an existing public layer identity, own its geometry/settings and the support's lower perimeter slices (empty if absent).
+Input build_input(storage_handle *storage, const Print &print, LayerIdentity target);
+// Given an existing public layer identity, own ordered external holes/shifts and the global spacing at its Z.
+ExternalInput build_external_input(const Print &print, LayerIdentity target);
+
+}}}
+
+#endif
