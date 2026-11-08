@@ -75,6 +75,9 @@ on a 0.4 mm nozzle separates the flow-spacing inset from the nozzle fallback.
 The test measures intermediate route points against the expected flow-based
 inset.
 
+The shared-top check also inspects the stored excluded top areas and verifies
+that their grid points refer to the boundary's own stored contour points.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
@@ -85,7 +88,8 @@ inset.
     `-- Core-only checks
         |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
         |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
-        `-- travel_to: measure the raw-slice flow-spacing inset
+        |-- travel_to: measure the raw-slice flow-spacing inset
+        `-- internal_boundary: check excluded tops and borrowed grid points
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -323,6 +327,7 @@ TEST_CASE("Core travel detour uses raw-sliced regional perimeter spacing",
 }
 
 // A same-tool modifier shares generated surfaces but must retain its own top-avoidance setting.
+// The internal boundary retains excluded tops, and its grid borrows their stored points.
 TEST_CASE("Shared island tops obey regional top avoidance",
           "[plugins][travel][avoid-crossing-parity]")
 {
@@ -388,6 +393,12 @@ TEST_CASE("Shared island tops obey regional top avoidance",
         }
         const Polyline route = router.travel_to({layer, from, Point::Zero(), 0, 0., false}, to);
         REQUIRE(route.size() >= 2);
+        if (avoid_top) {
+            REQUIRE_FALSE(router.internal_boundary().to_avoid.empty());
+            REQUIRE_FALSE(router.internal_boundary().to_avoid_grid.contours().empty());
+            CHECK(router.internal_boundary().to_avoid_grid.contours().front().begin() ==
+                  router.internal_boundary().to_avoid.front().contour.points.data());
+        }
         if (!intersection_pl(Polyline(from, to), enabled_tops).empty()) {
             ++enabled_chords;
             CHECK(intersection_pl(route, enabled_tops).empty() == avoid_top);

@@ -64,6 +64,11 @@
 // With no contributing region, the fallback is the mean nozzle diameter of this
 // object's extruders, which requires at least one extruder.
 //
+// Each Boundary owns its rings and excluded tops (to_avoid). init_boundary keeps
+// those tops across its reset, then builds grid over the routing rings and
+// to_avoid_grid over the stored top areas. Both grids borrow these owned points;
+// changing the geometry requires rebuilding the indexes.
+//
 // Routing places endpoints near rings, finds crossings and connects islands,
 // follows a chosen ring direction, then removes unnecessary points. It is a
 // heuristic, not a shortest-path or no-crossing guarantee. A detour exceeding
@@ -100,6 +105,10 @@ static coord_t get_perimeter_spacing(const Layer &layer);
 static coord_t get_perimeter_spacing_external(const Layer &layer);
 // Return a float in scaled units: mean external perimeter width over this layer's regions with raw slices, or the object's mean nozzle diameter.
 static float get_external_perimeter_width(const Layer &layer);
+// Keep the excluded tops, replace the routing rings, then rebuild both edge grids over the stored points.
+static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons &&boundary_polygons, coord_t extra_available_space);
+// Keep the excluded tops, replace the routing rings, then rebuild both edge grids over the stored points.
+static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygons &&boundary_islands, coord_t extra_available_space);
 
 struct TravelPoint
 {
@@ -2485,6 +2494,8 @@ static void init_boundary_distances(AvoidCrossingPerimeters::Boundary *boundary)
 
 static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons &&boundary_polygons, coord_t extra_available_space)
 {
+    // clear() drops the excluded tops, so keep them across the reset.
+    ExPolygons to_avoid = std::move(boundary->to_avoid);
     boundary->clear();
     boundary->boundaries = std::move(boundary_polygons);
     BoundingBox bbox(get_extents(boundary->boundaries));
@@ -2495,16 +2506,18 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons 
     boundary->grid.create(boundary->boundaries, (scale_i(1.)));
     init_boundary_distances(boundary);
     
-    boundary->to_avoid = union_ex(boundary->to_avoid);
+    boundary->to_avoid = union_ex(to_avoid);
     bbox = BoundingBox(get_extents(boundary->to_avoid));
     bbox.offset(SCALED_EPSILON + extra_available_space);
     boundary->to_avoid_grid.set_bbox(bbox);
     // FIXME 1mm grid? -> use nozzle size or extrusion width
-    boundary->to_avoid_grid.create(to_polygons(boundary->to_avoid), (scale_i(1.)));
+    boundary->to_avoid_grid.create(boundary->to_avoid, (scale_i(1.)));
 }
 
 static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygons &&boundary_islands, coord_t extra_available_space)
 {
+    // clear() drops the excluded tops, so keep them across the reset.
+    ExPolygons to_avoid = std::move(boundary->to_avoid);
     boundary->clear();
     // fill boundaries & boundary_to_island
     size_t island_id = 0;
@@ -2527,12 +2540,12 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygon
     boundary->grid.create(boundary->boundaries, scale_i(1.));
     init_boundary_distances(boundary);
     
-    boundary->to_avoid = union_ex(boundary->to_avoid);
+    boundary->to_avoid = union_ex(to_avoid);
     bbox = BoundingBox(get_extents(boundary->to_avoid));
     bbox.offset(SCALED_EPSILON + extra_available_space);
     boundary->to_avoid_grid.set_bbox(bbox);
     // FIXME 1mm grid? -> use nozzle size or extrusion width
-    boundary->to_avoid_grid.create(to_polygons(boundary->to_avoid), scale_i(1.));
+    boundary->to_avoid_grid.create(boundary->to_avoid, scale_i(1.));
 
     assert(boundary->islands.size() == boundary->boundaries.size());
 }
