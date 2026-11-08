@@ -25,9 +25,11 @@ below Z + SCALED_EPSILON; same-Z holes may therefore occur twice.
 
 layer_at_print_z finds an exact object-layer Z; first_layer_below_print_z finds
 the last object layer strictly below a supplied Z. Neither searches auxiliary
-layers. Geometry and settings are copied; no host handle is retained. Keep Input
+layers. is_first_layer reports exact equality with normal layer zero's print Z,
+including auxiliary targets; it returns false when there are no normal layers.
+Geometry and settings are copied; no host handle is retained. Keep Input
 alive while consumers borrow its target. Workers own separate inputs and geometry.
-Each worker supplies its own temporary allocation storage.
+Allocation storage may be shared; the host synchronizes its allocation bookkeeping.
 */
 
 #include <cstdint>
@@ -41,6 +43,7 @@ struct storage_handle;
 namespace slic3r_api {
 class Print;
 class Object;
+class Layer;
 namespace LayerExtrusionEdit { namespace AvoidCrossing {
 
 // Select an indexed print object, then its normal or auxiliary layer collection and a layer in it.
@@ -112,6 +115,8 @@ std::optional<uint32_t> layer_at_print_z(const Object &object, coord_t z);
 std::optional<uint32_t> first_layer_below_print_z(const Object &object, coord_t z);
 // Given an existing public layer identity, own its geometry/settings and the support's lower perimeter slices (empty if absent).
 Input build_input(storage_handle *storage, const Print &print, LayerIdentity target);
+// Return whether this layer shares the first object layer's print Z, including auxiliary layers; false without object layers.
+bool is_first_layer(const Object &object, const Layer &layer);
 // Given an existing public layer identity, own ordered external holes/shifts and the global spacing at its Z.
 ExternalInput build_external_input(const Print &print, LayerIdentity target);
 

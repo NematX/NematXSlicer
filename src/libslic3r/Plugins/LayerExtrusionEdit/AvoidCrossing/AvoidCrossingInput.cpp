@@ -22,7 +22,9 @@ fill areas from islands containing that region. With several such islands it
 grows them by ten scaled units and intersects with the region's raw slices before
 public ensure_valid cleanup, matching the core's fill-area preparation. Top
 surfaces shared by several regions are clipped to this region's raw slices.
-Support copies no tops. Regional flow spacing and external width are averaged
+Support copies no tops. is_first_layer compares the target Z with normal object layer zero; auxiliary
+layers at that exact height also qualify, while owners without normal layers do not.
+Regional flow spacing and external width are averaged
 over regions with raw slices, with the nozzle average as fallback.
 
 For support targets build_input also copies the object-layer perimeter slices
@@ -36,6 +38,7 @@ instance shifts remain separate for the boundary consumer to place and reverse.
 
     build_input: retain the target and additional support boundary input
     |-- copy_layer: copy geometry and compute regional flow averages
+    |   |-- is_first_layer: compare print Z with normal object layer zero
     |   |-- default_spacing: average nozzles over the collected printing tools
     |   `-- copy_region: rebuild fill areas and select regional tops
     `-- first_layer_below_print_z: find the last object-layer index below the supplied Z
@@ -46,12 +49,15 @@ instance shifts remain separate for the boundary consumer to place and reverse.
 
 The caller supplies temporary API storage and keeps the print unchanged during
 these reads. Returned buffers own their geometry independently of that storage.
-Each worker supplies its own temporary allocation storage.
+Allocation storage may be shared; the host synchronizes its allocation bookkeeping.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
 namespace pw = PluginCommon::polygon_work;
 namespace clipper = PluginCommon::clipper;
+
+// Compare scaled print Z with object layer zero; auxiliary layers at that height also qualify, and empty objects do not.
+bool is_first_layer(const Object &object, const Layer &layer);
 
 // Native union_safety_offset_ex grows fill areas by ten scaled coordinate units.
 static constexpr double ClipperSafetyOffset = 10.;
@@ -81,6 +87,11 @@ std::optional<uint32_t> first_layer_below_print_z(const Object &object, coord_t 
         result = i;
     }
     return result;
+}
+
+bool is_first_layer(const Object &object, const Layer &layer)
+{
+    return object.layer_count() != 0 && layer.print_z() == object.layer(0).print_z();
 }
 
 Input build_input(storage_handle *storage, const Print &print, LayerIdentity target)
@@ -156,7 +167,7 @@ static LayerInput copy_layer(storage_handle *storage, const Print &print, LayerI
     out.identity = identity;
     out.print_z = layer.print_z();
     out.support = layer.properties().get(LayerSupportProperty::key) != nullptr;
-    out.first_layer = object.layer_count() != 0 && layer.print_z() == object.layer(0).print_z();
+    out.first_layer = is_first_layer(object, layer);
     out.lslices = clipper::from_expolygon_collection_view(layer.slices());
     for (uint32_t i = 0; i < layer.island_count(); ++i) {
         const pw::ExPolygons slices = clipper::from_expolygon_collection_view(layer.island(i).perimeter_slices());
