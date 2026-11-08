@@ -64,6 +64,10 @@ Existing 5.x packages remain compatible without reconstruction. The C++
 `Object::default_region_config(print)` and its Python counterpart delegate to the
 host resolver instead of duplicating that rule in each language.
 
+Clipper 2.1 adds `clipper_variable_offset_inner()` without changing the 2.0
+operand layout. Volume 2.0 retains `c_mesh_slicing_params.extra_offset`; moving
+FFF compensation to post-slicing does not remove the mesh API's offset field.
+
 The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument

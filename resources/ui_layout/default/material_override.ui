@@ -23,4 +23,4 @@ group:Corrections
 	setting:id$0:material_ow_relative_correction_x
 	setting:id$0:material_ow_relative_correction_y
 	setting:id$0:material_ow_relative_correction_z
-	setting:id$0:material_ow_first_layer_size_compensation
+	setting:id$0:material_ow_sla_first_layer_size_compensation

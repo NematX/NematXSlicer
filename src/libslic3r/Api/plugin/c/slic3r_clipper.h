@@ -6,7 +6,7 @@
 #define slic3r_clipper_h_
 
 #define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u
-#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 0u
+#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 1u
 
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
@@ -300,6 +300,17 @@ SLIC3R_HOST_API expolygon_collection_handle *clipper_offset2_ex(storage_handle *
                                                                 double delta2,
                                                                 clipper_join_type_t join_type,
                                                                 double miter_limit);
+
+/* Variable inward offset of one normalized ExPolygon.
+deltas contains one scaled distance per vertex: first all contour vertices,
+then the vertices of each hole in order. Distances must be finite and <= 0.
+delta_count must match that complete vertex count. miter_limit must be finite
+and >= 1. Returns NULL for invalid arguments or unsafe coordinate margins.
+An empty result collection is a successful geometric collapse. Source and deltas
+are borrowed for this call only; the returned collection is owned by storage. */
+SLIC3R_HOST_API expolygon_collection_handle *clipper_variable_offset_inner(
+    storage_handle *storage, const expolygon_handle *source,
+    const float *deltas, uint32_t delta_count, double miter_limit);
 
 /* ---- Conversion back to ABI collections ------------------------------
 Materialize a Clipper shape into a new storage-owned collection.

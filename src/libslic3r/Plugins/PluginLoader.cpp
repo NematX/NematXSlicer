@@ -160,6 +160,8 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Slicing/SliceVolume.hpp"
 #include "libslic3r/Plugins/Slicing/StandardLayerHeightGenerator.hpp"
 #include "libslic3r/Plugins/Slicing/VaseMultiIslandConnector.hpp"
+#include "libslic3r/Plugins/HoleSizeCompensation.hpp"
+#include "libslic3r/Plugins/XYSizeCompensation.hpp"
 #include "libslic3r/Plugins/Surface/CleanInfillSurfaces.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include "libslic3r/Plugins/Surface/InitialTypedSurfaceBuilder.hpp"
@@ -725,6 +727,10 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::SliceVolumePlugin::register_slice_volume_plugin);
     register_builtin_plugin(orchestrator, "overhang_slope_fill",
         slic3r_api::OverhangSlopeFillPlugin::register_overhang_slope_fill_plugin);
+    register_builtin_plugin(orchestrator, "slicing.hole_size_compensation",
+        slic3r_api::HoleSizeCompensationPlugin::register_hole_size_compensation_plugin);
+    register_builtin_plugin(orchestrator, "slicing.xy_size_compensation",
+        slic3r_api::XYSizeCompensationPlugin::register_simple_xy_size_compensation_plugin);
     register_builtin_plugin(orchestrator, "max_overhang_threshold",
         slic3r_api::MaxOverhangThresholdPlugin::register_max_overhang_threshold_plugin);
     register_builtin_plugin(orchestrator, "vase.multi_island_connector",

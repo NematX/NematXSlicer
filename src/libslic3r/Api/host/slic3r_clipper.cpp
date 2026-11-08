@@ -3,6 +3,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,21 @@
 
 #include "ClipperShapes.hpp"
 #include "Orchestrator.hpp"
+
+/*
+This file implements public clipping and offset operations for plugins. Opaque
+handles borrow native geometry while each result is published in PluginStorage.
+Closed-ring offsets clean spikes without changing unrelated rings. Variable
+inward offsets validate per-vertex distances and coordinate margins before
+calling the native geometry routine; inputs are never changed.
+
+    clipper_offset*()
+    |-- offset_closed_rings(): clean affected rings and unite the result
+    `-- store_shape(): transfer owned paths to plugin storage
+    clipper_variable_offset_inner()
+    |-- validate ring layout, distances and coordinate margins
+    `-- variable_offset_inner_ex(): publish a storage-owned polygon collection
+*/
 
 namespace Slic3r {
 
@@ -704,6 +720,68 @@ clipper_shapes_handle *clipper_offset_polylines(storage_handle *storage,
     for (const Slic3r::Polygon &polygon : offset)
         paths.emplace_back(polygon.points);
     return Slic3r::store_shape(storage, Slic3r::ApiClipper::make_path_list_shapes(std::move(paths)));
+}
+
+expolygon_collection_handle *clipper_variable_offset_inner(
+    storage_handle *storage, const expolygon_handle *source,
+    const float *deltas, uint32_t delta_count, double miter_limit)
+{
+    if (storage == nullptr || source == nullptr || (delta_count != 0 && deltas == nullptr) ||
+        !std::isfinite(miter_limit) || miter_limit < 1.)
+        return nullptr;
+    const Slic3r::ExPolygon &input = *Slic3r::to_expolygon(source);
+    size_t count = input.contour.size();
+    for (const auto &hole : input.holes)
+        count += hole.size();
+    if (count != delta_count)
+        return nullptr;
+    if (input.contour.empty()) {
+        return input.holes.empty() ? storage_new_expolygons(storage) : nullptr;
+    }
+    if (input.contour.size() < 3 || !input.contour.is_counter_clockwise())
+        return nullptr;
+    for (const auto &hole : input.holes)
+        if (hole.size() < 3 || !hole.is_clockwise())
+            return nullptr;
+
+    double maximum_delta = 0.;
+    for (uint32_t index = 0; index < delta_count; ++index) {
+        if (!std::isfinite(deltas[index]) || deltas[index] > 0.f)
+            return nullptr;
+        maximum_delta = std::max(maximum_delta, -double(deltas[index]));
+    }
+    // Reject unsafe margins before any variable-offset coordinate arithmetic.
+    // A double rounds hiRange up, so use the next lower representable value.
+    const double limit = std::nextafter(double(Slic3r::ClipperLib::hiRange), 0.);
+    const double margin = std::ceil(maximum_delta * std::max(2., miter_limit)) + 2. * Slic3r::SCALED_EPSILON;
+    if (!std::isfinite(margin) || margin > limit)
+        return nullptr;
+    const auto bounds = Slic3r::get_extents(input);
+    const double safe = limit - margin;
+    if (double(bounds.min.x()) < -safe || double(bounds.min.y()) < -safe ||
+        double(bounds.max.x()) > safe || double(bounds.max.y()) > safe)
+        return nullptr;
+
+    // Split the flat ABI array into one delta vector per ring: contour first, then holes.
+    // delta_count was checked above against the total vertex count, so every slice stays in bounds.
+    std::vector<std::vector<float>> ring_deltas;
+    ring_deltas.reserve(input.holes.size() + 1);
+
+    const float *const contour_ring_begin = deltas;
+    const float *const contour_ring_end = contour_ring_begin + input.contour.size();
+    ring_deltas.emplace_back(contour_ring_begin, contour_ring_end);
+
+    const float *hole_ring_begin = contour_ring_end;
+    for (const Slic3r::Polygon &hole_ring : input.holes) {
+        const float *const hole_ring_end = hole_ring_begin + hole_ring.size();
+        ring_deltas.emplace_back(hole_ring_begin, hole_ring_end);
+        hole_ring_begin = hole_ring_end;
+    }
+    assert(hole_ring_begin == deltas + delta_count);
+    Slic3r::ExPolygons output = Slic3r::variable_offset_inner_ex(input, ring_deltas, miter_limit);
+    auto *result = storage_new_expolygons(storage);
+    *Slic3r::to_expolygons(result) = std::move(output);
+    return result;
 }
 
 /* ---- Conversion back to public geometry handles ----------------------

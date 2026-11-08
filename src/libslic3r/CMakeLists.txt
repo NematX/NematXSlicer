@@ -487,6 +487,14 @@ set(SLIC3R_SOURCES
 	Plugins/Slicing/StandardLayerHeightGenerator.hpp
 	Plugins/Slicing/VaseMultiIslandConnector.cpp
 	Plugins/Slicing/VaseMultiIslandConnector.hpp
+	Plugins/ElephantFootCompensation.cpp
+	Plugins/ElephantFootCompensation.hpp
+	Plugins/HoleSizeCompensation.cpp
+	Plugins/HoleSizeCompensation.hpp
+	Plugins/XYSizeCompensation.cpp
+	Plugins/XYSizeCompensation.hpp
+	Plugins/XYSizeCompensationHelpers.cpp
+	Plugins/XYSizeCompensationHelpers.hpp
 	Plugins/Perimeter/ArachnePerimeterGenerator.cpp
 	Plugins/Perimeter/ArachnePerimeterGenerator.hpp
 	Plugins/Perimeter/ClassicPerimeterGenerator.cpp

@@ -7,6 +7,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(_sdk_sources
+    cpp/HoleCompensation.cpp
     cpp/PrintHelpers.cpp
     cpp/gcode/BuiltinGCodeReaderBase.cpp
     cpp/gcode/DefaultExtruder.cpp

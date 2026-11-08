@@ -847,11 +847,21 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     if (has(dict, "octoprint_apikey"s)) {
         opt_key() = "printhost_apikey"s;
     }
+    // The SLA printer setting was split from the FFF one. A file containing an
+    // SLA-only printer key is an SLA printer profile.
+    const bool sla_printer = has(dict, "printer_technology"s, "SLA"s) ||
+        has(dict, "elephant_foot_min_width"s) || has(dict, "elefant_foot_min_width"s);
     if (has(dict, "elefant_foot_compensation"s)) {
         float v = boost::lexical_cast<float>(value());
-        opt_key() = "first_layer_size_compensation";
+        opt_key() = sla_printer ? "sla_first_layer_size_compensation" : "first_layer_size_compensation";
         if (v > 0)
             value() = to_string_nozero(-v, 5);
+    }
+    if (sla_printer && has(dict, "first_layer_size_compensation"s)) {
+        opt_key() = "sla_first_layer_size_compensation";
+    }
+    if (has(dict, "material_ow_first_layer_size_compensation"s)) {
+        opt_key() = "material_ow_sla_first_layer_size_compensation";
     }
     if (has(dict, "elefant_foot_min_width"s)) {
         opt_key() = "elephant_foot_min_width"s;
@@ -2412,7 +2422,8 @@ std::map<std::string, std::string> PrintConfigDef::to_prusa(t_config_option_key&
         }else if ("contiguous" == value) {
             value = "aligned";
         }
-    } else if ("first_layer_size_compensation" == opt_key) {
+    } else if ("sla_first_layer_size_compensation" == opt_key) {
+        // The FFF first_layer_size_compensation is plugin-owned and removed from Prusa exports.
         opt_key = "elefant_foot_compensation";
         if (!value.empty()) {
             if (value[0] == '-') {

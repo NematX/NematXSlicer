@@ -534,7 +534,9 @@ static inline bool trafos_differ_in_rotation_by_z_and_mirroring_by_xy_only(const
     return std::abs(d * d) < EPSILON * lx2 * ly2;
 }
 
-static PrintObjectRegions::BoundingAlignedBox3f transformed_its_bbox2d(const indexed_triangle_set &its, const Transform3f &m, float offset)
+// Volumes are sliced without any XY growth: XY compensation is applied after
+// slicing by its plugin, so the mesh extents bound the sliced geometry.
+static PrintObjectRegions::BoundingAlignedBox3f transformed_its_bbox2d(const indexed_triangle_set &its, const Transform3f &m)
 {
     assert(! its.indices.empty());
 
@@ -542,8 +544,8 @@ static PrintObjectRegions::BoundingAlignedBox3f transformed_its_bbox2d(const ind
     for (const stl_triangle_vertex_indices &tri : its.indices)
         for (int i = 0; i < 3; ++ i)
             bbox.extend(m * its.vertices[tri(i)]);
-    bbox.min() -= Vec3f(offset, offset, float(EPSILON));
-    bbox.max() += Vec3f(offset, offset, float(EPSILON));
+    bbox.min() -= Vec3f(0.f, 0.f, float(EPSILON));
+    bbox.max() += Vec3f(0.f, 0.f, float(EPSILON));
     return bbox;
 }
 
@@ -551,8 +553,7 @@ static void transformed_its_bboxes_in_z_ranges(
     const indexed_triangle_set                                    &its, 
     const Transform3f                                             &m,
     const std::vector<t_layer_height_range>                       &z_ranges,
-    std::vector<std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool>> &bboxes,
-    const float                                                    offset)
+    std::vector<std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool>> &bboxes)
 {
     bboxes.assign(z_ranges.size(), std::make_pair(PrintObjectRegions::BoundingAlignedBox3f(), false));
     for (const stl_triangle_vertex_indices &tri : its.indices) {
@@ -611,8 +612,8 @@ static void transformed_its_bboxes_in_z_ranges(
     }
 
     for (std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool> &bbox : bboxes) {
-        bbox.first.min() -= Vec3f(offset, offset, float(EPSILON));
-        bbox.first.max() += Vec3f(offset, offset, float(EPSILON));
+        bbox.first.min() -= Vec3f(0.f, 0.f, float(EPSILON));
+        bbox.first.max() += Vec3f(0.f, 0.f, float(EPSILON));
     }
 }
 
@@ -842,8 +843,7 @@ void update_volume_bboxes(
     std::vector<PrintObjectRegions::LayerRangeRegions>  &layer_ranges,
     std::vector<ObjectID>                               &cached_volume_ids,
     ModelVolumePtrs                                      model_volumes,
-    const Transform3d                                   &object_trafo, 
-    const float                                          offset)
+    const Transform3d                                   &object_trafo)
 {
     // output will be sorted by the order of model_volumes sorted by their ObjectIDs.
     model_volumes_sort_by_id(model_volumes);
@@ -860,7 +860,7 @@ void update_volume_bboxes(
                         layer_range.volumes.emplace_back(*it);
                 } else
                     layer_range.volumes.push_back({ model_volume->id(),
-                        transformed_its_bbox2d(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix()), offset) });
+                        transformed_its_bbox2d(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix())) });
             }
     } else {
         std::vector<std::vector<PrintObjectRegions::VolumeExtents>> volumes_old;
@@ -893,7 +893,7 @@ void update_volume_bboxes(
                             layer_range.volumes.emplace_back(*it);
                     }
                 } else {
-                    transformed_its_bboxes_in_z_ranges(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix()), ranges, bboxes, offset);
+                    transformed_its_bboxes_in_z_ranges(model_volume->mesh().its, trafo_for_bbox(object_trafo, model_volume->get_matrix()), ranges, bboxes);
                     for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges)
                         if (auto &bbox = bboxes[&layer_range - layer_ranges.data()]; bbox.second)
                             layer_range.volumes.push_back({ model_volume->id(), bbox.first });
@@ -918,7 +918,6 @@ static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
     const PrintRegionConfig                     &default_region_config,
     const Transform3d                           &trafo,
     size_t                                       num_extruders,
-    const float                                  xy_size_compensation,
     const std::vector<unsigned int>             &painting_extruders)
 {
     // Reuse the old object or generate a new one.
@@ -954,8 +953,7 @@ static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
             //     range.config);
     }
 
-    const bool is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) { return mv->is_mm_painted(); });
-    update_volume_bboxes(layer_ranges_regions, print_object_regions->cached_volume_ids, model_volumes, print_object_regions->trafo_bboxes, is_mm_painted ? 0.f : std::max(0.f, xy_size_compensation));
+    update_volume_bboxes(layer_ranges_regions, print_object_regions->cached_volume_ids, model_volumes, print_object_regions->trafo_bboxes);
 
     const auto get_create_region = [&print, &all_regions](PrintRegionConfig &&config) -> const PrintRegion* {
         const PrintRegion *region = &print.register_print_region(config);
@@ -1635,8 +1633,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         if (!print_object_regions || model_object_status.print_object_regions_status != ModelObjectStatus::PrintObjectRegionsStatus::Valid) {
             // Layer ranges with their associated configurations. Remove overlaps between the ranges
             // and create the regions from scratch.
-            const ConfigOptionFloat *xy_size_compensation =
-                print_object.config().option<ConfigOptionFloat>("xy_size_compensation");
             print_object_regions = generate_print_object_regions(
                 *this,
                 print_object_regions,
@@ -1645,7 +1641,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 object_default_region,
                 model_object_status.print_instances.front().trafo,
                 num_extruders,
-                print_object.is_mm_painted() ? 0.f : float(xy_size_compensation != nullptr ? xy_size_compensation->value : 0.),
                 painting_extruders);
         }
         for (auto it = it_print_object; it != it_print_object_end; ++it) {

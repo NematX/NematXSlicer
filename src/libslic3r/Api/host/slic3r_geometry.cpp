@@ -25,7 +25,27 @@
 #include <clipper/clipper.hpp>
 #include "Orchestrator.hpp"
 
+/*
+This file exposes native geometry through the plugin C interface. Handles borrow
+points, rings or collections unless a storage_new_* call allocates an owned
+result. Editing functions operate on the host's mutable views; read queries
+leave geometry untouched. Structural validators return status codes instead of
+invoking debug assertions, so malformed plugin input remains diagnosable.
+
+    expolygon_valid() / expolygons_valid()
+    `-- expolygon_status_without_asserts(): check ring structure and orientation
+        `-- polygon_points_valid_without_asserts(): check point separation
+
+Validation does not prove absence of self-intersections or containment of holes.
+Other geometry operations keep the preconditions documented in the public header.
+*/
+
 namespace Slic3r {
+// Read ring sizes and adjacent-point separation without the native debug assertions.
+static bool polygon_points_valid_without_asserts(const Polygon &polygon);
+// Return structural/orientation status without modifying rings or checking containment.
+static expolygon_status expolygon_status_without_asserts(const ExPolygon &expolygon);
+
 static PluginStorage *to_storage(storage_handle *storage) { return reinterpret_cast<PluginStorage *>(storage); }
 
 static extrusion_entity_handle *to_handle(ExtrusionEntity *entity)
@@ -289,6 +309,36 @@ static Slic3r::Points to_points(const multipoint_view *me) {
 
 static const Slic3r::Point *as_points(const c_point *points) {
     return reinterpret_cast<const Slic3r::Point*>(points);
+}
+
+static bool polygon_points_valid_without_asserts(const Polygon &polygon)
+{
+    if (polygon.size() < 3)
+        return false;
+    const Point *previous = &polygon.points.back();
+    for (const Point &point : polygon.points) {
+        if (previous->coincides_with_epsilon(point))
+            return false;
+        previous = &point;
+    }
+    return true;
+}
+
+static expolygon_status expolygon_status_without_asserts(const ExPolygon &expolygon)
+{
+    if (expolygon.empty())
+        return EXPOLYGON_STATUS_EMPTY;
+    if (!polygon_points_valid_without_asserts(expolygon.contour))
+        return EXPOLYGON_STATUS_INVALID_GEOMETRY;
+    if (!expolygon.contour.is_counter_clockwise())
+        return EXPOLYGON_STATUS_INVALID_ORIENTATION;
+    for (const Polygon &hole : expolygon.holes) {
+        if (!polygon_points_valid_without_asserts(hole))
+            return EXPOLYGON_STATUS_INVALID_GEOMETRY;
+        if (!hole.is_clockwise())
+            return EXPOLYGON_STATUS_INVALID_ORIENTATION;
+    }
+    return EXPOLYGON_STATUS_OK;
 }
 }
 
@@ -1068,20 +1118,8 @@ int32_t polylines_remove_degenerate(polyline_collection_handle *me) {
 /* ========================= expolygon ========================= */
 
 expolygon_status expolygon_valid(const expolygon_handle *me) {
-    if (me == nullptr || Slic3r::to_expolygon(me)->empty())
-        return EXPOLYGON_STATUS_EMPTY;
-    const Slic3r::ExPolygon *expoly = Slic3r::to_expolygon(me);
-    if (!expoly->contour.is_valid())
-        return EXPOLYGON_STATUS_INVALID_GEOMETRY;
-    if (!expoly->contour.is_counter_clockwise())
-        return EXPOLYGON_STATUS_INVALID_ORIENTATION;
-    for (const Slic3r::Polygon &hole : expoly->holes) {
-        if (!hole.is_valid())
-            return EXPOLYGON_STATUS_INVALID_GEOMETRY;
-        if (!hole.is_clockwise())
-            return EXPOLYGON_STATUS_INVALID_ORIENTATION;
-    }
-    return EXPOLYGON_STATUS_OK;
+    return me == nullptr ? EXPOLYGON_STATUS_EMPTY :
+        Slic3r::expolygon_status_without_asserts(*Slic3r::to_expolygon(me));
 }
 
 void expolygon_ensure_valid(expolygon_handle *me, coord_t resolution) {
@@ -1217,17 +1255,9 @@ expolygon_status expolygons_valid(const expolygon_collection_handle *me) {
     if (me == nullptr)
         return EXPOLYGON_STATUS_EMPTY;
     for (const Slic3r::ExPolygon &expoly : *Slic3r::to_expolygons(me)) {
-        const expolygon_status status = expoly.empty() ? EXPOLYGON_STATUS_EMPTY :
-            (!expoly.contour.is_valid() ? EXPOLYGON_STATUS_INVALID_GEOMETRY :
-            (!expoly.contour.is_counter_clockwise() ? EXPOLYGON_STATUS_INVALID_ORIENTATION : EXPOLYGON_STATUS_OK));
+        const expolygon_status status = Slic3r::expolygon_status_without_asserts(expoly);
         if (status != EXPOLYGON_STATUS_OK)
             return status;
-        for (const Slic3r::Polygon &hole : expoly.holes) {
-            if (!hole.is_valid())
-                return EXPOLYGON_STATUS_INVALID_GEOMETRY;
-            if (!hole.is_clockwise())
-                return EXPOLYGON_STATUS_INVALID_ORIENTATION;
-        }
     }
     return EXPOLYGON_STATUS_OK;
 }

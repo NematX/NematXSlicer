@@ -31,7 +31,7 @@ The normal execution flow is:
     run_impl()
     |-- read the object layer Z positions
     |-- slice every printable, negative, or modifier volume with the object
-    |   transform, resolution, slicing mode, and XY compensation
+    |   transform, resolution, and slicing mode
     |-- assign sliced polygons to the destination print regions
     |   |-- use the direct fast path when only one volume region is active
     |   |-- use direct assignment when multiple regions do not overlap in XY
@@ -59,22 +59,6 @@ namespace {
 
 const char *k_slice_volume_id = "slice_volume";
 const char *k_no_dependencies[] = {nullptr};
-
-const raw_used_config_key k_used_config_keys[] = {
-    { "hole_size_compensation", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "xy_size_compensation", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "xy_inner_size_compensation", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
-};
-
-const char *const k_defined_config_keys[] = {
-    "hole_size_compensation",
-    "xy_size_compensation",
-    "xy_inner_size_compensation"
-};
-
-// Register the option definitions owned by this plugin; it runs once from
-// inilialize_impl().
-void initialize_slice_volume_settings(orchestrator_handle *orchestrator);
 
 // Raw mesh slicing result for one ModelVolume. The slicer returns simple
 // polygon loops per layer; region assignment and boolean clipping are handled
@@ -412,7 +396,7 @@ std::vector<VolumeSlices> slice_volumes_inner(const run_ctx_slicing &ctx,
 {
     // This follows PrintObjectSlice.cpp::slice_volumes_inner(): prepare one
     // MeshSlicingParamsEx-equivalent, slice only printable/negative/modifier
-    // volumes, filter by layer ranges, and apply the same XY compensation policy.
+    // volumes and filter by layer ranges; dimensional offsets run after slicing.
     std::vector<VolumeSlices> out;
     out.reserve(object.volume_count());
 
@@ -426,19 +410,11 @@ std::vector<VolumeSlices> slice_volumes_inner(const run_ctx_slicing &ctx,
 
     const Config print_config = print.config();
     const Config object_config = object.config();
-    const size_t num_extruders = print.config().get("nozzle_diameter").size();
-    const bool is_mm_painted = num_extruders > 1 && std::any_of(volumes.begin(), volumes.end(), [](const Volume &volume) {
-        return volume.is_mm_painted();
-    });
-
-    const float outer_delta = float(object_config.get("xy_size_compensation").get_float());
-    const float inner_delta = float(object_config.get("xy_inner_size_compensation").get_float());
-    const float hole_delta = inner_delta + float(object_config.get("hole_size_compensation").get_float());
-    const float min_delta = std::min(outer_delta, std::min(inner_delta, hole_delta));
-    const float extra_offset = is_mm_painted ? 0.f : std::max(0.f, min_delta);
 
     c_mesh_slicing_params params_base = {};
     params_base.closing_radius = float(object_config.get("slice_closing_radius").get_float());
+    // Dimensional compensation belongs to the post-slicing XY plugin; slicing
+    // only applies the technical closing radius.
     params_base.extra_offset = 0.f;
     params_base.transform = object.transform_centered();
     params_base.resolution = std::max(EPSILON, print_config.get("resolution").get_float());
@@ -453,8 +429,6 @@ std::vector<VolumeSlices> slice_volumes_inner(const run_ctx_slicing &ctx,
             continue;
 
         c_mesh_slicing_params params = params_base;
-        if (!volume.is_negative())
-            params.extra_offset = extra_offset;
 
         std::vector<StoredExPolygonCollection> by_layer;
         if (layer_range_count == 1) {
@@ -634,71 +608,6 @@ void write_region_slices(const run_ctx_slicing &ctx,
     }
 }
 
-void initialize_slice_volume_settings(orchestrator_handle *orchestrator)
-{
-    /*
-    Option definitions owned by this module. Each entry fixes the option type,
-    override scope, default and GUI metadata; defined keys are published in the
-    print presets, so profiles read and write them by name like any built-in
-    setting. Called once from inilialize_impl().
-    */
-    raw_config_option_def def = raw_config_option_def_init();
-    def.opt_key = "hole_size_compensation";
-    def.type = RAW_CO_FLOAT;
-    def.container_type = RAW_CONTAINER_TYPE_OBJECT;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_SLICING;
-    def.category = RAW_OPTION_CATEGORY_SLICING;
-    def.label = "XY compensation";
-    def.full_label = "XY holes compensation";
-    def.tooltip = "The convex holes will be grown / shrunk in the XY plane by the configured value"
-        " (negative = inwards = remove area, positive = outwards = add area, should be negative as the holes are always a bit smaller irl)."
-        " This might be useful for fine-tuning hole sizes."
-        "\nThis setting behaves the same as 'Inner XY size compensation' but only for convex shapes. It's added to 'Inner XY size compensation', it does not replace it. ";
-    def.sidetext = "mm";
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-
-    def = raw_config_option_def_init();
-    def.opt_key = "xy_size_compensation";
-    def.type = RAW_CO_FLOAT;
-    def.container_type = RAW_CONTAINER_TYPE_OBJECT;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_SLICING;
-    def.category = RAW_OPTION_CATEGORY_SLICING;
-    def.label = "Outer";
-    def.full_label = "Outer XY size compensation";
-    def.tooltip = "The object will be grown/shrunk in the XY plane by the configured value "
-        "(negative = inwards = remove area, positive = outwards = add area). This might be useful for fine-tuning sizes."
-        "\nThis one only applies to the 'exterior' shell of the object."
-        "\n !!! it's recommended you put the same value into the 'Inner XY size compensation', unless you are sure you don't have horizontal holes. !!! ";
-    def.sidetext = "mm";
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-
-    def = raw_config_option_def_init();
-    def.opt_key = "xy_inner_size_compensation";
-    def.type = RAW_CO_FLOAT;
-    def.container_type = RAW_CONTAINER_TYPE_OBJECT;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_SLICING;
-    def.category = RAW_OPTION_CATEGORY_SLICING;
-    def.label = "Inner";
-    def.full_label = "Inner XY size compensation";
-    def.tooltip = "The object will be grown/shrunk in the XY plane by the configured value "
-        "(negative = inwards = remove area, positive = outwards = add area). This might be useful for fine-tuning sizes."
-        "\nThis one only applies to the 'inner' shell of the object (!!! horizontal holes break the shell !!!)";
-    def.sidetext = "mm";
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-}
-
 } // namespace
 
 SliceVolume &SliceVolume::instance(orchestrator_handle *orch)
@@ -740,26 +649,6 @@ int32_t SliceVolume::priority_impl() const noexcept
 const char *SliceVolume::progress_message_format_impl() const noexcept
 {
     return "Slicing volumes: %u / %u layers";
-}
-
-int32_t SliceVolume::used_config_keys(raw_used_config_key *keys) const noexcept
-{
-    if (keys != nullptr)
-        std::copy(std::begin(k_used_config_keys), std::end(k_used_config_keys), keys);
-    return int32_t(std::size(k_used_config_keys));
-}
-
-int32_t SliceVolume::defined_config_keys(const char **keys) const noexcept
-{
-    if (keys != nullptr)
-        for (size_t idx = 0; idx < std::size(k_defined_config_keys); ++idx)
-            keys[idx] = k_defined_config_keys[idx];
-    return int32_t(std::size(k_defined_config_keys));
-}
-
-void SliceVolume::inilialize_impl(storage_handle *) const
-{
-    initialize_slice_volume_settings(m_orchestrator);
 }
 
 void SliceVolume::setup_run_impl(const plugin_run_context *run_ctx) const

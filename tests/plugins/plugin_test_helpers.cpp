@@ -132,6 +132,8 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Slicing/SliceVolume.hpp"
 #include "libslic3r/Plugins/Slicing/StandardLayerHeightGenerator.hpp"
 #include "libslic3r/Plugins/Slicing/VaseMultiIslandConnector.hpp"
+#include "libslic3r/Plugins/HoleSizeCompensation.hpp"
+#include "libslic3r/Plugins/XYSizeCompensation.hpp"
 #include "libslic3r/Plugins/Surface/CleanInfillSurfaces.hpp"
 #include "libslic3r/Plugins/Surface/InitialTypedSurfaceBuilder.hpp"
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
@@ -783,6 +785,9 @@ void ensure_plugin_test_runtime_initialized()
         slic3r_api::SliceVolumePlugin::register_slice_volume_plugin(orchestrator_handle_value);
         slic3r_api::MaxOverhangThresholdPlugin::register_max_overhang_threshold_plugin(orchestrator_handle_value);
         slic3r_api::OverhangSlopeFillPlugin::register_overhang_slope_fill_plugin(orchestrator_handle_value);
+        slic3r_api::HoleSizeCompensationPlugin::register_hole_size_compensation_plugin(orchestrator_handle_value);
+        slic3r_api::XYSizeCompensationPlugin::register_simple_xy_size_compensation_plugin(
+            orchestrator_handle_value);
         slic3r_api::VaseMultiIslandConnectorPlugin::register_vase_multi_island_connector_plugin(
             orchestrator_handle_value);
         slic3r_api::GCodeGeneration::PrintingPlanFileWriterPlugin::register_printing_plan_file_writer_plugin(
@@ -952,6 +957,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "slice_volume");
         activate_plugin_or_fail(orchestrator, "max_overhang_threshold");
         activate_plugin_or_fail(orchestrator, "overhang_slope_fill");
+        activate_plugin_or_fail(orchestrator, "slicing.hole_size_compensation");
+        activate_plugin_or_fail(orchestrator, "slicing.xy_size_compensation");
         activate_plugin_or_fail(orchestrator, "vase.multi_island_connector");
         activate_plugin_or_fail(orchestrator, "gcode.printing_plan_file_writer");
         activate_plugin_or_fail(orchestrator, "gcode.post_process");

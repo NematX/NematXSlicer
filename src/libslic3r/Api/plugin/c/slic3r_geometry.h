@@ -455,6 +455,11 @@ typedef int32_t expolygon_status;
 #define EXPOLYGON_STATUS_NOT_CLOSED          3
 #define EXPOLYGON_STATUS_INVALID_GEOMETRY    4
 
+/* Read-only structural validation, without assertions, in every build.
+ * Checks ring point counts, consecutive-point separation (including closure,
+ * using the host's SCALED_EPSILON/2 per-axis rule), and orientation.
+ * Does not check self-intersections or hole containment. Null/empty -> EMPTY.
+ * Raw Clipper intermediates may need ensure_valid before this query. */
 SLIC3R_HOST_API expolygon_status expolygon_valid(const expolygon_handle *me);
 SLIC3R_HOST_API void expolygon_ensure_valid(expolygon_handle *me, coord_t resolution);
 
@@ -515,6 +520,8 @@ typedef struct expolygon_collection_handle expolygon_collection_handle;
 /* create a new expolygon collection in the storage. */
 SLIC3R_HOST_API expolygon_collection_handle *storage_new_expolygons(storage_handle *me);
 
+/* Same checks as expolygon_valid for each element, returning the first failure.
+ * Null -> EMPTY; a non-null empty collection -> OK. Does not modify geometry. */
 SLIC3R_HOST_API expolygon_status expolygons_valid(const expolygon_collection_handle *me);
 SLIC3R_HOST_API void expolygons_ensure_valid(expolygon_collection_handle *me, coord_t resolution);
 

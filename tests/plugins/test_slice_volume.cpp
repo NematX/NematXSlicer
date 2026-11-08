@@ -38,7 +38,9 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
@@ -283,7 +285,7 @@ std::string read_text(const std::string &path)
 
 } // namespace
 
-TEST_CASE("Slice volume plugin owns the XY compensation settings",
+TEST_CASE("Slice volume defines no dimensional settings",
           "[plugins][slice-volume][config]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -291,28 +293,10 @@ TEST_CASE("Slice volume plugin owns the XY compensation settings",
 
     Plugin *plugin = orchestrator.get_plugin("slice_volume");
     REQUIRE(plugin != nullptr);
+    // Hole compensation moved to slicing.hole_size_compensation, XY
+    // compensation to slicing.xy_size_compensation.
+    CHECK(plugin->get_defined_config_keys().empty());
 
-    std::vector<std::string> defined_keys;
-    for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
-        defined_keys.push_back(key.key);
-    CHECK(defined_keys.size() == 3);
-    for (const char *expected : { "hole_size_compensation", "xy_size_compensation", "xy_inner_size_compensation" })
-        CHECK(std::find(defined_keys.begin(), defined_keys.end(), expected) != defined_keys.end());
-
-    for (const char *key : { "hole_size_compensation", "xy_size_compensation", "xy_inner_size_compensation" }) {
-        const ConfigOptionDef *def = PrintConfigDef::instance().get(key);
-        REQUIRE(def != nullptr);
-        CHECK(def->type == coFloat);
-        CHECK(def->container_type == ConfigOptionContainerType::Object);
-        CHECK(def->option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
-        CHECK(def->invalidates_step == STEP_SLICING);
-        CHECK(def->sidetext == "mm");
-        CHECK(def->default_value->serialize() == "0");
-        CHECK(PrintObjectConfig::defaults().option(key) != nullptr);
-        CHECK(PrintConfig::defaults().option(key) == nullptr);
-    }
-
-    // The compensation settings stay always editable: the plugin owns no rule.
     for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
         CHECK(rule.owner != "slice_volume");
 }
@@ -1666,3 +1650,114 @@ TEST_CASE("Python slicing timing bench on the real host", "[.][slicing-bench][py
 }
 
 #endif // SLIC3R_TEST_PYTHON_PLUGINS
+
+TEST_CASE("Post-slicing XY compensation owns regional dimensional settings",
+          "[plugins][xy-size-compensation][config]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Plugin *plugin = Orchestrator::instance().get_plugin("slicing.xy_size_compensation");
+    REQUIRE(plugin != nullptr);
+    CHECK(plugin->get_step() == STEP_POST_SLICING);
+
+    std::vector<std::string> defined_keys;
+    for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
+        defined_keys.push_back(key.key);
+    CHECK(defined_keys.size() == 5);
+
+    // Profile keys keep their types and defaults while moving into regional
+    // scope. The plugin owns all five; their FFF edits rerun post-slicing.
+    const struct ExpectedOption {
+        const char *key;
+        ConfigOptionType type;
+        const char *default_value;
+    } expected[] = {
+        { "xy_size_compensation", coFloat, "0" },
+        { "xy_inner_size_compensation", coFloat, "0" },
+        { "first_layer_size_compensation", coFloat, "0" },
+        { "first_layer_size_compensation_layers", coInt, "1" },
+        { "first_layer_size_compensation_no_collapse", coBool, "1" }
+    };
+    for (const ExpectedOption &option : expected) {
+        CAPTURE(option.key);
+        CHECK(std::find(defined_keys.begin(), defined_keys.end(), option.key) != defined_keys.end());
+        const ConfigOptionDef *def = PrintConfigDef::instance().get(option.key);
+        REQUIRE(def != nullptr);
+        CHECK(def->type == option.type);
+        CHECK(def->container_type == ConfigOptionContainerType::Region);
+        CHECK(def->option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
+        CHECK(def->invalidates_step == STEP_POST_SLICING);
+        CHECK(def->default_value->serialize() == option.default_value);
+        CHECK(PrintRegionConfig::defaults().option(option.key) != nullptr);
+        CHECK(PrintObjectConfig::defaults().option(option.key) == nullptr);
+        if (option.type == coFloat)
+            CHECK(def->precision == 6);
+    }
+}
+
+TEST_CASE("SLA first-layer compensation has its own native definition",
+          "[plugins][xy-size-compensation][config]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto &definitions = PrintConfigDef::instance();
+    const auto *sla = definitions.get("sla_first_layer_size_compensation");
+    const auto *material = definitions.get("material_ow_sla_first_layer_size_compensation");
+    REQUIRE(sla != nullptr);
+    REQUIRE(material != nullptr);
+    CHECK(sla->type == coFloat);
+    CHECK((sla->printer_technology & ptSLA) == ptSLA);
+    CHECK(material->type == sla->type);
+    CHECK(material->default_value->get_float() == sla->default_value->get_float());
+    // SLA material overrides are disabled until explicitly enabled by the user.
+    CHECK_FALSE(material->default_value->is_enabled());
+    CHECK(definitions.get("material_ow_first_layer_size_compensation") == nullptr);
+
+    // SLA printer profiles and Prusa imports are renamed; FFF profiles keep the plugin key.
+    const auto convert = [](std::map<std::string, std::string> entries) {
+        std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict;
+        for (const auto &[key, value] : entries)
+            dict[key] = { key, value };
+        PrintConfigDef::handle_legacy_map(dict, false);
+        std::map<std::string, std::string> out;
+        for (const auto &[key, entry] : dict)
+            if (!entry.first.empty())
+                out[entry.first] = entry.second;
+        return out;
+    };
+    const auto sla_printer = convert({ { "printer_technology", "SLA" }, { "first_layer_size_compensation", "-0.1" } });
+    CHECK(sla_printer.count("sla_first_layer_size_compensation") == 1);
+    CHECK(sla_printer.count("first_layer_size_compensation") == 0);
+    const auto prusa_sla = convert({ { "elefant_foot_min_width", "0.2" }, { "elefant_foot_compensation", "0.2" } });
+    REQUIRE(prusa_sla.count("sla_first_layer_size_compensation") == 1);
+    CHECK(prusa_sla.at("sla_first_layer_size_compensation") == "-0.2");
+    const auto material_profile = convert({ { "material_ow_first_layer_size_compensation", "-0.1" } });
+    CHECK(material_profile.count("material_ow_sla_first_layer_size_compensation") == 1);
+    const auto fff = convert({ { "printer_technology", "FFF" }, { "elefant_foot_compensation", "0.2" } });
+    CHECK(fff.count("first_layer_size_compensation") == 1);
+    CHECK(fff.count("sla_first_layer_size_compensation") == 0);
+}
+
+TEST_CASE("XY compensation declares its external-flow inputs and invalidates post-slicing",
+          "[plugins][xy-size-compensation][config]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Plugin *plugin = Orchestrator::instance().get_plugin("slicing.xy_size_compensation");
+    REQUIRE(plugin != nullptr);
+
+    const std::vector<Plugin::UsedConfigKey> used = plugin->get_used_config_keys();
+    for (const char *key : { "external_perimeter_overlap", "external_perimeter_extrusion_change_odd_layers" }) {
+        CAPTURE(key);
+        const auto found = std::find_if(used.begin(), used.end(), [key](const Plugin::UsedConfigKey &used_key) {
+            return used_key.key == key;
+        });
+        REQUIRE(found != used.end());
+
+        const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+        REQUIRE(definition != nullptr);
+        // These native settings traditionally replay at perimeter generation;
+        // reading them in this plugin tightens invalidation to post-slicing.
+        CHECK(definition->invalidates_step == STEP_POST_SLICING);
+    }
+}
