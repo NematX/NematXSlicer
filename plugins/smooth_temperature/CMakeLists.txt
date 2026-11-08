@@ -42,3 +42,21 @@ nematx_package_plugin(
 add_executable(smooth_temperature_tests tests/kernel_tests.cpp)
 target_include_directories(smooth_temperature_tests PRIVATE src)
 add_test(NAME smooth_temperature_kernel COMMAND smooth_temperature_tests)
+set_tests_properties(smooth_temperature_kernel PROPERTIES LABELS "smooth_temperature" TIMEOUT 2)
+
+# The Python oracle and the real host exports are part of the package gate, not
+# the host's core suite. Additional dependency directories remain configurable.
+set(SMOOTH_TEMPERATURE_RUNTIME_PATH "" CACHE STRING "Additional runtime library directories for SmoothTemperature tests")
+get_filename_component(_smooth_host_library_dir "${SUPERSLICER_HOST_LIBRARY}" DIRECTORY)
+set(_smooth_runtime_args --runtime-path "${_smooth_host_library_dir}")
+foreach(_runtime IN LISTS SMOOTH_TEMPERATURE_RUNTIME_PATH)
+    list(APPEND _smooth_runtime_args --runtime-path "${_runtime}")
+endforeach()
+add_test(NAME smooth_temperature_reader
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gcode_reader.py")
+set_tests_properties(smooth_temperature_reader PROPERTIES LABELS "smooth_temperature" TIMEOUT 3)
+add_test(NAME smooth_temperature_e2e
+    COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_smooth_temperature.py"
+        --host-executable "${SUPERSLICER_HOST_EXECUTABLE}" --build-dir "${CMAKE_BINARY_DIR}"
+        ${_smooth_runtime_args})
+set_tests_properties(smooth_temperature_e2e PROPERTIES LABELS "smooth_temperature" TIMEOUT 50)

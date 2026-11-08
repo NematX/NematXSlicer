@@ -1,55 +1,53 @@
-"""End-to-end checks for the smoothed temperature changes.
+"""Fast package E2E gate: micro-boxes, real 3MF instances and seven host exports.
 
-Each case exports 10 x 10 x 4.5 mm boxes (15 layers of 0.3 mm) through the host
-executable and reads the nozzle setpoint in effect during the extrusions of each
-layer, tool and object. Height ranges, modifiers and object settings are written
-in a 3MF project. The expected ramps follow the rule of TemperatureRamp.hpp,
-computed here independently: a request restarts the ramp from the value printed
-on the previous layer, the request layer takes the first step, the target is
-reached on the N-th layer, and values are rounded to the nearest degree, halves
-towards the target.
+The common scene combines ranges, partial/full modifiers, independent objects,
+copies, a synthetic skirt, policy changes and two tools/standby. Separate small
+scenes compare the host with N=0/1 and SEMM and exercise sequential copies.
+Expected sequences are written explicitly; the C++ tests cover the large
+arithmetic matrix without slicing it. The first export also saves the default
+catalogue for all scenes. Each run owns its datadir/results, keeps its logs and
+shares one budget.
+
+    main -> SmoothTemperature -> export -> write_project / HostRunner.run
+                                      -> parse_gcode -> Result.series
+         -> timings.json (including command and fixture/parser times)
 """
-
 from __future__ import annotations
 
 import argparse
+import functools
+import json
 import os
-import re
-import subprocess
+import shutil
 import sys
+import tempfile
+import time
 import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
+from xml.sax.saxutils import escape, quoteattr
 from zipfile import ZIP_DEFLATED, ZipFile
+
+from gcode_reader import Result, parse_gcode
+from host_runner import HostRunner
 
 PROJECT = Path(__file__).resolve().parents[3]
 HOST_EXECUTABLE: Path
 PLUGIN_DATADIR: Path
 OUTPUT_ROOT: Path
-RUNTIME_PATH: list[str] = []
+RUNNER: HostRunner
+STAGES: list[dict] = []
 
-LAYERS = 15
+LAYERS = 10
 BASE_PROFILE = (
-    # Seam visibility is very slow with a Debug host and irrelevant here.
-    "seam_visibility = 0",
-    "layer_height = 0.3",
-    "first_layer_height = 0.3",
-    "gcode_comments = 1",
-    "gcode_label_objects = octoprint",
-    "skirts = 0",
-    "brim_width = 0",
-    "perimeters = 1",
-    "fill_density = 0%",
-    "top_solid_layers = 0",
-    "bottom_solid_layers = 0",
-    "wipe_tower = 0",
-    "temperature = 220",
-    "first_layer_temperature = 220",
+    "seam_visibility = 0",  # Visibility calculations do not affect temperature decisions.
+    "layer_height = 0.3", "first_layer_height = 0.3", "gcode_comments = 1",
+    "gcode_label_objects = octoprint", "skirts = 0", "brim_width = 0", "perimeters = 1",
+    "fill_density = 0%", "top_solid_layers = 0", "bottom_solid_layers = 0", "wipe_tower = 0",
+    "temperature = 220", "first_layer_temperature = 220", "gcode_firmware_plugin = gcode.firmware.marlin2",
 )
-WORD = re.compile(r"([A-Z])([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
-
-# Per-extruder printer settings: the command line does not resize them to the
-# extruder count, so a second extruder repeats the host default of each one.
+# The CLI does not resize per-extruder printer vectors. Repeat the actual defaults,
+# not a second hard-coded printer profile that would drift from the host.
 EXTRUDER_KEYS = (
     "deretract_speed", "extruder_clearance", "extruder_colour", "extruder_extrusion_multiplier_speed",
     "extruder_fan_offset", "extruder_offset", "extruder_temperature_offset", "max_layer_height",
@@ -65,34 +63,9 @@ EXTRUDER_KEYS = (
 )
 
 
-def ramp(generals: list[int], layers: int | list[int]) -> list[int]:
-    """Values printed on each layer of one instance and tool, from its general temperature per layer."""
-    out = []
-    state: list[int] | None = None  # from, target, N, layers counted since the request
-    for layer, general in enumerate(generals):
-        n = layers[layer] if isinstance(layers, list) else layers
-        if state is None:
-            state = [general, general, 0, 0]
-        elif state[1] != general:
-            state = [ramp_value(state), general, n, 1]
-        elif state[3] < state[2]:
-            state[3] += 1
-        out.append(ramp_value(state))
-    return out
-
-
-def ramp_value(state: list[int]) -> int:
-    start, target, n, done = state
-    if done >= n:
-        return target
-    step = (target - start) * done
-    rounded = (abs(step) * 2 + n) // (2 * n)
-    return start + (rounded if step >= 0 else -rounded)
-
-
 @dataclass
 class Volume:
-    """Box from (x0, y0, z0) to (x1, y1, z1) in mm; a modifier when settings are given."""
+    """Axis-aligned local box; a parameter modifier when modifier is true."""
     box: tuple[float, float, float, float, float, float]
     modifier: bool = False
     config: dict[str, str] = field(default_factory=dict)
@@ -100,24 +73,24 @@ class Volume:
 
 @dataclass
 class Object:
+    """One 4 mm wide mesh with optional copies sharing the same 3MF object id."""
     name: str
     x0: float = 0.0
     config: dict[str, str] = field(default_factory=dict)
-    # (min_z, max_z, settings) in mm.
     ranges: list[tuple[float, float, dict[str, str]]] = field(default_factory=list)
     modifiers: list[Volume] = field(default_factory=list)
+    height: float = 3.0
+    copies: tuple[float, ...] = (0.0,)
 
 
 def write_project(path: Path, objects: list[Object]) -> None:
-    """3MF project with one 10 x 10 x 4.5 mm box per object, its settings, height ranges and modifiers."""
+    """Write tiny meshes once and translate build items to create real copies."""
     faces = ((3, 2, 1), (1, 0, 3), (4, 5, 6), (6, 7, 4), (0, 1, 5), (5, 4, 0),
              (1, 2, 6), (6, 5, 1), (2, 3, 7), (7, 6, 2), (3, 0, 4), (4, 7, 3))
-    meshes, configs, ranges = "", "", ""
+    meshes, configs, ranges, build = "", "", "", ""
     for object_id, obj in enumerate(objects, 1):
-        vertices: list[tuple[float, float, float]] = []
-        triangles: list[tuple[int, int, int]] = []
-        volumes = ""
-        for volume in [Volume((obj.x0, 0, 0, obj.x0 + 10, 10, 4.5))] + obj.modifiers:
+        vertices, triangles, volumes = [], [], ""
+        for volume in [Volume((0, 0, 0, 4, 4, obj.height))] + obj.modifiers:
             x0, y0, z0, x1, y1, z1 = volume.box
             base, first = len(vertices), len(triangles)
             vertices += [(x, y, z) for z in (z0, z1) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
@@ -125,294 +98,275 @@ def write_project(path: Path, objects: list[Object]) -> None:
             kind = "ParameterModifier" if volume.modifier else "ModelPart"
             volumes += (f'<volume firstid="{first}" lastid="{len(triangles) - 1}">'
                         f'<metadata type="volume" key="volume_type" value="{kind}" />'
-                        + "".join(f'<metadata type="volume" key="{key}" value="{value}" />'
+                        + "".join(f'<metadata type="volume" key={quoteattr(key)} value={quoteattr(value)} />'
                                   for key, value in volume.config.items()) + "</volume>")
         meshes += (f'<object id="{object_id}" type="model"><mesh><vertices>'
                    + "".join(f'<vertex x="{x:g}" y="{y:g}" z="{z:g}" />' for x, y, z in vertices)
                    + "</vertices><triangles>"
                    + "".join(f'<triangle v1="{a}" v2="{b}" v3="{c}" />' for a, b, c in triangles)
                    + "</triangles></mesh></object>")
-        configs += (f'<object id="{object_id}" instances_count="1">'
-                    f'<metadata type="object" key="name" value="{obj.name}" />'
-                    + "".join(f'<metadata type="object" key="{key}" value="{value}" />'
+        configs += (f'<object id="{object_id}" instances_count="{len(obj.copies)}">'
+                    f'<metadata type="object" key="name" value={quoteattr(obj.name)} />'
+                    + "".join(f'<metadata type="object" key={quoteattr(key)} value={quoteattr(value)} />'
                               for key, value in obj.config.items()) + volumes + "</object>")
         if obj.ranges:
             ranges += f'<object id="{object_id}">' + "".join(
                 f'<range min_z="{low:g}" max_z="{high:g}"><option opt_key="layer_height">0.3</option>'
-                + "".join(f'<option opt_key="{key}">{value}</option>' for key, value in settings.items())
+                + "".join(f'<option opt_key={quoteattr(key)}>{escape(value)}</option>' for key, value in settings.items())
                 + "</range>" for low, high, settings in obj.ranges) + "</object>"
+        build += "".join(f'<item objectid="{object_id}" transform="1 0 0 0 1 0 0 0 1 {obj.x0 + offset:g} 0 0" />'
+                         for offset in obj.copies)
     model = ('<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xml:lang="en-US" '
-             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"><resources>' + meshes
-             + "</resources><build>"
-             + "".join(f'<item objectid="{object_id}" />' for object_id in range(1, len(objects) + 1))
-             + "</build></model>")
+             'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+             '<metadata name="slic3rpe:Version3mf">1</metadata><resources>' + meshes
+             + "</resources><build>" + build + "</build></model>")
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml",
-                         '<?xml version="1.0" encoding="UTF-8"?>'
+        archive.writestr("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8"?>'
                          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
                          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />'
                          '<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml" />'
-                         '<Override PartName="/Metadata/Slic3r_PE_model.config" ContentType="application/xml" /></Types>')
-        archive.writestr("_rels/.rels",
-                         '<?xml version="1.0" encoding="UTF-8"?>'
+                         '<Override PartName="/Metadata/SuperSlicer_model.config" ContentType="application/xml" /></Types>')
+        archive.writestr("_rels/.rels", '<?xml version="1.0" encoding="UTF-8"?>'
                          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
                          '<Relationship Target="/3D/3dmodel.model" Id="rel0" '
                          'Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" /></Relationships>')
         archive.writestr("3D/3dmodel.model", model)
-        archive.writestr("Metadata/Slic3r_PE_model.config",
-                         f'<?xml version="1.0" encoding="UTF-8"?><config>{configs}</config>')
+        archive.writestr("Metadata/SuperSlicer_model.config", f'<?xml version="1.0" encoding="UTF-8"?><config>{configs}</config>')
         if ranges:
-            archive.writestr("Metadata/Slic3r_layer_config_ranges.xml",
+            archive.writestr("Metadata/SuperSlicer_layer_config_ranges.xml",
                              f'<?xml version="1.0" encoding="utf-8"?><objects>{ranges}</objects>')
 
 
-@dataclass
-class Result:
-    # (layer, tool, object name) -> distinct setpoints in effect during its extrusions, in order of use.
-    setpoints: dict[tuple[int, int, str], list[int]]
-    waits: int
-    gcode: list[str]
-
-    def layers(self, tool: int = 0, name: str = "box") -> list[int]:
-        """Setpoint of the first extrusion of each layer for one tool and object; layers without it are skipped."""
-        return [values[0] for (_, value_tool, value_name), values in sorted(self.setpoints.items())
-                if value_tool == tool and value_name == name]
-
-    def distinct(self, tool: int = 0, name: str = "box") -> list[list[int]]:
-        """Sorted distinct setpoints of each layer for one tool and object."""
-        return [sorted(values) for (_, value_tool, value_name), values in sorted(self.setpoints.items())
-                if value_tool == tool and value_name == name]
-
-
-def read_gcode(path: Path) -> Result:
-    """Follow setpoints, tools, objects and extrusions in Marlin G-code."""
-    setpoint: dict[int, int] = {}
-    tool = 0
-    layer = -1
-    name = ""
-    e = 0.0
-    absolute_e = True
-    waits = 0
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    out: dict[tuple[int, int, str], list[int]] = {}
-    for raw in lines:
-        if raw.startswith(";LAYER_CHANGE"):
-            layer += 1
-        elif raw.startswith("; printing object "):
-            name = raw[len("; printing object "):].split(" id:", 1)[0].strip()
-        elif raw.startswith("; stop printing object"):
-            name = ""
-        code = raw.split(";", 1)[0].strip().upper()
-        if not code:
-            continue
-        command = code.split(" ", 1)[0]
-        fields = {key: float(value) for key, value in WORD.findall(code[len(command):])}
-        extruded: int | None = None
-        if command in ("M104", "M109") and "S" in fields:
-            setpoint[int(fields.get("T", tool))] = int(fields["S"])
-            waits += command == "M109"
-        elif re.fullmatch(r"T\d+", command):
-            tool = int(command[1:])
-        elif command == "M82":
-            absolute_e = True
-        elif command == "M83":
-            absolute_e = False
-        elif command == "G92" and "E" in fields:
-            e = fields["E"]
-        elif command in ("G1", "G2", "G3") and "E" in fields:
-            de = fields["E"] - e if absolute_e else fields["E"]
-            e = fields["E"] if absolute_e else e + fields["E"]
-            if de > 0 and ("X" in fields or "Y" in fields):
-                extruded = tool
-        if extruded is not None and layer >= 0 and name:
-            values = out.setdefault((layer, extruded, name), [])
-            if setpoint.get(extruded) not in values:
-                values.append(setpoint.get(extruded))
-    return Result(out, waits, lines)
-
-
-def environment() -> dict[str, str]:
-    env = dict(os.environ)
-    env["PATH"] = os.pathsep.join(RUNTIME_PATH + [env.get("PATH", "")])
-    return env
+@functools.lru_cache(maxsize=1)
+def immediate_result() -> Result:
+    """Export N=0/1 and save the default catalogue in the same host invocation."""
+    return export("immediate", (), parity_scene(), save_defaults=True)
 
 
 def saved_defaults() -> dict[str, str]:
-    case_dir = OUTPUT_ROOT / "defaults-saved"
-    case_dir.mkdir(parents=True, exist_ok=True)
-    (case_dir / "profile.ini").write_text(BASE_PROFILE[0] + "\n", encoding="utf-8")
-    saved = case_dir / "defaults.ini"
-    subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--load", str(case_dir / "profile.ini"),
-                    "--save", str(saved)], capture_output=True, timeout=900, env=environment(), check=True)
+    """Read the catalogue saved by the first export, without a separate host launch."""
+    immediate_result()
+    saved = OUTPUT_ROOT / "immediate" / "defaults.ini"
     return dict(line.split(" = ", 1) for line in saved.read_text(encoding="utf-8").splitlines() if " = " in line)
 
 
+def selector() -> str:
+    """Find the real temperature group setting instead of hard-coding its generated key."""
+    return next(key for key in saved_defaults()
+                if key.startswith("exclusive_group_") and "layer_extrusion_edit_temperature" in key)
+
+
 def two_extruder_options() -> tuple[str, ...]:
+    """Extend the printer's real default vectors to two nozzles."""
     defaults = saved_defaults()
     options = []
     for key in EXTRUDER_KEYS:
-        # String vectors are separated by ';', the other vectors by ','.
         separator = ";" if defaults[key].startswith('"') else ","
         options.append(f"{key} = {defaults[key]}{separator}{defaults[key]}")
     return tuple(options) + ("nozzle_diameter = 0.4,0.4", "filament_diameter = 1.75,1.75")
 
 
-def export(name: str, options: tuple[str, ...], objects: list[Object]) -> Result:
-    case_dir = OUTPUT_ROOT / name
-    case_dir.mkdir(parents=True, exist_ok=True)
-    profile = case_dir / "profile.ini"
-    model = case_dir / "model.3mf"
-    output = case_dir / "result.gcode"
+def export(name: str, options: tuple[str, ...], objects: list[Object], save_defaults: bool = False) -> Result:
+    """Export one scene and reject host errors, stale files and unreadable heater state."""
+    start = time.monotonic()
+    RUNNER.remaining()
+    case = OUTPUT_ROOT / name
+    case.mkdir()
+    profile, model, output = case / "profile.ini", case / "model.3mf", case / "result.gcode"
     merged = {option.split("=", 1)[0].strip(): option for option in BASE_PROFILE + options}
     profile.write_text("\n".join(merged.values()) + "\n", encoding="utf-8")
     write_project(model, objects)
-    output.unlink(missing_ok=True)
-    # The datadir must be a native absolute path: the Debug host checks it.
-    result = subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--export-gcode", "--load",
-                             str(profile), "--output", str(output), str(model)],
-                            capture_output=True, timeout=900, env=environment())
-    log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
-    (case_dir / "host.log").write_text(log, encoding="utf-8")
-    if result.returncode != 0 or not output.is_file():
-        raise AssertionError(f"{name}: export failed (exit {result.returncode}); see {case_dir / 'host.log'}")
-    # The host reports the priorities of its built-in firmware group on every run; that report is not about this plugin.
+    prepared = time.monotonic()
+    # These handfuls of rectangular paths do not benefit from a machine-wide worker pool.
+    actions = ["--save", str(case / "defaults.ini")] if save_defaults else []
+    RUNNER.run([str(HOST_EXECUTABLE), "--threads", "1", "--dont-arrange", "--datadir", str(PLUGIN_DATADIR), *actions, "--export-gcode", "--load", str(profile),
+                "--output", str(output), str(model)], case / "host.log", per_command=18 if len(objects) > 3 else 12)
+    parsing = time.monotonic()
+    log = (case / "host.log").read_text(encoding="utf-8", errors="replace")
+    # This known firmware-group diagnostic is unrelated to the temperature provider.
+    # Keep the complete log, and do not ignore any other error or disabled plugin.
     checked = "\n".join(line for line in log.lower().splitlines()
                         if "exclusive group 'gcode_firmware_plugin' has incompatible execution priorities" not in line)
     for message in ("will be disabled", "unknown option", "[error]"):
         if message in checked:
-            raise AssertionError(f"{name}: {message!r} in {case_dir / 'host.log'}")
-    return read_gcode(output)
+            raise AssertionError(f"{name}: {message!r}; see {case / 'host.log'}")
+    result = parse_gcode(output.read_text(encoding="utf-8").splitlines())
+    if not result.setpoints:
+        raise AssertionError(f"{name}: no object extrusion was read")
+    STAGES.append({"case": name, "fixture_seconds": prepared - start, "parse_seconds": time.monotonic() - parsing})
+    RUNNER.remaining()
+    return result
 
 
-def without_comments(result: Result) -> list[str]:
-    return [line.split(";", 1)[0].rstrip() for line in result.gcode if line.split(";", 1)[0].strip()]
+def common_scene() -> list[Object]:
+    """One scene exercises several rules while the provider and N vary independently."""
+    config = {"print_first_layer_temperature": "205"}
+    ranges = [(0.6, 1.2, {"print_temperature": "210"}), (1.2, 1.8, {"print_temperature": "230"}),
+              (1.8, 3.0, {"print_temperature": "200"})]
+    return [Object("partial", 8, config, ranges,
+                   [Volume((-1, -1, 0.6, 2, 5, 1.2), True, {"print_temperature": "250", "perimeters": "2"})]),
+            Object("cover", 16, config, modifiers=[Volume((-1, -1, 0.6, 5, 5, 1.2), True,
+                                                                        {"print_temperature": "210"})], height=2.4),
+            Object("copies", 24, config, ranges, copies=(0, 8))]
 
 
-# Height ranges of 1.2 mm (4 layers) from layer 4 on: 210, 200, then 190 from layer 12.
-RANGES = [(1.2, 2.4, {"print_temperature": "210"}), (2.4, 3.6, {"print_temperature": "200"}),
-          (3.6, 4.5, {"print_temperature": "190"})]
-RANGE_GENERALS = [205] + [220] * 3 + [210] * 4 + [200] * 4 + [190] * 3
+def parity_scene() -> list[Object]:
+    """Compare both immediate lengths on a deterministic single-object range scene."""
+    ranges = [(low, high, dict(settings, print_temperature_smooth_change=str(n)))
+              for (low, high, settings), n in zip(common_scene()[0].ranges, (0, 1, 0))]
+    return [Object("one", config={"print_first_layer_temperature": "205", "print_temperature_smooth_change": "1"},
+                   ranges=ranges)]
+
+
+def tool_scene() -> list[Object]:
+    """T0 leaves this instance on layers 2–5 while T1 prints it."""
+    return [Object("tools", 80, ranges=[(0.3, 3, {"print_temperature": "240"})],
+                   modifiers=[Volume((-1, -1, 0.6, 5, 5, 1.8), True, {"extruder": "2"})])]
+
+
+@functools.lru_cache(maxsize=1)
+def main_result() -> Result:
+    """One host export serves the independent modifier, policy and tool assertions."""
+    objects = common_scene() + [
+        Object("example", 40, {"print_first_layer_temperature": "230", "print_temperature": "180",
+                               "print_temperature_smooth_change": "2"}, [(0.3, 0.6, {"print_temperature": "210"})], height=1.5),
+        Object("cancel", 48, {"print_temperature": "200"},
+               [(0.3, 0.9, {"print_temperature": "230", "print_temperature_smooth_change": "8"}),
+                (0.9, 3, {"print_temperature": "230", "print_temperature_smooth_change": "0"})], height=1.5),
+        Object("range_n", 56, {"print_temperature_smooth_change": "0"},
+               [(0.6, 1.8, {"print_temperature": "200", "print_temperature_smooth_change": "3"})], height=2.4),
+        Object("long", 64, {"print_temperature_smooth_change": "50"}, [(0.3, 3, {"print_temperature": "230"})], height=1.8),
+    ]
+    immediate = common_scene()[0]
+    immediate.name, immediate.x0 = "immediate_partial", 72
+    immediate.height = 2.4
+    immediate.config = dict(immediate.config, print_temperature_smooth_change="0")
+    objects += [immediate] + tool_scene()
+    # The tool scenario has N=4; the other objects keep their own policies or N=3.
+    objects[-1].config["print_temperature_smooth_change"] = "4"
+    options = two_extruder_options() + ("temperature = 220,200", "first_layer_temperature = 220,200",
+                                       "ooze_prevention = 1", "standby_temperature_delta = -30",
+                                       "skirts = 1", "skirt_height = 4", "print_temperature_smooth_change = 3")
+    return export("smooth", options, objects)
 
 
 class SmoothTemperature(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        plugin = PLUGIN_DATADIR / "plugins" / "nematx-smooth-temperature" / (
-            "plugin.dll" if sys.platform == "win32" else "plugin.so")
-        for required in (HOST_EXECUTABLE, plugin):
-            if not required.is_file():
-                raise FileNotFoundError(f"Missing build or staged package input: {required}")
-        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    """Check real extrusions, not merely the presence of temperature commands."""
 
-    def check_ranges(self, name: str, layers: int) -> Result:
-        result = export(name, ("first_layer_temperature = 205", f"print_temperature_smooth_change = {layers}"),
-                        [Object("box", ranges=RANGES)])
-        self.assertEqual(result.layers(), ramp(RANGE_GENERALS, layers), f"{name}: setpoint per layer")
-        return result
+    def expect(self, result: Result, name: str, values: list[int], tool: int = 0, copy: int = 0,
+               positions: list[int] | None = None) -> None:
+        """Require every expected printed layer and a single setpoint throughout it."""
+        self.assertEqual(result.series(name, len(values), tool, copy, positions), [[value] for value in values], (name, tool, copy))
 
-    def test_setting_is_defined_and_selected_by_default(self) -> None:
-        defaults = saved_defaults()
-        self.assertEqual(defaults.get("print_temperature_smooth_change"), "0")
-        selectors = [value for key, value in defaults.items()
-                     if key.startswith("exclusive_group_") and "layer_extrusion_edit_temperature" in key]
-        self.assertEqual(selectors, ["nematx_smooth_temperature"], "layer temperature provider selected by default")
+    def test_01_defaults(self) -> None:
+        """The package setting and default exclusive-group selection are exposed."""
+        self.assertEqual(saved_defaults().get("print_temperature_smooth_change"), "0")
+        self.assertEqual(saved_defaults()[selector()], "nematx_smooth_temperature")
 
-    def test_example_of_the_specification(self) -> None:
-        # N = 2: first layer 230, then a height range at 210 on the second layer, then 180.
-        result = export("example", ("temperature = 180", "first_layer_temperature = 230",
-                                    "print_temperature_smooth_change = 2"),
-                        [Object("box", ranges=[(0.3, 0.6, {"print_temperature": "210"})])])
-        self.assertEqual(result.layers()[:5], [230, 220, 200, 180, 180])
+    def test_02_common_scene(self) -> None:
+        """Compare complete host commands and read modifier/copy/skirt setpoints."""
+        host = export("host", (f"{selector()} = layer_extrusion_edit.temperature.default",
+                                "print_temperature_smooth_change = 3"), parity_scene())
+        self.expect(host, "one", [205, 220, 210, 210, 230, 230, 200, 200, 200, 200])
+        immediate = immediate_result()
+        self.assertEqual(immediate.commands(), host.commands(), "N=0 and N=1: complete host G-code")
+        smooth = main_result()
+        expected = [205, 210, 210, 210, 217, 223, 215, 208, 200, 200]
+        self.expect(smooth, "copies", expected, copy=0)
+        self.expect(smooth, "copies", expected, copy=1)
+        self.expect(smooth, "cover", [205, 210, 210, 210, 213, 217, 220, 220])
+        self.assertEqual([sorted(set(values)) for values in smooth.series("partial", LAYERS)],
+                         [sorted({value, 250}) if 2 <= layer < 4 else [value] for layer, value in enumerate(expected)])
+        immediate_values = [205, 220, 210, 210, 230, 230, 200, 200]
+        self.assertEqual([sorted(set(values)) for values in smooth.series("immediate_partial", len(immediate_values))],
+                         [sorted({value, 250}) if 2 <= layer < 4 else [value] for layer, value in enumerate(immediate_values)])
+        self.assertTrue(any(kind.lower() in ("skirt", "skirt/brim") for _, kind, _ in smooth.synthetic), "a real synthetic skirt was printed")
+        self.assertEqual(smooth.synthetic_heaters, [], "the synthetic skirt adds no heater request")
 
-    def test_height_ranges(self) -> None:
-        result = self.check_ranges("ranges-3", 3)
-        self.assertEqual(result.layers(), [205, 210, 215, 220, 217, 213, 210, 210, 207, 203, 200, 200, 197, 193, 190])
+    def test_03_policy_changes(self) -> None:
+        """Restart, cancel at unchanged target, per-range N and an unfinished long ramp."""
+        result = main_result()
+        self.expect(result, "example", [230, 220, 200, 180, 180])
+        self.expect(result, "cancel", [200, 204, 208, 230, 230])
+        self.expect(result, "range_n", [220, 220, 213, 207, 200, 200, 220, 220])
+        self.expect(result, "long", [220, 220, 220, 221, 221, 221])
 
-    def test_other_ramp_lengths(self) -> None:
-        for layers in (2, 50):
-            self.check_ranges(f"ranges-{layers}", layers)
+    def test_04_sequential_copies(self) -> None:
+        """Two copies of one mesh start immediately, even after another copy's ramp."""
+        result = export("sequential", ("complete_objects = 1", "print_temperature_smooth_change = 3"),
+                        [Object("same", config={"print_first_layer_temperature": "205"}, height=1.5, copies=(0, 80))])
+        for copy in (0, 1):
+            self.expect(result, "same", [205, 210, 215, 220, 220], copy=copy)
 
-    def test_setting_read_with_the_general_temperature(self) -> None:
-        # Only the change into the 200 range carries N = 3; the other changes apply at once.
-        ranges = [(low, high, dict(settings)) for low, high, settings in RANGES]
-        ranges[1][2]["print_temperature_smooth_change"] = "3"
-        result = export("one-range", ("first_layer_temperature = 205",), [Object("box", ranges=ranges)])
-        self.assertEqual(result.layers(), [205] + [220] * 3 + [210] * 4 + [207, 203, 200, 200] + [190] * 3)
-
-    def test_zero_and_one_layers_match_the_host_provider(self) -> None:
-        objects = [Object("box", ranges=RANGES)]
-        options = ("first_layer_temperature = 205",)
-        selector = next(key for key in saved_defaults()
-                        if key.startswith("exclusive_group_") and "layer_extrusion_edit_temperature" in key)
-        host = export("host-provider", options + (f"{selector} = layer_extrusion_edit.temperature.default",
-                                                  "print_temperature_smooth_change = 3"), objects)
-        self.assertEqual(host.layers(), RANGE_GENERALS, "the host provider ignores the setting")
-        for layers in (0, 1):
-            smooth = export(f"ranges-{layers}", options + (f"print_temperature_smooth_change = {layers}",), objects)
-            self.assertEqual(without_comments(smooth), without_comments(host), f"N = {layers}")
-
-    def test_disabling_smoothing_cancels_the_active_ramp(self) -> None:
-        # The second range disables smoothing without changing the requested target.
-        result = export("cancel-active-ramp", (), [Object("box", config={"print_temperature": "200"}, ranges=[
-            (0.3, 0.9, {"print_temperature": "230", "print_temperature_smooth_change": "8"}),
-            (0.9, 4.5, {"print_temperature": "230", "print_temperature_smooth_change": "0"})])])
-        self.assertEqual(result.layers(), [200, 204, 208] + [230] * 12)
-
-    def test_partial_modifier_is_an_override(self) -> None:
-        # Two perimeters keep the modifier's paths apart: regions differing only by temperature share their perimeters.
-        modifier = Volume((-1, -1, 1.2, 5, 11, 2.4), True, {"print_temperature": "250", "perimeters": "2"})
-        result = export("partial-modifier", ("first_layer_temperature = 205", "print_temperature_smooth_change = 3"),
-                        [Object("box", ranges=RANGES, modifiers=[modifier])])
-        expected = ramp(RANGE_GENERALS, 3)
-        self.assertEqual(result.distinct(), [sorted({value, 250}) if 4 <= layer < 8 else [value]
-                                             for layer, value in enumerate(expected)])
-
-    def test_modifier_covering_the_section_is_general(self) -> None:
-        modifier = Volume((-1, -1, 1.2, 11, 11, 2.4), True, {"print_temperature": "210"})
-        result = export("covering-modifier", ("print_temperature_smooth_change = 2",),
-                        [Object("box", modifiers=[modifier])])
-        self.assertEqual(result.layers(), ramp([220] * 4 + [210] * 4 + [220] * 7, 2))
-
-    def test_instances_have_their_own_ramps(self) -> None:
-        result = export("two-objects", ("print_temperature_smooth_change = 2",),
-                        [Object("a", 0, ranges=[(1.2, 4.5, {"print_temperature": "230"})]), Object("b", 40)])
-        self.assertEqual(result.layers(name="a"), ramp([220] * 4 + [230] * 11, 2))
-        self.assertEqual(result.layers(name="b"), [220] * LAYERS)
-
-    def test_objects_printed_one_by_one_start_at_their_first_layer(self) -> None:
-        result = export("sequential", ("complete_objects = 1", "first_layer_temperature = 205",
-                                       "print_temperature_smooth_change = 3"),
-                        [Object("a", 0), Object("b", 80)])
-        for name in ("a", "b"):
-            self.assertEqual(result.layers(name=name), ramp([205] + [220] * 14, 3), name)
-
-    def test_two_extruders(self) -> None:
-        # Extruder 2 prints layers 4 to 7; extruder 1 ramps to 240 from layer 2 and pauses meanwhile.
-        modifier = Volume((-1, -1, 1.2, 11, 11, 2.4), True, {"extruder": "2"})
-        objects = [Object("box", ranges=[(0.6, 4.5, {"print_temperature": "240"})], modifiers=[modifier])]
-        options = two_extruder_options() + ("temperature = 220,200", "first_layer_temperature = 220,200")
-        host = export("two-extruders-0", options + ("print_temperature_smooth_change = 0",), objects)
-        smooth = export("two-extruders-4", options + ("print_temperature_smooth_change = 4",), objects)
-        self.assertEqual(smooth.layers(0), [220, 220, 225, 230, 235, 240, 240, 240, 240, 240, 240])
-        self.assertEqual(smooth.layers(1), [240] * 4)
-        self.assertEqual(smooth.waits, host.waits, "the ramp adds no wait")
-        ooze = export("two-extruders-ooze", options + ("print_temperature_smooth_change = 4", "ooze_prevention = 1",
-                                                       "standby_temperature_delta = -30"), objects)
-        self.assertEqual(ooze.layers(0), smooth.layers(0), "standby only suspends the ramp")
-        self.assertIn("M104 S190 T0", ooze.gcode, "extruder 1 goes to standby when extruder 2 starts")
-        self.assertIn("M109 S235 T0", ooze.gcode, "the returning extruder waits for its next ramp value")
+    def test_05_tools_and_semm(self) -> None:
+        """Standby is immediate; an absent tool resumes its ramp with the base wait."""
+        objects = tool_scene()
+        options = two_extruder_options() + ("temperature = 220,200", "first_layer_temperature = 220,200",
+                                           "ooze_prevention = 1", "standby_temperature_delta = -30")
+        host = export("tools-base", options + ("print_temperature_smooth_change = 4",
+                                               f"{selector()} = layer_extrusion_edit.temperature.default"),
+                      objects + [Object("companion")])
+        self.expect(host, "tools", [220, 240, 240, 240, 240, 240], positions=[0, 1, 6, 7, 8, 9])
+        smooth = main_result()
+        self.expect(smooth, "tools", [220, 225, 230, 235, 240, 240], positions=[0, 1, 6, 7, 8, 9])
+        self.expect(smooth, "tools", [240] * 4, tool=1, positions=[2, 3, 4, 5])
+        self.assertEqual(smooth.wait_sites(), host.wait_sites(), "same wait locations as the base, not merely the same count")
+        self.assertIn("M104 S190 T0", smooth.commands(), "inactive T0 keeps the base standby temperature")
+        for layer, tool, temperature in smooth.waits:
+            if layer < 0:
+                continue
+            first = next(values[0] for key, values in smooth.setpoints.items() if key[:2] == (layer, tool))
+            self.assertEqual(temperature, first, "a returning tool waits for the first root's checked ramp value")
+        # SEMM is exercised with a real two-material plan, without an expensive wipe tower.
+        semm = two_extruder_options() + ("single_extruder_multi_material = 1", "print_temperature_smooth_change = 4")
+        semm_base = export("semm-base", semm + (f"{selector()} = layer_extrusion_edit.temperature.default",), objects)
+        semm_smooth = export("semm-smooth", semm, objects)
+        self.assertEqual(semm_smooth.commands(), semm_base.commands(), "SEMM leaves all base decisions unchanged")
+        self.expect(semm_smooth, "tools", [220, 240, 240, 240, 240, 240], positions=[0, 1, 6, 7, 8, 9])
+        self.expect(semm_smooth, "tools", [240] * 4, tool=1, positions=[2, 3, 4, 5])
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Run in an isolated datadir and retain a timing report even when a test fails."""
+    global HOST_EXECUTABLE, PLUGIN_DATADIR, OUTPUT_ROOT, RUNNER
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host-executable", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, default=PROJECT / ".build")
-    parser.add_argument("--runtime-path", action="append", default=[],
-                        help="directory added to PATH for the host's DLL dependencies")
+    parser.add_argument("--runtime-path", action="append", default=[])
+    parser.add_argument("--builtin", action="store_true", help="qualify the embedded provider without a standalone package")
+    parser.add_argument("--budget-seconds", type=float, default=45)
     args, unittest_args = parser.parse_known_args()
-    build_dir = args.build_dir.resolve()
     HOST_EXECUTABLE = args.host_executable.resolve()
-    PLUGIN_DATADIR = build_dir / "test-data" / "smooth_temperature"
-    OUTPUT_ROOT = build_dir / "test-results" / "smooth-temperature"
-    RUNTIME_PATH = [str(Path(path).resolve()) for path in args.runtime_path]
-    unittest.main(argv=[sys.argv[0], *unittest_args], verbosity=2)
+    build = args.build_dir.resolve()
+    env = dict(os.environ)
+    runtime = [str(HOST_EXECUTABLE.parent)] + [str(Path(path).resolve()) for path in args.runtime_path]
+    key = "PATH" if os.name == "nt" else "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    env[key] = os.pathsep.join(runtime + [env.get(key, "")])
+    RUNNER = HostRunner(args.budget_seconds, env)
+    results = build / "test-results" / "smooth-temperature"
+    results.mkdir(parents=True, exist_ok=True)
+    OUTPUT_ROOT = Path(tempfile.mkdtemp(prefix="run-", dir=results))
+    PLUGIN_DATADIR = OUTPUT_ROOT / "datadir"
+    PLUGIN_DATADIR.mkdir()
+    if not args.builtin:
+        staged = build / "test-data" / "smooth_temperature" / "plugins"
+        plugin = staged / "nematx-smooth-temperature" / ("plugin.dll" if os.name == "nt" else "plugin.so")
+        if not plugin.is_file():
+            raise FileNotFoundError(f"Build and stage the standalone package first: {plugin}")
+        shutil.copytree(staged, PLUGIN_DATADIR / "plugins")
+    print(f"SmoothTemperature logs: {OUTPUT_ROOT}", flush=True)
+    succeeded = False
+    try:
+        program = unittest.main(argv=[sys.argv[0], *unittest_args], verbosity=2, exit=False)
+        RUNNER.remaining()
+        succeeded = program.result.wasSuccessful()
+        return 0 if succeeded else 1
+    finally:
+        report = {"success": succeeded, "seconds": time.monotonic() - RUNNER.started, "budget_seconds": args.budget_seconds,
+                  "exports": len(STAGES), "calls": RUNNER.calls, "stages": STAGES, "builtin": args.builtin}
+        (OUTPUT_ROOT / "timings.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(f"SmoothTemperature total: {report['seconds']:.3f}s; host calls: {len(RUNNER.calls)}", flush=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
