@@ -22,16 +22,15 @@ TravelRouter then seeks a detour using copied public API inputs. The detour
 limit can retain straight travel; this is neither a shortest-path service nor
 a guarantee that every perimeter crossing is removed.
 
-When both travel providers are active, straight travel remains the group default.
-Explicitly select layer_extrusion_edit.travel.avoid_crossing_perimeters to use
-this provider.
+When both providers are active, this provider is the exclusive group's default.
+An explicit selector ID takes precedence and can retain straight travel.
 */
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossingPerimetersTravelPlugin {
 
-/* Register the optional perimeter-avoiding travel producer. */
+/* Register the perimeter-avoiding travel producer, preferred by the travel group. */
 void register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle *orchestrator);
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin

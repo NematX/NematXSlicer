@@ -40,6 +40,9 @@ configured limit; it does not guarantee a shortest or crossing-free path.
 The planner restores the instance shift and exact original endpoints before
 returning XY points to the connector.
 
+When both travel providers are active, this provider is the group default;
+an explicit selector can still choose straight travel.
+
 Each run owns its copied inputs and one router and crossing cache per target
 layer/tool pair. Inputs outlive the routers borrowing them. Temporary geometry
 operations use the run context's plugin storage. Planners do not escape the
@@ -189,6 +192,8 @@ private:
     const char *const *dependencies_impl() const noexcept override;
     // Run after the entry-state, retraction and wipe providers and before lift insertion.
     int32_t priority_impl() const noexcept override;
+    // Prefer this provider when the travel selector is absent; explicit provider IDs take precedence.
+    int32_t exclusive_group_priority_impl() const noexcept override;
     // Report key types for host validation and GUI activation. Call with null to get the count,
     // then supply a caller-owned array of that size; copied entries borrow static key strings.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
@@ -415,6 +420,11 @@ const char *const *AvoidCrossingPerimetersTravel::dependencies_impl() const noex
 int32_t AvoidCrossingPerimetersTravel::priority_impl() const noexcept
 {
     return -50;
+}
+
+int32_t AvoidCrossingPerimetersTravel::exclusive_group_priority_impl() const noexcept
+{
+    return -1;
 }
 
 int32_t AvoidCrossingPerimetersTravel::used_config_keys(raw_used_config_key *keys) const noexcept

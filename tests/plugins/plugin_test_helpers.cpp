@@ -9,6 +9,10 @@ The copied sets remain unchanged when later tests register or activate providers
 The configuration/activation helpers run inside the function-local static
 initializer lambda, once per process. The startup query only ensures that
 initialization has finished before returning the copied sets.
+Both travel providers remain active while the travel selector is created and
+option definitions are finalized, preserving its avoidance-provider default.
+They are then deactivated before FFF/SLA configuration caches are created, so
+unrelated tests can choose editor chains without inserting travel geometry.
 
 Representative direct calls (branches are not a timeline):
 
@@ -22,7 +26,13 @@ Representative direct calls (branches are not a timeline):
         |-- register_config_introspection_fixture()
         |   `-- register_config_option_or_fail()
         |-- register_plugin_option_list_fixtures()
-        `-- activate_plugin_or_fail()
+        |-- activate_plugin_or_fail()
+        |-- activate_plugin_or_fail: enable providers for initialization
+        |-- initialize_plugins: initialize active providers and their options
+        |-- finalize_plugin_option_defs: finish selector definitions
+        |-- set_plugin_active: disable travel and other test providers
+        |-- initialize_fff_print_config_cache: cache finalized FFF defaults
+        `-- initialize_sla_print_config_cache: cache finalized SLA defaults
 */
 #include "plugin_test_helpers.hpp"
 
@@ -174,6 +184,7 @@ const std::string &python_metadata_warnings();
 // The manager owns wrappers borrowing static providers; call before Print or full_print_config().
 // Disable regional seam/storage probes and aligned, contiguous, cost and random seam placers; the failed selector probe is disabled during initialization,
 // its expected diagnostic is filtered, and the valid selector probe is disabled after finalization.
+// Disable layer_extrusion_edit.travel.default and layer_extrusion_edit.travel.avoid_crossing_perimeters after registering their selector.
 // Missing expected plugins log and assert; registration, Python loading and allocation failures propagate.
 void ensure_plugin_test_runtime_initialized();
 
@@ -1070,6 +1081,9 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.transition_scope.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.entry_state.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.first_layer_flow");
+        // Register the travel selector before typed configs cache its default; individual tests choose their editor chain.
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.default");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
@@ -1188,6 +1202,8 @@ void ensure_plugin_test_runtime_initialized()
             }
         }
         register_exclusive_step_group_ui_fragments(orchestrator);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.default", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false);
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);
         orchestrator.set_plugin_active("test.plugin_storage.support", false);
         orchestrator.set_plugin_active(Test::ProbePatternPlugin::probe_pattern_id, false);
