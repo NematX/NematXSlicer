@@ -191,6 +191,19 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated-resources/plugins")
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/plugins/default_activated.ini.in"
                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}" @ONLY)
 
+if (SLIC3R_BUILD_REST_SERVER)
+    add_subdirectory(rest_server)
+    target_compile_definitions(Slic3r PRIVATE SLIC3R_REST_SERVER_MODE)
+    target_link_libraries(Slic3r PRIVATE slic3r_rest slic3r_rest_engine)
+endif ()
+
+if (WIN32)
+    prusaslicer_copy_dlls(Slic3r)
+    # Core slicing requires these runtimes even when REST is disabled.
+    install(FILES "$<TARGET_FILE_DIR:Slic3r>/libgmp-10.dll"
+        "$<TARGET_FILE_DIR:Slic3r>/libmpfr-4.dll" DESTINATION ".")
+endif ()
+
 if (APPLE)
 #    add_compile_options(-stdlib=libc++)
 #    add_definitions(-DBOOST_THREAD_DONT_USE_CHRONO -DBOOST_NO_CXX11_RVALUE_REFERENCES -DBOOST_THREAD_USES_MOVE)
@@ -238,18 +251,20 @@ if (WIN32)
 	
     configure_file(${CMAKE_CURRENT_SOURCE_DIR}/libslic3r/libslic3r_version.h.in ${CMAKE_CURRENT_BINARY_DIR}/libslic3r_version.h @ONLY)
 
-    add_executable(Slic3r_app_gui WIN32 PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.rc)
-    target_include_directories(Slic3r_app_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-    # Generate debug symbols even in release mode.
-    if(MSVC)
-        target_link_options(Slic3r_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
-    endif()
-    target_compile_definitions(Slic3r_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
-    add_dependencies(Slic3r_app_gui Slic3r)
-    set_target_properties(Slic3r_app_gui PROPERTIES
-        OUTPUT_NAME ${SLIC3R_APP_CMD}
-        ARCHIVE_OUTPUT_NAME "${SLIC3R_APP_CMD}_app_gui")
-    target_link_libraries(Slic3r_app_gui PRIVATE boost_headeronly)
+    if (SLIC3R_GUI)
+        add_executable(Slic3r_app_gui WIN32 PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.rc)
+        target_include_directories(Slic3r_app_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+        # Generate debug symbols even in release mode.
+        if(MSVC)
+            target_link_options(Slic3r_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+        endif()
+        target_compile_definitions(Slic3r_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
+        add_dependencies(Slic3r_app_gui Slic3r)
+        set_target_properties(Slic3r_app_gui PROPERTIES
+            OUTPUT_NAME ${SLIC3R_APP_CMD}
+            ARCHIVE_OUTPUT_NAME "${SLIC3R_APP_CMD}_app_gui")
+        target_link_libraries(Slic3r_app_gui PRIVATE boost_headeronly)
+    endif ()
 
     add_executable(Slic3r_app_console PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.rc)
     target_include_directories(Slic3r_app_console PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
@@ -264,18 +279,30 @@ if (WIN32)
         ARCHIVE_OUTPUT_NAME "${SLIC3R_APP_CMD}_console_app")
     target_link_libraries(Slic3r_app_console PRIVATE boost_headeronly)
 
-    add_executable(PrusaSlicer_app_gcodeviewer WIN32 PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}-gcodeviewer.rc ${CMAKE_CURRENT_BINARY_DIR}/libslic3r_version.h)
-    target_include_directories(PrusaSlicer_app_gcodeviewer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
-    # Generate debug symbols even in release mode.
-    if (MSVC)
-        target_link_options(PrusaSlicer_app_gcodeviewer PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+    if (SLIC3R_GUI)
+        add_executable(PrusaSlicer_app_gcodeviewer WIN32 PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}-gcodeviewer.rc ${CMAKE_CURRENT_BINARY_DIR}/libslic3r_version.h)
+        target_include_directories(PrusaSlicer_app_gcodeviewer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+        # Generate debug symbols even in release mode.
+        if (MSVC)
+            target_link_options(PrusaSlicer_app_gcodeviewer PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+        endif ()
+        target_compile_definitions(PrusaSlicer_app_gcodeviewer PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE -DSLIC3R_WRAPPER_GCODEVIEWER)
+        add_dependencies(PrusaSlicer_app_gcodeviewer Slic3r)
+        set_target_properties(PrusaSlicer_app_gcodeviewer PROPERTIES
+            OUTPUT_NAME "${GCODEVIEWER_APP_CMD}"
+            ARCHIVE_OUTPUT_NAME "${GCODEVIEWER_APP_CMD}_app")
+        target_link_libraries(PrusaSlicer_app_gcodeviewer PRIVATE boost_headeronly)
     endif ()
-    target_compile_definitions(PrusaSlicer_app_gcodeviewer PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE -DSLIC3R_WRAPPER_GCODEVIEWER)
-    add_dependencies(PrusaSlicer_app_gcodeviewer Slic3r)
-    set_target_properties(PrusaSlicer_app_gcodeviewer PROPERTIES
-        OUTPUT_NAME "${GCODEVIEWER_APP_CMD}"
-        ARCHIVE_OUTPUT_NAME "${GCODEVIEWER_APP_CMD}_app")
-    target_link_libraries(PrusaSlicer_app_gcodeviewer PRIVATE boost_headeronly)
+
+    if (SLIC3R_BUILD_REST_SERVER)
+        add_executable(Slic3r_app_rest PrusaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/${SLIC3R_APP_KEY}.rc)
+        target_include_directories(Slic3r_app_rest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
+        target_compile_definitions(Slic3r_app_rest PRIVATE SLIC3R_WRAPPER_REST SLIC3R_WRAPPER_CONSOLE)
+        target_link_libraries(Slic3r_app_rest PRIVATE boost_headeronly)
+        add_dependencies(Slic3r_app_rest Slic3r)
+        set_target_properties(Slic3r_app_rest PROPERTIES OUTPUT_NAME "${SLIC3R_APP_CMD}_rest"
+            ARCHIVE_OUTPUT_NAME "${SLIC3R_APP_CMD}_rest_app")
+    endif ()
 endif ()
 
 # Older Windows build trees used a directory junction for resources. A plain
@@ -324,7 +351,7 @@ if (WIN32)
     prusaslicer_copy_dlls(slic3rDllsCopy)
 
 else ()
-    if (APPLE)
+    if (APPLE AND SLIC3R_GUI)
         # On OSX, the name of the binary matches the name of the Application.
         add_custom_command(TARGET Slic3r POST_BUILD
             COMMAND ls
@@ -337,7 +364,7 @@ else ()
             WORKING_DIRECTORY "$<TARGET_FILE_DIR:Slic3r>"
             COMMENT "Symlinking the G-code viewer to Slic3r, symlinking to slic3r and gcodeviewer"
             VERBATIM)
-    else ()
+    elseif (SLIC3R_GUI)
         add_custom_command(TARGET Slic3r POST_BUILD
             #was: COMMAND ln -sf Slic3r prusa-gcodeviewer
             COMMAND ln -sf ${SLIC3R_APP_CMD} ${GCODEVIEWER_APP_CMD}
@@ -346,18 +373,32 @@ else ()
             COMMENT "Symlinking the G-code viewer to Slic3r"
             VERBATIM)
     endif ()
+    if (SLIC3R_BUILD_REST_SERVER)
+        add_custom_command(TARGET Slic3r POST_BUILD
+            COMMAND ln -sf $<TARGET_FILE_NAME:Slic3r> ${SLIC3R_APP_CMD}-rest
+            WORKING_DIRECTORY "$<TARGET_FILE_DIR:Slic3r>"
+            COMMENT "Symlinking the REST mode to the application" VERBATIM)
+    endif ()
 endif ()
 
 # Slic3r binary install target
 if (WIN32)
-    install(TARGETS Slic3r RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
-    if (MSVC)
-        install(TARGETS Slic3r_app_gui RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
-        install(TARGETS Slic3r_app_console RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}")
+    install(TARGETS Slic3r RUNTIME DESTINATION ".")
+    if (SLIC3R_GUI)
+        install(TARGETS Slic3r_app_gui RUNTIME DESTINATION ".")
+    endif ()
+    install(TARGETS Slic3r_app_console RUNTIME DESTINATION ".")
+    if (SLIC3R_BUILD_REST_SERVER)
+        install(TARGETS Slic3r_app_rest RUNTIME DESTINATION ".")
     endif ()
 else ()
     install(TARGETS Slic3r RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 
     # Install the symlink for gcodeviewer
-    install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${SLIC3R_APP_CMD} ${GCODEVIEWER_APP_CMD} WORKING_DIRECTORY \$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR})")
+    if (SLIC3R_GUI)
+        install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${SLIC3R_APP_CMD} ${GCODEVIEWER_APP_CMD} WORKING_DIRECTORY \$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR})")
+    endif ()
+    if (SLIC3R_BUILD_REST_SERVER)
+        install(CODE "execute_process(COMMAND \"${CMAKE_COMMAND}\" -E create_symlink \"$<TARGET_FILE_NAME:Slic3r>\" \"${SLIC3R_APP_CMD}-rest\" WORKING_DIRECTORY \"\$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\")")
+    endif ()
 endif ()

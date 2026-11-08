@@ -28,6 +28,9 @@ if (CMAKE_TOOLCHAIN_FILE)
     list(APPEND _build_args "-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
 endif ()
 
+# Forward the REST option so the dependency set matches the main build.
+list(APPEND _build_args "-DSLIC3R_BUILD_REST_SERVER:BOOL=${SLIC3R_BUILD_REST_SERVER}")
+
 set(_build_dir "${CMAKE_CURRENT_LIST_DIR}/build-${${PROJECT_NAME}_DEPS_PRESET}")
 if (${PROJECT_NAME}_DEPS_BUILD_DIR)
     set(_build_dir "${${PROJECT_NAME}_DEPS_BUILD_DIR}")

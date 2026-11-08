@@ -1,0 +1,12 @@
+# Replace the domain; Caddy provisions HTTPS. Do not add handle_path or rewrites.
+slicer.example.com {
+    request_body {
+        max_size 256MiB
+    }
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1
+        transport http {
+            response_header_timeout 300s
+        }
+    }
+}

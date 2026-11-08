@@ -86,6 +86,7 @@ if (SLIC3R_STATIC)
 endif ()
 
 # Dependency build management
+option(SLIC3R_BUILD_REST_SERVER "Build the REST server mode and its standalone executables" OFF)
 option(${PROJECT_NAME}_BUILD_DEPS "Build dependencies before the project" OFF)
 option(${PROJECT_NAME}_DEPS_OUTPUT_QUIET "Don't print build output for dependencies" OFF)
 set(${PROJECT_NAME}_DEPS_PRESET "default" CACHE STRING "Preset of the dependencies when ${PROJECT_NAME}_BUILD_DEPS is ON")
@@ -684,7 +685,7 @@ endif()
 
 # Resources install target, configure fhs.hpp on UNIX
 if (WIN32)
-    install(DIRECTORY "${SLIC3R_BUILD_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+    install(DIRECTORY "${SLIC3R_BUILD_RESOURCES_DIR}/" DESTINATION "resources")
 elseif (SLIC3R_FHS)
     # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
     set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/${SLIC3R_APP_KEY}")
@@ -742,4 +743,3 @@ if (NOT WIN32)
 endif()
 
 include(CPack)
-
