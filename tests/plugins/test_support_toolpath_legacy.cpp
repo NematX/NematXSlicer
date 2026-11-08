@@ -26,7 +26,11 @@
     preserved metadata and earlier paths, per-component coverage and replay.
     Two cases drive the internal helpers directly: synthetic slabs for height
     modulation and plain arguments for the filler pattern choice. A variable-height grid/tree case runs the full support
-    toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow. */
+    toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow.
+    Selector probes check ranked dense alternatives for each style and explicit overrides.
+
+        selector TEST_CASE -> register metadata probes -> resolve automatic/explicit choices
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -60,6 +64,10 @@ public:
     // Borrow process-lifetime strings and select the native side's execution priority.
     ContactGroupProbe(orchestrator_handle *host, const char *id, const char *group, int32_t priority)
         : PluginBase(host), m_id(id), m_group(group), m_priority(priority) {}
+    // Read the static probe identity for activation and selection checks.
+    const char *get_id() const noexcept { return m_id; }
+    // Read the role being replaced without querying mutable host state.
+    const char *get_exclusive_group() const noexcept { return m_group; }
 private:
     // Return the stable registration identifier without effects or failures.
     const char *id_impl() const noexcept override { return m_id; }
@@ -184,6 +192,51 @@ layer_region_island_handle *publish_test_surfaces(Print &print, PluginStorage &s
     return region;
 }
 
+}
+
+// Ranking replaces dense roles for every family; explicit selections and removal retain their meaning.
+TEST_CASE("Dense support auto selection allows ranked alternatives for every family", "[plugins][support-toolpath-legacy][support-toolpath-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace Common = slic3r_api::Support::Common;
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    static ContactGroupProbe alternatives[] = {
+        {handle, "test.support.dense.auto.top", Common::k_top_interface_role, 200},
+        {handle, "test.support.dense.auto.top_contact", Common::k_top_contact_role, 190},
+        {handle, "test.support.dense.auto.bottom", Common::k_bottom_interface_role, 100},
+        {handle, "test.support.dense.auto.bottom_contact", Common::k_bottom_contact_role, 90}
+    };
+    const ScopedActivePlugins restore;
+    for (ContactGroupProbe &alternative : alternatives) {
+        if (!host.get_plugin(alternative.get_id())) {
+            Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+            orchestrator_register_plugin(handle, alternative.c_instance());
+            host.set_plugin_active(alternative.get_id(), false);
+        }
+        const std::string group = alternative.get_exclusive_group();
+        const std::string key = Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, group);
+        for (const char *style : {"grid", "snug", "tree", "organic", "filled"}) {
+            CAPTURE(group, style);
+            DynamicPrintConfig config = SG::config(style);
+            // Runtime probes are registered after catalogue initialization; singleton contact keys are not in that catalogue.
+            config.set_key_value(key, new ConfigOptionString(SLIC3R_SELECTOR_AUTO_VALUE));
+            REQUIRE(host.set_plugin_active(alternative.get_id(), false));
+            const Plugin *legacy = Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, group, &config);
+            REQUIRE(legacy != nullptr);
+            const std::string legacy_id = legacy->get_id();
+            REQUIRE(legacy_id.rfind("support.toolpath.legacy_", 0) == 0);
+            REQUIRE(host.set_plugin_active(alternative.get_id(), true));
+            CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, group, &config)->get_id() == alternative.get_id());
+            config.set_key_value(key, new ConfigOptionString(legacy_id));
+            REQUIRE(config.option(key) != nullptr);
+            CHECK(config.option(key)->serialize() == legacy_id);
+            CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, group, &config)->get_id() == legacy_id);
+            config.set_key_value(key, new ConfigOptionString(SLIC3R_SELECTOR_AUTO_VALUE));
+            REQUIRE(host.set_plugin_active(alternative.get_id(), false));
+            CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, group, &config)->get_id() == legacy_id);
+        }
+    }
 }
 
 // Publish one dense lower surface without interfaces and retain its explicitly marked bridge flow after contact hand-back.
@@ -832,7 +885,10 @@ TEST_CASE("Contact groups retain their declaring provider and elect complete sel
     REQUIRE(native->traits.invalidates_step.has_value());
     CHECK(*native->traits.invalidates_step == STEP_SUPPORT_TOOLPATH);
     CHECK(native->traits.auto_value);
-    CHECK(Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id).size() == 5);
+    const std::vector<Common::ToolpathPreference> preferences = Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id);
+    REQUIRE(preferences.size() == 1);
+    CHECK(std::string(preferences.front().role) == Common::k_sparse_role);
+    CHECK(std::string(preferences.front().provider_id) == Common::k_legacy_sparse_id);
     ContactGroupProbe *a = top ? &top_a : &bottom_a;
     ContactGroupProbe *b = top ? &top_b : &bottom_b;
     const std::string a_id = top ? "test.support.contact.group.top.a" : "test.support.contact.group.bottom.a";

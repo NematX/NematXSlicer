@@ -1,7 +1,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* A role groups alternative algorithms for sparse lines or either side's contact and interface lines.
    A family is a support generator such as grid or tree.
-   These helpers declare preferences for all five automatic roles, including sheath as a sparse algorithm.
+   These helpers declare the style-specific sparse preference, including sheath.
+   Contacts and interfaces use group ranking unless explicitly selected by the object.
    During family initialization, for example:
      const std::vector<ToolpathPreference> choices = legacy_toolpath_preferences(k_legacy_sparse_id);
      declare_toolpath_preferences(orchestrator, {"grid", "snug"}, choices);
@@ -30,7 +31,7 @@ struct ToolpathPreference {
     const char *role;
     const char *provider_id;
 };
-// Return the five automatic roles' legacy algorithms, substituting the sparse algorithm.
+// Return the style-specific sparse choice; dense roles retain their automatic group ranking.
 std::vector<ToolpathPreference> legacy_toolpath_preferences(const char *sparse_provider);
 // Copy each role preference for every serialized style into the host; rejection throws.
 void declare_toolpath_preferences(orchestrator_handle *orchestrator, const std::vector<const char *> &styles,

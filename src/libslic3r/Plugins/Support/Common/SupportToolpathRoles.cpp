@@ -2,10 +2,13 @@
 #include "SupportToolpathRoles.hpp"
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 
-/* Support generators share preferences for the five automatic roles defined in SupportToolpathRoles.hpp.
-   Sheath and legacy sparse share the sparse role. Neither helper reads or writes layer geometry.
+/* Support generators choose the sparse algorithm for each support style.
+   Sheath and legacy sparse share that role. Dense roles use their group's
+   ranking, so an alternative interface algorithm can be selected automatically
+   without replacing a support family. Explicit object selections still win.
+   Neither helper reads or writes layer geometry.
    Call graph during generator initialization:
-     legacy_toolpath_preferences -> build the five-role list
+     legacy_toolpath_preferences -> build the sparse preference
      declare_toolpath_preferences -> OrchestratorView::register_selector_auto_choice -> host registry */
 
 namespace slic3r_api::Support::Common {
@@ -19,11 +22,7 @@ void declare_toolpath_preferences(orchestrator_handle *orchestrator, const std::
 
 std::vector<ToolpathPreference> legacy_toolpath_preferences(const char *sparse_provider)
 {
-    return {{k_sparse_role, sparse_provider},
-            {k_bottom_contact_role, k_legacy_bottom_contact_id},
-            {k_bottom_interface_role, k_legacy_bottom_id},
-            {k_top_contact_role, k_legacy_top_contact_id},
-            {k_top_interface_role, k_legacy_top_id}};
+    return {{k_sparse_role, sparse_provider}};
 }
 
 void declare_toolpath_preferences(orchestrator_handle *orchestrator, const std::vector<const char *> &styles,

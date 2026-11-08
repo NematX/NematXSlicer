@@ -761,12 +761,12 @@ TEST_CASE("Organic objects print their sparse support with the branch sheath thr
     }
 }
 
-// Every serialized style supplies one active preference for each production role, independent of the GUI's style list.
-TEST_CASE("Every support style prefers one active algorithm for every support toolpath role",
+// Styles choose sparse paths; dense roles remain replaceable through automatic group ranking.
+TEST_CASE("Every support style selects sparse preferences and ranked dense algorithms",
           "[plugins][support-toolpath][support-toolpath-auto]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const Orchestrator &host = Orchestrator::instance();
+    Orchestrator &host = Orchestrator::instance();
     std::vector<std::string> styles = PrintConfigDef::instance().get("support_material_style")->enum_def->values();
     if (std::find(styles.begin(), styles.end(), "tree") == styles.end()) styles.push_back("tree");
     std::vector<std::string> roles;
@@ -789,7 +789,14 @@ TEST_CASE("Every support style prefers one active algorithm for every support to
                     CHECK(provider->get_step() == STEP_SUPPORT_TOOLPATH);
                     CHECK(provider->get_exclusive_group() == role);
                 }
-            CHECK(choices == 1);
+            CHECK(choices == (role == slic3r_api::Support::Common::k_sparse_role ? 1 : 0));
+            DynamicPrintConfig config = Test::SupportGrid::config(style.c_str());
+            const std::string key = Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, role);
+            config.set_deserialize_strict({{key, std::string(SLIC3R_SELECTOR_AUTO_VALUE)}});
+            const Plugin *selected = Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, role, &config);
+            REQUIRE(selected != nullptr);
+            CHECK(selected->get_exclusive_group() == role);
+            CHECK(host.is_plugin_active(selected->get_id()));
         }
 }
 
