@@ -15,6 +15,7 @@ add_executable(${_TEST_NAME}_tests
     test_adaptive_cubic_pattern.cpp
     test_lightning_pattern.cpp
     test_auxiliary_layer_helpers.cpp
+    test_avoid_crossing_crossing.cpp
     test_avoid_crossing_input.cpp
     test_avoid_crossing_router.cpp
     test_avoid_crossing_travel_parity.cpp
