@@ -35,6 +35,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/PrintObjectRegion.hpp"
 #include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
@@ -1389,16 +1390,27 @@ TEST_CASE("Print and object expose their default region configurations", "[plugi
 
     const slic3r_api::Print print_view(print_c);
     CHECK(print_view.default_region_config().handle() == print_get_default_region_config(print_c));
-    const slic3r_api::Object object(reinterpret_cast<const object_handle *>(&print.object(0)));
+    const object_handle *object_c = reinterpret_cast<const object_handle *>(&print.object(0));
+    const slic3r_api::Object object(object_c);
     CHECK(perimeters(object.default_region_config(print_view)) == 5);
+    CHECK(print_resolve_default_region_config(print_c, nullptr) == print_get_default_region_config(print_c));
+    CHECK(print_resolve_default_region_config(print_c, object_c) == object.default_region_config(print_view).handle());
+    CHECK(print_resolve_default_region_config(nullptr, object_c) == nullptr);
+    CHECK(print_resolve_default_region_config(nullptr, nullptr) == nullptr);
     // Parallel readers must not manufacture the auxiliary object as a side effect.
     const config_handle *expected_default = print_get_default_region_config(print_c);
+    const config_handle *expected_object_region = print_resolve_default_region_config(print_c, object_c);
+    const config_handle *expected_object_default = print_get_default_object_config(print_c);
     std::atomic<bool> same_default{true};
     std::vector<std::thread> readers;
     for (size_t idx = 0; idx < 4; ++idx)
-        readers.emplace_back([print_c, expected_default, &same_default]() {
+        readers.emplace_back([print_c, object_c, expected_default, expected_object_region,
+                              expected_object_default, &same_default]() {
             for (size_t iteration = 0; iteration < 64; ++iteration)
-                if (print_get_default_region_config(print_c) != expected_default)
+                if (print_get_default_region_config(print_c) != expected_default ||
+                    print_resolve_default_region_config(print_c, nullptr) != expected_default ||
+                    print_resolve_default_region_config(print_c, object_c) != expected_object_region ||
+                    print_get_default_object_config(print_c) != expected_object_default)
                     same_default = false;
         });
     for (std::thread &reader : readers)
@@ -1408,6 +1420,21 @@ TEST_CASE("Print and object expose their default region configurations", "[plugi
     // The auxiliary object's first region is the print's default region.
     const slic3r_api::Object auxiliary(reinterpret_cast<const object_handle *>(&print.mutable_auxiliary_object()));
     CHECK(perimeters(auxiliary.default_region_config(print_view)) == 3);
+    CHECK(print_resolve_default_region_config(print_c, auxiliary.handle()) ==
+          ApiHost::to_config_handle(&print.auxiliary_object()->default_region_config(print.default_region_config())));
+
+    // Use the auxiliary-object constructor before any region has been published.
+    class RegionlessObject final : public PrintObject {
+    public:
+        // Own an empty region list but borrow the same Print and preset defaults.
+        explicit RegionlessObject(Print &owner) :
+            PrintObject(&owner, Vec3crd::Zero(), std::make_shared<PrintObjectRegions>()) {}
+    };
+    const RegionlessObject regionless(print);
+    REQUIRE(regionless.num_printing_regions() == 0);
+    const object_handle *regionless_c = reinterpret_cast<const object_handle *>(&regionless);
+    CHECK(print_resolve_default_region_config(print_c, regionless_c) == expected_default);
+    CHECK(slic3r_api::Object(regionless_c).default_region_config(print_view).handle() == expected_default);
 
     // Reapplying the same Print must replace fallback values, not retain a region
     // from the previous object or confuse a volume override with the object default.
@@ -1425,6 +1452,51 @@ TEST_CASE("Print and object expose their default region configurations", "[plugi
         found_volume_override |= perimeters(slic3r_api::Config(ApiHost::to_config_handle(&region.config()))) == 9;
     CHECK(found_volume_override);
 }
+
+TEST_CASE("Print exposes preset object defaults without creating a global tower owner",
+          "[plugins][config][default-object]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("wipe_tower_x", "42");
+    config.set_deserialize_strict("wipe_tower_width", "23");
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->add_volume(make_cube(20., 20., 20.));
+    model_object->config.set_deserialize_strict("wipe_tower_x", "7");
+    model_object->add_instance();
+    model.center_instances_around_point({100., 100.});
+    model_object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+
+    const print_handle *print_c = reinterpret_cast<const print_handle *>(&print);
+    const slic3r_api::Print print_view(print_c);
+    REQUIRE(print.auxiliary_object() == nullptr);
+    const slic3r_api::Config defaults(print_get_default_object_config(print_c));
+    REQUIRE(defaults.valid());
+    CHECK(defaults.handle() == ApiHost::to_config_handle(&print.default_object_config()));
+    CHECK(defaults.get("wipe_tower_x").get_float() == 42.);
+    CHECK(defaults.get("wipe_tower_width").get_float() == 23.);
+    CHECK(print_get_default_object_config(nullptr) == nullptr);
+    CHECK(print_view.default_object_config().handle() == defaults.handle());
+    CHECK(print_view.object(0).config().get("wipe_tower_x").get_float() == 7.);
+    CHECK(print.auxiliary_object() == nullptr);
+
+    // Global tower geometry uses preset object settings, not a model override.
+    const slic3r_api::Object tower_owner(reinterpret_cast<const object_handle *>(&print.mutable_auxiliary_object()));
+    CHECK(tower_owner.config().get("wipe_tower_x").get_float() == 42.);
+    CHECK(tower_owner.config().get("wipe_tower_width").get_float() == 23.);
+    config.set_deserialize_strict("wipe_tower_x", "64");
+    print.apply(model, config);
+    CHECK(print_view.default_object_config().get("wipe_tower_x").get_float() == 64.);
+    CHECK(print_view.object(0).config().get("wipe_tower_x").get_float() == 7.);
+    const slic3r_api::Object reapplied_tower(reinterpret_cast<const object_handle *>(&print.mutable_auxiliary_object()));
+    CHECK(reapplied_tower.config().get("wipe_tower_x").get_float() == 64.);
+}
+
 TEST_CASE("Print registry validates and owns immutable regional snapshots", "[plugins][config][print-region-registry]")
 {
     using namespace Slic3r;

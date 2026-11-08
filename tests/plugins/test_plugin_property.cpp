@@ -554,7 +554,7 @@ TEST_CASE("Default configuration queries preserve compatibility with earlier dat
           "[plugins][abi][default-region]")
 {
     static_assert(SLIC3R_PLUGIN_API_DATA_TREE_MAJOR == 5u);
-    for (uint16_t minor : {uint16_t(0), uint16_t(1), uint16_t(2)}) {
+    for (uint16_t minor : {uint16_t(0), uint16_t(1), uint16_t(2), uint16_t(3)}) {
         CAPTURE(minor);
         const std::vector<PluginApiRequirement> requirements = {
             {"slic3r_plugin_types.h", {SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR, SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR}},

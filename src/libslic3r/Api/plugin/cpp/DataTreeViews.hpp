@@ -35,6 +35,10 @@ below. `Layer` provides Z positions and the collection of islands. `Object`
 provides layers, instances, volumes, object configuration, and object-owned
 auxiliary layers. `Print` provides the objects, print configuration, records,
 and the hidden auxiliary object used for print-level generated geometry.
+Read preset defaults through Print::default_object_config() or
+Print::default_region_config() without creating that hidden object. For helper
+paths belonging to a model object, use object.default_region_config(print);
+the host resolves the object's region zero or falls back to the preset.
 
 A typical plugin traversal is:
 
@@ -713,6 +717,12 @@ public:
         return Config(print_get_default_region_config(handle()));
     }
 
+    // Borrow preset object settings, including the global wipe tower settings,
+    // before object overrides. Reacquire after apply(); read only while defaults are stable.
+    Config default_object_config() const {
+        return Config(print_get_default_object_config(handle()));
+    }
+
     // Copy regional overrides onto current Print defaults and intern the result.
     // The immutable borrowed result survives apply(), but not clear()/destruction.
     // Does not attach geometry. Concurrent registration is allowed while defaults
@@ -746,7 +756,7 @@ public:
 
 inline Config Object::default_region_config(const Print &print) const
 {
-    return print_region_count() > 0 ? print_region(0).config() : print.default_region_config();
+    return Config(print_resolve_default_region_config(print.handle(), handle()));
 }
 
 inline Layer LayerRegion::layer() const
