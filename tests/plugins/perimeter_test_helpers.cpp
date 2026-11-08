@@ -571,6 +571,13 @@ void prepare_cube_print(PreparedPerimeterPrint &prepared, const DynamicPrintConf
     run_until_perimeter_input(Orchestrator::instance(), prepared.print);
 }
 
+void prepare_box_print(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config, double height_mm)
+{
+    const TriangleMesh box = make_box({-10., -10., 0., 10., 10., height_mm});
+    Slic3r::Test::init_print({box}, prepared.print, prepared.model, config);
+    run_until_perimeter_input(Orchestrator::instance(), prepared.print);
+}
+
 void replace_all_layer_islands(PreparedPerimeterPrint &prepared, const ExPolygon &area)
 {
     REQUIRE(prepared.print.objects().size() == 1);

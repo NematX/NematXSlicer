@@ -112,6 +112,10 @@ ExPolygon rectangle_expolygon(double min_x, double min_y, double max_x, double m
 ExPolygon rectangle_with_hole_expolygon();
 DynamicPrintConfig perimeter_config(std::initializer_list<std::pair<std::string, std::string>> overrides);
 void prepare_cube_print(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config);
+/* Prepare a 20 x 20 mm box of the given height in millimeters, sliced and
+   ready for perimeters like prepare_cube_print(). Tests that only need a
+   bottom, a middle and a top layer use it to avoid filling unchecked layers. */
+void prepare_box_print(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config, double height_mm);
 size_t layer_index_for_top(const PrintObject &object);
 size_t layer_index_for_odd_layer(const PrintObject &object);
 

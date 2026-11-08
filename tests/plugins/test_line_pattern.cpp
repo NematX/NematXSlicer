@@ -25,8 +25,10 @@ Line pattern plugin tests
 
 The plugin is a port of FillLine. The parity test fills the same surfaces with
 the native filler and with the plugin and compares the directed paths, without
-requiring the output order of the sortable group. The "not connected" mode is an
-intentional difference: the legacy filler emitted nothing there.
+requiring the output order of the sortable group. Its plain square is 16 mm wide:
+large enough for several joined lines at every density, small enough to keep
+the full combination matrix cheap. The "not connected" mode is an intentional
+difference: the legacy filler emitted nothing there.
 */
 
 using namespace Slic3r;
@@ -158,7 +160,7 @@ std::vector<ExPolygon> parity_surfaces()
     const ExPolygon lshape(Polygon({ Point(0, 0), Point(scale_i(30.), 0), Point(scale_i(30.), scale_i(10.)),
                                      Point(scale_i(10.), scale_i(10.)), Point(scale_i(10.), scale_i(25.)),
                                      Point(0, scale_i(25.)) }));
-    return { rectangle_expolygon(-19., -19., 19., 19.), rectangle_with_hole_expolygon(), lshape,
+    return { rectangle_expolygon(-8., -8., 8., 8.), rectangle_with_hole_expolygon(), lshape,
              narrow_bridge.front() };
 }
 
@@ -167,7 +169,8 @@ std::vector<ExPolygon> parity_surfaces()
 TEST_CASE("Line plugin matches the native line filler", "[plugins][infill][line]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    for (const ExPolygon &surface : parity_surfaces())
+    const std::vector<ExPolygon> surfaces = parity_surfaces();
+    for (const ExPolygon &surface : surfaces)
         for (const float density : { 0.15f, 0.5f, 1.f })
             for (const bool dont_adjust : { true, false })
                 for (const float angle : { 0.f, float(M_PI / 6.), float(-M_PI / 4.) })
@@ -181,6 +184,16 @@ TEST_CASE("Line plugin matches the native line filler", "[plugins][infill][line]
                             const BoundingBox bbox = get_extents(surface);
                             const DirectedPaths expected = core_paths(run_core(line_case, bbox));
                             REQUIRE_FALSE(expected.empty());
+                            // The plain square keeps several lines at every density, and the
+                            // connection modes join some of them.
+                            if (&surface == &surfaces.front()) {
+                                size_t points = 0;
+                                for (const DirectedPath &path : expected)
+                                    points += path.size();
+                                CHECK(points >= 8);
+                                CHECK(std::any_of(expected.begin(), expected.end(),
+                                                  [](const DirectedPath &path) { return path.size() > 2; }));
+                            }
                             const DirectedPaths actual = run_plugin(line_case, bbox);
                             INFO("expected " << describe(expected));
                             INFO("actual " << describe(actual));

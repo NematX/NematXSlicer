@@ -217,6 +217,21 @@ FullFillVolumeRun collect_full_fill_volume_run(const Print &print)
     return run;
 }
 
+// Prepare the slab of every case: one bottom solid layer, one sparse layer and
+// one top solid layer, the smallest print that has both stamped solid roots and
+// an unstamped sparse root. A 14 x 14 mm section with a single perimeter leaves
+// a well defined free area, so the stamped target and the measured extrusion are
+// both stable. Every extra layer or wider section would only add pattern work:
+// in Debug, a full-density Hilbert curve already takes about two seconds per
+// surface. Tests that need a coverage extreme pass their own cross-section.
+void prepare_slab(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config, const ExPolygon *area)
+{
+    // The first layer is 1 mm high and the next ones 0.3 mm, the largest height for the 0.4 mm nozzle.
+    prepare_box_print(prepared, config, 1.6);
+    REQUIRE(prepared.print.object(0).layer_count() == 3);
+    replace_all_layer_islands(prepared, area != nullptr ? *area : rectangle_expolygon(-7., -7., 7., 7.));
+}
+
 void run_until_infill(PreparedPerimeterPrint &prepared)
 {
     Orchestrator &orchestrator = Orchestrator::instance();
@@ -244,14 +259,7 @@ FullFillVolumeRun run_full_fill_volume_case(
     const ExPolygon *area = nullptr)
 {
     PreparedPerimeterPrint prepared;
-    prepare_cube_print(
-        prepared, full_fill_volume_config(pattern_id, fill_density, enforce_full_fill_volume, extra_overrides));
-
-    // A flat 20 x 20 mm slab with a single perimeter leaves a well defined free
-    // area, so the stamped target and the measured extrusion are both stable.
-    // Tests that need a coverage extreme pass their own cross-section.
-    replace_all_layer_islands(
-        prepared, area != nullptr ? *area : rectangle_expolygon(-10., -10., 10., 10.));
+    prepare_slab(prepared, full_fill_volume_config(pattern_id, fill_density, enforce_full_fill_volume, extra_overrides), area);
 
     ScopedActivePlugins active({
         SIMPLE_PERIMETER_GENERATOR,
@@ -284,10 +292,7 @@ FullFillVolumeComparison run_full_fill_volume_comparison(
     const ExPolygon *area = nullptr)
 {
     PreparedPerimeterPrint prepared;
-    prepare_cube_print(
-        prepared, full_fill_volume_config(pattern_id, fill_density, enforce_full_fill_volume, extra_overrides));
-    replace_all_layer_islands(
-        prepared, area != nullptr ? *area : rectangle_expolygon(-10., -10., 10., 10.));
+    prepare_slab(prepared, full_fill_volume_config(pattern_id, fill_density, enforce_full_fill_volume, extra_overrides), area);
 
     ScopedActivePlugins active({
         SIMPLE_PERIMETER_GENERATOR,
@@ -310,8 +315,7 @@ FullFillVolumeComparison run_full_fill_volume_comparison(
 std::pair<FullFillVolumeRun, FullFillVolumeRun> run_full_fill_volume_twice(const char *pattern_id)
 {
     PreparedPerimeterPrint prepared;
-    prepare_cube_print(prepared, full_fill_volume_config(pattern_id, "100%", true));
-    replace_all_layer_islands(prepared, rectangle_expolygon(-10., -10., 10., 10.));
+    prepare_slab(prepared, full_fill_volume_config(pattern_id, "100%", true), nullptr);
 
     ScopedActivePlugins active({
         SIMPLE_PERIMETER_GENERATOR,
@@ -356,6 +360,7 @@ TEST_CASE("Full fill volume targets follow the enforce_full_fill_volume setting"
     // Sparse surfaces never request the correction, even at 100% density: only
     // the solid first-layer bottom and last-layer top surfaces are stamped.
     CHECK(enforced.stamped_roots.size() < enforced.root_count);
+    CHECK(enforced.stamped_roots.size() == 2);
     for (const StampedRootVolume &root : enforced.stamped_roots)
         CHECK(root.solid_surface);
 
@@ -365,6 +370,7 @@ TEST_CASE("Full fill volume targets follow the enforce_full_fill_volume setting"
     REQUIRE(sparse.root_count > 0);
     CHECK(sparse.stamped_roots.size() > 0);
     CHECK(sparse.stamped_roots.size() < sparse.root_count);
+    CHECK(sparse.stamped_roots.size() == 2);
     for (const StampedRootVolume &root : sparse.stamped_roots)
         CHECK(root.solid_surface);
 

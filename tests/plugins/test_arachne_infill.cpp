@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <initializer_list>
 #include <memory>
-#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,7 +53,9 @@ checks that the Arachne perimeter generator setting selects the walls.
 
 The ensuring plugin is compared with the native FillEnsuring tree as a whole:
 same group flags, same entities in the same order, and the same points up to
-SCALED_EPSILON.
+SCALED_EPSILON. Both trees are written as text; one linear pass separates the
+points from the rest of the text, which must be identical. A dedicated case
+checks that this comparison rejects every other difference.
 */
 
 using namespace Slic3r;
@@ -123,9 +125,19 @@ std::string native_ensuring(const ExPolygon &polygon, const raw_infill_pattern_p
 // Run the ensuring plugin on one recipe and read its whole tree.
 std::string plugin_ensuring(const ExPolygon &polygon, const raw_infill_pattern_params &raw,
                             const Arachne::WallToolPathsSettings &settings);
+// One tree text with each "x,y;" point replaced by ";", and the point coordinates in order.
+struct TreeShape
+{
+    std::string text;
+    std::vector<long long> coordinates;
+};
+// Separate the points of a tree text in one pass. A point is an optional minus sign
+// and digits, a comma, another such number and a semicolon; other characters are kept.
+TreeShape split_points(const std::string &tree);
 // Whether two tree texts are the same, coordinates compared up to SCALED_EPSILON:
 // the plugin and the native filler reach the same areas through different Clipper
-// operations, whose outputs are cleaned at SCALED_EPSILON.
+// operations, whose outputs are cleaned at SCALED_EPSILON. Flags, structure, roles,
+// flows and point counts must match exactly.
 bool same_tree(const std::string &plugin, const std::string &native);
 // Slice a thin slab with a concentric top surface and read the width of every top infill leaf.
 std::vector<float> top_infill_widths(const char *perimeter_generator);
@@ -347,18 +359,43 @@ std::string plugin_ensuring(const ExPolygon &polygon, const raw_infill_pattern_p
     return tree;
 }
 
+TreeShape split_points(const std::string &tree)
+{
+    // End of an optional minus sign followed by at least one digit, or npos.
+    const auto number_end = [&tree](size_t start) {
+        size_t end = start < tree.size() && tree[start] == '-' ? start + 1 : start;
+        const size_t digits = end;
+        while (end < tree.size() && tree[end] >= '0' && tree[end] <= '9')
+            ++end;
+        return end > digits ? end : std::string::npos;
+    };
+    TreeShape shape;
+    shape.text.reserve(tree.size());
+    for (size_t at = 0; at < tree.size();) {
+        const size_t x_end = number_end(at);
+        if (x_end != std::string::npos && x_end < tree.size() && tree[x_end] == ',') {
+            const size_t y_end = number_end(x_end + 1);
+            if (y_end != std::string::npos && y_end < tree.size() && tree[y_end] == ';') {
+                shape.coordinates.push_back(std::strtoll(tree.c_str() + at, nullptr, 10));
+                shape.coordinates.push_back(std::strtoll(tree.c_str() + x_end + 1, nullptr, 10));
+                shape.text += ';';
+                at = y_end + 1;
+                continue;
+            }
+        }
+        shape.text += tree[at++];
+    }
+    return shape;
+}
+
 bool same_tree(const std::string &plugin, const std::string &native)
 {
-    // Points are written "x,y;". Flags, roles and flows must match exactly.
-    static const std::regex point(R"((-?[0-9]+),(-?[0-9]+);)");
-    if (std::regex_replace(plugin, point, ";") != std::regex_replace(native, point, ";"))
+    const TreeShape actual = split_points(plugin), expected = split_points(native);
+    if (actual.text != expected.text || actual.coordinates.size() != expected.coordinates.size())
         return false;
-    std::sregex_iterator plugin_it(plugin.begin(), plugin.end(), point);
-    std::sregex_iterator native_it(native.begin(), native.end(), point);
-    for (const std::sregex_iterator end; plugin_it != end; ++plugin_it, ++native_it)
-        for (const int coordinate : {1, 2})
-            if (std::abs(std::stoll((*plugin_it)[coordinate]) - std::stoll((*native_it)[coordinate])) > SCALED_EPSILON)
-                return false;
+    for (size_t index = 0; index < actual.coordinates.size(); ++index)
+        if (std::abs(actual.coordinates[index] - expected.coordinates[index]) > SCALED_EPSILON)
+            return false;
     return true;
 }
 
@@ -667,6 +704,39 @@ TEST_CASE("Ensuring plugin matches the native FillEnsuring tree", "[plugins][inf
                     INFO("native: " << expected);
                     CHECK(same_tree(actual, expected));
                 }
+}
+
+// The tree comparison of the parity test accepts only coordinate differences up to SCALED_EPSILON.
+// Any other change of the text, or a point added or removed, makes the trees different.
+TEST_CASE("Ensuring tree comparison tolerates only small coordinate differences", "[plugins][infill][ensuring]")
+{
+    const std::string base = "SR{L{10,-20;30,40;|7|0.05|0.45|0.2}{-5,6;7,8;|8|0.06|0.4|0.2}}";
+    // The base text with its first occurrence of from replaced by to.
+    const auto with = [&base](const std::string &from, const std::string &to) {
+        std::string text = base;
+        const size_t at = text.find(from);
+        REQUIRE(at != std::string::npos);
+        return text.replace(at, from.size(), to);
+    };
+    const std::string near = std::to_string(10 + SCALED_EPSILON) + ",-20;";
+    const std::string far = std::to_string(11 + SCALED_EPSILON) + ",-20;";
+    const std::string near_y = "-5," + std::to_string(6 - SCALED_EPSILON) + ";";
+    const std::string far_y = "-5," + std::to_string(5 - SCALED_EPSILON) + ";";
+    CHECK(split_points(base).text == "SR{L{;;|7|0.05|0.45|0.2}{;;|8|0.06|0.4|0.2}}");
+    CHECK(split_points(base).coordinates == std::vector<long long>{10, -20, 30, 40, -5, 6, 7, 8});
+    CHECK(same_tree(base, base));
+    CHECK(same_tree(with("10,-20;", near), base));
+    CHECK(same_tree(base, with("10,-20;", near)));
+    CHECK(same_tree(with("-5,6;", near_y), base));
+    const std::vector<std::string> changed{
+        with("10,-20;", far), with("-5,6;", far_y), with("30,40;", "30,40;31,40;"), with("30,40;", ""),
+        with("SR{", "S{"), with("SR{", "R{"), with("L{", "{"), with("|7|", "|8|"), with("|0.05|", "|0.051|"),
+        with("|0.45|", "|0.44|"), with("0.2}{", "0.21}{"), with("}{", "{"), base + "{}"};
+    for (const std::string &text : changed) {
+        CAPTURE(text);
+        CHECK_FALSE(same_tree(text, base));
+        CHECK_FALSE(same_tree(base, text));
+    }
 }
 
 TEST_CASE("Ensuring cancellation discards the unpublished group", "[plugins][infill][ensuring][arachne][cancellation]")
