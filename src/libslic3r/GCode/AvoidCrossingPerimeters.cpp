@@ -2848,14 +2848,13 @@ Polyline AvoidCrossingPerimeters::travel_to(const TravelContext &context,
             result_pl.points.back()   = end;
         }
     }
-    assert(result_pl.size() > 1);
-    for (size_t i = 1; i < result_pl.size(); i++)
-        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
-
     if(result_pl.empty()) {
         // Travel line is completely outside the bounding box.
         result_pl = {start, end};
     }
+    assert(result_pl.size() > 1);
+    for (size_t i = 1; i < result_pl.size(); i++)
+        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
 
     bool                              max_detour_length_exceeded = false;
     if (context.max_detour > 0) {
