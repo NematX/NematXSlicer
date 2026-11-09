@@ -524,12 +524,17 @@ public:
     coord_t bottom_z() const { return print_z() - height(); }
     Object object() const;
 
+    // The host returns no adjacent layer for the top and bottom layers of an
+    // object and for unlinked auxiliary layers, such as support layers. Return
+    // an invalid view then, so callers can test valid() before reading it.
     Layer upper_layer() const {
-        return Layer(layer_get_upper_layer(handle()));
+        const layer_handle *upper = layer_get_upper_layer(handle());
+        return upper != nullptr ? Layer(upper) : Layer();
     }
 
     Layer lower_layer() const {
-        return Layer(layer_get_lower_layer(handle()));
+        const layer_handle *lower = layer_get_lower_layer(handle());
+        return lower != nullptr ? Layer(lower) : Layer();
     }
 
     ConstPluginProperties properties() const {

@@ -256,6 +256,35 @@ TEST_CASE("Auxiliary layer C API creates mutable generic layers",
     CHECK(object_count_auxiliary_layer(object_handle_value) == 0);
 }
 
+TEST_CASE("Layer views without an adjacent layer are invalid",
+          "[plugins][auxiliary-layer][api]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model = make_auxiliary_region_model(false, false, false);
+    Print print;
+    init_print_from_model(model, print);
+    run_until_sliced(print);
+    PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() > 1);
+    const slic3r_api::Object view = object_view(object);
+
+    // Object layers are linked to each other, except below the first and above the last one.
+    const slic3r_api::Layer first = view.layer(0);
+    const slic3r_api::Layer last = view.layer(view.layer_count() - 1);
+    CHECK_FALSE(first.lower_layer().valid());
+    CHECK(first.upper_layer().same_handle(view.layer(1)));
+    CHECK(view.layer(1).lower_layer().same_handle(first));
+    CHECK_FALSE(last.upper_layer().valid());
+
+    // Support layers are auxiliary layers: even stacked, the host links none of them.
+    const slic3r_api::Layer bottom = view.add_auxiliary_layer(scale_i(0.2), scale_i(0.2), scale_i(0.1));
+    const slic3r_api::Layer top = view.add_auxiliary_layer(scale_i(0.2), scale_i(0.4), scale_i(0.3));
+    for (const slic3r_api::Layer &layer : {bottom, top}) {
+        CHECK_FALSE(layer.lower_layer().valid());
+        CHECK_FALSE(layer.upper_layer().valid());
+    }
+}
+
 TEST_CASE("Print auxiliary object owns print-level auxiliary layers outside object list",
           "[plugins][auxiliary-layer][api]")
 {
