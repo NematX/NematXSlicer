@@ -78,6 +78,11 @@ inset.
 The shared-top check also inspects the stored excluded top areas and verifies
 that their grid points refer to the boundary's own stored contour points.
 
+A core-only notched plate tests a narrow passage opposite a long edge. Routing
+builds the core's internal boundary (the inset rings used for routes inside
+the object) lazily; one resulting ring must contain points on both sides of
+the passage, checking that the width-aware inset keeps it joined.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
@@ -89,7 +94,8 @@ that their grid points refer to the boundary's own stored contour points.
         |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
         |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
         |-- travel_to: measure the raw-slice flow-spacing inset
-        `-- internal_boundary: check excluded tops and borrowed grid points
+        |-- internal_boundary: check excluded tops and borrowed grid points
+        `-- travel_to, internal_boundary: check the notched passage remains joined
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -142,6 +148,48 @@ TriangleMesh ring_mesh();
 void check_scene(Scene scenario);
 // Slice and order a ring, returning core routes and copied diagnostics without running travel editing or making Catch assertions.
 TopRoutes top_oracle_routes(bool avoid_top);
+
+// A notch faces the middle of a long edge, where local width needs additional vertices before insetting.
+TEST_CASE("Core travel boundary preserves the passage beneath a notch",
+          "[plugins][travel][avoid-crossing-parity]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
+        {"bottom_solid_layers", "0"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"gap_fill_enabled", "0"}, {"thin_walls", "0"}, {"thin_perimeters", "0"},
+        {"avoid_crossing_top", "0"}});
+    TriangleMesh mesh = make_cube(30., 0.5, 0.6);
+    for (double x : {0., 16.}) {
+        TriangleMesh side = make_cube(14., 9.5, 0.6);
+        side.translate(float(x), 0.5f, 0.f);
+        mesh.merge(side);
+    }
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const Layer &layer = print.object(0).layers().front();
+    REQUIRE(layer.lslices().size() == 1);
+    const BoundingBox bounds = get_extents(layer.lslices());
+    const Point left = bounds.min + Point(scale_i(5.), scale_i(5.));
+    const Point right = bounds.min + Point(scale_i(25.), scale_i(5.));
+    AvoidCrossingPerimeters router;
+    router.init_layer(layer);
+    router.travel_to({layer, left, Point::Zero(), extruder_index_t(0), 0., false}, right);
+    const AvoidCrossingPerimeters::Boundary &boundary = router.internal_boundary();
+    size_t spanning = 0;
+    for (const Polygon &ring : boundary.boundaries)
+        if (ring.contains(left) && ring.contains(right)) ++spanning;
+    std::cout << "notch: boundaries=" << boundary.boundaries.size() << " spanning=" << spanning << std::endl;
+    CHECK(spanning == 1);
+}
 
 TEST_CASE("Avoid-crossing resolves a sliced modifier boundary with an interior probe",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters][avoid-crossing-parity]")

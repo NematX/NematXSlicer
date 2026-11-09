@@ -2195,8 +2195,8 @@ static std::vector<float> contour_distance(const EdgeGrid::Grid     &grid,
     return out;
 }
 
-// Polygon offset which ensures that if a polygon breaks up into several separate parts, the original polygon will be used in these places.
-// ExPolygons are handled one by one so returned ExPolygons could intersect.
+// Inset less in narrow areas, retrying with higher width thresholds; return original/inset pairs, processing islands separately so results may overlap.
+// Finally keep one piece even with changed holes, the largest of several pieces, or the pre-inset candidate if the inset is empty.
 static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygons &ex_polygons, double offset)
 {
     const std::vector<double> min_contour_width_values = {offset / 2., offset, 2. * offset + SCALED_EPSILON};
@@ -2205,11 +2205,10 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
         ex_poly_result.emplace_back(expo, expo);
         resample_expolygon(ex_poly_result.back().second, offset / 2, scale_d(0.5));
         ExPolygons ensure_resample_dont_grow = diff_ex(ex_poly_result.back().second, ex_poly_result.back().first);
-        if (ensure_resample_dont_grow.size() != 1) {
-            // fail, use the unsimplified one.
+        // Keep the original if resampling extends outside it. Otherwise keep the resampled island directly,
+        // because clipping by intersection would remove the collinear samples needed for local widths.
+        if (!ensure_resample_dont_grow.empty()) {
             ex_poly_result.back().second = ex_poly_result.back().first;
-        } else {
-            ex_poly_result.back().second = ensure_resample_dont_grow.front();
         }
     }
 
@@ -2251,7 +2250,7 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
             }
 
             ExPolygons offset_ex_poly = variable_offset_inner_ex(ex_poly, offsets);
-            // If variable_offset_inner_ex produces empty result, then original ex_polygon is used
+            // If the inset is empty, retry with a higher width threshold; after the last attempt, keep the pre-inset candidate.
             if (offset_ex_poly.size() == 1 && offset_ex_poly.front().holes.size() == ex_poly.holes.size()) {
                 ex_poly = std::move(offset_ex_poly.front());
                 break;
