@@ -93,7 +93,7 @@ The normal call flow is:
                     |   `-- for each bridge infill leaf of the island:
                     |       Common::append_polyline_strokes()
                     |-- subtract the strokes from the island's demand
-                    `-- remove the leftovers thinner than a line along the strokes
+                    `-- Common::remove_leftovers_along_strokes(): remove only nearby touching thin pieces
 
 The jobs write the demand of different islands only, and read the data of their
 own layer and of the layer below, so they do not share any mutable data.
@@ -181,37 +181,6 @@ ClipperOperand bridge_infill_strokes(storage_handle *storage,
     return strokes.empty() ? std::move(strokes) : clipper_union(strokes);
 }
 
-// Remove from `remaining` the leftovers of its subtraction with the strokes: the connected pieces of what an opening by half the line
-// width removes (the parts thinner than a line) that touch the strokes and lie entirely within one line width of them.
-void remove_leftovers_along_strokes(const ClipperContext &clipper,
-                                    const ClipperOperand &strokes,
-                                    double line_width,
-                                    ClipperOperand &remaining)
-{
-    // The residue of demand - strokes touches the strokes: a few SCALED_EPSILON absorb the rounding.
-    const double tolerance = 4. * double(SCALED_EPSILON);
-    // A classic opening: mitered joins keep the convex corners of the remaining demand.
-    const ClipperOperand opened = clipper_offset2(remaining, -0.5 * line_width, 0.5 * line_width, CLIPPER_JOIN_MITER, 3.);
-    const ClipperOperand thin_parts = clipper_diff(remaining, opened);
-    if (thin_parts.empty())
-        return;
-
-    const ClipperOperand near_strokes = clipper_offset(strokes, line_width + tolerance, CLIPPER_JOIN_SQUARE, 0.);
-    ClipperOperand removable = clipper.empty();
-    const StoredExPolygonCollection pieces = thin_parts.to_expolygon_collection();
-    for (ExPolygon piece : pieces) {
-        const ClipperOperand shape = clipper(piece);
-        const ClipperOperand reach = clipper_offset(shape, tolerance, CLIPPER_JOIN_SQUARE, 0.);
-        if (clipper_intersection(reach, strokes).empty())
-            continue;
-        if (!clipper_diff(shape, near_strokes).empty())
-            continue;
-        removable.concat_replace(shape);
-    }
-    if (!removable.empty())
-        remaining = clipper_diff(remaining, removable);
-}
-
 // Subtract the bridge strokes of the island from its demand, then the leftovers along them, and publish the result.
 void remove_bridged_infill_from_island_demand(const plugin_run_context *run_ctx,
                                               storage_handle *storage,
@@ -230,7 +199,7 @@ void remove_bridged_infill_from_island_demand(const plugin_run_context *run_ctx,
         return;
 
     ClipperOperand remaining = clipper_diff_with_safety_offset(clipper(existing), strokes);
-    remove_leftovers_along_strokes(clipper, strokes, line_width, remaining);
+    Common::remove_leftovers_along_strokes(clipper, strokes, line_width, remaining);
     StoredExPolygonCollection cleaned_demand = remaining.to_expolygon_collection();
     expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), cleaned_demand.mutable_handle());
 }

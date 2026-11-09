@@ -1,5 +1,8 @@
 #include <catch2/catch.hpp>
+#include <boost/filesystem.hpp>
 
+#include "gcode_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 
@@ -10,6 +13,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -33,6 +37,22 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+/* Exercise support-demand producers and refinements through real slicing steps,
+   plus the shared bridge-stroke geometry on owned native trees. Scene fixtures
+   compare demand before support generation and the areas the support family
+   publishes. Direct helper cases distinguish local/inherited printed widths and
+   keep independent or out-of-reach demand when cleaning thin subtraction residue.
+
+       run_support_demand() -> slicing/perimeter steps -> demand measurements
+       run_scene() -> SupportGrid::prefix() -> demand -> SupportGrid::family()
+       run_with_thin_strip() -> add independent demand -> STEP_POST_INFILL
+       direct geometry cases -> bridge strokes -> bounded leftover cleanup
+       linear export matrix -> STL round trip -> slicing -> CLI export -> support moves
+
+   Tests own models, prints, trees and scratch storage. Borrowed SDK views stay
+   inside those lifetimes; temporary Clipper results are released before storage.
+*/
 
 namespace {
 
@@ -404,13 +424,17 @@ struct SpanSupport
     }
 };
 
-// Run the slicing steps through post-infill, where every demand refinement has run, then the support family. With lines_along_x the
-// infill, bridges included, is printed along X (fill angle 0, no cross layers); otherwise the fill angle is the default one (45 degrees).
-SpanSupport run_scene(const Scene &scene, const bool dont_support_bridges, const bool lines_along_x = false)
+// Run through post-infill demand refinement, then support generation. lines_along_x selects fill angle 0 without crossing layers;
+// otherwise it keeps the default 45 degrees. An optional internal perimeter width leaves the external width unchanged.
+SpanSupport run_scene(const Scene &scene, bool dont_support_bridges, bool lines_along_x = false, const char *perimeter_width = nullptr);
+
+SpanSupport run_scene(const Scene &scene, const bool dont_support_bridges, const bool lines_along_x, const char *perimeter_width)
 {
     namespace SG = Slic3r::Test::SupportGrid;
     DynamicPrintConfig config = SG::config("grid", false, 3);
     config.set_deserialize_strict({{"dont_support_bridges", dont_support_bridges ? "1" : "0"}});
+    if (perimeter_width != nullptr)
+        config.set_deserialize_strict("perimeter_extrusion_width", perimeter_width);
     if (lines_along_x)
         config.set_deserialize_strict({{"fill_angle", "0"}, {"fill_angle_cross", "0"}});
     Print print;
@@ -783,6 +807,85 @@ TEST_CASE("SupportDemandBridgeRemoval removes the demand under a perimeter-only 
     CHECK(removed.published_mm2 == Approx(0.).margin(0.01));
 }
 
+TEST_CASE("SupportDemandBridgeRemoval cleans narrow spans with distinct internal widths", "[plugins][support-demand][support-bridge-width]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const char *width : {"125%", "150%"}) {
+        INFO("internal perimeter width="<<width<<", external width stays 105%");
+        const SpanSupport kept = run_scene(scene_pillars_and_span(2.), false, false, width);
+        const SpanSupport removed = run_scene(scene_pillars_and_span(2.), true, false, width);
+        REQUIRE(kept.demand_mm2 > 10.);
+        REQUIRE(kept.published_mm2 > 0.);
+        CHECK(removed.demand_mm2 == Approx(0.).margin(0.01));
+        CHECK(removed.published_mm2 == Approx(0.).margin(0.01));
+    }
+}
+
+TEST_CASE("Perimeter bridge removal exports a linear narrow-span STL matrix", "[plugins][support-demand][plugin-e2e][support-bridge-e2e]")
+{
+    namespace E2E = Slic3r::Test::PluginE2E;
+    namespace GC = Slic3r::Test::GCode;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = Slic3r::Test::SupportGrid::config("grid", false, 3, true);
+    baseline.set_deserialize_strict({{"dont_support_bridges", "1"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"use_relative_e_distances", "0"}, {"filament_diameter", "1.75,1.75"}});
+    const std::vector<E2E::Domain> domains{
+        {{"dont_support_bridges"}, {{"support retained", {{"dont_support_bridges", "0"}}}}},
+        {{"support_material"}, {{"support disabled", {{"support_material", "0"}}}}},
+        {{"perimeter_extrusion_width"}, {{"internal 125%", {{"perimeter_extrusion_width", "125%"}}},
+            {"internal 150%", {{"perimeter_extrusion_width", "150%"}}}}}};
+    const std::vector<E2E::Case> cases = E2E::linear_cases(host,
+        {"support.demand.bridge_removal", "support.demand.bridge_infill_removal"}, baseline, domains);
+    REQUIRE(cases.size() == 5);
+    TriangleMesh mesh;
+    boost::filesystem::path stl = GC::temporary_gcode_path();
+    stl.replace_extension(".stl");
+    try {
+        REQUIRE(scene_pillars_and_span(2.).mesh.write_binary(stl.string().c_str()));
+        REQUIRE(mesh.ReadSTLFile(stl.string().c_str()));
+        boost::filesystem::remove(stl);
+    } catch (...) {
+        boost::system::error_code ignored;
+        boost::filesystem::remove(stl, ignored);
+        throw;
+    }
+    for (const E2E::Case &test : cases) {
+        INFO(test.name);
+        const DynamicPrintConfig config = E2E::apply_case(baseline, test);
+        Model model;
+        Print print;
+        Slic3r::Test::init_print({mesh}, print, model, config);
+        const boost::filesystem::path path = GC::temporary_gcode_path();
+        std::string code;
+        try {
+            print.process();
+            code = GC::read_text_file(host.export_gcode_cli(print, path.string()));
+            GC::remove_output_pair(path);
+        } catch (...) {
+            GC::remove_output_pair(path);
+            throw;
+        }
+        size_t moves = 0, support_moves = 0;
+        std::string type;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(code, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (line.comment().rfind("TYPE:", 0) == 0)
+                type = line.comment().substr(5);
+            if (line.extruding(state) && line.dist_XY(state) > 0.) {
+                ++moves;
+                if (type.rfind("Support material", 0) == 0) ++support_moves;
+            }
+        });
+        CHECK(moves > 0);
+        if (test.name == "support retained") CHECK(support_moves > 0);
+        else CHECK(support_moves == 0);
+    }
+}
+
 TEST_CASE("SupportDemandBridgeInfillRemoval removes the demand under bridge lines from pillar to pillar", "[plugins][support-demand]")
 {
     // The span is 20 mm wide and the pillars as wide as the span. With the fill along X (angle 0, no cross layers) the bridge lines run
@@ -914,6 +1017,85 @@ double polyline_stroke_area(const std::vector<std::pair<double, double>> &points
 }
 
 } // namespace
+
+TEST_CASE("Perimeter bridge strokes resolve local and inherited widths without counting unanchored lines", "[plugins][support-demand][support-bridge-width]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace Common = slic3r_api::Support::Common;
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    slic3r_api::ClipperContext clipper(handle);
+    const ExPolygons pillars{
+        ExPolygon(Points{Point(0,0),Point(scale_i(10.),0),Point(scale_i(10.),scale_i(10.)),Point(0,scale_i(10.))}),
+        ExPolygon(Points{Point(scale_i(40.),0),Point(scale_i(50.),0),Point(scale_i(50.),scale_i(10.)),Point(scale_i(40.),scale_i(10.))})};
+    const slic3r_api::ExPolygonCollection lower_support(reinterpret_cast<const expolygon_collection_handle *>(&pillars));
+    ExtrusionEntity root(ExtrusionEntity::Children{},true,true,false);
+    root.add_property(ExtrusionAttributes(ExtrusionRole::Perimeter,ExtrusionFlow(.08,.8f,.2f)));
+    ExtrusionEntity branch(ExtrusionEntity::Children{},true,true,false);
+    ExtrusionEntity inherited(true,ArcPolyline(Points{Point(scale_i(5.),scale_i(7.)),Point(scale_i(45.),scale_i(7.))}));
+    branch.append_child(std::move(inherited));
+    ExtrusionEntity local(true,ArcPolyline(Points{Point(scale_i(5.),scale_i(3.)),Point(scale_i(45.),scale_i(3.))}));
+    local.add_property(ExtrusionAttributes(ExtrusionRole::Perimeter,ExtrusionFlow(.04,.2f,.2f)));
+    branch.append_child(std::move(local));
+    ExtrusionEntity fallback(true,ArcPolyline(Points{Point(scale_i(5.),scale_i(5.)),Point(scale_i(45.),scale_i(5.))}));
+    fallback.add_property(ExtrusionAttributes(ExtrusionRole::Perimeter,ExtrusionFlow(.04,0.f,.2f)));
+    branch.append_child(std::move(fallback));
+    ExtrusionEntity cantilever(true,ArcPolyline(Points{Point(scale_i(5.),scale_i(9.)),Point(scale_i(25.),scale_i(9.))}));
+    cantilever.add_property(ExtrusionAttributes(ExtrusionRole::Perimeter,ExtrusionFlow(.2,2.f,.2f)));
+    branch.append_child(std::move(cantilever));
+    root.append_child(std::move(branch));
+
+    slic3r_api::ClipperOperand strokes = clipper.empty();
+    const Common::BridgeLineFlow flow;
+    const double widest = Common::append_entity_strokes(handle,lower_support,flow,clipper,
+        slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&root)),strokes);
+    CHECK(unscaled(widest) == Approx(.802).margin(.000002));
+    const slic3r_api::StoredExPolygonCollection shapes = slic3r_api::clipper_union(strokes).to_expolygon_collection();
+    for (const std::pair<Point,bool> probe : {
+        std::pair<Point,bool>{Point(scale_i(25.),scale_i(7.3)),true},
+        {Point(scale_i(25.),scale_i(3.08)),true}, {Point(scale_i(25.),scale_i(3.15)),false},
+        {Point(scale_i(25.),scale_i(5.19)),true}, {Point(scale_i(25.),scale_i(5.21)),false},
+        {Point(scale_i(20.),scale_i(9.)),false}}) {
+        INFO("probe="<<unscaled(probe.first.x())<<','<<unscaled(probe.first.y()));
+        bool covered = false;
+        for (const slic3r_api::ExPolygon shape : shapes)
+            covered = covered || shape.contains(c_point{probe.first.x(),probe.first.y()});
+        CHECK(covered == probe.second);
+    }
+}
+
+TEST_CASE("Bridge leftover cleanup requires thinness contact and bounded reach", "[plugins][support-demand][support-bridge-width]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace Common = slic3r_api::Support::Common;
+    const auto rectangle = [](double x0,double y0,double x1,double y1) {
+        return ExPolygon(Points{Point(scale_i(x0),scale_i(y0)),Point(scale_i(x1),scale_i(y0)),
+            Point(scale_i(x1),scale_i(y1)),Point(scale_i(x0),scale_i(y1))});
+    };
+    for (const std::string kind : {"touching thin","separate thin","wide demand","out of reach"}) {
+        INFO(kind);
+        PluginStorage storage;
+        storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+        slic3r_api::ClipperContext clipper(handle);
+        const ExPolygons stroke_shapes{rectangle(0.,0.,10.,1.)};
+        const ExPolygon requested = kind == "touching thin" ? rectangle(2.,1.,8.,1.3) :
+            kind == "separate thin" ? rectangle(2.,1.5,8.,1.8) :
+            kind == "wide demand" ? rectangle(2.,1.,8.,3.) : rectangle(2.,1.,2.3,3.);
+        const ExPolygons demand{requested};
+        const slic3r_api::ExPolygonCollection stroke_view(reinterpret_cast<const expolygon_collection_handle *>(&stroke_shapes));
+        const slic3r_api::ExPolygonCollection demand_view(reinterpret_cast<const expolygon_collection_handle *>(&demand));
+        const slic3r_api::ClipperOperand strokes = clipper(stroke_view);
+        slic3r_api::ClipperOperand remaining = clipper(demand_view);
+        Common::remove_leftovers_along_strokes(clipper,strokes,scale_d(1.),remaining);
+        const slic3r_api::StoredExPolygonCollection result = remaining.to_expolygon_collection();
+        const ExPolygons &native = *reinterpret_cast<const ExPolygons *>(result.handle());
+        if (kind == "touching thin") CHECK(native.empty());
+        else {
+            CHECK(diff_ex(demand,native).empty());
+            CHECK(diff_ex(native,demand).empty());
+        }
+    }
+}
 
 TEST_CASE("Bridge strokes merge the collinear segments of a line", "[plugins][support-demand]")
 {

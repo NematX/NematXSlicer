@@ -22,11 +22,33 @@ piece tells which). Each piece over the void is extended at both ends by the lin
 extended ends are over the lower support; its stroke is the piece grown by half the line width with square ends.
 append_polyline_strokes() first merges the consecutive collinear segments of a leaf, so that a line split into several
 segments is tested whole.
+
+append_entity_strokes() resolves widths through the borrowed extrusion tree and
+records the widest stroke contributed by an anchored straight segment. Both demand
+removers use remove_leftovers_along_strokes(): subtract an opening from remaining
+demand, then remove a connected thin piece only when it touches the strokes and
+stays wholly inside their one-line-width neighbourhood. Other thin demand stays.
+
+    append_entity_strokes()
+        `-- append_tree_strokes(): inherit attributes and select each leaf's flow
+            `-- append_segment_strokes(): split at support and require two anchors
+    append_polyline_strokes(): merge only straight, ordered collinear segments
+        `-- append_segment_strokes()
+    remove_leftovers_along_strokes(): opening -> contact/reach checks -> subtraction
 */
 
 namespace slic3r_api::Support::Common {
 
 namespace {
+
+// Resolve borrowed attributes along each branch and return the widest stroke actually contributed by its segments.
+double append_tree_strokes(storage_handle *storage,
+                           const ExPolygonCollection &lower_support,
+                           const BridgeLineFlow &flow,
+                           const ClipperContext &clipper,
+                           const ExtrusionEntity &entity,
+                           const EPropertyAttributes *attributes,
+                           ClipperOperand &strokes);
 
 // Whether the point lies in one of the polygons (contour and holes taken into account by ExPolygon::contains).
 bool point_supported_by_expolygons(const ExPolygonCollection &support_polygons, c_point point)
@@ -143,7 +165,7 @@ StoredExPolygonCollection grown_lower_support(const ClipperContext &clipper, con
     return lower_support_operand.to_expolygon_collection();
 }
 
-void append_segment_strokes(storage_handle *storage,
+bool append_segment_strokes(storage_handle *storage,
                             const ExPolygonCollection &lower_support,
                             const BridgeLineFlow &flow,
                             const ClipperContext &clipper,
@@ -151,7 +173,7 @@ void append_segment_strokes(storage_handle *storage,
                             ClipperOperand &strokes)
 {
     if (segment.radius != 0.f || c_point_distance_to(segment.point_a, segment.point_b) <= SCALED_EPSILON)
-        return;
+        return false;
 
     // The old support code first subtracts the lower layer from perimeter
     // polylines, then checks whether each remaining straight unsupported piece
@@ -161,6 +183,7 @@ void append_segment_strokes(storage_handle *storage,
     // bridges.
     const std::vector<double> parameters =
         lower_support_intersection_parameters(lower_support, segment.point_a, segment.point_b);
+    bool added = false;
     for (size_t idx = 1; idx < parameters.size(); ++idx) {
         const double begin = parameters[idx - 1];
         const double end = parameters[idx];
@@ -189,27 +212,51 @@ void append_segment_strokes(storage_handle *storage,
 
         ClipperOperand bridge_area = clipper_offset(clipper(line), flow.half_width, CLIPPER_JOIN_SQUARE, 0.,
                                                     CLIPPER_END_OPEN_SQUARE);
-        if (!bridge_area.empty())
+        if (!bridge_area.empty()) {
             strokes.concat_replace(bridge_area);
+            added = true;
+        }
     }
+    return added;
 }
 
-void append_entity_strokes(storage_handle *storage,
+double append_entity_strokes(storage_handle *storage,
                            const ExPolygonCollection &lower_support,
                            const BridgeLineFlow &flow,
                            const ClipperContext &clipper,
                            const ExtrusionEntity &entity,
                            ClipperOperand &strokes)
 {
-    // The extrusion tree may contain collection nodes. Only local polylines can
-    // describe printable bridge spans, so recurse until we find leaves carrying
-    // segments.
+    return append_tree_strokes(storage, lower_support, flow, clipper, entity, nullptr, strokes);
+}
+
+namespace {
+
+double append_tree_strokes(storage_handle *storage,
+                           const ExPolygonCollection &lower_support,
+                           const BridgeLineFlow &flow,
+                           const ClipperContext &clipper,
+                           const ExtrusionEntity &entity,
+                           const EPropertyAttributes *attributes,
+                           ClipperOperand &strokes)
+{
+    if (const EPropertyAttributes *local = entity.get(EPropertyAttributes::key))
+        attributes = local;
+    BridgeLineFlow line_flow = flow;
+    if (attributes != nullptr && attributes->c_extrusion_property_attributes::width > 0.f)
+        line_flow = bridge_line_flow_of_width(flow, coord_t(std::llround(scale_d(attributes->c_extrusion_property_attributes::width))));
+
+    double widest = 0.;
     for (uint32_t segment_idx = 0; segment_idx < entity.segment_count(); ++segment_idx)
-        append_segment_strokes(storage, lower_support, flow, clipper, entity.segment(segment_idx), strokes);
+        if (append_segment_strokes(storage, lower_support, line_flow, clipper, entity.segment(segment_idx), strokes))
+            widest = std::max(widest, 2. * line_flow.half_width);
 
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
-        append_entity_strokes(storage, lower_support, flow, clipper, entity.child(child_idx), strokes);
+        widest = std::max(widest, append_tree_strokes(storage, lower_support, flow, clipper, entity.child(child_idx), attributes, strokes));
+    return widest;
 }
+
+} // namespace
 
 void append_polyline_strokes(storage_handle *storage,
                              const ExPolygonCollection &lower_support,
@@ -256,6 +303,35 @@ void append_polyline_strokes(storage_handle *storage,
     }
     if (has_current)
         append_segment_strokes(storage, lower_support, flow, clipper, current, strokes);
+}
+
+void remove_leftovers_along_strokes(const ClipperContext &clipper,
+                                    const ClipperOperand &strokes,
+                                    double line_width,
+                                    ClipperOperand &remaining)
+{
+    // The residue of demand - strokes touches the strokes: a few SCALED_EPSILON absorb the rounding.
+    const double tolerance = 4. * double(SCALED_EPSILON);
+    // A classic opening: mitered joins keep the convex corners of the remaining demand.
+    const ClipperOperand opened = clipper_offset2(remaining, -0.5 * line_width, 0.5 * line_width, CLIPPER_JOIN_MITER, 3.);
+    const ClipperOperand thin_parts = clipper_diff(remaining, opened);
+    if (thin_parts.empty())
+        return;
+
+    const ClipperOperand near_strokes = clipper_offset(strokes, line_width + tolerance, CLIPPER_JOIN_SQUARE, 0.);
+    ClipperOperand removable = clipper.empty();
+    const StoredExPolygonCollection pieces = thin_parts.to_expolygon_collection();
+    for (ExPolygon piece : pieces) {
+        const ClipperOperand shape = clipper(piece);
+        const ClipperOperand reach = clipper_offset(shape, tolerance, CLIPPER_JOIN_SQUARE, 0.);
+        if (clipper_intersection(reach, strokes).empty())
+            continue;
+        if (!clipper_diff(shape, near_strokes).empty())
+            continue;
+        removable.concat_replace(shape);
+    }
+    if (!removable.empty())
+        remaining = clipper_diff(remaining, removable);
 }
 
 } // namespace slic3r_api::Support::Common

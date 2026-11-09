@@ -37,6 +37,10 @@ intersections with the lower-layer support mask. An unsupported interval is
 treated as a bridge only when both of its extended endpoints reach lower
 support. The resulting stroke area is then subtracted from the island's
 existing support demand through the step context.
+Each branch resolves its nearest extrusion attributes, so internal perimeters and
+gap fills use their own printed widths rather than one external-perimeter width.
+Thin subtraction leftovers are removed only when they touch actual bridge strokes
+and stay inside their one-line-width neighbourhood; independent demand is retained.
 
 The normal call flow is:
 
@@ -58,8 +62,9 @@ The normal call flow is:
                 |   `-- Common::append_entity_strokes() (SupportBridgeStrokes.hpp)
                 |       |-- split straight segments at support intersections
                 |       `-- keep unsupported intervals anchored at both ends
-                `-- remove_bridges_from_island_demand()
-                    `-- subtract bridge areas from the island's demand
+                 `-- remove_bridges_from_island_demand()
+                     |-- subtract bridge areas from the island's demand
+                     `-- Common::remove_leftovers_along_strokes(): clean only bounded touching thin pieces
 
 Bridged infill is not handled here: the infill is generated after this step, so
 support.demand.bridge_infill_removal removes the demand under its bridge lines at
@@ -92,6 +97,27 @@ struct BridgeRemovalConfig
     bool dont_support_bridges = false;
 };
 
+// Add one role's bridge strokes using inherited/local printed widths and return the widest contributing stroke (scaled).
+double append_bridge_areas_from_region_island(storage_handle *storage,
+                                             const ExPolygonCollection &lower_support,
+                                             const Common::BridgeLineFlow &flow,
+                                             const ClipperContext &clipper,
+                                             const LayerRegionIsland &region_island,
+                                             raw_extrusion_role role,
+                                             ClipperOperand &bridges);
+// Return united perimeter/gap-fill strokes in storage and their maximum contributing width through line_width.
+ClipperOperand bridge_areas_for_island(storage_handle *storage,
+                                      const Layer &lower_layer,
+                                      const LayerIsland &island,
+                                      const ClipperContext &clipper,
+                                      double &line_width);
+// Replace the island's demand only after stroke subtraction and bounded thin-leftover cleanup have succeeded.
+void remove_bridges_from_island_demand(const plugin_run_context *run_ctx,
+                                      storage_handle *storage,
+                                      const Layer &lower_layer,
+                                      const LayerIsland &island,
+                                      const ClipperContext &clipper);
+
 BridgeRemovalConfig read_object_config(const Object &object)
 {
     const Config object_config = object.config();
@@ -100,7 +126,7 @@ BridgeRemovalConfig read_object_config(const Object &object)
     return out;
 }
 
-void append_bridge_areas_from_region_island(storage_handle *storage,
+double append_bridge_areas_from_region_island(storage_handle *storage,
                                             const ExPolygonCollection &lower_support,
                                             const Common::BridgeLineFlow &flow,
                                             const ClipperContext &clipper,
@@ -109,27 +135,29 @@ void append_bridge_areas_from_region_island(storage_handle *storage,
                                             ClipperOperand &bridges)
 {
     if (!region_island.has_extrusion(role))
-        return;
+        return 0.;
 
     const ExtrusionEntity root(region_island.extrusion(role));
-    Common::append_entity_strokes(storage, lower_support, flow, clipper, root, bridges);
+    return Common::append_entity_strokes(storage, lower_support, flow, clipper, root, bridges);
 }
 
 ClipperOperand bridge_areas_for_island(storage_handle *storage,
-                                       const Layer &lower_layer,
-                                       const LayerIsland &island,
-                                       const ClipperContext &clipper)
+                                      const Layer &lower_layer,
+                                      const LayerIsland &island,
+                                      const ClipperContext &clipper,
+                                      double &line_width)
 {
     ClipperOperand bridges = clipper.empty();
+    line_width = 0.;
     const Common::BridgeLineFlow flow = Common::bridge_line_flow(island, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, false);
     StoredExPolygonCollection lower_support = Common::grown_lower_support(clipper, lower_layer, flow);
 
     for (uint32_t region_island_idx = 0; region_island_idx < island.region_island_count(); ++region_island_idx) {
         const LayerRegionIsland region_island = island.region_island(region_island_idx);
-        append_bridge_areas_from_region_island(storage, lower_support, flow, clipper, region_island,
-                                               RAW_EXTRUSION_ROLE_PERIMETER, bridges);
-        append_bridge_areas_from_region_island(storage, lower_support, flow, clipper, region_island,
-                                               RAW_EXTRUSION_ROLE_GAP_FILL, bridges);
+        line_width = std::max(line_width, append_bridge_areas_from_region_island(storage, lower_support, flow, clipper, region_island,
+            RAW_EXTRUSION_ROLE_PERIMETER, bridges));
+        line_width = std::max(line_width, append_bridge_areas_from_region_island(storage, lower_support, flow, clipper, region_island,
+            RAW_EXTRUSION_ROLE_GAP_FILL, bridges));
     }
 
     return bridges.empty() ? std::move(bridges) : clipper_union(bridges);
@@ -145,13 +173,15 @@ void remove_bridges_from_island_demand(const plugin_run_context *run_ctx,
     if (existing.empty())
         return;
 
-    ClipperOperand bridges = bridge_areas_for_island(storage, lower_layer, island, clipper);
+    double line_width = 0.;
+    ClipperOperand bridges = bridge_areas_for_island(storage, lower_layer, island, clipper, line_width);
     if (bridges.empty())
         return;
 
-    StoredExPolygonCollection remaining =
-        clipper_diff_with_safety_offset(clipper(existing), bridges).to_expolygon_collection();
-    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), remaining.mutable_handle());
+    ClipperOperand remaining = clipper_diff_with_safety_offset(clipper(existing), bridges);
+    Common::remove_leftovers_along_strokes(clipper, bridges, line_width, remaining);
+    StoredExPolygonCollection cleaned_demand = remaining.to_expolygon_collection();
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), cleaned_demand.mutable_handle());
 }
 
 } // namespace

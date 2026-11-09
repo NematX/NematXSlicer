@@ -35,7 +35,13 @@ demand. The usual sequence is:
             |-- skip every piece whose middle is over the lower support
             |-- extend the other pieces at both ends by the flow width
             |-- skip a piece with an extended end that is not over the lower support
-            `-- add the piece grown by half the line width to the strokes
+             `-- add the piece grown by half the line width to the strokes
+
+append_entity_strokes() resolves the nearest attributes on each branch and uses
+each leaf's printed width, falling back to the supplied flow when it is absent.
+It returns the widest stroke actually added. After subtracting the strokes,
+remove_leftovers_along_strokes() removes only thin connected pieces that touch
+the strokes and lie entirely within one contributing line width of them.
 
 Conventions shared by every function:
 - Lengths are scaled coordinates (coord_t) or scaled doubles; the C views use the same units.
@@ -80,16 +86,17 @@ BridgeLineFlow bridge_line_flow_of_width(const BridgeLineFlow &base, coord_t lin
 StoredExPolygonCollection grown_lower_support(const ClipperContext &clipper, const Layer &lower_layer, const BridgeLineFlow &flow);
 
 // Add to `strokes` the strokes of the bridge pieces of one straight segment. `lower_support` is the grown lower support (borrowed); `storage`
-// holds the temporary geometry of the call. A curved or degenerate segment adds nothing.
-void append_segment_strokes(storage_handle *storage,
+// holds the temporary geometry of the call. Return whether any stroke was added; curved or degenerate segments return false.
+bool append_segment_strokes(storage_handle *storage,
                             const ExPolygonCollection &lower_support,
                             const BridgeLineFlow &flow,
                             const ClipperContext &clipper,
                             const c_extrusion_segment &segment,
                             ClipperOperand &strokes);
 
-// Add to `strokes` the strokes of the bridge pieces of every segment of an extrusion tree, each segment as it is printed.
-void append_entity_strokes(storage_handle *storage,
+// Add the bridge strokes of every segment as printed, resolving the nearest inherited/local width per leaf.
+// Missing or non-positive widths use flow. Return the widest stroke actually added (scaled), or zero when none qualifies.
+double append_entity_strokes(storage_handle *storage,
                            const ExPolygonCollection &lower_support,
                            const BridgeLineFlow &flow,
                            const ClipperContext &clipper,
@@ -103,8 +110,16 @@ void append_polyline_strokes(storage_handle *storage,
                              const ExPolygonCollection &lower_support,
                              const BridgeLineFlow &flow,
                              const ClipperContext &clipper,
-                             const ExtrusionEntity &leaf,
-                             ClipperOperand &strokes);
+                              const ExtrusionEntity &leaf,
+                              ClipperOperand &strokes);
+
+// Remove connected leftovers thinner than line_width (scaled) only if they touch strokes and lie entirely within
+// one line_width of them. Inputs share clipper storage; strokes stay unchanged and remaining receives an owned result.
+// Call after subtracting nonempty strokes, with their positive maximum contributing line width.
+void remove_leftovers_along_strokes(const ClipperContext &clipper,
+                                    const ClipperOperand &strokes,
+                                    double line_width,
+                                    ClipperOperand &remaining);
 
 } // namespace slic3r_api::Support::Common
 
