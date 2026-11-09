@@ -17,13 +17,14 @@
 // Registration and execution: the host constructs the plugin, reads its metadata,
 // calls inilialize_impl to define the option, then calls run_impl for each layer group.
 //
-// run_impl skips extrusions without a source (synthetic work, not region paths) and those
-// whose source layer is not the second printed layer. The host guarantees that every other
-// source is valid, with all its regions on the same layer. On the second layer, a run-local
-// cache keeps the ratio factors of each source region island and print instance, like the
-// host's first-layer flow plugin: only the regions of that region island are considered.
-// Paths crossing regions with different ratios are split before each fragment receives its
-// region's factor; skirt, brim and support use the object's default factor.
+// run_impl skips extrusions without a source (synthetic work, not region paths), those on
+// auxiliary layers (support, skirt and brim), and those whose source layer is not an object's
+// second printed layer. The host guarantees that every other source is valid, with all its
+// regions on the same layer. On the second layer, a run-local cache keeps the ratio factors
+// of each source region island and print instance, like the host's first-layer flow plugin:
+// only the regions of that region island are considered. Paths crossing regions with
+// different ratios are split before each fragment receives its region's factor; skirt, brim
+// and support paths found on an object layer use the object's default factor.
 //
 // The host may run several layer groups at the same time. Each callback only edits its
 // own layer group, and its factors, cloned masks, settings, and views are local to it.
@@ -159,6 +160,18 @@ bool is_second_layer(const Layer &layer)
     return lower.valid() && lower.bottom_z() == 0;
 }
 
+// Support layers, and the skirt and brim layers of the print, are auxiliary layers of their
+// object. Like the legacy slicer, which never applied the ratio to support, skip them by what
+// they are rather than through their missing link to a lower layer.
+bool is_auxiliary_layer(const Layer &layer)
+{
+    const Object object = layer.object();
+    for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx)
+        if (object.auxiliary_layer(idx).same_handle(layer))
+            return true;
+    return false;
+}
+
 // Cache key for one layer callback: the source region island and print instance.
 // The catalog ID distinguishes instances with different offsets.
 struct SourceKey
@@ -179,7 +192,8 @@ struct SourceKey
 // Flow factors of one extrusion source on the second layer. When its regions have
 // different ratios, areas holds one mask per ratio (in printing-plan coordinates) and
 // factors the matching factor; otherwise areas is empty and uniform_factor applies.
-// outside_factor is used for skirt, brim and support, printed outside the masks.
+// outside_factor is used for skirt, brim and support, printed outside the masks, when
+// such paths come from an object layer rather than an auxiliary layer.
 struct SourceFactors
 {
     double uniform_factor = 1.0;
@@ -332,6 +346,8 @@ void apply_tree(MutableExtrusionEntity entity,
 
     // Skirt, brim and support lie outside the region masks: splitting them would leave
     // uncovered pieces. They take the object's default factor instead.
+    // The host prints them from auxiliary layers, which run_impl skips: this only applies
+    // to such paths on an object layer, which the host and NematX plugins do not produce.
     const raw_extrusion_role role = attributes->extrusion_role();
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role) || RAW_EXTRUSION_ROLE_IS_SUPPORT(role)) {
         const double final_flow = checked_product(initial_flow, factors.outside_factor);
@@ -449,6 +465,9 @@ private:
         // Cache one set of factors per source region island and print instance, reused by
         // every extrusion of that source in this layer group.
         std::map<SourceKey, SourceFactors> sources;
+        // Cache whether each source layer is an object's second layer: finding an
+        // auxiliary layer scans its object's auxiliary layers.
+        std::map<const layer_handle *, bool> second_layers;
         for (uint32_t tool_idx = 0; tool_idx < layer_group.tool_group_count(); ++tool_idx) {
             throw_if_cancelled(run_ctx);
             PrintingToolGroup tool_group = layer_group.tool_group(tool_idx);
@@ -462,7 +481,11 @@ private:
                 if (!region_island.valid())
                     continue;
                 const Layer source_layer = region_island.region(0).layer();
-                if (!is_second_layer(source_layer))
+                auto second = second_layers.find(source_layer.handle());
+                if (second == second_layers.end())
+                    second = second_layers.emplace(source_layer.handle(),
+                        !is_auxiliary_layer(source_layer) && is_second_layer(source_layer)).first;
+                if (!second->second)
                     continue;
 
                 const SourceKey key{ region_island.handle(), extrusion.printing_catalog_id() };

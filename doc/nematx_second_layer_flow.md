@@ -20,11 +20,11 @@ The region-level FFF print setting is **second_layer_flow_ratio**:
 
 ## Affected paths
 
-The plugin follows source-layer links to identify the second printed layer. It applies the setting to eligible perimeter, infill, support, skirt, and gap-fill paths. Travel, wipe, retract, unretract, wipe-tower, and milling paths are excluded. Paths already expressed as E per millimeter are also excluded.
+The plugin follows source-layer links to identify the second printed layer of each object. It applies the setting to eligible perimeter, infill, and gap-fill paths. Travel, wipe, retract, unretract, wipe-tower, and milling paths are excluded. Paths already expressed as E per millimeter are also excluded.
+
+Support, skirt, and brim are printed from auxiliary layers, which are never changed. The legacy slicer did not apply the ratio to support either. Unlike the legacy slicer, a skirt taller than one layer keeps its flow on the second layer.
 
 When an extrusion crosses a boundary between regions with different ratios, the plugin splits the path at the boundary and applies each region's ratio to its fragment. Regions at **100%** retain their original flow while regions at **150%** receive 50% more deposited volume. Instance offsets are included when matching paths to region geometry. Only the regions attached to the extrusion's source are considered, as in the host's first-layer flow plugin.
-
-Skirt, brim, and support paths are printed outside the region geometry, so they are never split: they use the object's default ratio (the print setting with the object's own override, if any; the print setting alone for the print-level skirt and brim).
 
 The plugin changes **mm3_per_mm**; it does not directly set feed rate. NematXSlicer's later speed calculation and volumetric limits remain in effect.
 

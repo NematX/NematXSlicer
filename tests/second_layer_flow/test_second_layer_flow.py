@@ -268,6 +268,20 @@ def extrusion_moves(path: Path) -> list[ExtrusionMove]:
     return moves
 
 
+def write_supported_stl(path: Path) -> None:
+    """A T shape: a 4 mm wide slab on a post, with overhangs that need support below."""
+    faces = ((3, 2, 1), (1, 0, 3), (4, 5, 6), (6, 7, 4), (0, 1, 5), (5, 4, 0),
+             (1, 2, 6), (6, 5, 1), (2, 3, 7), (7, 6, 2), (3, 0, 4), (4, 7, 3))
+    lines = ["solid supported"]
+    for x0, y0, z0, x1, y1, z1 in ((4, 0, 0, 8, 4, 2), (0, 0, 2, 12, 4, 2.6)):
+        vertices = [(x, y, z) for z in (z0, z1) for x, y in ((x0, y0), (x1, y0), (x1, y1), (x0, y1))]
+        for face in faces:
+            lines.append(" facet normal 0 0 0\n  outer loop")
+            lines.extend("   vertex {} {} {}".format(*vertices[index]) for index in face)
+            lines.append("  endloop\n endfacet")
+    path.write_text("\n".join(lines + ["endsolid supported"]) + "\n", encoding="ascii")
+
+
 def profile_text(
     ratio: str | None,
     max_volumetric_speed: float,
@@ -376,6 +390,22 @@ class SecondLayerFlowIntegration(unittest.TestCase):
             ("global-cap-125", "125%", True),
         ):
             output, log, return_code = run_export(name, ratio, enabled, max_volumetric_speed=2.0)
+            if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
+                raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
+            cls.outputs[name] = output
+            cls.logs[name] = log
+
+        # Support layers are auxiliary layers without a lower layer. These exports used to stop
+        # on an assertion in debug builds, even at the neutral 100% ratio.
+        supported_model = OUTPUT_ROOT / "supported.stl"
+        write_supported_stl(supported_model)
+        support = ("support_material = 1", "support_material_buildplate_only = 0")
+        for name, ratio, enabled in (
+            ("supported-baseline", None, False),
+            ("supported-100", "100%", True),
+            ("supported-80", "80%", True),
+        ):
+            output, log, return_code = run_export(name, ratio, enabled, model=supported_model, extra_options=support)
             if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
                 raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
             cls.outputs[name] = output
@@ -540,6 +570,29 @@ class SecondLayerFlowIntegration(unittest.TestCase):
         baseline_right = component_flow(baseline, False)
         self.assertAlmostEqual(component_flow(regional, True) / baseline_left, 1.0, delta=0.035)
         self.assertAlmostEqual(component_flow(regional, False) / baseline_right, 1.5, delta=0.035)
+
+    def test_support_keeps_its_flow_while_the_object_second_layer_changes(self) -> None:
+        def flows(name: str) -> dict[tuple[int, bool], float]:
+            # Weighted E per mm by layer, for support and for object paths.
+            totals: dict[tuple[int, bool], list[float]] = {}
+            for move in extrusion_moves(self.outputs[name]):
+                key = (move.layer, "support" in move.extrusion_type.lower())
+                total = totals.setdefault(key, [0.0, 0.0])
+                total[0] += move.deposited_e
+                total[1] += move.path_length
+            return {key: e / length for key, (e, length) in totals.items() if length > 0}
+
+        baseline = flows("supported-baseline")
+        self.assertTrue(any(is_support for _, is_support in baseline), "The T shape must print support.")
+        for case, object_ratio in (("supported-100", 1.0), ("supported-80", 0.8)):
+            result = flows(case)
+            self.assertEqual(baseline.keys(), result.keys(), case)
+            for (layer, is_support), initial in baseline.items():
+                expected = object_ratio if layer == 1 and not is_support else 1.0
+                self.assertAlmostEqual(
+                    result[(layer, is_support)] / initial, expected, delta=0.025,
+                    msg=f"{case}, LAYER_CHANGE index {layer}, support={is_support}",
+                )
 
     def test_zero_ratio_is_rejected_without_a_successful_output(self) -> None:
         output, log, return_code = run_export("invalid-zero", "0%", True)
