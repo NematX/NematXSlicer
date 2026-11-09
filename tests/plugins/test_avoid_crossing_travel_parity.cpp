@@ -32,17 +32,17 @@
 #include "libslic3r/Steps/PipelineProgress.hpp"
 
 /*
-Travel parity tests check that the travel plugin integrates the core perimeter
-crossing test and router without changing their route coordinates. Small
-meshes are sliced into surfaces and extrusion paths, then ordered for
-printing. The selected editors identify the gaps between ordered paths, carry
-the position at each gap's entry, and insert travel paths. Wipe and lift
-editors do not run, so they cannot change the measured connectors. A leaf here
-is an extrusion entity with a polyline of at least two points and no children;
-its owning PrintingExtrusion identifies its source region and object instance.
-The reserved travel phase is the connector slot in an ordered extrusion.
-collect_leaves marks its paths, separating inserted connectors from other
-travel paths.
+Travel parity tests compare the travel plugin's routes with routes computed
+using the core perimeter crossing test and router, expecting identical
+coordinates. Small meshes are sliced into surfaces and extrusion paths, then
+ordered for printing. The selected editors identify the gaps between ordered
+paths, carry the position at each gap's entry, and insert travel paths. Wipe
+and lift editors do not run, so they cannot change the measured connectors. A
+leaf here is an extrusion entity with a polyline of at least two points and no
+children; its owning PrintingExtrusion identifies its source region and object
+instance. The reserved travel phase is the connector slot in an ordered
+extrusion. collect_leaves marks its paths, separating inserted connectors from
+other travel paths.
 
 oracle_path computes the expected route with the core class, independently of
 the travel editor. After handling travel across layer groups, it checks
@@ -93,6 +93,10 @@ When avoid_crossing_not_first_layer is enabled, the expected route stays
 direct at the first object layer's Z, including support at that height. Scene
 checks verify this exemption by height rather than by layer identifier.
 
+A plugin-only skirt/brim scene checks paths that have regions but no valid
+object instance. Their connectors must stay direct, while object paths in the
+same sliced ring still receive detours.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
@@ -101,13 +105,15 @@ checks verify this exemption by height rather than by layer identifier.
     |   |-- enabled_endpoint, oracle_path: compute core routes and compare every point
     |   |-- lookup_at_point: check the controlled modifier-edge retry
     |   `-- oracle_path, check_scene: check enabled first-layer exemption for support by Z
-    `-- Core-only checks
-        |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
-        |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
-        |-- travel_to: measure the raw-slice flow-spacing inset
-        |-- internal_boundary: check excluded tops and borrowed grid points
-        |-- travel_to, internal_boundary: check the notched passage remains joined
-        `-- travel_to, internal_boundary: check grid misses and the edge projection
+    |-- Core-only checks
+    |   |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
+    |   |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
+    |   |-- travel_to: measure the raw-slice flow-spacing inset
+    |   |-- internal_boundary: check excluded tops and borrowed grid points
+    |   |-- travel_to, internal_boundary: check the notched passage remains joined
+    |   `-- travel_to, internal_boundary: check grid misses and the edge projection
+    `-- Plugin identity check
+        `-- ordering, layer editing, collect_leaves: check global adhesion connectors
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -161,6 +167,72 @@ TriangleMesh ring_mesh();
 void check_scene(Scene scenario);
 // Slice and order a ring, returning core routes and copied diagnostics without running travel editing or making Catch assertions.
 TopRoutes top_oracle_routes(bool avoid_top);
+
+// Global adhesion paths have regions but no instance; only object-to-object gaps may route.
+TEST_CASE("Avoid-crossing keeps global adhesion travels direct",
+          "[plugins][travel][layer-extrusion-edit][avoid-crossing-parity][global-identity]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool brim = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
+        {"skirts", "2"}, {"brim_width", brim ? "2" : "0"}});
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({ring_mesh()}, print, model, config);
+    print.process();
+    print.pipeline_progress().reset();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    Steps::StepExtrusionOrdering::run_step(orchestrator, print);
+    size_t global_regions = 0;
+    for (const PrintingGroup &group : print.printing_plan()->groups)
+        for (const PrintingLayerGroup &layer : group.layers)
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions)
+                    if (extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE &&
+                        extrusion.region_island != nullptr) {
+                        const slic3r_api::LayerRegionIsland region_island(
+                            reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+                        REQUIRE(region_island.valid());
+                        REQUIRE(region_island.region_count() > 0);
+                        ++global_regions;
+                        std::cout << "adhesion brim=" << brim << " catalog=" << extrusion.printing_catalog_id
+                                  << " region_island=" << extrusion.region_island << std::endl;
+                    }
+    REQUIRE(global_regions > 0);
+    {
+        Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
+            "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
+            "layer_extrusion_edit.travel.avoid_crossing_perimeters"});
+        Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
+    }
+    REQUIRE_FALSE(orchestrator.is_plugin_cancelled());
+    std::vector<Leaf> leaves;
+    for (const PrintingGroup &group : print.printing_plan()->groups)
+        for (const PrintingLayerGroup &layer : group.layers)
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions)
+                    collect_leaves(*extrusion.root, extrusion, tool.extruder_id, layer, leaves);
+    size_t direct_global = 0, routed_object = 0;
+    for (size_t idx = 1; idx + 1 < leaves.size(); ++idx) {
+        if (!leaves[idx].generated_travel)
+            continue;
+        const bool global = leaves[idx - 1].owner->printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE ||
+                            leaves[idx + 1].owner->printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE;
+        if (global) {
+            CHECK(leaves[idx].entity->polyline_ref().size() == 2);
+            ++direct_global;
+        } else if (leaves[idx].entity->polyline_ref().size() > 2)
+            ++routed_object;
+    }
+    CHECK(direct_global > 0);
+    CHECK(routed_object > 0);
+}
 
 // A notch faces the middle of a long edge, where local width needs additional vertices before insetting.
 TEST_CASE("Core travel boundary preserves the passage beneath a notch",

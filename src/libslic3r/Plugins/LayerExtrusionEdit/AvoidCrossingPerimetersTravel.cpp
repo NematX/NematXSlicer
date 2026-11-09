@@ -11,6 +11,8 @@ Each worker owns its routers and crossing caches while it processes one final
 PrintingLayerGroup. Regional activation is resolved only at the two endpoints
 of a gap. The direct segment is retained unless the optimized crossing test
 confirms that it crosses printable boundaries.
+Endpoints without a valid object instance, including global skirt and brim,
+keep the direct travel.
 
 ScopeTravelConnector owns reserved-phase insertion, epsilon snapping, Z
 interpolation and final flags, keeping this file focused on route selection.
@@ -84,7 +86,7 @@ public:
                               extruder_index_t extruder_id);
 
 private:
-    /* Resolve one endpoint's regional setting, probing inside on a boundary. */
+    // Resolve regional activation only for valid object instances, probing inside on a boundary.
     bool endpoint_enables_avoidance(const TravelEndpoint &endpoint) const;
 
     /* Convert a final-plan point into the source object's local coordinates. */
@@ -156,6 +158,14 @@ bool LayerTravelPlanner::endpoint_enables_avoidance(const TravelEndpoint &endpoi
     if (!endpoint.region_island.valid() || endpoint.region_island.region_count() == 0)
         return false;
 
+    // Global skirt and brim regions have no object instance for local coordinates.
+    if (endpoint.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
+        endpoint.printing_catalog_id >= m_plan.object_instance_count())
+        return false;
+    const Object object = endpoint.region_island.region(0).layer().object();
+    if (m_plan.object_instance(endpoint.printing_catalog_id).object_instance_idx() >= object.instance_count())
+        return false;
+
     const c_point endpoint_point{endpoint.position.x, endpoint.position.y};
     RegionSettingsPointResult result = RegionSettings::lookup_at_point(
         endpoint.region_island, {k_region_setting_keys[0]}, local_point(endpoint_point, endpoint));
@@ -218,12 +228,7 @@ std::vector<c_point> LayerTravelPlanner::path(const TravelEndpoint &source,
     const Layer target_layer_view = target.region_island.region(0).layer();
     const Object source_object = source_layer_view.object();
     const Object target_object = target_layer_view.object();
-    if (target.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
-        target.printing_catalog_id >= m_plan.object_instance_count())
-        return straight(source, target, extruder_id);
     const uint64_t target_instance_idx = m_plan.object_instance(target.printing_catalog_id).object_instance_idx();
-    if (target_instance_idx >= target_object.instance_count())
-        return straight(source, target, extruder_id);
 
     const Slic3r::Layer *target_layer =
         reinterpret_cast<const Slic3r::Layer *>(target_layer_view.handle());
