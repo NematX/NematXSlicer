@@ -52,6 +52,8 @@
    not production support generation; real-provider slicing/export integration
    is in test_bridge_pipeline.cpp. Active providers and callbacks are restored
    by their test scopes.
+   Rounded-row cases exercise both finalizers on a quantized 30-degree strand;
+   malformed directions, bends, returns, arcs and Z offsets must still fail.
 */
 #include <catch2/catch.hpp>
 #include <algorithm>
@@ -326,6 +328,74 @@ void visit_leaves(const ExtrusionEntity &root,const std::function<void(const Ext
     if (root.is_leaf() && root.has_polyline()) { REQUIRE(attributes!=nullptr);callback(root,*attributes); }
     for (const ExtrusionEntityUPtr &child : root.children()) if (child) visit_leaves(*child,callback,attributes);
 }
+}
+
+TEST_CASE("Bridge finalizers accept integer-rounded short rows in either direction","[plugins][bridge-volume][bridge-direction-rounding]")
+{
+    for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"})
+        for (const bool reversed : {false,true}) {
+            INFO(provider<<" reversed="<<reversed);
+            Fixture fixture({{"bridge_angle","30"},{"bridge_volume_compensation",provider},
+                {"fill_density","30%"},{"internal_bridge_expansion","0"}});
+            fixture.internal();fixture.prepare();
+            Points points{Point(6368327,1360725),Point(6368327,1905952)};
+            float rotation=float(PI/6.);rotation+=float(PI/2.);
+            for (Point &point : points) point.rotate(rotation);
+            REQUIRE(points.front()==Point(-4362586,4834770));
+            REQUIRE(points.back()==Point(-4834767,4562157));
+            // Translation keeps the recorded row vector but places it inside the fixture's prepared core.
+            for (Point &point : points) point+=Point(4500000,-4700000);
+            if (reversed) std::reverse(points.begin(),points.end());
+            ExtrusionEntity path(true,ArcPolyline(points));
+            path.add_property(ExtrusionAttributes(ExtrusionRole::InternalBridgeInfill,Flow::bridging_flow(.4f,.4f)));
+            path.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=fixture.bridge().id();
+            fixture.island().regions_islands().front().mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
+            Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
+            REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+            size_t leaves=0;
+            for (const LayerRegionIsland &region : fixture.island().regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::INFILLS))
+                    visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+                        ++leaves;
+                        REQUIRE(leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr);
+                        CHECK(attributes.role==ExtrusionRole::InternalBridgeInfill);
+                        CHECK(leaf.first_point()==points.front());
+                        CHECK(leaf.last_point()==points.back());
+                    });
+            CHECK(leaves==1);
+        }
+}
+
+TEST_CASE("Bridge finalizers still reject malformed rows beyond endpoint rounding","[plugins][bridge-volume][bridge-direction-rounding]")
+{
+    for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"})
+        for (const std::string defect : {"short direction","long direction","bend","return","arc","Z offset"}) {
+            INFO(provider<<" defect="<<defect);
+            Fixture fixture({{"bridge_angle","30"},{"bridge_volume_compensation",provider},
+                {"fill_density","30%"},{"internal_bridge_expansion","0"}});
+            fixture.internal();fixture.prepare();
+            Points points{Point(137414,134770),Point(-334767,-137843)};
+            if (defect=="short direction") points.back().y()+=10;
+            else if (defect=="long direction") points={Point(-1000000,-577350),Point(1000000,577365)};
+            else if (defect=="bend") points.insert(points.begin()+1,Point(-98676,98463));
+            else if (defect=="return") points={points.front(),points.back(),points.front(),points.back()};
+            ExtrusionEntity path(true,ArcPolyline(points));
+            path.add_property(ExtrusionAttributes(ExtrusionRole::InternalBridgeInfill,Flow::bridging_flow(.4f,.4f)));
+            path.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=fixture.bridge().id();
+            if (defect=="arc" || defect=="Z offset") {
+                slic3r_api::MutableExtrusionEntity writable(reinterpret_cast<extrusion_entity_handle *>(&path));
+                std::vector<c_extrusion_segment> segments=writable.segments();
+                REQUIRE(segments.size()==1);
+                if (defect=="arc") {
+                    segments.front().radius=float(scale_i(1.));
+                    segments.front().orientation=RAW_EXTRUSION_ARC_ORIENTATION_CCW;
+                } else segments.front().z_offset_b=scale_i(.01);
+                REQUIRE(writable.set_segments(segments));
+            }
+            fixture.island().regions_islands().front().mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
+            Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
+            REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+        }
 }
 
 TEST_CASE("First solid covers on internal sparse become internal bridges including top covers","[plugins][bridge-internal][bridge-preparation]")

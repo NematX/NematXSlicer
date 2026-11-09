@@ -66,6 +66,8 @@
            `-- replace_infill_buckets() [host publication callback]
 
    A strand is one continuous row, even when flow changes split it into pieces.
+   Direction checks retain their angular tolerance and add only the projected
+   rounding bound of two integer endpoints, divided by their separation.
    publish_pieces() splits a private row where flow changes. Each piece receives
    BridgeVolumeInfo with its incoming/assigned flow and input/geometry signatures.
    A containing collection receives BridgeAtomicStrand so ordering preserves the
@@ -403,12 +405,15 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
     const coord_t fill_resolution=std::min(scale_i(width)/16,
         std::max(SCALED_EPSILON,scale_i(print_config.get("resolution_internal").get_float())));
     const double tolerance=unscaled(std::max(4*SCALED_EPSILON,fill_resolution));
+    // Each endpoint rounds by at most half a coordinate unit per axis. Their
+    // difference has twice that bound, projected onto the bridge's normal.
+    const double direction_roundoff=unscaled(std::abs(std::sin(angle))+std::abs(std::cos(angle)))/length;
     double previous=-tolerance;
     for (const c_extrusion_segment &segment : leaf.segments()) {
         const double projection=unscaled(double(segment.point_b.x-start.x)*ux+double(segment.point_b.y-start.y)*uy);
         const double across=unscaled(std::abs(double(segment.point_b.x-start.x)*uy-double(segment.point_b.y-start.y)*ux));
         if (segment.radius!=0. || segment.z_offset_a!=0 || segment.z_offset_b!=0 || across>tolerance || projection<previous-tolerance ||
-            std::abs(ux*std::sin(angle)-uy*std::cos(angle))>1e-6)
+            std::abs(ux*std::sin(angle)-uy*std::cos(angle))>1e-6+direction_roundoff)
             throw std::runtime_error("A prepared bridge generated a non-axial, non-planar or returning strand.");
         previous=projection;
     }
