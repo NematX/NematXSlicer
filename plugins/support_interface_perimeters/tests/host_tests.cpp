@@ -62,7 +62,7 @@ void replay();
 void objects();
 // Keep interface and sparse paths in their separately selected extruders.
 void tools();
-// Export neutral and enabled interfaces while isolating the unrelated second-layer-flow compatibility defect.
+// Export neutral and enabled interfaces.
 void export_smoke(const std::filesystem::path &directory);
 
 void require(bool condition, const char *message)
@@ -252,8 +252,6 @@ void tools()
 
 void export_smoke(const std::filesystem::path &directory)
 {
-    require(Orchestrator::instance().set_plugin_active("nematx_second_layer_flow", false), "cannot isolate the unrelated second-layer flow provider");
-    std::cout << "Export isolation: nematx_second_layer_flow disabled; it dereferences region 0 on auxiliary sources without regions\n";
     for (const int count : {0, 2}) {
         Model model;
         scene(model, 1);

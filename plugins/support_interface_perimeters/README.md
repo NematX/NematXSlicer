@@ -58,13 +58,6 @@ zero with legacy, checks sparse geometry, reloads saved settings and compares
 standalone with embedded delivery. The focused host support tests cover the
 callback boundary, selection precedence, first-layer and bridge-flow handling.
 
-The export gate explicitly disables the unrelated `nematx_second_layer_flow`
-provider. Its current implementation accesses `region(0)` even on auxiliary
-support sources with no regions, before checking the neutral 100% ratio. This
-fails with the legacy support paths too. The isolation is recorded in each
-gate report and activation file; compatibility with that provider is not claimed.
-The native `--export-only` check uses the same declared isolation.
-
 The raft probe also requests three raft layers at zero and two interface
 perimeters. The current host grid pipeline does not emit a raft contact below
 the model in this fixture; the report records `not_emitted_by_host`, not a

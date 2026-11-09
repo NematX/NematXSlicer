@@ -4,9 +4,6 @@ Every declared input has a variation domain, checked against the C++ key lists.
 Cases change one input from an enabled baseline, not a Cartesian product. Other
 comparisons cover zero-count parity, explicit legacy selection, sparse paths and
 standalone versus built-in delivery. Each run owns its datadir and keeps logs.
-The unrelated second-layer flow provider is disabled explicitly: its current
-region-zero assumption rejects auxiliary support sources before its neutral
-ratio check. That compatibility defect is not part of the perimeter algorithm.
 
     main -> Gate.export -> write_roof / host CLI -> read_moves
          -> checked_domains -> linear cases -> report.json
@@ -31,7 +28,6 @@ ROLES = ("support_toolpath_bottom_contact", "support_toolpath_bottom_interface",
          "support_toolpath_top_contact", "support_toolpath_top_interface")
 LEGACY = ("support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_bottom",
           "support.toolpath.legacy_top_contact", "support.toolpath.legacy_top")
-ISOLATED_PROVIDER = "nematx_second_layer_flow"
 BASE = {
     "seam_visibility": "0", "layer_height": "0.2", "first_layer_height": "0.2",
     "gcode_comments": "1", "gcode_firmware_plugin": "gcode.firmware.marlin2",
@@ -252,12 +248,6 @@ class Gate:
             prepared = self.args.build_dir / "test-data/support_interface_perimeters"
             shutil.copy2(prepared / "plugins/activated.ini", datadir / "plugins/activated.ini")
             shutil.copytree(prepared / "plugins/nematx-support-interface-perimeters", datadir / "plugins/nematx-support-interface-perimeters")
-        activation = datadir / "plugins/activated.ini"
-        contents, replacements = re.subn(r"(?m)^nematx_second_layer_flow[ \t]*=[ \t]*[01][ \t]*$",
-                                         ISOLATED_PROVIDER + " = 0", activation.read_text(encoding="utf-8"))
-        if replacements != 1:
-            raise AssertionError("cannot establish the declared second-layer-flow isolation")
-        activation.write_text(contents, encoding="utf-8")
         model, profile, output = case / "roof.stl", case / "profile.ini", case / "output.gcode"
         write_roof(model)
         options = BASE | changes
@@ -346,7 +336,6 @@ def main() -> None:
                 gate.export(f"domain-{key}-{index}", changes)
     finally:
         (gate.root / "report.json").write_text(json.dumps({"tag": "plugin-e2e", "domains": domains,
-            "isolated_provider": {"id": ISOLATED_PROVIDER, "reason": "SecondLayerFlow accesses region(0) on support sources with zero regions before checking its neutral ratio"},
             "raft_contact": raft_contact,
             "coupled_domains": [{"setting": key, "value": value, "changes": changes} for (key, value), changes in COUPLED_DOMAINS.items()],
             "results": gate.results, "seconds": time.monotonic() - gate.started}, indent=2), encoding="utf-8")
