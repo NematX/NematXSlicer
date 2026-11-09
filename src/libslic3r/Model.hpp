@@ -355,7 +355,8 @@ enum class ModelVolumeType : int {
     SUPPORT_ENFORCER,
     SEAM_POSITION_CENTER,
     SEAM_POSITION_CENTER_Z,
-    SEAM_POSITION_INSIDE_CENTER, //TODO
+    SEAM_POSITION_INTERNAL_CENTER_Z,
+    SEAM_POSITION_INSIDE_CENTER = SEAM_POSITION_INTERNAL_CENTER_Z, // Source compatibility; serialized under the canonical name.
     SEAM_POSITION_INSIDE, //TODO
     BRIM_PATCH,
     BRIM_NEGATIVE,
@@ -880,7 +881,7 @@ public:
 	bool                is_support_enforcer()   const { return m_type == ModelVolumeType::SUPPORT_ENFORCER; }
 	bool                is_support_blocker()    const { return m_type == ModelVolumeType::SUPPORT_BLOCKER; }
     bool                is_support_modifier()   const { return m_type == ModelVolumeType::SUPPORT_BLOCKER || m_type == ModelVolumeType::SUPPORT_ENFORCER; }
-    bool                is_seam_position()      const { return m_type == ModelVolumeType::SEAM_POSITION_CENTER || m_type == ModelVolumeType::SEAM_POSITION_CENTER_Z || m_type == ModelVolumeType::SEAM_POSITION_INSIDE_CENTER || m_type == ModelVolumeType::SEAM_POSITION_INSIDE; }
+    bool                is_seam_position()      const { return m_type == ModelVolumeType::SEAM_POSITION_CENTER || m_type == ModelVolumeType::SEAM_POSITION_CENTER_Z || m_type == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z || m_type == ModelVolumeType::SEAM_POSITION_INSIDE; }
     bool                is_brim_patch()         const { return m_type == ModelVolumeType::BRIM_PATCH; }
     bool                is_brim_negative()      const { return m_type == ModelVolumeType::BRIM_NEGATIVE; }
     bool                is_brim()               const { return m_type == ModelVolumeType::BRIM_PATCH || m_type == ModelVolumeType::BRIM_NEGATIVE; }

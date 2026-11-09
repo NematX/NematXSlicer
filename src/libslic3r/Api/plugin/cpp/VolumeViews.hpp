@@ -388,7 +388,7 @@ public:
         const raw_volume_type value = type();
         return value == RAW_VOLUME_TYPE_SEAM_POSITION_CENTER ||
                value == RAW_VOLUME_TYPE_SEAM_POSITION_CENTER_Z ||
-               value == RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER ||
+               value == RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z ||
                value == RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE;
     }
     bool is_brim() const { return type() == RAW_VOLUME_TYPE_BRIM_PATCH || type() == RAW_VOLUME_TYPE_BRIM_NEGATIVE; }

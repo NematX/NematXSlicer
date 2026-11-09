@@ -2091,8 +2091,8 @@ ModelVolumeType ModelVolume::type_from_string(const std::string &s)
         return ModelVolumeType::SEAM_POSITION_CENTER;
     if (s == "SeamPositionCenterZ")
         return ModelVolumeType::SEAM_POSITION_CENTER_Z;
-    if (s == "SeamPositionInsideCenter")
-        return ModelVolumeType::SEAM_POSITION_INSIDE_CENTER;
+    if (s == "SeamPositionInternalCenterZ" || s == "SeamPositionInsideCenter")
+        return ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z;
     if (s == "SeamPositionInside")
         return ModelVolumeType::SEAM_POSITION_INSIDE;
     if (s == "BrimPatch")
@@ -2114,7 +2114,7 @@ std::string ModelVolume::type_to_string(const ModelVolumeType t)
 	case ModelVolumeType::SUPPORT_BLOCKER:    return "SupportBlocker";
     case ModelVolumeType::SEAM_POSITION_CENTER:         return "SeamPositionCenter";
     case ModelVolumeType::SEAM_POSITION_CENTER_Z:       return "SeamPositionCenterZ";
-    case ModelVolumeType::SEAM_POSITION_INSIDE_CENTER:  return "SeamPositionInsideCenter";
+    case ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z: return "SeamPositionInternalCenterZ";
     case ModelVolumeType::SEAM_POSITION_INSIDE:         return "SeamPositionInside";
     case ModelVolumeType::BRIM_PATCH:         return "BrimPatch";
     case ModelVolumeType::BRIM_NEGATIVE:      return "BrimNegative";

@@ -110,6 +110,12 @@ has published them, also for a direct export of a reference it did not produce. 
 only if the numeric statistics exist and the text `statistics` list is not empty, else zero. All of it is host memory
 borrowed for the synchronous EXPORT call. Plugins built for 4.1 keep working.
 
+Volume API 2.1 names value 7
+`RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z`; `INSIDE_CENTER` remains a
+source-compatible alias. Projects write `SeamPositionInternalCenterZ` and also
+read the old `SeamPositionInsideCenter` spelling. This is an additive name, not
+a change to the numeric volume layout.
+
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the
 DLL export. Packaging extracts it without loading the library and fails if it

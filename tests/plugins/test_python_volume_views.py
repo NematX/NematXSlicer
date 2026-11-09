@@ -403,6 +403,10 @@ class PythonVolumeViewTests(unittest.TestCase):
         self.assertEqual([call["z"] for call in api.host.slice_calls], [[]])
 
     def test_volume_role_and_painting_predicates(self):
+        # Canonical and historical spellings must keep the same persisted identity.
+        self.assertEqual(self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z, 7)
+        self.assertEqual(self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER,
+                         self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z)
         api = self.make_api()
         role_checks = {
             self.generated.RAW_VOLUME_TYPE_MODEL_PART: "is_model_part",
@@ -412,7 +416,7 @@ class PythonVolumeViewTests(unittest.TestCase):
             self.generated.RAW_VOLUME_TYPE_SUPPORT_BLOCKER: "is_support_blocker",
             self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_CENTER: "is_seam_position",
             self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_CENTER_Z: "is_seam_position",
-            self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER: "is_seam_position",
+            self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z: "is_seam_position",
             self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE: "is_seam_position",
             self.generated.RAW_VOLUME_TYPE_BRIM_PATCH: "is_brim",
             self.generated.RAW_VOLUME_TYPE_BRIM_NEGATIVE: "is_brim",

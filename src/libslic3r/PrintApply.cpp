@@ -58,9 +58,8 @@ Representative direct calls (branches are not a timeline):
 
 namespace Slic3r {
 
-// Add or remove support modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
-// in the exact order and with the same IDs.
-// It is expected, that the model_object_dst already contains the non-support volumes of model_object_new in the correct order.
+// Match support, seam and brim helper volumes to model_object_new, in its exact order and with the same IDs.
+// The destination already contains the printable parts and parameter modifiers in the correct order.
 // Friend to ModelVolume to allow copying.
 // static is not accepted by gcc if declared as a friend of ModelObject.
 /* static */ void model_volume_list_update_supports_seams(ModelObject &model_object_dst, const ModelObject &model_object_new)
@@ -83,12 +82,14 @@ namespace Slic3r {
             assert(! it->second); // not consumed yet
             it->second = true;
             ModelVolume *model_volume_dst = const_cast<ModelVolume*>(it->first);
-            // For support modifiers, the type may have been switched from blocker to enforcer and vice versa.
-            assert((model_volume_dst->is_support_modifier() && model_volume_src->is_support_modifier()) || model_volume_dst->type() == model_volume_src->type());
+            // Non-printing seam volumes may change kind without rebuilding the model part.
+            assert((model_volume_dst->is_support_modifier() && model_volume_src->is_support_modifier()) ||
+                   (model_volume_dst->is_seam_position() && model_volume_src->is_seam_position()) ||
+                   model_volume_dst->type() == model_volume_src->type());
             model_object_dst.volumes.emplace_back(model_volume_dst);
             if (model_volume_dst->is_support_modifier() || model_volume_dst->is_seam_position() ||
                 model_volume_dst->is_brim()) {
-                // For support modifiers, the type may have been switched from blocker to enforcer and vice versa.
+                // Copy the helper kind and transform without replacing printable geometry.
                 model_volume_dst->set_type(model_volume_src->type());
                 model_volume_dst->set_transformation(model_volume_src->get_transformation());
             }
@@ -1335,7 +1336,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         auto print_objects_range        = print_object_status_db.get_range(model_object);
         bool seam_position_differ       = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_CENTER)
             || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_CENTER_Z)
-            || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INSIDE_CENTER)
+            || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z)
             || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INSIDE);
         bool brim_patch_differ          = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_PATCH) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_NEGATIVE);
@@ -1384,8 +1385,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     // First stop background processing before shuffling or deleting the ModelVolumes in the ModelObject's list.
                     this->call_cancel_callback();
                     update_apply_status(false);
-                    // Invalidate just the gcode step.
-                    update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_GCODE)));
+                    // Seam volumes are read while ordering rotates the plan loops.
+                    update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_ORDERING)));
                     // Copy just the seam volumes.
                     model_volume_list_update_supports_seams(model_object, model_object_new);
                 } else if (brim_patch_differ) {
@@ -1397,7 +1398,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     model_volume_list_update_supports_seams(model_object, model_object_new);
                 }
             } else if (model_custom_seam_data_changed(model_object, model_object_new)) {
-                update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_GCODE)));
+                update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_ORDERING)));
             }
         }
         if (! solid_or_modifier_differ) {

@@ -78,12 +78,52 @@
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Format/OBJ.hpp"
+#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
+
+// Keep persisted names compatible without changing the public volume numbering.
+TEST_CASE("Internal seam attractor names retain the stable volume identity", "[volume][internal-seam]")
+{
+    using namespace Slic3r;
+    static_assert(int(ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z) == 7);
+    static_assert(int(ModelVolumeType::SEAM_POSITION_INSIDE) == 8);
+    static_assert(int(ModelVolumeType::BRIM_PATCH) == 9);
+    static_assert(RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z == 7);
+    CHECK(ModelVolume::type_from_string("SeamPositionInsideCenter") == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
+    CHECK(ModelVolume::type_from_string("SeamPositionInternalCenterZ") == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::SEAM_POSITION_INSIDE_CENTER) == "SeamPositionInternalCenterZ");
+
+    Model model;
+    ModelObject *object = model.add_object("cube", "cube.stl", make_cube(4, 4, 1.5));
+    object->add_instance();
+    ModelVolume *attractor = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z, false);
+    CHECK(attractor->is_seam_position());
+    const slic3r_api::Volume view(reinterpret_cast<const volume_handle *>(attractor));
+    CHECK(view.type() == RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z);
+    CHECK(view.is_seam_position());
+
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("internal-seam-" + std::to_string(attractor->id().id) + ".3mf");
+    struct ArchiveOwner {
+        std::filesystem::path path;
+        // Release only the archive created by this test.
+        ~ArchiveOwner() { std::error_code error; std::filesystem::remove(path, error); }
+    } archive{path};
+    const DynamicPrintConfig saved_config;
+    REQUIRE(store_3mf(path.u8string().c_str(), &model, &saved_config));
+    Model loaded;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(path.u8string().c_str(), config, substitutions, &loaded, false, false));
+    REQUIRE(loaded.objects().size() == 1);
+    REQUIRE(loaded.objects().front().volumes.size() == 2);
+    CHECK(loaded.objects().front().volumes.back()->type() == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
+}
 
 namespace {
 

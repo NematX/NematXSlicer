@@ -6,7 +6,7 @@
 #define slic3r_volume_h_
 
 #define SLIC3R_PLUGIN_API_VOLUME_MAJOR 2u
-#define SLIC3R_PLUGIN_API_VOLUME_MINOR 0u
+#define SLIC3R_PLUGIN_API_VOLUME_MINOR 1u
 
 #include <stdint.h>
 
@@ -85,7 +85,10 @@ typedef enum raw_volume_type {
     RAW_VOLUME_TYPE_SUPPORT_ENFORCER            = 4,
     RAW_VOLUME_TYPE_SEAM_POSITION_CENTER        = 5,
     RAW_VOLUME_TYPE_SEAM_POSITION_CENTER_Z      = 6,
-    RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER = 7,
+    /* Internal-perimeter attractor, active only through the volume's height.
+       The old spelling is an alias; no existing numeric value changes. */
+    RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z = 7,
+    RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER = RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z,
     RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE        = 8,
     RAW_VOLUME_TYPE_BRIM_PATCH                  = 9,
     RAW_VOLUME_TYPE_BRIM_NEGATIVE               = 10
