@@ -1715,7 +1715,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
     }
 }
 
-// Called by avoid_perimeters() and by simplify_travel_heuristics().
+// Adjust endpoints and append the routed path to the expected-empty result_out; return the intersection count.
 static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &boundary, // not const because of possible late init of island_to_grid
                                      const Point                             &real_start,
                                      const Point                             &real_end,
@@ -1779,7 +1779,7 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
                 }
             }
 
-            // travel strait to the nearest point to the same boudary as the other one, if it reduce the strait travel
+            // Scan consecutive ring edges so the unmatched endpoint projects onto the other endpoint's boundary.
             auto saerch_best_pt = [&](const EdgeGrid::Grid::ClosestPointResult &good_one,
                                       Point &bad_one)->bool {
                 coordf_t min_dist_sqr = dist*dist;
@@ -1795,6 +1795,7 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
                         min_dist_sqr = dist_sqr;
                         best_pt = nearest;
                     }
+                    last_pt = current;
                 }
                 bad_one = best_pt;
                 return  min_dist_sqr < dist*dist;

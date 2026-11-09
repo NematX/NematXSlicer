@@ -83,6 +83,12 @@ builds the core's internal boundary (the inset rings used for routes inside
 the object) lazily; one resulting ring must contain points on both sides of
 the passage, checking that the width-aware inset keeps it joined.
 
+A core-only square with a distant island tests endpoint placement. The island
+widens that internal boundary's bounding box so the departure stays inside it,
+while grid queries within half the travel length find a ring only for arrival.
+The next route point must be the departure's projection onto the square
+boundary edge, rather than an arbitrary vertex.
+
     Travel tests
     |-- Plugin/core comparisons
     |   |-- Print::process: slice meshes and generate source extrusions
@@ -95,7 +101,8 @@ the passage, checking that the width-aware inset keeps it joined.
         |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
         |-- travel_to: measure the raw-slice flow-spacing inset
         |-- internal_boundary: check excluded tops and borrowed grid points
-        `-- travel_to, internal_boundary: check the notched passage remains joined
+        |-- travel_to, internal_boundary: check the notched passage remains joined
+        `-- travel_to, internal_boundary: check grid misses and the edge projection
 
 The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
@@ -189,6 +196,53 @@ TEST_CASE("Core travel boundary preserves the passage beneath a notch",
         if (ring.contains(left) && ring.contains(right)) ++spanning;
     std::cout << "notch: boundaries=" << boundary.boundaries.size() << " spanning=" << spanning << std::endl;
     CHECK(spanning == 1);
+}
+
+// A distant island keeps the outside endpoint in the routing box while only the square is close to the arrival.
+TEST_CASE("Core travel endpoint fallback projects onto a boundary edge",
+          "[plugins][travel][avoid-crossing-parity]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
+        {"bottom_solid_layers", "0"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"gap_fill_enabled", "0"}, {"thin_walls", "0"}, {"thin_perimeters", "0"},
+        {"avoid_crossing_top", "0"}, {"avoid_travel_island", "0"}});
+    TriangleMesh mesh = make_cube(20., 20., 0.6);
+    TriangleMesh distant = make_cube(5., 5., 0.6);
+    distant.translate(100.f, 100.f, 0.f);
+    mesh.merge(distant);
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    const Layer &layer = print.object(0).layers().front();
+    const BoundingBox bounds = get_extents(layer.lslices());
+    const Point from = bounds.min + Point(scale_i(7.123), scale_i(60.));
+    const Point to = bounds.min + Point(scale_i(7.123), scale_i(19.));
+    AvoidCrossingPerimeters router;
+    router.init_layer(layer);
+    const Polyline route = router.travel_to({layer, from, Point::Zero(), extruder_index_t(0), 0., false}, to);
+    const AvoidCrossingPerimeters::Boundary &boundary = router.internal_boundary();
+    const double radius = from.distance_to(to) / 2;
+    CHECK(boundary.grid.closest_point_signed_distance(from, radius).contour_idx == size_t(-1));
+    REQUIRE(boundary.grid.closest_point_signed_distance(to, radius).contour_idx != size_t(-1));
+    const Polygon *square = nullptr;
+    for (const Polygon &ring : boundary.boundaries)
+        if (ring.contains(to)) square = &ring;
+    REQUIRE(square != nullptr);
+    const Point projection(from.x(), get_extents(*square).max.y());
+    std::cout << "endpoint projection core:";
+    for (const Point &point : route.points) std::cout << " (" << point.x() << "," << point.y() << ")";
+    std::cout << " expected=(" << projection.x() << "," << projection.y() << ")" << std::endl;
+    REQUIRE(route.size() > 2);
+    CHECK(route.points[1] == projection);
 }
 
 TEST_CASE("Avoid-crossing resolves a sliced modifier boundary with an interior probe",
