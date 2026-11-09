@@ -6,10 +6,16 @@
 #define slic3r_def_h_
 
 #define SLIC3R_PLUGIN_API_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_DEF_MINOR 4u
+#define SLIC3R_PLUGIN_API_DEF_MINOR 5u
 
 #include <assert.h>
 #include <stdint.h>
+
+/* Typed runtime identities belong to one orchestrator. Stable names, not these
+   numeric values, identify them across orchestrators or serialized files. */
+typedef uint32_t orchestrator_runtime_id;
+#define ORCHESTRATOR_RUNTIME_ID_INVALID ((orchestrator_runtime_id)UINT32_MAX)
+#define ORCHESTRATOR_RUNTIME_ID_DYNAMIC_BEGIN ((orchestrator_runtime_id)0x80000000u)
 
 /*
 Common C types and constants used by the plugin headers live here. Geometry
@@ -51,6 +57,7 @@ typedef uint32_t slic3r_property_type;
 #define SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME             ((slic3r_property_type)18u)
 #define SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND             ((slic3r_property_type)19u)
 #define SLIC3R_PROPERTY_TYPE_SUPPORT_PIPELINE          ((slic3r_property_type)20u)
+#define SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN              ((slic3r_property_type)21u)
 
 #ifdef __cplusplus
 #define SLIC3R_CONSTEXPR_INLINE constexpr inline

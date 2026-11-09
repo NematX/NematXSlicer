@@ -79,7 +79,8 @@ static_assert(offsetof(Abi3PluginVtable, get_id) == 0, "ABI3 has no size prefix.
     defined(SLIC3R_TEST_PLUGIN_SHORT_API_TABLE) || defined(SLIC3R_TEST_PLUGIN_LONG_API_TABLE) || \
     defined(SLIC3R_TEST_PLUGIN_UNKNOWN_API) || defined(SLIC3R_TEST_PLUGIN_ZERO_API_TABLE) || \
     defined(SLIC3R_TEST_PLUGIN_MISSING_VTABLE) || defined(SLIC3R_TEST_PLUGIN_INVALID_API_SIZE) || \
-    defined(SLIC3R_TEST_PLUGIN_CHANGING_API_SIZE) || defined(SLIC3R_TEST_PLUGIN_ABI3)
+    defined(SLIC3R_TEST_PLUGIN_CHANGING_API_SIZE) || defined(SLIC3R_TEST_PLUGIN_ABI3) || \
+    defined(SLIC3R_TEST_PLUGIN_OLD_SPEED_FAN)
 extern "C" SLIC3R_PLUGIN_API int32_t slic3r_plugin_abi_version(
     slic3r_major_minor_version *requirements)
 {
@@ -120,6 +121,11 @@ extern "C" SLIC3R_PLUGIN_API int32_t slic3r_plugin_abi_version(
 #endif
 #ifdef SLIC3R_TEST_PLUGIN_BAD_API_MINOR
     requirements[SLIC3R_PLUGIN_API_PLUGIN_TYPES].minor = SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR + 1;
+#endif
+#ifdef SLIC3R_TEST_PLUGIN_OLD_SPEED_FAN
+    // Actual former Speed layout, not current-version-plus-one.
+    requirements[SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY].major = 3;
+    requirements[SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY].minor = 0;
 #endif
 #ifdef SLIC3R_TEST_PLUGIN_CHANGING_API_SIZE
     return int32_t(count - 1);

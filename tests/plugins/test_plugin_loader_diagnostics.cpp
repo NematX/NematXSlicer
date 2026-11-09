@@ -296,6 +296,46 @@ TEST_CASE("Packages built without the group-priority vtable entry are rejected b
     CHECK(report.issues.front().detail.find("Registration fixture failure") == std::string::npos);
 }
 
+TEST_CASE("Plugin loader rejects the former combined Speed fan ABI",
+          "[plugins][loader][diagnostics][abi][fan-request]")
+{
+    SECTION("exported table is checked before registration") {
+        const auto &report = load_fixture(
+            boost::filesystem::path(SLIC3R_TEST_PLUGIN_OLD_SPEED_FAN_DLL), "diagnostic.old_speed_fan");
+        REQUIRE(report.issues.size() == 1);
+        CHECK(report.issues.front().code == Slic3r::PluginPackageLoadErrorCode::ApiHeaderVersionMismatch);
+        CHECK(report.registered_plugin_ids.empty());
+        CHECK(report.issues.front().detail.find("slic3r_extrusion_property.h") != std::string::npos);
+        CHECK(report.issues.front().detail.find("Registration fixture failure") == std::string::npos);
+    }
+    SECTION("sidecar is checked before opening the library") {
+        const auto repository = boost::filesystem::temp_directory_path() /
+            boost::filesystem::unique_path("slic3r-old-speed-fan-%%%%-%%%%");
+        const auto package = repository / "diagnostic.old_speed_fan.sidecar";
+        write_package_metadata(package, "diagnostic.old_speed_fan.sidecar");
+        {
+            boost::nowide::ofstream version((package / "version.ini").string());
+            version << "[plugin]\npackage_version=1.0.0\nslicer_version=2.7.63.0\n"
+                       "[abi]\nslic3r_plugin_types.h="
+                    << SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR << "."
+                    << SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR
+                    << "\nslic3r_extrusion_property.h=3.0\n";
+            boost::nowide::ofstream binary((package / plugin_library_filename()).string());
+            binary << "not a library: opening this must never be attempted";
+        }
+        auto &host = Slic3r::Orchestrator::instance();
+        host.clear_plugin_package_load_reports();
+        Slic3r::load_plugin_packages_from_repository(repository, host);
+        const auto *report = host.plugin_package_load_report("diagnostic.old_speed_fan.sidecar");
+        REQUIRE(report != nullptr);
+        REQUIRE(report->issues.size() == 1);
+        CHECK(report->issues.front().code == Slic3r::PluginPackageLoadErrorCode::ApiHeaderVersionMismatch);
+        CHECK(report->issues.front().detail.find("slic3r_extrusion_property.h") != std::string::npos);
+        CHECK(report->registered_plugin_ids.empty());
+        boost::filesystem::remove_all(repository);
+    }
+}
+
 TEST_CASE("Plugin loader rejects an API header minor version newer than the host",
           "[plugins][loader][diagnostics]")
 {

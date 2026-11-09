@@ -1137,6 +1137,18 @@ Orchestrator::Orchestrator()
     assert(portable_reader_registered);
     (void) portable_reader_registered;
 
+    const std::pair<const char *, orchestrator_runtime_id> builtin_fan_modes[] = {
+        {FAN_REQUEST_MODE_NAME_UNSPECIFIED, FAN_REQUEST_MODE_UNSPECIFIED},
+        {FAN_REQUEST_MODE_NAME_AUTOMATIC, FAN_REQUEST_MODE_AUTOMATIC},
+        {FAN_REQUEST_MODE_NAME_OVERRIDE, FAN_REQUEST_MODE_OVERRIDE},
+    };
+    bool builtin_fan_modes_registered = true;
+    for (const auto &mode : builtin_fan_modes)
+        builtin_fan_modes_registered = this->register_static_runtime_id(
+            FAN_REQUEST_MODE_ID_TYPE, mode.first, mode.second) && builtin_fan_modes_registered;
+    assert(builtin_fan_modes_registered);
+    (void) builtin_fan_modes_registered;
+
     // Script events keep their compact historical values in PrintingPlan.
     // Reserving every stable name in the generic registry gives built-in and
     // plugin-defined scripts the same lookup path without making the numeric

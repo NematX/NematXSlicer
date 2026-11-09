@@ -135,6 +135,9 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/DynamicFan.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FanCooling.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
 #include "libslic3r/Plugins/SkirtBrim/DefaultBrimSkirtTrim.hpp"
@@ -837,6 +840,12 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::LayerExtrusionEdit::DefaultAccelerationPlugin::register_default_acceleration_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel_deceleration.default",
         slic3r_api::LayerExtrusionEdit::DefaultTravelDecelerationPlugin::register_default_travel_deceleration_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.cooling",
+        slic3r_api::LayerExtrusionEdit::FanCoolingPlugin::register_fan_cooling_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.first_layers",
+        slic3r_api::LayerExtrusionEdit::FirstLayerFanPlugin::register_first_layer_fan_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.dynamic",
+        slic3r_api::LayerExtrusionEdit::DynamicFanPlugin::register_dynamic_fan_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.default",
         slic3r_api::LayerExtrusionEdit::DefaultFanPlugin::register_default_fan_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.temperature.default",
@@ -1206,6 +1215,11 @@ void load_plugins()
             plugin_config,
             "gcode.firmware.default",
             {"gcode.firmware.marlin2"})) ||
+            activation_config_changed;
+        activation_config_changed = (user_configuration_available && migrate_plugin_activation_id(
+            plugin_config, "layer_extrusion_edit.fan.default",
+            {"layer_extrusion_edit.fan.default", "layer_extrusion_edit.fan.cooling",
+             "layer_extrusion_edit.fan.first_layers", "layer_extrusion_edit.fan.dynamic"})) ||
             activation_config_changed;
         if (ensure_plugin_activation_config(boost::filesystem::path(), default_plugin_config,
                                             ignored_from_user_config, plugin_config_error)) {

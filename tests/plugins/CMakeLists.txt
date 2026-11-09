@@ -41,6 +41,8 @@ add_executable(${_TEST_NAME}_tests
     test_geometry_primitives.cpp
     test_extrusion_split_by_areas.cpp
     test_extrusion_views.cpp
+    fan_policy_c_fixture.c
+    test_fan_policy.cpp
     test_fff_print_gui_rules.cpp
     test_plugin_activation_config.cpp
     test_plugin_api_compatibility.cpp
@@ -268,7 +270,7 @@ target_compile_definitions(${_TEST_NAME}_tests PRIVATE
     SLIC3R_TEST_PLUGIN_THROW_REGISTER_DLL=R"\($<TARGET_FILE:plugin_loader_throw_register_fixture>\)")
 
 # Malformed protocol fixtures must fail before their throwing registration runs.
-foreach(_variant IN ITEMS abi3 legacy_abi unknown_api zero_api_table missing_vtable invalid_api_size changing_api_size)
+foreach(_variant IN ITEMS abi3 legacy_abi unknown_api zero_api_table missing_vtable invalid_api_size changing_api_size old_speed_fan)
     string(TOUPPER "${_variant}" _variant_upper)
     add_library(plugin_loader_${_variant}_fixture SHARED plugin_loader_fixture.cpp)
     target_compile_definitions(plugin_loader_${_variant}_fixture PRIVATE

@@ -280,6 +280,8 @@ void* ExtrusionPropertyContainer::get_or_add_property_data_mutable(extrusion_pro
         return &this->get_or_add_property<ExtrusionAttributes>();
     case ExtrusionPropertySpeed::property_type:
         return &this->get_or_add_property<ExtrusionPropertySpeed>().speed_mm_per_s;
+    case ExtrusionPropertyFan::property_type:
+        return &this->get_or_add_property<ExtrusionPropertyFan>().percent;
     case ExtrusionPropertyModifier::property_type:
         return &this->get_or_add_property<ExtrusionPropertyModifier>().enforce_travel;
     case ExtrusionPropertySpecialCommand::property_type:

@@ -149,9 +149,16 @@ protected:
     template<class PropertyType>
     const PropertyType* current_property() const
     {
+        return current_property<PropertyType>([](const PropertyType &) { return true; });
+    }
+
+    template<class PropertyType, class Predicate>
+    const PropertyType *current_property(Predicate accepts) const
+    {
         for (auto it = m_stack.rbegin(); it != m_stack.rend(); ++it) {
             if (const PropertyType *property = it->entity->template get_property<PropertyType>())
-                return property;
+                if (accepts(*property))
+                    return property;
         }
         return nullptr;
     }

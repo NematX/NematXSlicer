@@ -115,9 +115,11 @@ class AbiPackagingTests(unittest.TestCase):
         catalog = json.loads(self.generator.generate_abi_catalog())
         for symbol in ("PLUGIN_ERROR_OK", "PLUGIN_ERROR_GENERAL"):
             self.assertEqual(catalog["python_symbols"][symbol], ["slic3r_plugin_types.h"])
-        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 1])
+        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 2])
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH"], 58)
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT"], 59)
+        self.assertEqual(namespace["SLIC3R_PLUGIN_API_FAN_POLICY"], 60)
+        self.assertEqual(namespace["SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME"], 61)
         self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 6])
         self.assertEqual(catalog["headers"]["slic3r_orchestrator.h"]["version"], [3, 5])
         self.assertEqual(namespace["PLUGIN_INITIALIZE"]._restype_, ctypes.c_int32)
@@ -182,6 +184,11 @@ class AbiPackagingTests(unittest.TestCase):
             )
             self.assertIn("slic3r_gcode_firmware.h", catalog["headers"])
             self.assertIn("steps/slic3r_step_gcode_firmware.h", catalog["headers"])
+            for header, symbol, version in (("slic3r_fan_policy.h", "CFanPolicyContext", [2, 0]),
+                                            ("slic3r_printing_layer_time.h", "CPrintingLayerTimeProperty", [1, 0])):
+                self.assertEqual(catalog["headers"][header]["version"], version)
+                self.assertEqual(catalog["headers"][header]["dependencies"], [])
+                self.assertEqual(catalog["python_symbols"][symbol], [header])
             self.assertNotIn(
                 "slic3r_gcode_thumbnail.h",
                 catalog["headers"]["steps/slic3r_step_gcode.h"]["dependencies"],
@@ -195,6 +202,11 @@ class AbiPackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
             bindings = self.analyzer.build_binding_index(runtime, catalog)
+            for symbol, header in (("fan_policy_context_key", "slic3r_fan_policy.h"),
+                                   ("printing_layer_time_property_key", "slic3r_printing_layer_time.h"),
+                                   ("validate_fan_policy_context", "slic3r_fan_policy.h"),
+                                   ("validate_printing_layer_time", "slic3r_printing_layer_time.h")):
+                self.assertIn(header, bindings.symbols[symbol])
 
             for method in (
                 "path_count",

@@ -69,6 +69,12 @@ if (TARGET Python3::Python)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/../libslic3r/Api/plugin/python/slic3r_property_key.py"
             "$<TARGET_FILE_DIR:python_plugin_loader>/python/slic3r_property_key.py"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/../libslic3r/Api/plugin/python/slic3r_runtime_id.py"
+            "$<TARGET_FILE_DIR:python_plugin_loader>/python/slic3r_runtime_id.py"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/../libslic3r/Api/plugin/python/slic3r_fan_policy.py"
+            "$<TARGET_FILE_DIR:python_plugin_loader>/python/slic3r_fan_policy.py"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/../libslic3r/Api/plugin/python/slic3r_run_context.py"
             "$<TARGET_FILE_DIR:python_plugin_loader>/python/slic3r_run_context.py"

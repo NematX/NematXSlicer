@@ -131,7 +131,9 @@ std::unique_ptr<ExtrusionPath> make_firmware_path(const ArcPolyline &polyline,
     std::unique_ptr<ExtrusionPath> path(
         new ExtrusionPath(polyline, attributes, nullptr, true));
     path->add_property(ExtrusionPropertySpeed(
-        speed, acceleration, pressure_advance, fan_speed));
+        speed, acceleration, pressure_advance));
+    if (fan_speed >= 0.f)
+        path->add_property(ExtrusionPropertyFan(fan_speed, FAN_REQUEST_MODE_OVERRIDE));
     if (temperature >= 0.f)
         path->add_property(ExtrusionPropertyHeater(
             C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, int16_t(temperature), false));

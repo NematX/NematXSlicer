@@ -8,16 +8,19 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
 #include <string>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "Api/plugin/c/slic3r_extrusion_property.h"
+#include "Api/plugin/cpp/properties/FanRequestPayload.hpp"
 #include "ExtrusionRole.hpp"
 #include "PropertyStorage.hpp"
 #include "libslic3r.h"
@@ -33,6 +36,7 @@ class Flow;
 using PropertySlot = PropertyStorageSlot;
 struct ExtrusionAttributes;
 class ExtrusionPropertySpeed;
+class ExtrusionPropertyFan;
 class ExtrusionPropertyModifier;
 class ExtrusionPropertyCustomGcode;
 class ExtrusionPropertyCustomGcodeText;
@@ -56,6 +60,7 @@ enum : extrusion_property_type {
     extrusion_property_type_invalid         = EXTRUSION_PROPERTY_TYPE_INVALID,
     extrusion_property_type_attributes      = EXTRUSION_PROPERTY_TYPE_ATTRIBUTES,
     extrusion_property_type_speed           = EXTRUSION_PROPERTY_TYPE_SPEED,
+    extrusion_property_type_fan             = EXTRUSION_PROPERTY_TYPE_FAN,
     extrusion_property_type_modifier        = EXTRUSION_PROPERTY_TYPE_MODIFIER,
     extrusion_property_type_custom_gcode    = EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE,
     extrusion_property_type_special_command = EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND,
@@ -122,8 +127,8 @@ public:
     static constexpr extrusion_property_type property_type = extrusion_property_type_speed;
 
     // Initialize inherited process values; negative values mean that a value is not requested.
-    ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1, float fan = -1)
-        : c_extrusion_property_speed{ speed, accel, pa, fan } {}
+    ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1)
+        : c_extrusion_property_speed{ speed, accel, pa } {}
 
     // Set the inherited speed in millimeters per second.
     ExtrusionPropertySpeed& speed(float speed) { speed_mm_per_s = speed; return *this; }
@@ -131,10 +136,20 @@ public:
     ExtrusionPropertySpeed& acceleration(float accel) { accel_mm_per_s2 = accel; return *this; }
     // Set the inherited pressure-advance value.
     ExtrusionPropertySpeed& presure_advance(float pa) { pressure_adv = pa; return *this; }
-    // Set the inherited fan percentage, constrained to -1 through 100.
-    ExtrusionPropertySpeed& fan_speed(float fspeed) { assert(fspeed >= -1 && fspeed <= 100); fan_speed_percent = fspeed; return *this; }
 
     // Clone this C-layout process payload into an owned property slot.
+    ExtrusionPropertyUPtr clone() const;
+};
+
+// An exclusive, atomically inherited logical fan request. Zero bytes inherit.
+class ExtrusionPropertyFan : public slic3r_api::FanRequestPayload<ExtrusionPropertyFan>
+{
+public:
+    static constexpr extrusion_property_type property_type = extrusion_property_type_fan;
+    ExtrusionPropertyFan() { clear(); }
+    ExtrusionPropertyFan(float value, fan_request_mode request_mode) : ExtrusionPropertyFan() {
+        set(value, request_mode);
+    }
     ExtrusionPropertyUPtr clone() const;
 };
 
@@ -333,6 +348,7 @@ struct ExtrusionPropertyTraits
 static_assert(sizeof(ExtrusionFlow) == sizeof(c_extrusion_flow), "ExtrusionFlow must keep the C ABI layout");
 static_assert(sizeof(ExtrusionAttributes) == sizeof(c_extrusion_property_attributes), "ExtrusionAttributes must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertySpeed) == sizeof(c_extrusion_property_speed), "ExtrusionPropertySpeed must keep the C ABI layout");
+static_assert(sizeof(ExtrusionPropertyFan) == sizeof(c_extrusion_property_fan), "ExtrusionPropertyFan must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertyModifier) == sizeof(c_extrusion_property_modifier), "ExtrusionPropertyModifier must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertyCustomGcode) == sizeof(c_extrusion_property_custom_gcode), "ExtrusionPropertyCustomGcode must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertySpecialCommand) == sizeof(c_extrusion_property_special_command), "ExtrusionPropertySpecialCommand must keep the C ABI layout");
@@ -346,6 +362,7 @@ static_assert(sizeof(ExtrusionPropertyHeater) == sizeof(c_extrusion_property_hea
 static_assert(alignof(ExtrusionFlow) == alignof(c_extrusion_flow), "ExtrusionFlow must keep the C ABI alignment");
 static_assert(alignof(ExtrusionAttributes) == alignof(c_extrusion_property_attributes), "ExtrusionAttributes must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertySpeed) == alignof(c_extrusion_property_speed), "ExtrusionPropertySpeed must keep the C ABI alignment");
+static_assert(alignof(ExtrusionPropertyFan) == alignof(c_extrusion_property_fan), "ExtrusionPropertyFan must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertyModifier) == alignof(c_extrusion_property_modifier), "ExtrusionPropertyModifier must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertyCustomGcode) == alignof(c_extrusion_property_custom_gcode), "ExtrusionPropertyCustomGcode must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertySpecialCommand) == alignof(c_extrusion_property_special_command), "ExtrusionPropertySpecialCommand must keep the C ABI alignment");
@@ -359,6 +376,7 @@ static_assert(alignof(ExtrusionPropertyHeater) == alignof(c_extrusion_property_h
 static_assert(std::is_standard_layout<ExtrusionFlow>::value, "ExtrusionFlow must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionAttributes>::value, "ExtrusionAttributes must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertySpeed>::value, "ExtrusionPropertySpeed must keep the C ABI layout");
+static_assert(std::is_standard_layout<ExtrusionPropertyFan>::value, "ExtrusionPropertyFan must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertyModifier>::value, "ExtrusionPropertyModifier must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertyCustomGcode>::value, "ExtrusionPropertyCustomGcode must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertySpecialCommand>::value, "ExtrusionPropertySpecialCommand must keep the C ABI layout");
@@ -371,6 +389,7 @@ static_assert(std::is_standard_layout<ExtrusionPropertyHeater>::value, "Extrusio
 
 static_assert(std::is_trivially_copyable<ExtrusionAttributes>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertySpeed>::value, "Stored extrusion properties must be trivially copyable");
+static_assert(std::is_trivially_copyable<ExtrusionPropertyFan>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertyModifier>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertyCustomGcode>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertySpecialCommand>::value, "Stored extrusion properties must be trivially copyable");
@@ -397,6 +416,7 @@ inline ExtrusionPropertyUPtr clone_property_to_slot(const PropertyType &property
 
 inline ExtrusionPropertyUPtr ExtrusionAttributes::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertySpeed::clone() const { return clone_property_to_slot(*this); }
+inline ExtrusionPropertyUPtr ExtrusionPropertyFan::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertyModifier::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertyCustomGcode::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertySpecialCommand::clone() const { return clone_property_to_slot(*this); }

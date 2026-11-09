@@ -11,6 +11,7 @@
 #include <sstream>
 #include <utility>
 #include <vector>
+#include <boost/log/trivial.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
@@ -207,12 +208,16 @@ message or log entry.
 */
 struct SpeedValidationReport
 {
+    explicit SpeedValidationReport(const Orchestrator &orchestrator) :
+        runtime_orchestrator(reinterpret_cast<const orchestrator_handle *>(&orchestrator)) {}
+    const orchestrator_handle *runtime_orchestrator;
     size_t error_count = 0;
     size_t speed_error_count = 0;
     size_t extrusion_e_only_error_count = 0;
     size_t scope_event_error_count = 0;
     size_t missing_root_count = 0;
     size_t unsupported_role_error_count = 0;
+    size_t fan_error_count = 0;
     std::vector<std::string> details;
 
     void add_speed_error(std::string detail)
@@ -251,6 +256,14 @@ struct SpeedValidationReport
     {
         ++error_count;
         ++unsupported_role_error_count;
+        if (details.size() < MaximumReportedValidationErrors)
+            details.push_back(std::move(detail));
+    }
+
+    void add_fan_error(std::string detail)
+    {
+        ++error_count;
+        ++fan_error_count;
         if (details.size() < MaximumReportedValidationErrors)
             details.push_back(std::move(detail));
     }
@@ -750,6 +763,11 @@ void validate_extrusion_tree_movements(const Print &print,
                                        SpeedValidationReport &report)
 {
     SpeedTraversalState state = parent_state;
+    if (const ExtrusionPropertyFan *fan = entity.get_property<ExtrusionPropertyFan>()) {
+        if (!fan->is_valid(report.runtime_orchestrator))
+            report.add_fan_error(extrusion_tree_path(location, child_path) +
+                ": invalid EPropertyFan pair: unregistered mode or invalid active percentage.\n");
+    }
     if (const ExtrusionPropertySpeed *speed = entity.get_property<ExtrusionPropertySpeed>()) {
         state.declarations.push_back(SpeedDeclaration{child_path, speed->speed_mm_per_s});
         if (!std::isfinite(speed->speed_mm_per_s)) {
@@ -918,6 +936,9 @@ std::string speed_validation_message(const SpeedValidationReport &report)
         out << report.unsupported_role_error_count << " geometric extrusion "
             << (report.unsupported_role_error_count == 1 ? "leaf has" : "leaves have")
             << " an unsupported effective role which cannot be converted to a legacy marker.\n";
+    if (report.fan_error_count > 0)
+        out << report.fan_error_count << " invalid fan request pair(s). Active percentages must be finite"
+               " and in [0,100], and modes must belong to the fan runtime-ID domain.\n";
     out << "All PrintingPlan indices below are zero-based.\n";
     for (size_t detail_idx = 0; detail_idx < report.details.size(); ++detail_idx)
         out << "\n[" << detail_idx + 1 << "/" << report.error_count << "]\n"
@@ -1024,7 +1045,7 @@ void clear(Print &print)
 
 void prepare(Print &) {}
 
-bool validate_pre(const Print &print, std::string *error)
+bool validate_pre(const Orchestrator &orchestrator, const Print &print, std::string *error)
 {
     if (error != nullptr)
         error->clear();
@@ -1036,7 +1057,7 @@ bool validate_pre(const Print &print, std::string *error)
         return false;
     }
 
-    SpeedValidationReport report;
+    SpeedValidationReport report(orchestrator);
     const size_t extruder_count = configured_extruder_count(print);
     ActiveToolState active_tool;
     if (plan->events.has_before())
@@ -1142,7 +1163,7 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     // staging file. RuntimeError is required here instead of the debug-only
     // validate_or_report helper so Release builds expose the same diagnosis.
     std::string validation_error;
-    if (!validate_pre(print, &validation_error))
+    if (!validate_pre(orchestrator, print, &validation_error))
         throw RuntimeError(validation_error);
 
     const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(

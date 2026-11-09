@@ -39,6 +39,7 @@ ambiguous rather than silently selecting one value.
 
 #include "PluginActivationConfig.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <exception>
 #include <istream>
@@ -268,7 +269,8 @@ bool migrate_plugin_activation_id(PluginActivationConfig &config,
                                   const std::string &obsolete_id,
                                   std::initializer_list<std::string> replacement_ids)
 {
-    bool changed = config.plugin_packages.erase(obsolete_id) > 0;
+    const bool retain_original = std::find(replacement_ids.begin(), replacement_ids.end(), obsolete_id) != replacement_ids.end();
+    bool changed = !retain_original && config.plugin_packages.erase(obsolete_id) > 0;
     const std::map<std::string, bool>::iterator obsolete = config.activated.find(obsolete_id);
     if (obsolete == config.activated.end())
         return changed;
@@ -277,9 +279,14 @@ bool migrate_plugin_activation_id(PluginActivationConfig &config,
     // old state, including false, before the default activations are merged.
     const bool enabled = obsolete->second;
     for (const std::string &replacement_id : replacement_ids)
-        config.activated.emplace(replacement_id, enabled);
-    config.activated.erase(obsolete);
-    return true;
+        changed = config.activated.emplace(replacement_id, enabled).second || changed;
+    // An extraction may retain the standard provider's public identity while
+    // moving its other responsibilities into independent successor plugins.
+    if (!retain_original) {
+        config.activated.erase(obsolete);
+        changed = true;
+    }
+    return changed;
 }
 
 boost::filesystem::path plugin_activation_config_path(const boost::filesystem::path &data_directory)

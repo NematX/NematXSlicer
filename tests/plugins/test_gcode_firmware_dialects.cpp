@@ -568,7 +568,8 @@ TEST_CASE("Built-in firmware dialects encode their process commands",
             special_command_entity(ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP));
         std::unique_ptr<ExtrusionEntity> root(
             new ExtrusionEntity(std::move(children), false, true, true));
-        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f));
+        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f));
+        root->add_property(ExtrusionPropertyFan(50.f, FAN_REQUEST_MODE_OVERRIDE));
         root->add_property(ExtrusionPropertyHeater(
             C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, false));
         append_path_extrusion(tool_group, std::move(root));
@@ -668,7 +669,8 @@ TEST_CASE("Built-in firmware dialects address one physical extruder in SEMM",
             20.f, 500.f, pressure, fan, temperature));
         children.push_back(special_command_entity(ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP));
         std::unique_ptr<ExtrusionEntity> root(new ExtrusionEntity(std::move(children), false, true, true));
-        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, pressure, fan));
+        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, pressure));
+        root->add_property(ExtrusionPropertyFan(fan, FAN_REQUEST_MODE_OVERRIDE));
         root->add_property(ExtrusionPropertyHeater(
             C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, int16_t(temperature), false));
         append_path_extrusion(group, std::move(root));
@@ -2249,7 +2251,8 @@ std::string export_labelled_cubes(bool relative_e, uint16_t tools = 1,
     return output;
 }} // namespace
 
-// Inspect the process-owned firmware catalog without rendering; check all six fan definitions and the total including printer/plate/software identity, reporting mismatches through Catch.
+// Inspect all six chamber settings and the shared physical calibration alongside
+// printer/plate/software identity. Catch reports any missing or changed metadata.
 TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
           "[plugins][gcode][firmware][bambu][config]")
 {
@@ -2267,7 +2270,19 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
     for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
         defined.insert(key.key);
     // Printer model id, nozzle type and plate type have translation tests; software identity has exporter tests.
-    CHECK(plugin->get_defined_config_keys().size() == 10);
+    CHECK(plugin->get_defined_config_keys().size() == 11);
+    CHECK(defined.count("fan_printer_min_speed") == 1);
+    const ConfigOptionDef *calibration = PrintConfigDef::instance().get("fan_printer_min_speed");
+    REQUIRE(calibration != nullptr);
+    CHECK(calibration->type == coInt);
+    REQUIRE(calibration->default_value.get() != nullptr);
+    CHECK(calibration->default_value->serialize() == "0");
+    CHECK(calibration->container_type == ConfigOptionContainerType::Plater);
+    CHECK(calibration->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    CHECK(calibration->invalidates_step == STEP_GCODE);
+    CHECK(calibration->min == 0);
+    CHECK(calibration->max == 100);
+    CHECK(calibration->sidetext == "%");
     for (size_t idx = 0; idx < 6; ++idx) {
         INFO(keys[idx]);
         const ConfigOptionDef *def = PrintConfigDef::instance().get(keys[idx]);
@@ -2635,9 +2650,9 @@ ToolFan tool_fan(Probe &session, size_t tool)
 
 // Check the part fan of every tool after a script. ``expected`` holds, per tool,
 // the fan percent the script must leave, or nothing for a tool it must not touch.
-// The script runs twice: through the script interpreter alone (requested and
-// encoded fan), then through the event path, where the Reader reconciliation
-// replaces the encoded fan of every tool.
+// The script runs through the interpreter alone, then through Reader
+// reconciliation. Both observe physical output without inventing a logical
+// request, since minimum/offset calibration cannot be inverted.
 template <class Probe>
 void check_script_fans(uint16_t tool, const std::string &script,
                        const std::vector<std::optional<double>> &expected)
@@ -2649,27 +2664,21 @@ void check_script_fans(uint16_t tool, const std::string &script,
                 for (size_t idx = 0; idx < expected.size(); ++idx) {
                     INFO("tool " << idx);
                     const ToolFan fan = tool_fan(session, idx);
+                    CHECK_FALSE(fan.requested);
                     if (!expected[idx]) {
                         CHECK_FALSE(fan.encoded);
-                        if (!reader)
-                            CHECK_FALSE(fan.requested);
                         continue;
                     }
                     REQUIRE(fan.encoded);
                     CHECK(*fan.encoded == Approx(*expected[idx]));
-                    if (!reader) {
-                        REQUIRE(fan.requested);
-                        CHECK(*fan.requested == Approx(*expected[idx]));
-                    }
                 }
             }));
     }
 }
 
-// A script M106 / M107 is followed twice: the script interpreter sets the
-// requested and encoded fan of the addressed tool, then the Reader reconciliation
-// replaces the encoded fan of every tool. Four tools, so P2 and P3 are real tools
-// for Marlin 2 and must not be for Bambu.
+// A script M106 / M107 updates the addressed fan's physical observation, not a
+// logical request. Check both interpreter and Reader paths with four tools:
+// P2 and P3 are real tools for Marlin 2 and must not be for Bambu.
 TEST_CASE("A Bambu script M106 changes only the part fan of the selected tool",
           "[plugins][gcode][firmware][bambu][fans][script]")
 {

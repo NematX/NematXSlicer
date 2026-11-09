@@ -23,11 +23,14 @@ Entity guide: [Using Unified Extrusion Entities](/doc/plugins/extrusions.md)
 */
 
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/cpp/PluginPropertyKey.hpp"
+#include "FanRequestPayload.hpp"
 
 namespace slic3r_api {
 
@@ -58,9 +61,13 @@ struct EPropertySpeed :
     EPropertySpeed &acceleration(float value) { accel_mm_per_s2 = value; return *this; }
     /* Set the inherited pressure-advance value. */
     EPropertySpeed &pressure_advance(float value) { pressure_adv = value; return *this; }
-    /* Set the inherited fan percentage. */
-    EPropertySpeed &fan_speed(float value) { fan_speed_percent = value; return *this; }
 };
+
+/* One fan request. is_set() tests this payload, not its ancestors: callers
+   filling defaults must first resolve inheritance, skipping Unspecified pairs. */
+struct EPropertyFan :
+    EPropertyPayload<EPropertyFan, FanRequestPayload<EPropertyFan>, EXTRUSION_PROPERTY_TYPE_FAN>
+{};
 
 /* Travel, retraction, lift, and tool-change movement modifiers. */
 struct EPropertyModifier :
@@ -257,6 +264,10 @@ struct EPropertyExtrusionAxis :
 // Each helper is a direct typed view over the corresponding host-owned C bytes.
 static_assert(sizeof(EPropertyAttributes) == sizeof(c_extrusion_property_attributes), "ABI payload mismatch");
 static_assert(sizeof(EPropertySpeed) == sizeof(c_extrusion_property_speed), "ABI payload mismatch");
+static_assert(sizeof(EPropertyFan) == sizeof(c_extrusion_property_fan), "ABI payload mismatch");
+static_assert(alignof(EPropertyFan) == alignof(c_extrusion_property_fan), "ABI payload mismatch");
+static_assert(std::is_trivially_copyable<EPropertyFan>::value, "Fan requests must be POD storage");
+static_assert(std::is_standard_layout<EPropertyFan>::value, "Fan requests must preserve C layout");
 static_assert(sizeof(EPropertyModifier) == sizeof(c_extrusion_property_modifier), "ABI payload mismatch");
 static_assert(sizeof(EPropertyCustomGcode) == sizeof(c_extrusion_property_custom_gcode), "ABI payload mismatch");
 static_assert(sizeof(EPropertySpecialCommand) == sizeof(c_extrusion_property_special_command), "ABI payload mismatch");

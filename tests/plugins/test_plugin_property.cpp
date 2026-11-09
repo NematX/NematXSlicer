@@ -16,6 +16,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/RuntimeIdDomain.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PluginProperty.hpp"
@@ -30,6 +31,7 @@
 #include "libslic3r/Surface.hpp"
 
 #include <utility>
+#include <limits>
 #include <functional>
 #include <type_traits>
 #include <stdexcept>
@@ -948,6 +950,211 @@ TEST_CASE("PluginPropertyKey gives built-in and dynamic properties one access mo
         PluginPropertyKey<IncompatibleRuntimePropertyPayload>::register_dynamic(
             test_orchestrator_handle(), "tests.plugin-property-key.first"),
         std::runtime_error);
+}
+
+TEST_CASE("Fan requests use exclusive extensible modes and neutral zero bytes",
+          "[plugins][properties][fan-request]")
+{
+    using slic3r_api::EPropertyFan;
+    static_assert(SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE == 16u && SLIC3R_PROPERTY_TYPE_BRIDGE_SURFACE == 17u &&
+                  SLIC3R_PROPERTY_TYPE_BRIDGE_VOLUME == 18u && SLIC3R_PROPERTY_TYPE_BRIDGE_STRAND == 19u &&
+                  SLIC3R_PROPERTY_TYPE_SUPPORT_PIPELINE == 20u && SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN == 21u,
+                  "Fan requests must not reuse existing layer, bridge or support property IDs.");
+    orchestrator_handle *orch = test_orchestrator_handle();
+    const std::pair<const char *, fan_request_mode> standards[] = {
+        {FAN_REQUEST_MODE_NAME_UNSPECIFIED, FAN_REQUEST_MODE_UNSPECIFIED},
+        {FAN_REQUEST_MODE_NAME_AUTOMATIC, FAN_REQUEST_MODE_AUTOMATIC},
+        {FAN_REQUEST_MODE_NAME_OVERRIDE, FAN_REQUEST_MODE_OVERRIDE},
+    };
+    for (const auto &mode : standards) {
+        CHECK(orchestrator_register_runtime_id(orch, FAN_REQUEST_MODE_ID_TYPE, mode.first) == mode.second);
+        REQUIRE(orchestrator_runtime_id_name(orch, FAN_REQUEST_MODE_ID_TYPE, mode.second) != nullptr);
+        CHECK(std::string(orchestrator_runtime_id_name(orch, FAN_REQUEST_MODE_ID_TYPE, mode.second)) == mode.first);
+    }
+    const auto custom = orchestrator_register_runtime_id(orch, FAN_REQUEST_MODE_ID_TYPE, "tests.fan.custom");
+    REQUIRE(custom != ORCHESTRATOR_RUNTIME_ID_INVALID);
+    CHECK(custom >= ORCHESTRATOR_RUNTIME_ID_DYNAMIC_BEGIN);
+    CHECK(orchestrator_register_runtime_id(orch, FAN_REQUEST_MODE_ID_TYPE, "tests.fan.custom") == custom);
+
+    PluginStorage storage;
+    slic3r_api::StoredExtrusionEntity entity(reinterpret_cast<storage_handle *>(&storage));
+    EPropertyFan &fan = entity.get_or_add(EPropertyFan::key);
+    CHECK(fan.percent == 0.f);
+    CHECK(fan.mode == FAN_REQUEST_MODE_UNSPECIFIED);
+    CHECK_FALSE(fan.is_set());
+    CHECK_NOTHROW(fan.validate(orch));
+    CHECK(extrusion_property_byte_count(orch, EXTRUSION_PROPERTY_TYPE_FAN) == sizeof(c_extrusion_property_fan));
+    CHECK(extrusion_property_alignment(orch, EXTRUSION_PROPERTY_TYPE_FAN) == alignof(c_extrusion_property_fan));
+    CHECK(orchestrator_property_byte_count(orch, SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN) == sizeof(c_extrusion_property_fan));
+    CHECK(orchestrator_property_alignment(orch, SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN) == alignof(c_extrusion_property_fan));
+    CHECK(std::string(orchestrator_property_name(orch, SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN)) == "slic3r.extrusion.fan");
+
+    EPropertyFan parent = {};
+    parent.set(70.f, FAN_REQUEST_MODE_OVERRIDE);
+    CHECK(fan.resolved_with(parent).percent == 70.f);
+    CHECK(fan.resolved_with(parent).mode == FAN_REQUEST_MODE_OVERRIDE);
+    for (fan_request_mode mode : {FAN_REQUEST_MODE_AUTOMATIC, FAN_REQUEST_MODE_OVERRIDE, custom}) {
+        fan.set(0.f, mode);
+        CHECK(fan.is_set());
+        CHECK_NOTHROW(fan.validate(orch));
+        const auto effective = fan.resolved_with(parent);
+        CHECK(effective.percent == 0.f);
+        CHECK(effective.mode == mode);
+        if (!fan.is_set())
+            fan.set(50.f, FAN_REQUEST_MODE_AUTOMATIC);
+        CHECK(fan.mode == mode);
+        CHECK(fan.percent == 0.f);
+    }
+    fan.clear();
+    CHECK_FALSE(fan.is_set());
+    CHECK(fan.percent == 0.f);
+    // The raw C slot can contain noncanonical Unspecified bytes: they inherit.
+    fan.percent = std::numeric_limits<float>::quiet_NaN();
+    CHECK_NOTHROW(fan.validate(orch));
+    CHECK(fan.resolved_with(parent).percent == 70.f);
+    for (float invalid : {-1.f, 101.f, std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN()}) {
+        CHECK_THROWS_AS(fan.set(invalid, FAN_REQUEST_MODE_AUTOMATIC), std::invalid_argument);
+        fan.mode = FAN_REQUEST_MODE_OVERRIDE;
+        fan.percent = invalid;
+        CHECK_THROWS_AS(fan.validate(orch), std::invalid_argument);
+    }
+    fan.percent = 30.f;
+    fan.mode = 42; // No static registration for this mode.
+    CHECK_THROWS_AS(fan.validate(orch), std::invalid_argument);
+    CHECK_THROWS_AS(fan.set(30.f, ORCHESTRATOR_RUNTIME_ID_INVALID), std::invalid_argument);
+    fan.mode = ORCHESTRATOR_RUNTIME_ID_INVALID;
+    CHECK_THROWS_AS(fan.validate(orch), std::invalid_argument);
+    CHECK_THROWS_AS(fan.validate(nullptr), std::invalid_argument);
+}
+
+TEST_CASE("Raw fan creation exposes the native pair without duplicate slots",
+          "[plugins][properties][fan-request]")
+{
+    Slic3r::ExtrusionEntity entity(true);
+    extrusion_entity_handle *handle = reinterpret_cast<extrusion_entity_handle *>(&entity);
+    c_extrusion_property_fan *raw = static_cast<c_extrusion_property_fan *>(
+        extrusion_property_get_or_add_data_mutable(
+            test_orchestrator_handle(), handle, EXTRUSION_PROPERTY_TYPE_FAN));
+    REQUIRE(raw != nullptr);
+    CHECK(raw->percent == 0.f);
+    CHECK(raw->mode == FAN_REQUEST_MODE_UNSPECIFIED);
+    CHECK(reinterpret_cast<uintptr_t>(raw) % alignof(c_extrusion_property_fan) == 0);
+    Slic3r::ExtrusionPropertyFan *native = entity.get_property<Slic3r::ExtrusionPropertyFan>();
+    REQUIRE(native != nullptr);
+    CHECK(static_cast<void *>(raw) == static_cast<void *>(&native->percent));
+    CHECK(sizeof(*native) == sizeof(*raw));
+    CHECK(alignof(Slic3r::ExtrusionPropertyFan) == alignof(c_extrusion_property_fan));
+    CHECK(extrusion_property_get_or_add_data_mutable(
+        test_orchestrator_handle(), handle, EXTRUSION_PROPERTY_TYPE_FAN) == raw);
+    CHECK(extrusion_property_count(handle) == 1);
+
+    // A raw active zero is still an explicit stop, including after cloning.
+    raw->mode = FAN_REQUEST_MODE_OVERRIDE;
+    CHECK(native->is_set());
+    std::unique_ptr<Slic3r::ExtrusionEntity> clone(entity.clone());
+    const Slic3r::ExtrusionPropertyFan *copied = clone->get_property<Slic3r::ExtrusionPropertyFan>();
+    REQUIRE(copied != nullptr);
+    CHECK(copied->percent == 0.f);
+    CHECK(copied->mode == FAN_REQUEST_MODE_OVERRIDE);
+    CHECK(copied->is_set());
+}
+
+TEST_CASE("Fan requests resolve neutral descendants and survive cloning",
+          "[plugins][properties][fan-request][inheritance]")
+{
+    using namespace slic3r_api;
+    PluginStorage storage;
+    auto *store = reinterpret_cast<storage_handle *>(&storage);
+    StoredExtrusionEntity root(store), neutral(store), stop(store), custom(store);
+    root.get_or_add(EPropertyFan::key).set(70.f, FAN_REQUEST_MODE_OVERRIDE);
+    neutral.get_or_add(EPropertyFan::key).clear();
+    stop.get_or_add(EPropertyFan::key).set(0.f, FAN_REQUEST_MODE_AUTOMATIC);
+    const auto special = orchestrator_register_runtime_id(
+        test_orchestrator_handle(), FAN_REQUEST_MODE_ID_TYPE, "tests.fan.inheritance");
+    custom.get_or_add(EPropertyFan::key).set(0.f, special);
+    REQUIRE_FALSE(is_invalid_index(root.append_child_move(neutral.mutable_view())));
+    REQUIRE_FALSE(is_invalid_index(root.append_child_move(stop.mutable_view())));
+    REQUIRE_FALSE(is_invalid_index(root.append_child_move(custom.mutable_view())));
+    class Visitor final : public slic3r_api::ExtrusionTreeConstVisitor<> {
+    public:
+        std::vector<std::pair<float, fan_request_mode>> requests;
+    private:
+        void visit_leaf(slic3r_api::ExtrusionEntity) override {
+            const EPropertyFan *fan = current_property(EPropertyFan::key,
+                [](const EPropertyFan &request) { return request.is_set(); });
+            REQUIRE(fan != nullptr);
+            requests.emplace_back(fan->percent, fan->mode);
+        }
+    } visitor;
+    StoredExtrusionEntity clone(store, root.readonly());
+    visitor.traverse(clone.readonly());
+    const std::vector<std::pair<float, fan_request_mode>> expected = {
+        {70.f, FAN_REQUEST_MODE_OVERRIDE}, {0.f, FAN_REQUEST_MODE_AUTOMATIC}, {0.f, special}};
+    CHECK(visitor.requests == expected);
+    clone.get_or_add(EPropertyFan::key).set(20.f, FAN_REQUEST_MODE_AUTOMATIC);
+    CHECK(root.get(EPropertyFan::key)->percent == 70.f);
+    CHECK(root.get(EPropertyFan::key)->mode == FAN_REQUEST_MODE_OVERRIDE);
+
+    Slic3r::ExtrusionEntity native(true);
+    native.add_property(Slic3r::ExtrusionPropertyFan(35.f, special));
+    std::unique_ptr<Slic3r::ExtrusionEntity> native_clone(native.clone());
+    const auto *pair = native_clone->get_property<Slic3r::ExtrusionPropertyFan>();
+    REQUIRE(pair != nullptr);
+    CHECK(pair->percent == 35.f);
+    CHECK(pair->mode == special);
+}
+
+TEST_CASE("Runtime ID domains share registration and fan policy arbitration",
+          "[plugins][properties][fan-request][runtime-id]")
+{
+    using slic3r_api::EPropertyFan;
+    using slic3r_api::RuntimeIdDomain;
+    orchestrator_handle *orchestrator = test_orchestrator_handle();
+    RuntimeIdDomain modes(FAN_REQUEST_MODE_ID_TYPE);
+    const fan_request_mode mine = modes.register_name(orchestrator, "tests.fan.policy.mine");
+    const fan_request_mode other = modes.register_name(orchestrator, "tests.fan.policy.other");
+    CHECK(modes.register_name(orchestrator, "tests.fan.policy.mine") == mine);
+    CHECK(std::string(modes.name(orchestrator, mine)) == "tests.fan.policy.mine");
+    CHECK(modes.is_valid(orchestrator, FAN_REQUEST_MODE_OVERRIDE));
+    CHECK_FALSE(modes.is_valid(orchestrator, 42));
+    CHECK_FALSE(modes.is_valid(orchestrator, ORCHESTRATOR_RUNTIME_ID_INVALID));
+    CHECK_THROWS_AS(modes.validate(orchestrator, 42), std::invalid_argument);
+    const orchestrator_handle *readonly = orchestrator;
+    CHECK(modes.is_valid(readonly, mine));
+
+    // Identity has no built-in fan knowledge: the same helper serves another domain.
+    RuntimeIdDomain annotations("tests.annotation.domain");
+    const orchestrator_runtime_id annotation = annotations.register_name(orchestrator, "tests.annotation.value");
+    CHECK(annotations.is_valid(orchestrator, annotation));
+    CHECK(std::string(annotations.name(orchestrator, annotation)) == "tests.annotation.value");
+    EPropertyFan request = {};
+
+    // This truth table also covers explicit zero: arbitration depends on mode,
+    // never on the percentage or on whether a direct property exists.
+    for (float percent : {0.f, 40.f}) {
+        for (fan_request_mode inherited : {FAN_REQUEST_MODE_UNSPECIFIED, FAN_REQUEST_MODE_AUTOMATIC,
+                                          FAN_REQUEST_MODE_OVERRIDE, mine, other}) {
+            request.set(inherited == FAN_REQUEST_MODE_UNSPECIFIED ? 0.f : percent, inherited);
+            CHECK_NOTHROW(request.validate(orchestrator));
+            CHECK(request.is_valid(orchestrator));
+            for (fan_request_mode policy : {FAN_REQUEST_MODE_AUTOMATIC, FAN_REQUEST_MODE_OVERRIDE, mine, other}) {
+                const bool expected = inherited != FAN_REQUEST_MODE_OVERRIDE &&
+                    (inherited == FAN_REQUEST_MODE_UNSPECIFIED || inherited == FAN_REQUEST_MODE_AUTOMATIC ||
+                     inherited == policy);
+                CHECK(request.can_modify(policy) == expected);
+                Slic3r::ExtrusionPropertyFan native(request.percent, inherited);
+                CHECK(native.can_modify(policy) == expected);
+                CHECK_NOTHROW(native.validate(orchestrator));
+            }
+            CHECK_FALSE(request.can_modify(ORCHESTRATOR_RUNTIME_ID_INVALID));
+        }
+    }
+    request.clear().percent = 35.f;
+    CHECK_NOTHROW(request.validate(orchestrator));
+    CHECK(request.is_valid(orchestrator));
+    request.mode = 42;
+    CHECK_FALSE(request.is_valid(orchestrator));
 }
 
 TEST_CASE("Extrusion visitors resolve inherited dynamic properties by key",

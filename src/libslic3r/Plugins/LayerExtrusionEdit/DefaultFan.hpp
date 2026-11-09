@@ -13,9 +13,9 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultFanPlugin
 /*
 Register the default STEP_LAYER_EXTRUSION_EDIT fan plugin.
 
-The plugin converts per-extruder cooling settings and layer duration into
-effective fan percentages on the cloned PrintingPlan extrusion trees. It does
-not emit G-code or slow paths down; those remain separate responsibilities.
+The standard provider publishes BASE role references and fills effective
+absences on deposition leaves. Later independent fan plugins transform them;
+this provider does not estimate time, compact requests or emit G-code.
 */
 void register_default_fan_plugin(orchestrator_handle *orch);
 

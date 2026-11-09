@@ -68,6 +68,14 @@ Clipper 2.1 adds `clipper_variable_offset_inner()` without changing the 2.0
 operand layout. Volume 2.0 retains `c_mesh_slicing_params.extra_offset`; moving
 FFF compensation to post-slicing does not remove the mesh API's offset field.
 
+Extrusion property 4.0 removes `fan_speed_percent` from the Speed payload and
+adds a separate Fan request pair (`percent`, exclusive runtime `mode`). This
+changes Speed's binary layout: packages requiring property 3.x must be rebuilt
+and are rejected before loading, rather than interpreted with the wrong layout.
+Def 1.5 allocates Fan at property ID 21. Existing LayerInstance 16 and the
+bridge/support payload IDs 17–20 remain unchanged. The fan runtime-ID typedef
+moves to the common header without changing its representation.
+
 The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument

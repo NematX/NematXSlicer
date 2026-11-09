@@ -6,7 +6,7 @@
 #define slic3r_step_layer_extrusion_edit_h_
 
 #define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MINOR 0u
+#define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MINOR 1u
 
 #include "slic3r_step_common.h"
 #include "../slic3r_printing_plan.h"
@@ -14,6 +14,15 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Fan policies run after geometry/speed edits. Each plugin completes every
+   layer before the next priority observes its published references. */
+enum layer_extrusion_edit_fan_priority {
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_STANDARD = 20,
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING = 22,
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS = 24,
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_DYNAMIC = 26
+};
 
 /*
 Payload for STEP_LAYER_EXTRUSION_EDIT.
