@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     test_auxiliary_layer_helpers.cpp
     test_avoid_crossing_boundary.cpp
     test_avoid_crossing_crossing.cpp
+    test_avoid_crossing_e2e.cpp
     test_avoid_crossing_input.cpp
     test_avoid_crossing_router.cpp
     test_avoid_crossing_travel_parity.cpp
