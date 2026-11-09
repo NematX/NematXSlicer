@@ -63,6 +63,7 @@
 #include "WipeTowerDialog.hpp"
 
 #include <array>
+#include <charconv>
 #include <sstream>
 #include <unordered_set>
 
@@ -110,6 +111,9 @@ Rebuilding pages or switching presets must preserve the distinction between
 saved profiles and their edited copies. Actions that are choices for one export
 belong to that export request, not to a permanent profile field merely because
 they appear beside printer settings in the interface.
+Scripted layout settings may set a nonnegative integer maximum through max$.
+Invalid suffixes are logged without changing the definition; native settings
+retain their configuration-defined bounds.
 
 Representative direct calls (branches are not a timeline):
 
@@ -2550,6 +2554,17 @@ std::vector<Slic3r::GUI::PageShp> Tab::create_pages(std::string setting_type_nam
                         option.opt.max_literal = { boost::lexical_cast<double>(
                             params[i].substr(strlen("max_literal$")).c_str()), false };
 
+                } else if (is_script && boost::starts_with(params[i], "max$")) {
+                    // Change only complete ASCII integer bounds, before the scripted field is created.
+                    const std::string suffix = params[i].substr(4);
+                    int maximum = 0;
+                    const std::from_chars_result parsed = std::from_chars(suffix.data(), suffix.data() + suffix.size(), maximum);
+                    if (!suffix.empty() && suffix.find_first_not_of("0123456789") == std::string::npos &&
+                        parsed.ec == std::errc() && parsed.ptr == suffix.data() + suffix.size())
+                        option.opt.max = maximum;
+                    else
+                        BOOST_LOG_TRIVIAL(error) << "Error: invalid scripted maximum in UI file '" << ui_layout_file.string()
+                            << "', setting '" << setting_id << "', token '" << params[i] << "'.";
                 } else if (is_script) {
                     //be careful, "floatX" has to deteted before "float".
                     // TODO: set default value

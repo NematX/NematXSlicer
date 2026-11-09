@@ -262,6 +262,7 @@ if (WIN32)
         add_dependencies(Slic3r_app_gui Slic3r)
         set_target_properties(Slic3r_app_gui PROPERTIES
             OUTPUT_NAME ${SLIC3R_APP_CMD}
+            PDB_NAME "${SLIC3R_APP_CMD}_app_gui"
             ARCHIVE_OUTPUT_NAME "${SLIC3R_APP_CMD}_app_gui")
         target_link_libraries(Slic3r_app_gui PRIVATE boost_headeronly)
     endif ()

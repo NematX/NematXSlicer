@@ -518,7 +518,8 @@ public:
 	static bool validate_custom_gcode(const wxString& title, const std::string& gcode);
     bool        validate_custom_gcodes_was_shown{ false };
 
-	// create a setting page from ui file. type_override is used by frequent settings.
+	// Build pages from layout files and plugin fragments; scripted max$ tokens set local field bounds.
+	// type_override supplies the preset type for frequent settings instead of this tab's type.
 	std::vector<PageShp> create_pages(std::string setting_type_name, int32_t idx = -1, Preset::Type type_override = Preset::Type::TYPE_INVALID);
 	static t_change set_or_add(t_change previous, t_change toadd);
 

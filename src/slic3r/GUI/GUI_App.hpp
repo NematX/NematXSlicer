@@ -446,6 +446,7 @@ public:
     bool            get_wifi_config_dialog_shown() const { return m_wifi_config_dialog_shown; }
 private:
     bool            on_init_inner();
+    // Load application paths and preferences, then install a font callback borrowing this application.
 	void            init_app_config();
     // returns old config path to copy from if such exists,
     // returns an empty string if such config path does not exists or if it cannot be loaded.

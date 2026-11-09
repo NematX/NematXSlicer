@@ -158,6 +158,8 @@ GUI_App owns the graphical application's startup and shutdown coordination.
 It loads application/profile state, creates the main windows and routes shared
 actions to the active Plater. UI callbacks, translation setup and closing of
 dependent dialogs belong to this thread rather than the slicing worker.
+The font-size callback reads current preferences on demand and returns zero for
+nonpositive sizes, so both editor and viewer can request the system font.
 
 Export input or rendering work requested by background processing must be
 dispatched to the UI and completed or cancelled before its borrowed callback
@@ -180,6 +182,11 @@ Representative direct calls (branches are not a timeline):
         |-- this->gui->mainframe->load_config()
         |-- this->mainframe->load_config_file()
         `-- load_files()
+
+    GUI_App::init_app_config()
+        |-- AppConfig::init_root_data_dir(): reuse explicit or installed paths
+        |-- AppConfig::load(): read preferences before initializing controls
+        `-- DPIAware_::get_font_size: borrow current preferences for later font requests
 */
 
 using namespace std::literals;
@@ -1494,8 +1501,8 @@ void GUI_App::init_app_config()
             }
         }
     }
-    //add callback to font size from app_config
-    DPIAware_::get_font_size = [this]()->int { return atoi(app_config->get("font_size").c_str()); };
+    // Viewer defaults do not normalize font_size, and preferences may change after startup.
+    DPIAware_::get_font_size = [this]()->int { return std::max(0, app_config->get_int("font_size")); };
 }
 
 // returns old config path to copy from if such exists,

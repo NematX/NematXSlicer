@@ -97,12 +97,13 @@ public:
 
     // Clear and reset to defaults.
     void                reset();
-    // Override missing or keys with their defaults.
+    // Fill missing preferences and normalize obsolete or invalid values for the current application mode.
     void                set_defaults();
     void                init_ui_layout();
     ConfigurationEntry  get_installation() { return m_data_dir; }
     boost::filesystem::path data_dir() { return m_data_dir.config_path; }
-    // return false if already init
+    // Adopt an explicit process datadir or inventory the portable/default root.
+    // Return false when already initialized or explicit, true after root inventory even without a matching installation.
     bool                init_root_data_dir(const std::string &default_app_data_path);
     std::string         get_root_data_dir() { return m_data_dir_root; }
     void                load_installed_repo(const boost::filesystem::path &filename);

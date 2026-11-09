@@ -18,6 +18,9 @@ keys are separate from interpreting a printer profile's option definitions.
 Application configuration stores per-user settings and fills missing values
 when defaults are applied. Retired keys are erased so later consumers do not
 keep presenting options that no longer have an owner.
+Editor font defaults use zero for system sizing when the stored integer is not
+positive. Explicit command-line data paths are borrowed from the process path
+settings rather than the installation entry that is still being initialized.
 
 FIXME replace the two following includes with <boost/md5.hpp> after it becomes mainstream.
 
@@ -29,6 +32,10 @@ Representative direct calls (branches are not a timeline):
         |-- unescape_strings_cstyle()
         |-- this->set_defaults()
         `-- this->init_ui_layout()
+
+    AppConfig::init_root_data_dir()
+        |-- Slic3r::data_dir(): adopt an explicit process path without inventory
+        `-- load_installed_repo(): otherwise inventory portable or default roots
 
     AppConfig::save()
         |-- escape_strings_cstyle()
@@ -210,7 +217,8 @@ void AppConfig::set_defaults()
         if (get("tab_icon_size").empty())
             set("tab_icon_size", "32");
 
-        if (get("font_size").empty())
+        // Zero selects system sizing; retain the existing integer-prefix parsing for positive values.
+        if (get("font_size").empty() || get_int("font_size") <= 0)
             set("font_size", "0");
 
         if (get("side_panel_width").empty())
@@ -608,6 +616,8 @@ boost::filesystem::path AppConfig::ConfigurationEntry::get_config_path(const std
     }
 }
 
+// Adopt a nonempty process datadir without inventory, or create and inspect the portable/default root.
+// Return false for an initialized root or explicit datadir, true after inventory; filesystem failures propagate.
 bool AppConfig::init_root_data_dir(const std::string &default_app_data_path) {
     if (!m_data_dir_root.empty()) {
         assert(!m_data_dir.config_path.empty());
@@ -617,7 +627,7 @@ bool AppConfig::init_root_data_dir(const std::string &default_app_data_path) {
     if (has_data_dir()) {
         // set by command line arg 'datadir'
         m_data_dir.other_keys["installed_name"] = m_data_dir.installed_name = "command_line";
-        m_data_dir.other_keys["config_path"] = (m_data_dir.config_path = data_dir()).string();
+        m_data_dir.other_keys["config_path"] = (m_data_dir.config_path = Slic3r::data_dir()).string();
         m_data_dir.other_keys["config_path_relative"] = "0";
         m_data_dir.other_keys["exe_path"] = (m_data_dir.exe_path = install_path()).string();
         m_data_dir.other_keys["exe_path_relative"] = "0";

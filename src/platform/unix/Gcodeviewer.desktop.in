@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=@GCODEVIEWER_APP_NAME@
-Comment=G-code viewer of Slic3r
+Comment=G-code viewer of @SLIC3R_APP_NAME@
 Exec=@SLIC3R_APP_CMD@ --gcodeviewer %F
 Icon=@GCODEVIEWER_APP_KEY@
 Terminal=false

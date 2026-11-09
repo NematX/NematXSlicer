@@ -45,7 +45,7 @@ private:
 
     bool setup(int argc, char **argv);
     
-    /// Prints usage of the CLI.
+    // Print usage with the configured command name and optionally the selected technology's settings.
     void print_help(bool include_print_options = false, PrinterTechnology printer_technology = ptFFF | ptSLA | ptSLS) const;
     
     /// Exports loaded models to a file of the specified format, according to the options affecting output filename.

@@ -38,17 +38,29 @@
 #include <wx/version.h>
 
 #include "libslic3r/Config/ConfigDef.hpp"
+#include "libslic3r_version.h"
+
+/* Translate GUI messages and option labels in the catalogue owned by their
+   definition. The historical built-in domain Slic3r resolves to SLIC3R_APP_KEY;
+   empty domains still use the default catalogue and plugin domains stay intact.
+   Use translate_in_domain() for definition text and enum_display_label() for
+   enum choices. UTF-8 wrappers return owned strings; wxWidgets stays in this
+   GUI header rather than the core configuration API. */
 
 namespace Slic3r { namespace GUI { 
 
 namespace I18N {
 	// Plugin-provided text carries its gettext domain with the owning
 	// definition. Keeping the lookup here confines wxWidgets to the GUI layer.
+	// Map only the historical built-in domain; preserve empty and third-party catalogue names.
+	inline wxString catalogue_domain(const std::string &domain) {
+		return wxString(domain == "Slic3r" ? SLIC3R_APP_KEY : domain.c_str(), wxConvUTF8);
+	}
 	// Return marked text verbatim; an empty catalogue name otherwise uses the default catalogue.
 	inline wxString translate_in_domain(const char *s, const std::string &domain, bool untranslated = false) {
 		if (untranslated) return wxString(s, wxConvUTF8);
 		return domain.empty() ? wxGetTranslation(wxString(s, wxConvUTF8)) :
-			wxGetTranslation(wxString(s, wxConvUTF8), wxString(domain.c_str(), wxConvUTF8));
+			wxGetTranslation(wxString(s, wxConvUTF8), catalogue_domain(domain));
 	}
 	// Translate borrowed UTF-8 text unless its setting requires verbatim display.
 	inline wxString translate_in_domain(const std::string &s, const std::string &domain, bool untranslated = false) {
@@ -61,26 +73,29 @@ namespace I18N {
 		return enum_def.has_labels() ? wxString::FromUTF8(enum_def.translated_label(index).c_str()) :
 			translate_in_domain(enum_def.label(index), def.translation_domain, def.untranslated);
 	}
+	// Translate singular/plural UTF-8 text in its owning catalogue.
 	inline wxString translate_in_domain(const char *s, const char *plural, unsigned int n, const std::string &domain) {
 		return domain.empty() ? wxGetTranslation(wxString(s, wxConvUTF8), wxString(plural, wxConvUTF8), n) :
 			wxGetTranslation(wxString(s, wxConvUTF8), wxString(plural, wxConvUTF8), n,
-							 wxString(domain.c_str(), wxConvUTF8));
+							 catalogue_domain(domain));
 	}
+	// Translate context-qualified UTF-8 text in its owning catalogue.
 	inline wxString translate_in_domain_with_context(const char *s, const char *context, const std::string &domain) {
 #if wxCHECK_VERSION(3, 1, 1)
 		return wxGetTranslation(wxString(s, wxConvUTF8),
-							domain.empty() ? wxString(wxEmptyString) : wxString(domain.c_str(), wxConvUTF8),
+							catalogue_domain(domain),
 							wxString(context, wxConvUTF8));
 #else
 		(void)context;
 		return translate_in_domain(s, domain);
 #endif
 	}
+	// Translate context-qualified plural text in its owning catalogue.
 	inline wxString translate_in_domain_with_context(const char *s, const char *plural, unsigned int n,
 	                                                 const char *context, const std::string &domain) {
 #if wxCHECK_VERSION(3, 1, 1)
 		return wxGetTranslation(wxString(s, wxConvUTF8), wxString(plural, wxConvUTF8), n,
-							domain.empty() ? wxString(wxEmptyString) : wxString(domain.c_str(), wxConvUTF8),
+							catalogue_domain(domain),
 							wxString(context, wxConvUTF8));
 #else
 		(void)context;
