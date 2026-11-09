@@ -63,7 +63,7 @@ The normal call flow is:
 namespace slic3r_api { namespace Infill {
 namespace {
 
-namespace rect_work = RectilinearPatternsPlugin::work;
+namespace rect_work = PluginCommon::polygon_work;
 namespace rect_fills = RectilinearPatternsPlugin::fills;
 
 const char *const k_fill_smooth_width_key = "fill_smooth_width";

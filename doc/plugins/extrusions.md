@@ -655,3 +655,80 @@ own the host object.
 Python mutable property payloads are live `ctypes` views, while read-only
 property access returns a copy. Reacquire a mutable payload after structural
 mutation for the same reasons as in C++.
+
+## Travel provider selection
+
+The exclusive group `layer_extrusion_edit.travel` selects how gaps between
+ordered extrusion leaves become travels. Both bundled providers are enabled.
+`layer_extrusion_edit.travel.avoid_crossing_perimeters` has the lowest group
+priority and is the default; `layer_extrusion_edit.travel.default` is the
+straight-line alternative. Group priority orders selector choices independently
+of execution priority. Presets storing `layer_extrusion_edit.travel.default`
+keep straight travel. The avoidance default applies when the selector is absent;
+newly initialized configurations receive that ID from the generated definition.
+
+The avoidance provider checks `avoid_crossing_perimeters` at both regional
+endpoints. When an endpoint lies on a region boundary, the lookup can miss
+because the point may belong to two regions; the provider then retries at a
+point just inside the leaf, if that point is available. It keeps
+straight travel if either endpoint disables avoidance, has no regional data,
+or has no valid object instance (including global skirt and brim paths).
+With `avoid_crossing_not_first_layer` enabled, it also excludes the target's
+first object layer and every layer at that print Z, including support layers.
+Both points are translated by the target instance shift for routing, and the
+returned route restores the shift and exact original endpoints. The shared
+connector handles insertion, epsilon snapping, Z interpolation and travel flags.
+
+Before routing, `PerimeterCrossing` tests the direct segment against prepared
+interior boundaries, not extrusion centerlines. When region settings assign
+perimeters or infill to a tool other than the current one, object interiors are
+clipped to the current tool so its material does not ooze over another tool's
+area. Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
+then removes top surfaces from both. The provider tests the inset version.
+Support uses its own
+slices expanded by 1.5 radii, without tool clipping or top removal; this does not
+test the object layers already printed at that height. A path that does not
+cross those boundaries remains straight.
+
+Within one object instance, the router uses internal rings around inset object
+interiors. Between objects or instances, it uses external rings: holes placed
+at instance positions, rather than outer obstacle outlines. The support boundary
+uses object slices at or below the target height; its purpose is undocumented,
+and it does not route support travels around objects. The router places endpoints near usable rings, follows
+ring arcs and tries shortcuts. It may keep a direct path and does not guarantee
+a shortest path or the removal of every crossing.
+
+Top surfaces come from `LayerRegionIsland`; shared islands' tops are clipped to
+each region's raw slices. Support has no tops. Crossing preparation removes all
+tops regardless of `avoid_crossing_top`. Routing removes the tops selected by
+that setting after insetting them by half a perimeter spacing, and retains those
+inset areas in `to_avoid` to compare candidate paths. A top band is kept only where there are perimeters and no
+ironing: a detour can follow the top perimeter, while ironing passes over its
+edge. Perimeter spacing is averaged over regions with nonempty raw slices;
+external spacing includes objects at that print Z. Missing spacing falls back
+to the mean nozzle diameter. Departure and arrival placement use the same
+search for a nearby point inside the island.
+
+`avoid_crossing_perimeters_max_detour` limits extra length beyond the direct
+distance, in millimetres or as a percentage of that distance. Zero is unlimited.
+An over-budget route, or a result with fewer than two points, keeps straight
+travel.
+
+The implementation is internal to the host, under
+`src/libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/`, not a third-party API.
+Each layer-group worker owns its copied inputs, routers and crossing caches;
+inputs outlive routers, and temporary geometry uses run-context plugin storage.
+
+```text
+AvoidCrossingPerimetersTravel: choose a route for each eligible gap
+|-- LayerInputCache::get: retain target geometry, settings and spacing
+|   `-- build_input: copy public Print, Object and Layer views
+|-- PerimeterCrossing: prepare interiors and test the direct path
+`-- TravelRouter: build boundaries and choose a detour
+    |-- TravelBoundary: retain rings and their search grids
+    `-- build_external_input: copy other objects only when needed
+```
+
+Retraction with `wipe_only_crossing` uses the same copied-input and crossing
+helpers as a gate for wiping, independently of travel-provider selection; it
+does not ask the router for a detour.

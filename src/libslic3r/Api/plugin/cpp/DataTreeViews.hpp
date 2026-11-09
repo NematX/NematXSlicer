@@ -30,7 +30,8 @@ The main hierarchy is:
 `LayerRegionIsland` is the region-specific part of one geometric island. It
 groups one or more `LayerRegion` objects that share the same effective
 extruder for the current operation. `LayerIsland` contains the geometric
-slice, infill areas, and links to overlapping islands on the layers above and
+slice, infill areas, filled XY areas published by perimeter processing for travel
+boundaries (see layer_island_get_perimeter_slices), and links to overlapping islands on the layers above and
 below. `Layer` provides Z positions and the collection of islands. `Object`
 provides layers, instances, volumes, object configuration, and object-owned
 auxiliary layers. `Print` provides the objects, print configuration, records,
@@ -388,7 +389,8 @@ public:
 };
 
 // One connected geometric island on a Layer. It exposes the sliced shape,
-// infill areas, region-island groups, and overlap links to neighboring layers.
+// infill areas, filled XY areas published by perimeter processing for travel boundaries,
+// region-island groups, and overlap links to neighboring layers.
 class LayerIsland : public ConstDataTreeHandleView<layer_island_handle>
 {
 public:
@@ -398,6 +400,9 @@ public:
     c_bounding_box bounding_box() const { return layer_island_get_bounding_box(handle()); }
     ExPolygon infill_slice() const { return ExPolygon(layer_island_get_infill_slice(handle())); }
     ExPolygonCollection infill_areas() const { return ExPolygonCollection(layer_island_get_infill_areas(handle())); }
+    // Borrow filled XY areas for travel boundaries, not paths; may be empty.
+    // See layer_island_get_perimeter_slices for publication, lifetime and thread rules.
+    ExPolygonCollection perimeter_slices() const { return ExPolygonCollection(layer_island_get_perimeter_slices(handle())); }
     c_bounding_box infill_bounding_box() const { return layer_island_get_infill_bounding_box(handle()); }
     ExPolygon infill_no_overlap_slice() const { return ExPolygon(layer_island_get_infill_no_overlap_slice(handle())); }
     ExPolygonCollection infill_no_overlap_areas() const {

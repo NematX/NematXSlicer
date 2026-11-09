@@ -26,7 +26,89 @@
 
 //#define AVOID_CROSSING_PERIMETERS_DEBUG_OUTPUT
 
+// AvoidCrossingPerimeters supplies the legacy G-code generator with crossing tests
+// and two-dimensional travel detours. Crossing detection and routing are separate:
+// a caller can test a path without building the rings needed to guide a detour.
+// A safe interior is a filled area whose edges are tested for crossings; the test
+// does not prove that a path stays inside it. Object base areas are slices clipped
+// to the active tool when any region assigns perimeters, infill or solid infill
+// to another tool; offset areas inset them by 1.5 nozzle radii.
+// Tops are removed from both. Support base areas combine slices from
+// already_printed_object_layers; offset areas expand those slices by 1.5 nozzle
+// radii. The offset argument of can_cross_perimeter selects which set is tested.
+// Tool clipping keeps one tool from oozing its material over another tool's area.
+//
+// init_layer resets the routing caches and prepares inset perimeter slices.
+// prepare_crossing_test caches base and offset interiors for a layer and tool.
+// Object crossing tests remove all tops, regardless of avoid_crossing_top.
+// Tops come from layer islands; a top shared by regions is clipped to each
+// region's raw slices before applying that region's settings. Support has no tops.
+//
+// travel_to builds routing boundaries only when needed. Internal rings follow
+// inset filled areas in object coordinates. Tops are removed only where the
+// region enables avoid_crossing_top. A band remains around such a top only with
+// perimeters and without ironing: it lets a detour follow the top's perimeter;
+// ironing passes over the edge and makes that band useless. For support targets,
+// perimeter slices from the same object's last layer strictly below
+// Z + SCALED_EPSILON add internal rings. This does not route support travel around
+// objects; its purpose is undocumented.
+// External rings come from holes of all objects at this height. For support
+// targets, they also include holes of each object's last layer strictly below
+// Z + SCALED_EPSILON. A layer at the target Z qualifies, so its holes can appear
+// twice. The holes are expanded and placed at each instance's shift
+// in platter coordinates; they are not outer object outlines.
+//
+// Boundary distances use averages of flow dimensions over regions with raw
+// slices, in scaled coordinate units. Internal spacing and external perimeter
+// width use this layer; external spacing uses all print objects at its print Z.
+// With no contributing region, the fallback is the mean nozzle diameter of this
+// object's extruders, which requires at least one extruder.
+//
+// Each Boundary owns its rings and excluded tops (to_avoid). init_boundary keeps
+// those tops across its reset, then builds grid over the routing rings and
+// to_avoid_grid over the stored top areas. Both grids borrow these owned points;
+// changing the geometry requires rebuilding the indexes.
+//
+// Routing places endpoints near rings, finds crossings and connects islands,
+// follows a chosen ring direction, then removes unnecessary points. It is a
+// heuristic, not a shortest-path or no-crossing guarantee. A detour exceeding
+// the configured extra-length limit can be replaced by the direct travel.
+// Layers are borrowed during geometry preparation and routing calls. Cached
+// polygons are owned by the router; stored layer pointers identify the prepared
+// context.
+//
+// Entry points and the helpers that prepare their results:
+// |-- init_layer: reset routing caches and prepare inset perimeter slices
+// |-- prepare_crossing_test: prepare interiors for can_cross_perimeter
+// |   `-- regional_top_surfaces: separate each region's tops
+// |-- can_cross_perimeter: test a path against prepared interiors
+// `-- travel_to: select boundaries and enforce the detour limit
+//     |-- get_boundary: build internal areas and collect excluded tops
+//     |   |-- regional_top_surfaces: apply regional top settings
+//     |   `-- inner_offset: reduce the inset in narrow areas
+//     |-- get_boundary_external: place expanded object holes
+//     |-- init_boundary: store rings and index their edges
+//     `-- avoid_perimeters: form a route from the selected boundaries
+//         `-- avoid_perimeters_inner: join crossings along rings
+//             |-- jump_between_island: connect separate islands
+//             `-- simplify_travel: remove unnecessary waypoints
+
 namespace Slic3r {
+
+// Copy top surfaces from the layer's islands, clipping shared islands to the region's raw slices.
+static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region);
+// Return mean nozzle diameter in scaled units as fallback spacing; the object must have at least one extruder.
+static inline coord_t get_default_perimeter_spacing(const PrintObject &print_object);
+// Return mean perimeter spacing in scaled units over regions with raw slices, or the object's mean nozzle diameter.
+static coord_t get_perimeter_spacing(const Layer &layer);
+// Return mean perimeter spacing in scaled units over raw-sliced regions of all print objects at this print Z, or this object's mean nozzle diameter.
+static coord_t get_perimeter_spacing_external(const Layer &layer);
+// Return a float in scaled units: mean external perimeter width over this layer's regions with raw slices, or the object's mean nozzle diameter.
+static float get_external_perimeter_width(const Layer &layer);
+// Keep the excluded tops, replace the routing rings, then rebuild both edge grids over the stored points.
+static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons &&boundary_polygons, coord_t extra_available_space);
+// Keep the excluded tops, replace the routing rings, then rebuild both edge grids over the stored points.
+static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygons &&boundary_islands, coord_t extra_available_space);
 
 struct TravelPoint
 {
@@ -639,7 +721,6 @@ static std::vector<TravelPoint> simplify_travel(const AvoidCrossingPerimeters::B
     return simplified_path;
 }
 
-// called by get_perimeter_spacing() / get_perimeter_spacing_external()
 static inline coord_t get_default_perimeter_spacing(const PrintObject &print_object)
 {
     std::set<extruder_index_t> printing_extruders = print_object.object_extruders();
@@ -651,13 +732,12 @@ static inline coord_t get_default_perimeter_spacing(const PrintObject &print_obj
     return avg_extruder;
 }
 
-// called by get_boundary() / avoid_perimeters_inner()
 static coord_t get_perimeter_spacing(const Layer &layer)
 {
     size_t regions_count     = 0;
     coord_t  perimeter_spacing = 0;
     for (const LayerRegion &layer_region : layer.regions())
-        if (! layer_region.slices().empty()) {
+        if (! layer_region.get_raw_slices().empty()) {
             perimeter_spacing += layer_region.flow(frPerimeter).scaled_spacing();
             ++regions_count;
         }
@@ -670,7 +750,6 @@ static coord_t get_perimeter_spacing(const Layer &layer)
     return perimeter_spacing;
 }
 
-// called by get_boundary_external()
 static coord_t get_perimeter_spacing_external(const Layer &layer)
 {
     size_t  regions_count     = 0;
@@ -680,7 +759,7 @@ static coord_t get_perimeter_spacing_external(const Layer &layer)
                object.get_layer_at_printz(layer.scaled_print_z()));
         if (const Layer *l = object.get_layer_at_printz(layer.scaled_print_z()); l) {
             for (const LayerRegion &layer_region : l->regions()) {
-                if (!layer_region.slices().empty()) {
+                if (!layer_region.get_raw_slices().empty()) {
                     perimeter_spacing += layer_region.flow(frPerimeter).scaled_spacing();
                     ++regions_count;
                 }
@@ -763,13 +842,12 @@ bool find_point_on_boundary(Point& pt_to_move, const AvoidCrossingPerimeters::Bo
     return true;
 }
 
-// Returns average perimeter width calculated from all LayerRegion within the layer.
 static float get_external_perimeter_width(const Layer &layer)
 {
     size_t regions_count     = 0;
     float  perimeter_width   = 0.f;
     for (const LayerRegion &layer_region : layer.regions())
-        if (! layer_region.slices().empty()) {
+        if (! layer_region.get_raw_slices().empty()) {
             perimeter_width += float(layer_region.flow(frExternalPerimeter).scaled_width());
             ++regions_count;
         }
@@ -1248,12 +1326,13 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 // try with a visitor that look at epsilon distance, and modify the start point to the intersection
                 FirstEpsilonIntersectionVisitor visitor_epsilon(start_grid, start_end_line.a, start_end_line.b);
                 start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
-                assert(visitor_epsilon.intersect);
                 visitor.intersect = visitor_epsilon.intersect;
                 visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
                 visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
-                assert(start != start_end_line.a);
-                start = start_end_line.a;
+                if (visitor_epsilon.intersect) {
+                    assert(start != start_end_line.a);
+                    start = start_end_line.a;
+                }
             }
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
@@ -1278,15 +1357,16 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             end_grid.visit_cells_intersecting_line(start, end, visitor);
             if (!visitor.intersect) {
                 // probably a epsilon-difference for the intersection to happen.
-                // try with a visitor that look at epsilon distance, and modify the start point to the intersection
-                FirstEpsilonIntersectionVisitor visitor_epsilon(end_grid, start_end_line.a, start_end_line.b);
-                assert(visitor_epsilon.intersect);
-                start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
+                // On a nearby segment match, project the end onto it and possibly move it away from start to obtain a crossing; otherwise leave it for brute force.
+                FirstEpsilonIntersectionVisitor visitor_epsilon(end_grid, start_end_line.b, start_end_line.a);
+                end_grid.visit_cells_intersecting_line(end, start, visitor_epsilon);
                 visitor.intersect = visitor_epsilon.intersect;
                 visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
                 visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
-                assert(start != start_end_line.a);
-                start = start_end_line.a;
+                if (visitor_epsilon.intersect) {
+                    assert(end != start_end_line.b);
+                    end = start_end_line.b;
+                }
             }
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
@@ -1635,7 +1715,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
     }
 }
 
-// Called by avoid_perimeters() and by simplify_travel_heuristics().
+// Adjust endpoints and append the routed path to the expected-empty result_out; return the intersection count.
 static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &boundary, // not const because of possible late init of island_to_grid
                                      const Point                             &real_start,
                                      const Point                             &real_end,
@@ -1699,7 +1779,7 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
                 }
             }
 
-            // travel strait to the nearest point to the same boudary as the other one, if it reduce the strait travel
+            // Scan consecutive ring edges so the unmatched endpoint projects onto the other endpoint's boundary.
             auto saerch_best_pt = [&](const EdgeGrid::Grid::ClosestPointResult &good_one,
                                       Point &bad_one)->bool {
                 coordf_t min_dist_sqr = dist*dist;
@@ -1715,6 +1795,7 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
                         min_dist_sqr = dist_sqr;
                         best_pt = nearest;
                     }
+                    last_pt = current;
                 }
                 bad_one = best_pt;
                 return  min_dist_sqr < dist*dist;
@@ -2115,8 +2196,8 @@ static std::vector<float> contour_distance(const EdgeGrid::Grid     &grid,
     return out;
 }
 
-// Polygon offset which ensures that if a polygon breaks up into several separate parts, the original polygon will be used in these places.
-// ExPolygons are handled one by one so returned ExPolygons could intersect.
+// Inset less in narrow areas, retrying with higher width thresholds; return original/inset pairs, processing islands separately so results may overlap.
+// Finally keep one piece even with changed holes, the largest of several pieces, or the pre-inset candidate if the inset is empty.
 static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygons &ex_polygons, double offset)
 {
     const std::vector<double> min_contour_width_values = {offset / 2., offset, 2. * offset + SCALED_EPSILON};
@@ -2125,11 +2206,10 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
         ex_poly_result.emplace_back(expo, expo);
         resample_expolygon(ex_poly_result.back().second, offset / 2, scale_d(0.5));
         ExPolygons ensure_resample_dont_grow = diff_ex(ex_poly_result.back().second, ex_poly_result.back().first);
-        if (ensure_resample_dont_grow.size() != 1) {
-            // fail, use the unsimplified one.
+        // Keep the original if resampling extends outside it. Otherwise keep the resampled island directly,
+        // because clipping by intersection would remove the collinear samples needed for local widths.
+        if (!ensure_resample_dont_grow.empty()) {
             ex_poly_result.back().second = ex_poly_result.back().first;
-        } else {
-            ex_poly_result.back().second = ensure_resample_dont_grow.front();
         }
     }
 
@@ -2171,7 +2251,7 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
             }
 
             ExPolygons offset_ex_poly = variable_offset_inner_ex(ex_poly, offsets);
-            // If variable_offset_inner_ex produces empty result, then original ex_polygon is used
+            // If the inset is empty, retry with a higher width threshold; after the last attempt, keep the pre-inset candidate.
             if (offset_ex_poly.size() == 1 && offset_ex_poly.front().holes.size() == ex_poly.holes.size()) {
                 ex_poly = std::move(offset_ex_poly.front());
                 break;
@@ -2202,7 +2282,7 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
 
 //#define INCLUDE_SUPPORTS_IN_BOUNDARY
 
-// called by AvoidCrossingPerimeters::travel_to()
+// Return inset travel areas for the zero-based extruder_id; append original/inset pairs to slice_2_boundary and excluded tops to to_avoid, keeping prior entries.
 static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id, std::vector<std::pair<ExPolygon, ExPolygon>> &slice_2_boundary, ExPolygons &to_avoid)
 {
     const coord_t perimeter_spacing = get_perimeter_spacing(layer);
@@ -2249,31 +2329,23 @@ static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id,
         boundary = union_ex(boundary);
     }
     // Collect all top layers that will not be crossed.
-    size_t      polygons_count    = 0;
-    for (const LayerRegion &layer_region : layer.regions())
-        if(layer_region.region().config().avoid_crossing_top)
-            for (const Surface &surface : layer_region.fill_surfaces())
-                if (surface.has_pos_top()) ++polygons_count;
-
-    if (polygons_count > 0) {
-        ExPolygons top_layer_polygons;
-        top_layer_polygons.reserve(polygons_count);
+    ExPolygons top_layer_polygons;
+    if (!support_layer) {
         for (const LayerRegion &layer_region : layer.regions()) {
             if (layer_region.region().config().avoid_crossing_top) {
-                for (const Surface &surface : layer_region.fill_surfaces()) {
-                    if (surface.has_pos_top()) {
-                        ExPolygons offseted_top = offset_ex(surface.expolygon, coordf_t(-perimeter_spacing / 2));
-                        // still get a perimeter width to travel (unless no perimeters or post-process ironing)
-                        if (layer_region.region().config().perimeters > 0 && !layer_region.region().config().ironing) {
-                            append(boundary,
-                                   diff_ex(offset_ex(surface.expolygon, coordf_t(perimeter_spacing / 4)), offseted_top));
-                        }
-                        append(top_layer_polygons, offseted_top);
+                for (const ExPolygon &surface : regional_top_surfaces(layer, layer_region)) {
+                    ExPolygons offseted_top = offset_ex(surface, coordf_t(-perimeter_spacing / 2));
+                    // Keep a band for following the top perimeter; ironing crosses its edge, so needs no band.
+                    if (layer_region.region().config().perimeters > 0 && !layer_region.region().config().ironing) {
+                        append(boundary,
+                               diff_ex(offset_ex(surface, coordf_t(perimeter_spacing / 4)), offseted_top));
                     }
+                    append(top_layer_polygons, offseted_top);
                 }
             }
         }
-        
+    }
+    if (!top_layer_polygons.empty()) {
         top_layer_polygons = union_ex(top_layer_polygons);
         boundary = union_ex(boundary);
         append(to_avoid, top_layer_polygons);
@@ -2332,6 +2404,27 @@ static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id,
     }
 
     return boundary;
+}
+
+static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region)
+{
+    ExPolygons tops;
+    for (const LayerSliceIsland &island : layer.islands()) {
+        for (const LayerRegionIsland &region_island : island.regions_islands()) {
+            if (region_island.regions().count(&region) == 0)
+                continue;
+            for (const Surface &surface : region_island.fill_surfaces()) {
+                if (!surface.has_pos_top())
+                    continue;
+                // A shared island must not apply one region's settings to its neighbours.
+                if (region_island.regions().size() > 1)
+                    append(tops, intersection_ex(ExPolygons{surface.expolygon}, region.get_raw_slices()));
+                else
+                    tops.push_back(surface.expolygon);
+            }
+        }
+    }
+    return tops;
 }
 
 // called by AvoidCrossingPerimeters::travel_to()
@@ -2403,6 +2496,8 @@ static void init_boundary_distances(AvoidCrossingPerimeters::Boundary *boundary)
 
 static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons &&boundary_polygons, coord_t extra_available_space)
 {
+    // clear() drops the excluded tops, so keep them across the reset.
+    ExPolygons to_avoid = std::move(boundary->to_avoid);
     boundary->clear();
     boundary->boundaries = std::move(boundary_polygons);
     BoundingBox bbox(get_extents(boundary->boundaries));
@@ -2413,16 +2508,18 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, Polygons 
     boundary->grid.create(boundary->boundaries, (scale_i(1.)));
     init_boundary_distances(boundary);
     
-    boundary->to_avoid = union_ex(boundary->to_avoid);
+    boundary->to_avoid = union_ex(to_avoid);
     bbox = BoundingBox(get_extents(boundary->to_avoid));
     bbox.offset(SCALED_EPSILON + extra_available_space);
     boundary->to_avoid_grid.set_bbox(bbox);
     // FIXME 1mm grid? -> use nozzle size or extrusion width
-    boundary->to_avoid_grid.create(to_polygons(boundary->to_avoid), (scale_i(1.)));
+    boundary->to_avoid_grid.create(boundary->to_avoid, (scale_i(1.)));
 }
 
 static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygons &&boundary_islands, coord_t extra_available_space)
 {
+    // clear() drops the excluded tops, so keep them across the reset.
+    ExPolygons to_avoid = std::move(boundary->to_avoid);
     boundary->clear();
     // fill boundaries & boundary_to_island
     size_t island_id = 0;
@@ -2445,12 +2542,12 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygon
     boundary->grid.create(boundary->boundaries, scale_i(1.));
     init_boundary_distances(boundary);
     
-    boundary->to_avoid = union_ex(boundary->to_avoid);
+    boundary->to_avoid = union_ex(to_avoid);
     bbox = BoundingBox(get_extents(boundary->to_avoid));
     bbox.offset(SCALED_EPSILON + extra_available_space);
     boundary->to_avoid_grid.set_bbox(bbox);
     // FIXME 1mm grid? -> use nozzle size or extrusion width
-    boundary->to_avoid_grid.create(to_polygons(boundary->to_avoid), scale_i(1.));
+    boundary->to_avoid_grid.create(boundary->to_avoid, scale_i(1.));
 
     assert(boundary->islands.size() == boundary->boundaries.size());
 }
@@ -2547,8 +2644,7 @@ bool AvoidCrossingPerimeters::prepare_crossing_test(const PerimeterCrossingConte
     if (!is_support_layer) {
         for (const LayerRegion &region : context.layer.regions()) {
             m_crossing_throw_if_canceled();
-            const ExPolygons top_surfaces = to_expolygons(
-                region.fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop));
+            const ExPolygons top_surfaces = regional_top_surfaces(context.layer, region);
             offset_slices = diff_ex(offset_slices, top_surfaces);
             slices = diff_ex(slices, top_surfaces);
         }
@@ -2754,14 +2850,13 @@ Polyline AvoidCrossingPerimeters::travel_to(const TravelContext &context,
             result_pl.points.back()   = end;
         }
     }
-    assert(result_pl.size() > 1);
-    for (size_t i = 1; i < result_pl.size(); i++)
-        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
-
     if(result_pl.empty()) {
         // Travel line is completely outside the bounding box.
         result_pl = {start, end};
     }
+    assert(result_pl.size() > 1);
+    for (size_t i = 1; i < result_pl.size(); i++)
+        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
 
     bool                              max_detour_length_exceeded = false;
     if (context.max_detour > 0) {

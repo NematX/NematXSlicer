@@ -143,6 +143,13 @@ public:
         }
     };
 
+    // Return the internal boundary, empty until travel_to() needs to build it.
+    const Boundary &internal_boundary() const { return m_internal; }
+    // Return the external boundary, empty until travel_to() needs to build it.
+    const Boundary &external_boundary() const { return m_external; }
+    // Return the offset layer slices prepared by init_layer().
+    const ExPolygons &layer_slices_offset() const { return m_lslices_offset; }
+
 private:
     /* One simplified printable island used by the crossing hot path. */
     struct SliceIsland

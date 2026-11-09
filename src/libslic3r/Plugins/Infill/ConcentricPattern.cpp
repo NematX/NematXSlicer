@@ -21,6 +21,7 @@
 #include "libslic3r/Plugins/Infill/PatternPluginHelpers.hpp"
 
 namespace slic3r_api { namespace Infill {
+namespace work = PluginCommon::work;
 namespace {
 struct Spacing { double extrusion; coord_t distance; };
 

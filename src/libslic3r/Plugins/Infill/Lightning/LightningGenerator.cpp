@@ -5,14 +5,14 @@
 // Layer dependencies require top-down construction before surface calls can share immutable trees.
 #include "LightningGenerator.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearClipper.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
 namespace slic3r_api { namespace Infill { namespace Lightning {
 
 std::unique_ptr<Cache> build_cache(const Inputs &inputs, storage_handle *scratch,
                                   const plugin_run_context *run_ctx)
 {
-    namespace clipper = RectilinearPatternsPlugin::clipper;
+    namespace clipper = PluginCommon::clipper;
     std::unique_ptr<Cache> cache = std::make_unique<Cache>();
     cache->layers.resize(inputs.layers.size());
     std::vector<work::Polygons> overhangs(inputs.layers.size());

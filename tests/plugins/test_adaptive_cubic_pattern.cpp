@@ -226,7 +226,7 @@ TEST_CASE("STEP_INFILL generates Support Cubic extrusion without pre-infill", "[
 
 namespace {
 namespace adaptive = slic3r_api::Infill::AdaptiveCubic;
-namespace work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+namespace work = slic3r_api::PluginCommon::polygon_work;
 
 void require_paths(const Polylines &expected, const work::Polylines &actual, bool compare_order = true)
 {

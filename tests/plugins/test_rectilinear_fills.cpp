@@ -34,7 +34,7 @@ STEP_ORDERING stage, so the general comparison does not require a path order.
 Monotonic patterns additionally compare every point in every path in order.
 */
 
-namespace rect_work = slic3r_api::Infill::RectilinearPatternsPlugin::work;
+namespace rect_work = slic3r_api::PluginCommon::polygon_work;
 namespace rect_fills = slic3r_api::Infill::RectilinearPatternsPlugin::fills;
 
 namespace {

@@ -42,6 +42,9 @@ storage-owned collection. Prefer them when parity with the native code matters.
 They raise ``ValueError`` for an unknown enum value, a non-finite number, or
 ``delta2 == 0`` in ``clipper_offset2_ex()``. A NULL result from the host after the
 arguments were accepted is an internal error and raises ``RuntimeError``.
+The generated low-level bindings also expose native ``clipper_diff_ex``,
+``clipper_intersection_ex``, ``clipper_variable_offset_inner_ex`` (ExPolygons),
+and ``clipper_expand`` (Polygons). They have no high-level helpers here.
 
 Lifetime model
 --------------

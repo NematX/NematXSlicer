@@ -6,11 +6,11 @@
 
 // Scaled-coordinate predicates and borrowed grid queries retain native Lightning boundary and rounding contracts.
 #include "LightningPreparation.hpp"
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearEdgeGrid.hpp"
+#include "libslic3r/Plugins/Common/PluginEdgeGrid.hpp"
 #include <boost/multiprecision/cpp_int.hpp>
 
 namespace slic3r_api { namespace Infill { namespace Lightning {
-namespace grid = RectilinearPatternsPlugin::EdgeGrid;
+namespace grid = PluginCommon::EdgeGrid;
 constexpr coord_t locator_cell_size = scale_i(4.);
 
 // Keep the native PointHash bit shifts; they determine grid lookup and dispersed cell priorities.

@@ -44,6 +44,10 @@ Query functions resolve a borrowed handle and return a value or another borrowed
 view. Keep the owning node alive and reacquire descendants after rebuilding or
 replacing a collection. Mutable access is limited by the current slicing step's
 capabilities; receiving a mutable handle does not grant unrestricted live editing.
+Perimeter slices are filled XY areas published for travel boundaries, not paths.
+Structural edits can invalidate element handles; recompute calls rebuild derived
+layer slices and islands. Channel-name queries use thread-local strings and
+pointers, replaced by the next such query on that thread.
 
 Some operations build or edit temporary surface collections owned by plugin
 storage. Type and bridge-angle setters act on that scratch data, with the supplied
@@ -66,6 +70,9 @@ that Print's execution. Without that mode, the check is an assertion.
 
 Representative direct calls (branches are not a timeline):
 
+    layer_island_get_perimeter_slices()
+        `-- borrow the island's published filled XY areas
+
     object_get_layer()
         |-- Slic3r::to_object()
         |-- layer_count()
@@ -79,6 +86,9 @@ Representative direct calls (branches are not a timeline):
         |-- object->auxiliary_layers()
         `-- Slic3r::data_tree_editable()
 */
+
+// Borrow the island-owned perimeter collection without copying; null input returns null, without mutation or exceptions.
+extern "C" const expolygon_collection_handle *layer_island_get_perimeter_slices(const layer_island_handle *me);
 
 namespace Slic3r {
 
@@ -846,6 +856,13 @@ const expolygon_collection_handle *layer_island_get_infill_areas(const layer_isl
     return me == nullptr ? nullptr :
                            reinterpret_cast<const expolygon_collection_handle *>(
                                &Slic3r::to_layer_island(me)->infill_areas());
+}
+
+const expolygon_collection_handle *layer_island_get_perimeter_slices(const layer_island_handle *me)
+{
+    return me == nullptr ? nullptr :
+                           reinterpret_cast<const expolygon_collection_handle *>(
+                               &Slic3r::to_layer_island(me)->get_perimeter_slices());
 }
 
 c_bounding_box layer_island_get_infill_bounding_box(const layer_island_handle *me)

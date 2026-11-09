@@ -6,7 +6,7 @@
 #include "LightningLayer.hpp"
 #include "LightningDistanceField.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearClipper.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
 namespace slic3r_api { namespace Infill { namespace Lightning {
 
@@ -22,7 +22,7 @@ LayerTree::Ground LayerTree::best_ground(const work::Point &point, const work::P
                                          const grid::Grid &locator, coord_t radius, coord_t wall_radius,
                                          const NodeGrid &nodes, const NodePtr &exclude, const plugin_run_context *run_ctx)
 {
-    const work::BoundingBox bounds = RectilinearPatternsPlugin::clipper::get_extents(outlines);
+    const work::BoundingBox bounds = PluginCommon::clipper::get_extents(outlines);
     work::Point ground;
     double minimum_squared = std::numeric_limits<double>::max();
     for (const work::Polygon &contour : outlines) {
@@ -81,7 +81,7 @@ LayerTree::Ground LayerTree::best_ground(const work::Point &point, const work::P
 void LayerTree::generate(const work::Polygons &overhang, const work::Polygons &outlines, const grid::Grid &locator,
                          coord_t radius, coord_t wall_radius, storage_handle *scratch, const plugin_run_context *run_ctx)
 {
-    const work::BoundingBox bounds = RectilinearPatternsPlugin::clipper::get_extents(outlines);
+    const work::BoundingBox bounds = PluginCommon::clipper::get_extents(outlines);
     DistanceField field(radius, bounds, overhang, scratch, run_ctx);
     NodeGrid nodes;
     populate(nodes, bounds);
@@ -110,7 +110,7 @@ void LayerTree::reconnect(const std::vector<NodePtr> &previous, const work::Poly
                           coord_t radius, coord_t wall_radius, const plugin_run_context *run_ctx)
 {
     NodeGrid nodes;
-    const work::BoundingBox bounds = RectilinearPatternsPlugin::clipper::get_extents(outlines);
+    const work::BoundingBox bounds = PluginCommon::clipper::get_extents(outlines);
     populate(nodes, bounds);
     for (const NodePtr &root : previous) {
         throw_if_cancelled(run_ctx);

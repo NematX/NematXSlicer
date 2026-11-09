@@ -242,7 +242,7 @@ TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
     CHECK(plugin->get_used_config_keys().empty());
 }
 
-TEST_CASE("Avoid-crossing travel is an optional provider in the travel group",
+TEST_CASE("Avoid-crossing travel is the default provider in the travel group",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -250,6 +250,7 @@ TEST_CASE("Avoid-crossing travel is an optional provider in the travel group",
     REQUIRE(plugin != nullptr);
     CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
     CHECK(plugin->get_priority() == -50);
+    CHECK(plugin->get_exclusive_group_priority() == -1);
     CHECK(plugin->get_exclusive_group() == "layer_extrusion_edit.travel");
     REQUIRE(plugin->get_dependencies().size() == 2);
     CHECK(plugin->get_dependencies()[0] == TRANSITION_SCOPE_PLUGIN);

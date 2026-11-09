@@ -6,7 +6,7 @@
 #define slic3r_clipper_h_
 
 #define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u
-#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 1u
+#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 2u
 
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
@@ -19,6 +19,22 @@ extern "C" {
 typedef struct clipper_shapes_handle clipper_shapes_handle;
 
 /*
+Polygon clipping and offsets for plugin authors.
+
+Use geometry handles from slic3r_geometry.h and temporary storage from
+slic3r_utils.h. Two routes are available. For a sequence of operations, wrap
+geometry in clipper_shapes_handle adapters, apply booleans or offsets, then
+materialize the result with clipper_shapes_to_polygons or
+clipper_shapes_to_expolygons. For native core
+results, call the native polygon functions below directly with geometry handles;
+they preserve the native result order and processing, without an adapter step.
+
+Keep borrowed geometry alive and unchanged throughout each call. Storage locks
+protect its registry of owned objects, not geometry access. Do not mutate or
+destroy an input or result while another thread uses it. Clear or destroy storage
+only after all users of its handles have finished. Native-result functions catch
+exceptions and return NULL; other entry points do not provide that guarantee.
+
 Opaque geometry adapter used by the Clipper ABI.
 
 The goal of this handle is to avoid exposing a combinatorial set of functions
@@ -242,10 +258,10 @@ SLIC3R_HOST_API clipper_shapes_handle *clipper_offset_polylines(storage_handle *
                                                                 double miter_limit,
                                                                 clipper_end_type_t end_type);
 
-/* ---- Native ExPolygon results -----------------------------------------
-The three functions below call the native ClipperUtils code and return its result
-as is: a new expolygon collection owned by storage (release it with
-storage_free()), with the native order of expolygons, contours and holes, and no
+/* ---- Native polygon results -----------------------------------------
+The functions below call the native ClipperUtils code and return its result
+as is: a new polygon or expolygon collection owned by storage (release it with
+storage_free()), preserving the native order of polygons or expolygons and their rings, with no
 extra cleaning. They return NULL when storage or an input handle is NULL, when an
 enum value is unknown, or when a double argument is not finite, and also on an
 internal error (for example ClipperLib rejecting coordinates outside its allowed
@@ -311,6 +327,46 @@ are borrowed for this call only; the returned collection is owned by storage. */
 SLIC3R_HOST_API expolygon_collection_handle *clipper_variable_offset_inner(
     storage_handle *storage, const expolygon_handle *source,
     const float *deltas, uint32_t delta_count, double miter_limit);
+/* Subtract clip from subject with native diff_ex, without safety offset.
+The native operation removes tiny or narrow rings and then unions the remaining
+paths to rebuild contour/hole topology. Even an empty clip can therefore remove
+small subject parts. Empty collections are accepted; NULL storage, subject or
+clip is not. Inputs are borrowed, unchanged, only during the call.
+Returns storage-owned ExPolygons in native order; release with storage_free().
+Invalid arguments or internal errors return NULL, store no result and let no
+exception cross the C boundary. Inputs must not be edited concurrently. */
+SLIC3R_HOST_API expolygon_collection_handle *clipper_diff_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip);
+/* Intersect subject and clip with native intersection_ex, without safety offset.
+Removes tiny or narrow output rings before a union rebuilds contour/hole topology.
+Empty collections are accepted and an empty clip gives an empty result. Native
+order, borrowing, thread, ownership and NULL/error rules are as for clipper_diff_ex. */
+SLIC3R_HOST_API expolygon_collection_handle *clipper_intersection_ex(storage_handle *storage,
+    const expolygon_collection_handle *subject, const expolygon_collection_handle *clip);
+
+/* Inset the filled area: the contour shrinks and holes grow; the result may
+split or vanish. Uses native variable_offset_inner_ex with miter limit 2.0.
+Deltas are scaled
+distances, flattened contour first, then holes in order, one float per vertex.
+expolygon and deltas are borrowed only for the duration of the call; the caller
+keeps ownership and neither is retained after return.
+Every delta must be finite and <= 0; count must equal the total vertex count.
+The contour must have strictly positive area and every hole strictly negative
+area. Input is neither reoriented nor cleaned. Returns storage-owned ExPolygons,
+or NULL for NULL storage, expolygon or deltas, a count/area/delta violation,
+or an internal error. Keep inputs unchanged during the call.
+On failure the function returns NULL, stores no result and lets no exception
+cross the C boundary. */
+SLIC3R_HOST_API expolygon_collection_handle *clipper_variable_offset_inner_ex(storage_handle *storage,
+    const expolygon_handle *expolygon, const float *deltas, uint32_t delta_count);
+
+/* Native expand(Polygons, delta), with miter joins and limit 3.0. Each CCW ring
+grows; each CW ring shrinks, then all results are united into Polygons (not
+ExPolygons). Delta must be finite and > 0. Empty input gives empty output.
+Returns a storage-owned collection or NULL for invalid arguments or internal
+errors, without storing a result or letting an exception cross the C boundary. */
+SLIC3R_HOST_API polygon_collection_handle *clipper_expand(storage_handle *storage,
+    const polygon_collection_handle *polygons, double delta);
 
 /* ---- Conversion back to ABI collections ------------------------------
 Materialize a Clipper shape into a new storage-owned collection.

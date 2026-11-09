@@ -790,11 +790,11 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Slic3r::Pr
     raster::FillRectilinear &filler = layer_idx == 0 ? static_cast<raster::FillRectilinear &>(solid) : sparse;
     raster::configure_filler(filler, params, storage);
     for (const Slic3r::ExPolygon &polygon : fill) {
-        const Infill::RectilinearPatternsPlugin::work::Polylines lines = filler.fill_surface(
+        const PluginCommon::polygon_work::Polylines lines = filler.fill_surface(
             ExPolygon(reinterpret_cast<const expolygon_handle *>(&polygon)), params);
-        for (const Infill::RectilinearPatternsPlugin::work::Polyline &line : lines) {
+        for (const PluginCommon::polygon_work::Polyline &line : lines) {
             Slic3r::Points points;
-            for (const Infill::RectilinearPatternsPlugin::work::Point &point : line.points)
+            for (const PluginCommon::polygon_work::Point &point : line.points)
                 points.emplace_back(point.x(), point.y());
             if (points.size() >= 2)
                 append_path(storage, root.mutable_view(), points, flow, speed);

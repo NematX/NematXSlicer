@@ -44,7 +44,7 @@ namespace {
 
 using namespace PatternHelpers;
 
-namespace rect_work = RectilinearPatternsPlugin::work;
+namespace rect_work = PluginCommon::polygon_work;
 namespace rect_fills = RectilinearPatternsPlugin::fills;
 namespace recti = RectilinearPatternsPlugin::recti;
 namespace sawtooth = RectilinearPatternsPlugin::sawtooth;

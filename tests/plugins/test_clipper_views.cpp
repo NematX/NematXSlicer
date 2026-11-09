@@ -1305,9 +1305,9 @@ TEST_CASE("Clipper offset grows a polygon list of clockwise rings like ClipperOf
 }
 
 
-// ---- Native ExPolygon functions of slic3r_clipper.h 2.0 -------------------------------------------
-// clipper_union_ex, clipper_offset_ex and clipper_offset2_ex must return exactly what the native
-// ClipperUtils returns: same sizes, same order of expolygons, same order of contour and holes, same
+// ---- Native polygon functions of slic3r_clipper.h 2.2 -------------------------------------------
+// Native-result operations must return exactly what ClipperUtils returns:
+// same sizes, same order of polygons or expolygons, same order of contour and holes, same
 // points (no rotation, no sorting, no canonicalisation).
 namespace {
 
@@ -1753,6 +1753,235 @@ TEST_CASE("Native ExPolygon clipper functions return NULL on a native exception 
     CHECK_THROWS_AS(slic3r_api::clipper_union_ex(nullptr, polygon_view, CLIPPER_FILL_NONZERO), std::invalid_argument);
     CHECK(plugin_storage.size() == count_before);
 }
+TEST_CASE("Native boolean ExPolygon operations preserve the core result", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const coord_t x = scale_i(50.);
+    const ExPolygon small(Polygon({Point(x, x), Point(x + 150, x), Point(x + 75, x + 130)}));
+    const ExPolygons subjects[] = {{}, {rectangle_with_two_holes()},
+        {ExPolygon(rectangle_mm(0., 0., 10., 10.)), small,
+         ExPolygon(rectangle_mm(20., 0., 30., 10.))}};
+    const ExPolygons clips[] = {{}, {ExPolygon(rectangle_mm(5., -1., 25., 11.))},
+        {ExPolygon(rectangle_mm(0., 0., 10., 10.)), small}};
+    for (const ExPolygons &subject : subjects) {
+        for (const ExPolygons &clip : clips) {
+            check_identical(native_expolygons(clipper_diff_ex(storage, expolygons_handle(subject), expolygons_handle(clip))),
+                            diff_ex(subject, clip));
+            check_identical(native_expolygons(clipper_intersection_ex(storage, expolygons_handle(subject), expolygons_handle(clip))),
+                            intersection_ex(subject, clip));
+            const slic3r_api::ExPolygonCollection sv(expolygons_handle(subject)), cv(expolygons_handle(clip));
+            check_identical(native_expolygons(slic3r_api::clipper_diff_ex(storage, sv, cv).handle()), diff_ex(subject, clip));
+            check_identical(native_expolygons(slic3r_api::clipper_intersection_ex(storage, sv, cv).handle()), intersection_ex(subject, clip));
+        }
+        check_identical(native_expolygons(clipper_diff_ex(storage, expolygons_handle(subject), expolygons_handle(subject))),
+                        diff_ex(subject, subject));
+        check_identical(native_expolygons(clipper_intersection_ex(storage, expolygons_handle(subject), expolygons_handle(subject))),
+                        intersection_ex(subject, subject));
+    }
+    const ExPolygons tiny{small}, empty;
+    CHECK(diff_ex(tiny, empty).empty());
+    CHECK(native_expolygons(clipper_diff_ex(storage, expolygons_handle(tiny), expolygons_handle(empty))).empty());
+}
+
+TEST_CASE("Native inner variable offset preserves rings and variable deltas", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const ExPolygon input = rectangle_with_two_holes();
+    const expolygon_handle *handle = reinterpret_cast<const expolygon_handle *>(&input);
+    const slic3r_api::ExPolygon view(handle);
+    for (const bool variable : {false, true}) {
+        std::vector<std::vector<float>> nested;
+        std::vector<float> flattened;
+        const Polygons rings = to_polygons(input);
+        for (const Polygon &ring : rings) {
+            std::vector<float> values;
+            for (size_t i = 0; i < ring.size(); ++i)
+                values.push_back(variable ? float(-scale_d(0.1) * (i % 3)) : 0.f);
+            flattened.insert(flattened.end(), values.begin(), values.end());
+            nested.push_back(std::move(values));
+        }
+        const ExPolygons expected = variable_offset_inner_ex(input, nested, 2.0);
+        check_identical(native_expolygons(clipper_variable_offset_inner_ex(storage, handle, flattened.data(), uint32_t(flattened.size()))), expected);
+        check_identical(native_expolygons(slic3r_api::clipper_variable_offset_inner_ex(storage, view, flattened.data(), uint32_t(flattened.size())).handle()), expected);
+    }
+}
+
+TEST_CASE("Native inner variable offset accepts translated triangles and unequal rings", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const coord_t origin = coord_t(34359738368LL);
+    // At 2^35, Polygon::area loses enough precision to assert, while ClipperLib::Area remains exact.
+    const ExPolygon translated(Polygon({Point(origin, origin), Point(origin + 100010, origin),
+        Point(origin, origin + 100010)}));
+    // Different ring sizes verify the splitting of the flattened delta array.
+    ExPolygon unequal(rectangle_mm(0., 0., 40., 40.));
+    unequal.holes.push_back(clockwise(Polygon({point_mm(5., 5.), point_mm(15., 5.), point_mm(10., 15.)})));
+    unequal.holes.push_back(clockwise(Polygon({point_mm(22., 5.), point_mm(30., 5.), point_mm(34., 10.),
+        point_mm(30., 15.), point_mm(22., 15.)})));
+    const std::vector<std::vector<float>> unequal_deltas{
+        {-100.f, -200.f, -300.f, -400.f}, {-500.f, -600.f, -700.f},
+        {-800.f, -900.f, -1000.f, -1100.f, -1200.f}};
+    const ExPolygon inputs[] = {translated, unequal};
+    const std::vector<std::vector<float>> deltas[] = {{{0.f, 0.f, 0.f}}, unequal_deltas};
+    for (size_t i = 0; i < 2; ++i) {
+        std::vector<float> flattened;
+        for (const std::vector<float> &ring : deltas[i])
+            flattened.insert(flattened.end(), ring.begin(), ring.end());
+        const expolygon_handle *handle = reinterpret_cast<const expolygon_handle *>(&inputs[i]);
+        const ExPolygons expected = variable_offset_inner_ex(inputs[i], deltas[i], 2.0);
+        check_identical(native_expolygons(clipper_variable_offset_inner_ex(storage, handle,
+            flattened.data(), uint32_t(flattened.size()))), expected);
+        check_identical(native_expolygons(slic3r_api::clipper_variable_offset_inner_ex(storage,
+            slic3r_api::ExPolygon(handle), flattened.data(), uint32_t(flattened.size())).handle()), expected);
+    }
+}
+
+TEST_CASE("Native expand preserves polygon order and shrinks clockwise rings", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const Polygons inputs[] = {{}, {clockwise(rectangle_mm(0., 0., 10., 10.))},
+        {rectangle_mm(0., 0., 10., 10.), rectangle_mm(9., 0., 20., 10.), clockwise(rectangle_mm(30., 0., 40., 10.))}};
+    for (const Polygons &input : inputs) {
+        const Polygons expected = expand(input, scale_d(1.));
+        const polygon_collection_handle *handle = clipper_expand(storage, polygons_handle(input), scale_d(1.));
+        REQUIRE(handle != nullptr);
+        const Polygons &actual = *reinterpret_cast<const Polygons *>(handle);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK(actual[i].points == expected[i].points);
+        const slic3r_api::StoredPolygonCollection wrapped = slic3r_api::clipper_expand(storage,
+            slic3r_api::PolygonCollection(polygons_handle(input)), scale_d(1.));
+        const Polygons &wrapped_native = *reinterpret_cast<const Polygons *>(wrapped.handle());
+        REQUIRE(wrapped_native.size() == expected.size());
+        for (size_t i = 0; i < expected.size(); ++i)
+            CHECK(wrapped_native[i].points == expected[i].points);
+    }
+    const Polygons cw{clockwise(rectangle_mm(0., 0., 10., 10.))};
+    const Polygons shrunk = expand(cw, scale_d(1.));
+    REQUIRE(shrunk.size() == 1);
+    CHECK(shrunk.front().bounding_box().size().x() == scale_i(8.));
+}
+
+TEST_CASE("Single ExPolygon and collection offsets are exactly equivalent for surfaces", "[plugins][clipper][clipper-native]")
+{
+    for (const NamedExPolygons &input : offset_inputs()) {
+        for (const ExPolygon &polygon : input.expolygons) {
+            for (const double delta : {scale_d(0.1), scale_d(-0.1), scale_d(2.), scale_d(-2.)}) {
+                INFO(input.name << ", delta " << delta);
+                check_identical(offset_ex(polygon, delta), offset_ex(ExPolygons{polygon}, delta));
+            }
+        }
+    }
+}
+
+TEST_CASE("New native operations reject invalid arguments without storing results", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    ExPolygon input = rectangle_with_two_holes();
+    const expolygon_handle *handle = reinterpret_cast<const expolygon_handle *>(&input);
+    const ExPolygons collection{input};
+    const expolygon_collection_handle *ch = expolygons_handle(collection);
+    const Polygons polygons = to_polygons(input);
+    const polygon_collection_handle *ph = polygons_handle(polygons);
+    size_t count = input.contour.size();
+    for (const Polygon &hole : input.holes)
+        count += hole.size();
+    std::vector<float> deltas(count, -100.f);
+    const size_t before = plugin_storage.size();
+    CHECK(clipper_diff_ex(nullptr, ch, ch) == nullptr);
+    CHECK(clipper_diff_ex(storage, nullptr, ch) == nullptr);
+    CHECK(clipper_diff_ex(storage, ch, nullptr) == nullptr);
+    CHECK(clipper_intersection_ex(nullptr, ch, ch) == nullptr);
+    CHECK(clipper_intersection_ex(storage, nullptr, ch) == nullptr);
+    CHECK(clipper_intersection_ex(storage, ch, nullptr) == nullptr);
+    CHECK(clipper_expand(nullptr, ph, 1.) == nullptr);
+    CHECK(clipper_expand(storage, nullptr, 1.) == nullptr);
+    for (const double delta : {0., -1., std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        CHECK(clipper_expand(storage, ph, delta) == nullptr);
+        CHECK_THROWS_AS(slic3r_api::clipper_expand(storage, slic3r_api::PolygonCollection(ph), delta), std::invalid_argument);
+    }
+    CHECK(clipper_variable_offset_inner_ex(nullptr, handle, deltas.data(), uint32_t(count)) == nullptr);
+    CHECK(clipper_variable_offset_inner_ex(storage, nullptr, deltas.data(), uint32_t(count)) == nullptr);
+    CHECK(clipper_variable_offset_inner_ex(storage, handle, nullptr, uint32_t(count)) == nullptr);
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(nullptr, slic3r_api::ExPolygon(handle), deltas.data(), uint32_t(count)), std::invalid_argument);
+    struct NullExPolygonView : slic3r_api::ExPolygon {
+        // Start with a valid borrowed view, then expose a null handle to test rejection without constructor assertions.
+        explicit NullExPolygonView(const expolygon_handle *source) : slic3r_api::ExPolygon(source) { m_handle = nullptr; }
+    };
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, NullExPolygonView(handle), deltas.data(), uint32_t(count)), std::invalid_argument);
+    struct NullExPolygonCollectionView : slic3r_api::ExPolygonCollection {
+        // Expose a null borrowed handle without invoking the asserting pointer constructor with NULL.
+        explicit NullExPolygonCollectionView(const expolygon_collection_handle *source) : slic3r_api::ExPolygonCollection(source) { m_handle = nullptr; }
+    };
+    struct NullPolygonCollectionView : slic3r_api::PolygonCollection {
+        // Expose a null borrowed handle without invoking the asserting pointer constructor with NULL.
+        explicit NullPolygonCollectionView(const polygon_collection_handle *source) : slic3r_api::PolygonCollection(source) { m_handle = nullptr; }
+    };
+    const NullExPolygonCollectionView null_collection(ch);
+    const slic3r_api::ExPolygonCollection valid_collection(ch);
+    CHECK_THROWS_AS(slic3r_api::clipper_diff_ex(storage, null_collection, valid_collection), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_diff_ex(storage, valid_collection, null_collection), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_intersection_ex(storage, null_collection, valid_collection), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_intersection_ex(storage, valid_collection, null_collection), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_expand(storage, NullPolygonCollectionView(ph), 1.), std::invalid_argument);
+    CHECK(plugin_storage.size() == before);
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(handle), nullptr, uint32_t(count)), std::invalid_argument);
+    for (const uint32_t bad_count : {uint32_t(count - 1), uint32_t(count + 1)}) {
+        CHECK(clipper_variable_offset_inner_ex(storage, handle, deltas.data(), bad_count) == nullptr);
+        CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(handle), deltas.data(), bad_count), std::runtime_error);
+    }
+    for (const float bad : {1.f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+        deltas[0] = bad;
+        CHECK(clipper_variable_offset_inner_ex(storage, handle, deltas.data(), uint32_t(count)) == nullptr);
+        CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(handle), deltas.data(), uint32_t(count)), std::runtime_error);
+    }
+    deltas[0] = -100.f;
+    input.contour.reverse();
+    CHECK(clipper_variable_offset_inner_ex(storage, handle, deltas.data(), uint32_t(count)) == nullptr);
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(handle), deltas.data(), uint32_t(count)), std::runtime_error);
+    input.contour.reverse();
+    input.holes[0].reverse();
+    CHECK(clipper_variable_offset_inner_ex(storage, handle, deltas.data(), uint32_t(count)) == nullptr);
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(handle), deltas.data(), uint32_t(count)), std::runtime_error);
+    input.holes[0].reverse();
+    input.contour.points = {Point(0, 0), Point(1, 0), Point(2, 0), Point(3, 0)};
+    CHECK(clipper_variable_offset_inner_ex(storage, handle, deltas.data(), uint32_t(count)) == nullptr);
+    const slic3r_api::ExPolygonCollection cv(ch);
+    CHECK_THROWS_AS(slic3r_api::clipper_diff_ex(nullptr, cv, cv), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_intersection_ex(nullptr, cv, cv), std::invalid_argument);
+    CHECK(plugin_storage.size() == before);
+}
+
+TEST_CASE("New native operations contain internal exceptions and preserve storage", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const coord_t huge = coord_t(0x4000000000000000LL);
+    const ExPolygon input(Polygon({Point(0, 0), Point(huge, 0), Point(0, huge)}));
+    const ExPolygons collection{input};
+    const Polygons polygons{input.contour};
+    const expolygon_collection_handle *ch = expolygons_handle(collection);
+    const polygon_collection_handle *ph = polygons_handle(polygons);
+    const expolygon_handle *eh = reinterpret_cast<const expolygon_handle *>(&input);
+    const float deltas[] = {-100.f, -100.f, -100.f};
+    const size_t before = plugin_storage.size();
+    CHECK(clipper_diff_ex(storage, ch, ch) == nullptr);
+    CHECK(clipper_intersection_ex(storage, ch, ch) == nullptr);
+    CHECK(clipper_expand(storage, ph, 100.) == nullptr);
+    CHECK(clipper_variable_offset_inner_ex(storage, eh, deltas, 3) == nullptr);
+    const slic3r_api::ExPolygonCollection cv(ch);
+    CHECK_THROWS_AS(slic3r_api::clipper_diff_ex(storage, cv, cv), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_intersection_ex(storage, cv, cv), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_expand(storage, slic3r_api::PolygonCollection(ph), 100.), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_variable_offset_inner_ex(storage, slic3r_api::ExPolygon(eh), deltas, 3), std::runtime_error);
+    CHECK(plugin_storage.size() == before);
+}
+
 TEST_CASE("Public LineDistancer index matches exhaustive queries and owns its data", "[plugins][line-distancer]")
 {
     slic3r_api::LineDistancer reference;

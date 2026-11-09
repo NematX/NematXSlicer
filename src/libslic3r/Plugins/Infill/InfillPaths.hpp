@@ -6,12 +6,12 @@
 
 // Copies bridge API-owned geometry and mutable work buffers; chaining orders independent paths without joining them.
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
-#include "libslic3r/Plugins/Infill/InfillWorkBuffers.hpp"
+#include "libslic3r/Plugins/Common/WorkBuffers.hpp"
 
 struct plugin_run_context;
 
 namespace slic3r_api { namespace Infill { namespace Paths {
-namespace work = slic3r_api::Infill::work;
+namespace work = slic3r_api::PluginCommon::work;
 
 // API collections own their payload; moving each stored path avoids a second coordinate copy.
 StoredPolylineCollection store_polylines(storage_handle *storage, const work::Polylines &lines,

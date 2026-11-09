@@ -5,13 +5,13 @@
 #define plugins_lightning_preparation_hpp_
 
 // Physical layer snapshots own outlines and parameters, never handles to mutable scratch geometry.
-#include "libslic3r/Plugins/Infill/Rectilinear/RectilinearWorkBuffers.hpp"
+#include "libslic3r/Plugins/Common/PolygonWorkBuffers.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 
 namespace slic3r_api { class Object; class Print; }
 
 namespace slic3r_api { namespace Infill { namespace Lightning {
-namespace work = RectilinearPatternsPlugin::work;
+namespace work = PluginCommon::polygon_work;
 
 struct RegionSettings
 {

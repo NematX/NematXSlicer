@@ -139,6 +139,21 @@ class PythonDataTreeViewTests(unittest.TestCase):
     def make_api(self):
         return type("Api", (), {"host": DataTreeHost(self.generated)})()
 
+    def test_island_perimeter_slices_borrow_the_host_collection(self):
+        """Verify that the read-only island view preserves the host collection handle."""
+        api = self.make_api()
+        calls = []
+
+        def perimeter_slices(island):
+            """Record the queried island and return its borrowed collection address."""
+            calls.append(address(island))
+            return 902
+
+        api.host.layer_island_get_perimeter_slices = perimeter_slices
+        collection = self.views.LayerIsland(api, 901).perimeter_slices()
+        self.assertEqual(collection.address, 902)
+        self.assertEqual(calls, [901])
+
     def test_layer_instance_payload_is_typed_and_exported(self):
         """Verify the public instance marker preserves its zero-index ABI payload."""
         payload = self.views.LayerInstanceProperty()

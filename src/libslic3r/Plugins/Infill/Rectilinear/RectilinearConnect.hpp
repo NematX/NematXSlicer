@@ -39,14 +39,21 @@ The two connect strategies mirror the legacy behaviour:
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 
-#include "RectilinearClipper.hpp"
-#include "RectilinearEdgeGrid.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
+#include "libslic3r/Plugins/Common/PluginEdgeGrid.hpp"
 
 namespace slic3r_api { namespace Infill { namespace RectilinearPatternsPlugin {
+namespace work = PluginCommon::polygon_work;
+namespace clipper = PluginCommon::clipper;
+namespace EdgeGrid = PluginCommon::EdgeGrid;
 namespace connect {
 
 using namespace work;
 using namespace clipper;
+// Select mutable work types only in this namespace; RectilinearWithPerimeter.cpp uses API views with the same type names.
+using work::ExPolygon;
+using work::Polygon;
+using work::Polyline;
 
 // A boundary is represented as one outer contour followed by its holes. The
 // views borrow the source geometry; mutable buffers are created only when the
