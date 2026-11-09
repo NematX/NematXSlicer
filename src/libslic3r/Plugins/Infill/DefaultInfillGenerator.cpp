@@ -675,7 +675,9 @@ void generate_surface_from_recipe(const run_ctx_generate_infill &ctx,
                                                    &params,
                                                    reinterpret_cast<extrusion_entity_handle *>(&output));
     throw_if_cancelled(run_ctx);
-    if (!generated || output.empty())
+    // A successful solid pattern may leave the whole narrow surface uncovered.
+    // Keep its recipe until post-infill can turn that residual into gap fill.
+    if (!generated || (output.empty() && (!surface.has_fill_solid() || surface.has_mod_bridge())))
         return;
 
     if (surface.get_property<BridgeSurfaceInfo>() != nullptr)

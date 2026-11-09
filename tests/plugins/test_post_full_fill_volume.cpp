@@ -104,7 +104,10 @@ DynamicPrintConfig full_fill_volume_config(
         { "bottom_solid_layers", "0" },
         { "solid_infill_every_layers", "0" },
         { "infill_every_layers", "1" },
-        { "enforce_full_fill_volume", enforce_full_fill_volume ? "1" : "0" }
+        { "enforce_full_fill_volume", enforce_full_fill_volume ? "1" : "0" },
+        { "infill_filled_top", "0" },
+        { "infill_filled_solid", "0" },
+        { "infill_filled_bottom", "0" }
     });
     for (const ConfigOverride &entry : extra_overrides)
         config.set_deserialize_strict(entry.first, entry.second);
@@ -453,8 +456,8 @@ TEST_CASE("Full fill volume targets stay inert without the corrector",
     const char *pattern_id = GENERATE("gyroid", "hilbertcurve");
     INFO(pattern_id);
 
-    // The post-infill step runs but only the gap-fill placeholder is active, so
-    // nothing may change the measured volume.
+    // The post-infill step runs with gap fill disabled by the fixture settings,
+    // so a target alone must not change the measured volume.
     const FullFillVolumeComparison comparison =
         run_full_fill_volume_comparison(pattern_id, "100%", true, k_post_infill_gap_fill);
 

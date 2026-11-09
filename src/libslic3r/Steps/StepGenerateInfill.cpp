@@ -454,22 +454,18 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
 
         ExtrusionEntity prepared(ExtrusionEntity::Children{}, true, true, false);
         append_source_extrusions(prepared, *extrusion);
-        region_island->remove_empty_extrusions();
         if (prepared.child_count() == 0)
             return 1;
 
         const ExtrusionRole bucket_role = bucket_role_from_raw(role);
-        if (region_island->has_extrusion(bucket_role)) {
-            ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role);
-            ExtrusionEntity::Children &dst_children = dst.children();
-            ExtrusionEntity::Children &src_children = prepared.children();
-            dst_children.reserve(dst_children.size() + src_children.size());
-            dst_children.insert(dst_children.end(), std::make_move_iterator(src_children.begin()), std::make_move_iterator(src_children.end()));
-            src_children.clear();
-        } else {
-            ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role);
-            std::swap(dst, prepared);
-        }
+        // Geometry-free source scopes still carry recipes for post-infill.
+        // Append to the stored bucket even when has_extrusion() is false.
+        ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role);
+        ExtrusionEntity::Children &dst_children = dst.children();
+        ExtrusionEntity::Children &src_children = prepared.children();
+        dst_children.reserve(dst_children.size() + src_children.size());
+        dst_children.insert(dst_children.end(), std::make_move_iterator(src_children.begin()), std::make_move_iterator(src_children.end()));
+        src_children.clear();
         return 1;
     } catch (...) {
         contain_pattern_callback_failure(orchestrator, STEP_INFILL, nullptr);

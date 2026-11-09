@@ -133,10 +133,9 @@ void correct_stamped_subtrees(MutableExtrusionEntity root, const plugin_run_cont
         // The stamp lives on the direct child of the bucket because the host
         // keeps property-carrying collections as semantic subtree roots. Only
         // that outermost target is consumed: a nested subtree carrying its own
-        // stamp is ignored on purpose. The future gap fill will publish inside
-        // the source surface subtree without its own stamp, so this pass will
-        // then measure fill and gap fill together like the legacy accounting
-        // did (FillBase.cpp:312).
+        // stamp is ignored on purpose. Gap fill is published inside the source
+        // surface subtree without its own stamp, so this pass measures fill and
+        // gap fill together like the legacy accounting did (FillBase.cpp:312).
         MutableExtrusionEntity child = root.child_mutable(child_idx);
         EPropertyInfill *infill = child.get_mutable(EPropertyInfill::key);
         if (infill == nullptr || infill->area_to_fill_mm2() <= 0.)
@@ -249,9 +248,9 @@ const char *const *PostFullFillVolume::dependencies_impl() const noexcept
 
 int32_t PostFullFillVolume::priority_impl() const noexcept
 {
-    // Runs after the gap-fill slot (priority 0) so the measurement can include
-    // gap volume once the gap fill publishes in the stamped subtree, exactly
-    // like the legacy accounting (FillBase.cpp:312), and after
+    // Runs after gap fill (priority 0) so the measurement includes gap volume
+    // in the stamped subtree, exactly like the legacy accounting
+    // (FillBase.cpp:312), and after
     // dense_infill.post_infill_order (priority 10) so the pass order never
     // depends on plugin registration order.
     return 11;
