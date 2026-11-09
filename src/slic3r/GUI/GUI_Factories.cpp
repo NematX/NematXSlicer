@@ -197,7 +197,7 @@ static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD
     {L("Add support enforcer"),  "support_enforcer"},    // ~ModelVolumeType::SUPPORT_ENFORCER
     {L("Add seam attractor (sphere)"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_CENTER
     {L("Add seam attractor (cylinder)"),   "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_CENTER_Z
-    {L("Enforce seam position (sphere)"), "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_INSIDE_CENTER
+    {L("Add internal seam attractor (cylinder)"), "add_seam"},    // ~ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z
     {L("Enforce seam position"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_INSIDE
     {L("Add brim patch"),        "add_brim_patch"},      // ~ModelVolumeType::BRIM_PATCH
     {L("Add brim negative"),     "add_brim_negative"},   // ~ModelVolumeType::BRIM_NEGATIVE
@@ -591,7 +591,7 @@ void MenuFactory::append_submenu_add_generic(wxMenu* menu_parent, wxMenu* sub_me
 {
     assert(type != ModelVolumeType::SEAM_POSITION_CENTER);
     assert(type != ModelVolumeType::SEAM_POSITION_CENTER_Z);
-    assert(type != ModelVolumeType::SEAM_POSITION_INSIDE_CENTER);
+    assert(type != ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
     //assert(type != ModelVolumeType::SEAM_POSITION_INSIDE);
     const ConfigOptionMode mode = wxGetApp().get_mode();
 
@@ -777,12 +777,17 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
         wxMenu* sub_menu_both = new wxMenu;
         auto& item_sphere = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SEAM_POSITION_CENTER)];
         auto& item_cylinder = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SEAM_POSITION_CENTER_Z)];
+        const auto& item_internal = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z)];
         append_menu_item(sub_menu_both, wxID_ANY, _L("Seam sphere attractor (center)"), "",
                 [this](wxCommandEvent&) { obj_list()->load_generic_subobject(L("SmallSphere"), ModelVolumeType::SEAM_POSITION_CENTER); },
                 item_sphere.second, nullptr, selected_func, m_parent);
         append_menu_item(sub_menu_both, wxID_ANY, _L("Seam cylinder attractor (from top to bottom)"), "",
                 [this](wxCommandEvent&) { obj_list()->load_generic_subobject(L("SmallCylinder"), ModelVolumeType::SEAM_POSITION_CENTER_Z); },
                 item_cylinder.second, nullptr, selected_func, m_parent);
+        append_menu_item(sub_menu_both, wxID_ANY, _L("Seam (internal perimeter) cylinder attractor"),
+                _L("Attracts internal perimeter seams through the cylinder's height. Select the NematX internal attractor seam provider."),
+                [](wxCommandEvent&) { obj_list()->load_generic_subobject(L("SmallCylinder"), ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z); },
+                item_internal.second, nullptr, selected_func, m_parent);
         // seam inside
         wxMenu* sub_menu_patch = new wxMenu;
         append_submenu_add_generic(sub_menu_both, sub_menu_patch, ModelVolumeType::SEAM_POSITION_INSIDE);

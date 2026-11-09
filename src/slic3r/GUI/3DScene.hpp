@@ -80,6 +80,8 @@ public:
     static const ColorRGBA SUPPORT_BLOCKER_COLOR;
     static const ColorRGBA SUPPORT_ENFORCER_COLOR;
     static const ColorRGBA SEAM_POSITION_COLOR;
+    // Distinguish internal-only attractors from unrestricted seam volumes.
+    static const ColorRGBA INTERNAL_SEAM_POSITION_COLOR;
     static const ColorRGBA BRIM_PATCH_COLOR;
     static const ColorRGBA BRIM_NEGATIVE_COLOR;
 
