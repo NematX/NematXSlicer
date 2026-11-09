@@ -15,9 +15,17 @@
 #include "Polyline.hpp"
 #include "PrintBase.hpp"
 
+/* Supply brim geometry to adhesion generators. Resolve BrimGenerationParameters
+   and Flow, then call the outer, ear, patch or interior builder with valid
+   first-layer objects, an occupied area and an owned Children destination.
+   Builders append generic extrusion nodes and extend the occupied area, whose
+   order must be retained across calls. They do not publish auxiliary layers.
+   BrimLoop describes explicit contour nesting for the internal extrusion pass.
+*/
+
 namespace Slic3r {
     
-class ExtrusionEntityCollection;
+class ExtrusionEntity;
 
 enum class BrimEarPattern : uint8_t
 {
@@ -68,10 +76,15 @@ public:
 // Collect islands_area to be merged into the final 1st layer convex hull.
 ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cancel, Polygons &islands_area);
 #endif
-void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntityCollection& out);
-void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntityCollection& out);
-void make_brim_patch(const Print &print, const Flow &flow, const Polygons &patches, ExPolygons &unbrimmable_areas, ExtrusionEntityCollection &out);
-void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, ExPolygons& unbrimmable_areas, ExtrusionEntityCollection& out);
+// Append outer brim to a borrowed Children destination for valid objects with first layers; retain forbidden-area order.
+// Output and forbidden areas require exclusive access; cancellation or allocation failure can leave partial changes.
+void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntity& out);
+// Append corner ears and extend forbidden areas under the same exclusive-access and partial-failure contract.
+void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntity& out);
+// Append brim around patches to an exclusively borrowed Children destination and extend forbidden areas; failures propagate after any earlier changes.
+void make_brim_patch(const Print &print, const Flow &flow, const Polygons &patches, ExPolygons &unbrimmable_areas, ExtrusionEntity &out);
+// Append inner brim for valid objects with first layers and extend forbidden areas under the same exclusive-access and partial-failure contract.
+void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, ExPolygons& unbrimmable_areas, ExtrusionEntity& out);
 
 } // Slic3r
 

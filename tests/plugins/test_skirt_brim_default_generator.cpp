@@ -1,5 +1,7 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <chrono>
 #include <iostream>
@@ -29,6 +31,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/ExtrusionGenerationWinding.hpp"
+#include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
@@ -46,7 +49,7 @@
 
 /*
 Default skirt/brim generator tests
-==================================
+=================================
 
 These tests exercise STEP_SKIRT_BRIM and final placement of adhesion paths.
 They slice a cube, run the adhesion plugins and inspect auxiliary layers.
@@ -78,6 +81,48 @@ Representative direct calls (branches are not a timeline):
         |-- Steps::StepPipeline::run_gcode()
         |-- merge()
         `-- collect_diagnostic_brim_coverage()
+The publication cases exercise the public STEP_SKIRT_BRIM runner on sliced
+models, separately from the final-plan cases described above.
+The tests cover plugin selection and settings, global versus object-owned
+output, and the first-layer hull rebuilt by the host. The publication tests
+separate complete-object origin patterns, normal instance placement, patch-only
+output, and interior-only output with zero separation. A pair of distinct
+objects proves that prior brim cuts later brim, in either object order. Isolated
+prints provide the comparison, so the test distinguishes brim interference from
+an obstacle formed by the other object's first-layer slices.
+
+Layer order is not used as an instance identifier. Interior brim tests inspect
+centerlines separately from their full-width coverage: at zero separation,
+centers can lie inside a hole while bead width overlaps its edge.
+
+    Publication test case
+    |-- prepare_brim_copies(), prepare_brim_objects() or Test::init_print()
+    |   `-- create the model/configuration and assign the requested instance positions
+    |-- run_prepared_print_until_skirt_brim()
+    |   |-- restrict active plugins to slicing and the default adhesion plugins
+    |   |-- StepLayerHeightGeneration::run_step()
+    |   |-- StepSlicing::run_step()
+    |   |-- StepSkirtBrim::run_step()
+    |   `-- check reported plugin messages; restore the active selection on return
+    `-- inspect published data after the runner returns, according to the scenario
+        |-- object_brim_auxiliary_layers() selects layers by their adhesion tag
+        |-- check_published_brim_layer() checks geometry and first-layer height/position
+        |-- brim_layer_paths() copies centerlines without compatibility-cache reads
+        `-- check_brim_instances() checks source handles, ownership and placement
+
+    The five brim publication scenarios add their own checks:
+    |-- complete-object origin pattern
+    |   `-- check_isolated_brim_bounds() against the origin slice; keep original instances
+    |-- separated and touching copies
+    |   `-- match layers by bed position; check bounds and lengths against isolated output
+    |-- patch-only brim
+    |   `-- require object-owned patch output and no global brim
+    |-- interior-only brim at zero separation
+    |   `-- inspect hole centerlines and full bead-width coverage separately
+    `-- distinct nearby objects, in both processing orders
+        |-- build isolated references for both objects
+        |-- require the first brim to match its isolated reference
+        `-- show the second loses centerlines to prior brim, not to the other body
 */
 
 namespace {
@@ -301,6 +346,20 @@ public:
         Orchestrator::instance().reset_plugin_cancel();
     }
 };
+// Check that a brim layer carries printable geometry and the source first layer's height and position.
+void check_published_brim_layer(const Layer &layer, const Layer &reference);
+
+// Prepare two copies of one thin cube at explicit X offsets, without generating adhesion yet.
+void prepare_brim_copies(PreparedBrimPrint &prepared, const DynamicPrintConfig &config, double distance);
+// Prepare separate thin-cube objects in the requested order and positions, without generating adhesion yet.
+void prepare_brim_objects(PreparedBrimPrint &prepared, const DynamicPrintConfig &config,
+                          const std::vector<double> &x_offsets);
+// Copy the stored brim centerlines and optionally project them to the plate, without reading compatibility caches.
+Polylines brim_layer_paths(const Layer &layer, const Point &shift = Point(0, 0));
+// Check that temporary generation did not change instance ownership, source handles or placement.
+void check_brim_instances(const PrintObject &object, const PrintInstances &saved);
+// Check a full isolated brim around the reference slice at the given position, with the configured 3 mm limit.
+void check_isolated_brim_bounds(const Layer &layer, const Layer &reference, const Point &shift);
 
 void run_prepared_print_until_skirt_brim(PreparedBrimPrint &prepared,
                                          bool include_trim = true);
@@ -399,6 +458,102 @@ std::unique_ptr<ExtrusionLoop> winding_arc_loop();
 ArcPolyline stored_winding_geometry(const ExtrusionEntity &entity);
 // Compare every arc and endpoint Z value, including the closed contour's entry.
 void check_winding_geometry(const ArcPolyline &actual, const ArcPolyline &expected);
+void check_published_brim_layer(const Layer &layer, const Layer &reference)
+{
+    CHECK(LayerAdhesionProperty::layer_is_brim(layer));
+    CHECK(layer.get_property<LayerSupportProperty>() == nullptr);
+    CHECK(layer.scaled_height() == reference.scaled_height());
+    CHECK(layer.scaled_print_z() == reference.scaled_print_z());
+    CHECK(layer.slice_z == reference.slice_z);
+    REQUIRE_FALSE(layer.lslices().empty());
+    CHECK(std::abs(area(layer.lslices())) > 0.);
+    double length = 0.;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            if (region.has_extrusion(LayerRegionIsland::PERIMETERS))
+                length += extrusion_tree_length_mm(region.extrusion(LayerRegionIsland::PERIMETERS));
+    CHECK(length > 0.);
+}
+
+void prepare_brim_copies(PreparedBrimPrint &prepared, const DynamicPrintConfig &config, const double distance)
+{
+    Slic3r::Test::init_print({Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_20x20x20,
+        Vec3d::Zero(), Vec3d(1., 1., 0.02))}, prepared.print, prepared.model, config, false, 2);
+    REQUIRE(prepared.model.objects().size() == 1);
+    ModelObject &model_object = prepared.model.objects().front();
+    REQUIRE(model_object.instances.size() == 2);
+    model_object.instances[0]->set_offset(Vec3d(60., 100., 0.));
+    model_object.instances[1]->set_offset(Vec3d(60. + distance, 100., 0.));
+    prepared.print.apply(prepared.model, config);
+    REQUIRE(prepared.print.objects().size() == 1);
+    REQUIRE(prepared.print.objects().front().instances().size() == 2);
+}
+
+void prepare_brim_objects(PreparedBrimPrint &prepared, const DynamicPrintConfig &config,
+                          const std::vector<double> &x_offsets)
+{
+    const TriangleMesh cube = Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_20x20x20,
+        Vec3d::Zero(), Vec3d(1., 1., 0.02));
+    Slic3r::Test::init_print(std::vector<TriangleMesh>(x_offsets.size(), cube),
+        prepared.print, prepared.model, config);
+    REQUIRE(prepared.model.objects().size() == x_offsets.size());
+    for (size_t index = 0; index < x_offsets.size(); ++index) {
+        ModelObject &object = prepared.model.objects()[index];
+        REQUIRE(object.instances.size() == 1);
+        object.instances.front()->set_offset(Vec3d(x_offsets[index], 100., 0.));
+    }
+    prepared.print.apply(prepared.model, config);
+    REQUIRE(prepared.print.objects().size() == x_offsets.size());
+    for (const PrintObject &object : prepared.print.objects())
+        REQUIRE(object.instances().size() == 1);
+}
+
+Polylines brim_layer_paths(const Layer &layer, const Point &shift)
+{
+    ArcPolylines stored;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            if (region.has_extrusion(LayerRegionIsland::PERIMETERS))
+                region.extrusion(LayerRegionIsland::PERIMETERS).collect_polylines(stored);
+    Polylines paths;
+    paths.reserve(stored.size());
+    for (const ArcPolyline &path : stored) {
+        paths.push_back(path.to_polyline());
+        paths.back().translate(shift);
+    }
+    REQUIRE_FALSE(paths.empty());
+    return paths;
+}
+
+void check_brim_instances(const PrintObject &object, const PrintInstances &saved)
+{
+    REQUIRE(object.instances().size() == saved.size());
+    for (size_t index = 0; index < saved.size(); ++index) {
+        CHECK(object.instances()[index].print_object == saved[index].print_object);
+        CHECK(object.instances()[index].model_instance == saved[index].model_instance);
+        CHECK(object.instances()[index].shift == saved[index].shift);
+    }
+}
+
+void check_isolated_brim_bounds(const Layer &layer, const Layer &reference, const Point &shift)
+{
+    ExPolygons slices = reference.lslices();
+    for (ExPolygon &slice : slices)
+        slice.translate(shift.x(), shift.y());
+    const BoundingBox base = get_extents(slices);
+    ExPolygons coverage = layer.lslices();
+    for (ExPolygon &slice : coverage)
+        slice.translate(shift.x(), shift.y());
+    const BoundingBox brim = get_extents(coverage);
+    CHECK(brim.min.x() < base.min.x());
+    CHECK(brim.min.y() < base.min.y());
+    CHECK(brim.max.x() > base.max.x());
+    CHECK(brim.max.y() > base.max.y());
+    CHECK(brim.min.x() > base.min.x() - scale_i(3.1));
+    CHECK(brim.min.y() > base.min.y() - scale_i(3.1));
+    CHECK(brim.max.x() < base.max.x() + scale_i(3.1));
+    CHECK(brim.max.y() < base.max.y() + scale_i(3.1));
+}
 
 std::unique_ptr<ExtrusionLoop> winding_arc_loop()
 {
@@ -1665,6 +1820,271 @@ TEST_CASE("Default brim generator can publish object-owned brim", "[plugins][ski
     Steps::StepSkirtBrim::clear(prepared.print);
     CHECK(object.brim().empty());
     CHECK(object_brim_auxiliary_layers(object).empty());
+}
+
+TEST_CASE("Complete-object brim publishes one reusable origin pattern",
+          "[plugins][skirt-brim][brim-root-publication]")
+{
+    DynamicPrintConfig config = brim_test_config(true, true);
+    config.set_deserialize_strict({
+        {"complete_objects", "1"}, {"parallel_objects_step", "0"},
+        {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
+    });
+    PreparedBrimPrint prepared;
+    prepare_brim_copies(prepared, config, 60.);
+    const PrintInstances saved = prepared.print.objects().front().instances();
+    run_prepared_print_until_skirt_brim(prepared, false);
+    const PrintObject &object = prepared.print.objects().front();
+    REQUIRE(object.layer_count() > 0);
+    check_brim_instances(object, saved);
+    CHECK(prepared.print.brim().empty());
+    REQUIRE_FALSE(object.brim().empty());
+    const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+    REQUIRE(layers.size() == 1);
+    check_published_brim_layer(*layers.front(), object.layers().front());
+    check_isolated_brim_bounds(*layers.front(), object.layers().front(), Point(0, 0));
+}
+
+TEST_CASE("Per-instance brim preserves bed placement for separated and touching copies",
+          "[plugins][skirt-brim][brim-root-publication]")
+{
+    DynamicPrintConfig config = brim_test_config(true, true);
+    config.set_deserialize_strict({
+        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
+        {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
+    });
+    PreparedBrimPrint isolated;
+    prepare_brim_objects(isolated, config, {60.});
+    run_prepared_print_until_skirt_brim(isolated, false);
+    const std::vector<const Layer *> isolated_layers = object_brim_auxiliary_layers(isolated.print.objects().front());
+    REQUIRE(isolated_layers.size() == 1);
+    const double isolated_length = total_length(brim_layer_paths(*isolated_layers.front()));
+    for (const double distance : {60., 20.}) {
+        DYNAMIC_SECTION("Copy centers separated by " << distance << " mm") {
+            PreparedBrimPrint prepared;
+            prepare_brim_copies(prepared, config, distance);
+            const PrintInstances saved = prepared.print.objects().front().instances();
+            run_prepared_print_until_skirt_brim(prepared, false);
+            const PrintObject &object = prepared.print.objects().front();
+            REQUIRE(object.layer_count() > 0);
+            check_brim_instances(object, saved);
+            CHECK(prepared.print.brim().empty());
+            REQUIRE_FALSE(object.brim().empty());
+            std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+            REQUIRE(layers.size() == saved.size());
+            // Stored layers are local; match original owners rather than publication order.
+            std::sort(layers.begin(), layers.end(), [](const Layer *lhs, const Layer *rhs) {
+                const LayerInstanceProperty *left = lhs->get_property<LayerInstanceProperty>();
+                const LayerInstanceProperty *right = rhs->get_property<LayerInstanceProperty>();
+                REQUIRE(left != nullptr);
+                REQUIRE(right != nullptr);
+                return left->object_instance_idx < right->object_instance_idx;
+            });
+            double combined_length = 0.;
+            for (size_t index = 0; index < layers.size(); ++index) {
+                const LayerInstanceProperty *owner = layers[index]->get_property<LayerInstanceProperty>();
+                REQUIRE(owner != nullptr);
+                REQUIRE(owner->object_instance_idx == index);
+                const Point shift = saved[index].shift;
+                check_published_brim_layer(*layers[index], object.layers().front());
+                const Polylines paths = brim_layer_paths(*layers[index], shift);
+                combined_length += total_length(paths);
+                if (distance == 60.) {
+                    check_isolated_brim_bounds(*layers[index], object.layers().front(), shift);
+                } else {
+                    const BoundingBox bounds = get_extents(paths);
+                    CHECK(bounds.min.x() > shift.x() - scale_i(13.1));
+                    CHECK(bounds.max.x() < shift.x() + scale_i(13.1));
+                    CHECK(bounds.min.y() > shift.y() - scale_i(13.1));
+                    CHECK(bounds.max.y() < shift.y() + scale_i(13.1));
+                }
+            }
+            if (distance == 20.)
+                CHECK(combined_length < 2. * isolated_length);
+        }
+    }
+}
+
+TEST_CASE("Patch-only brim publishes on its owning object without global brim",
+          "[plugins][skirt-brim][brim-root-publication]")
+{
+    DynamicPrintConfig config = brim_test_config(false, false);
+    config.set_deserialize_strict({{"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}});
+    PreparedBrimPrint prepared;
+    Slic3r::Test::init_print({Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_20x20x20,
+        Vec3d::Zero(), Vec3d(1., 1., 0.02))}, prepared.print, prepared.model, config);
+    TriangleMesh patch = Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_20x20x20,
+        Vec3d::Zero(), Vec3d(0.5, 0.5, 0.02));
+    patch.translate(15.f, 5.f, 0.f);
+    prepared.model.objects().front().add_volume(std::move(patch), ModelVolumeType::BRIM_PATCH, false);
+    prepared.print.apply(prepared.model, config);
+    run_prepared_print_until_skirt_brim(prepared, false);
+    REQUIRE(prepared.print.objects().size() == 1);
+    const PrintObject &object = prepared.print.objects().front();
+    REQUIRE(object.layer_count() > 0);
+    CHECK(prepared.print.brim().empty());
+    REQUIRE_FALSE(object.brim().empty());
+    const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+    REQUIRE(layers.size() == 1);
+    check_published_brim_layer(*layers.front(), object.layers().front());
+    REQUIRE(object.instances().size() == 1);
+    const LayerInstanceProperty *owner = layers.front()->get_property<LayerInstanceProperty>();
+    REQUIRE(owner != nullptr);
+    CHECK(owner->object_instance_idx == 0);
+    Polygons patches = object.get_brim_patch(ModelVolumeType::BRIM_PATCH);
+    for (Polygon &patch_polygon : patches)
+        patch_polygon.translate(-object.instances().front().shift);
+    REQUIRE_FALSE(patches.empty());
+    CHECK(diff_ex(layers.front()->lslices(), union_ex(patches)).empty());
+    ExPolygons occupied = object.layers().front().lslices();
+    CHECK(intersection_ex(layers.front()->lslices(), occupied).empty());
+}
+
+TEST_CASE("Interior-only brim publishes hole centerlines and full bead width at zero separation",
+          "[plugins][skirt-brim][brim-root-publication]")
+{
+    DynamicPrintConfig config = brim_test_config(false, false);
+    config.set_deserialize_strict({
+        {"brim_width_interior", "3"}, {"brim_inside_holes", "0"}, {"brim_separation", "0"},
+        {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
+    });
+    PreparedBrimPrint prepared;
+    Slic3r::Test::init_print({Slic3r::Test::mesh(Slic3r::Test::TestMesh::cube_with_hole,
+        Vec3d::Zero(), Vec3d(1., 1., 0.02))}, prepared.print, prepared.model, config);
+    run_prepared_print_until_skirt_brim(prepared, false);
+    REQUIRE(prepared.print.objects().size() == 1);
+    const PrintObject &object = prepared.print.objects().front();
+    REQUIRE(object.layer_count() > 0);
+    REQUIRE(object.instances().size() == 1);
+    REQUIRE_FALSE(prepared.print.brim().empty());
+    CHECK(object.brim().empty());
+    REQUIRE(prepared.print.auxiliary_object() != nullptr);
+    const std::vector<const Layer *> layers = object_brim_auxiliary_layers(*prepared.print.auxiliary_object());
+    REQUIRE(layers.size() == 1);
+    check_published_brim_layer(*layers.front(), object.layers().front());
+    Polygons holes;
+    for (const ExPolygon &slice : object.layers().front().lslices())
+        for (Polygon hole : slice.holes) {
+            hole.reverse();
+            hole.translate(object.instances().front().shift.x(), object.instances().front().shift.y());
+            holes.push_back(std::move(hole));
+        }
+    REQUIRE(holes.size() == 1);
+    const Polylines paths = brim_layer_paths(*layers.front());
+    CHECK(diff_pl(paths, holes).empty());
+    const Flow flow = prepared.print.brim_flow(0, prepared.print.default_object_config());
+    REQUIRE(flow.width() > flow.spacing());
+    CHECK(paths.size() == size_t(std::floor(object.config().brim_width_interior.value / flow.spacing())));
+    const coord_t edge_clearance = get_extents(holes).max.x() - get_extents(paths).max.x();
+    CHECK(edge_clearance > 0);
+    CHECK(double(edge_clearance) < scale_d(float(flow.width()) / 2));
+
+    // Centers stay in the hole, but a bead is wider than its spacing. Build its physical footprint
+    // from the leaf widths rather than requiring that footprint to stop at the hole boundary.
+    Polygons expected_coverage;
+    std::function<void(const ExtrusionEntity &)> inspect;
+    inspect = [&](const ExtrusionEntity &entity) {
+        if (const ArcPolyline *path = entity.polyline_or_null()) {
+            const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+            REQUIRE(attributes != nullptr);
+            CHECK(attributes->extrusion_role() == ExtrusionRole::Skirt);
+            CHECK(attributes->width == float(flow.width()));
+            CHECK(attributes->height == float(flow.height()));
+            CHECK(attributes->mm3_per_mm > 0.);
+            const Polygons covered = offset(path->to_polyline(), scale_d(attributes->width / 2) + SCALED_EPSILON);
+            expected_coverage.insert(expected_coverage.end(), covered.begin(), covered.end());
+        } else {
+            for (const ExtrusionEntityUPtr &child : entity.children())
+                if (child)
+                    inspect(*child);
+        }
+    };
+    for (const LayerSliceIsland &island : layers.front()->islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            if (region.has_extrusion(LayerRegionIsland::PERIMETERS))
+                inspect(region.extrusion(LayerRegionIsland::PERIMETERS));
+    const ExPolygons expected = union_ex(expected_coverage);
+    CHECK(diff_ex(layers.front()->lslices(), expected).empty());
+    CHECK(diff_ex(expected, layers.front()->lslices()).empty());
+    CHECK_FALSE(diff_ex(expected, union_ex(holes)).empty());
+}
+
+TEST_CASE("Per-object brim clips the second object against the first brim in either order",
+          "[plugins][skirt-brim][brim-root-publication]")
+{
+    DynamicPrintConfig config = brim_test_config(true, true);
+    config.set_deserialize_strict({
+        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
+        {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
+    });
+    PreparedBrimPrint left_alone;
+    PreparedBrimPrint right_alone;
+    prepare_brim_objects(left_alone, config, {60.});
+    prepare_brim_objects(right_alone, config, {84.});
+    run_prepared_print_until_skirt_brim(left_alone, false);
+    run_prepared_print_until_skirt_brim(right_alone, false);
+    const std::vector<const Layer *> left_layers = object_brim_auxiliary_layers(left_alone.print.objects().front());
+    const std::vector<const Layer *> right_layers = object_brim_auxiliary_layers(right_alone.print.objects().front());
+    REQUIRE(left_layers.size() == 1);
+    REQUIRE(right_layers.size() == 1);
+    const Polylines left_paths = brim_layer_paths(*left_layers.front(), left_alone.print.objects().front().instances().front().shift);
+    const Polylines right_paths = brim_layer_paths(*right_layers.front(), right_alone.print.objects().front().instances().front().shift);
+    for (const bool left_first : {true, false}) {
+        DYNAMIC_SECTION((left_first ? "left object first" : "right object first")) {
+            PreparedBrimPrint prepared;
+            prepare_brim_objects(prepared, config, left_first ? std::vector<double>{60., 84.} : std::vector<double>{84., 60.});
+            const PrintObject *first_handle = &prepared.print.objects()[0];
+            const PrintObject *second_handle = &prepared.print.objects()[1];
+            REQUIRE(first_handle->model_object() != second_handle->model_object());
+            const PrintInstances first_saved = first_handle->instances();
+            const PrintInstances second_saved = second_handle->instances();
+            REQUIRE((first_saved.front().shift.x() < second_saved.front().shift.x()) == left_first);
+            run_prepared_print_until_skirt_brim(prepared, false);
+            REQUIRE(&prepared.print.objects()[0] == first_handle);
+            REQUIRE(&prepared.print.objects()[1] == second_handle);
+            check_brim_instances(*first_handle, first_saved);
+            check_brim_instances(*second_handle, second_saved);
+            CHECK(prepared.print.brim().empty());
+            const std::vector<const Layer *> first_layers = object_brim_auxiliary_layers(*first_handle);
+            const std::vector<const Layer *> second_layers = object_brim_auxiliary_layers(*second_handle);
+            REQUIRE(first_layers.size() == 1);
+            REQUIRE(second_layers.size() == 1);
+            check_published_brim_layer(*first_layers.front(), first_handle->layers().front());
+            check_published_brim_layer(*second_layers.front(), second_handle->layers().front());
+            for (const Layer *layer : {first_layers.front(), second_layers.front()}) {
+                const LayerInstanceProperty *owner = layer->get_property<LayerInstanceProperty>();
+                REQUIRE(owner != nullptr);
+                CHECK(owner->object_instance_idx == 0);
+            }
+            const Polylines first_paths = brim_layer_paths(*first_layers.front(), first_saved.front().shift);
+            const Polylines second_paths = brim_layer_paths(*second_layers.front(), second_saved.front().shift);
+            const Polylines &first_reference = left_first ? left_paths : right_paths;
+            const Polylines &second_reference = left_first ? right_paths : left_paths;
+            CHECK(first_paths == first_reference);
+            CHECK(total_length(second_paths) < total_length(second_reference));
+
+            // A 4 mm gap keeps either 3 mm brim clear of the other cube. The shared strip lies
+            // only in the two brims, so losing centerlines here proves clipping by prior brim.
+            ExPolygons first_slices = first_handle->layers().front().lslices();
+            for (ExPolygon &slice : first_slices)
+                slice.translate(first_saved.front().shift.x(), first_saved.front().shift.y());
+            const BoundingBox base = get_extents(first_slices);
+            const coord_t strip_min = left_first ? base.max.x() + scale_i(1.5) : base.min.x() - scale_i(2.5);
+            const coord_t strip_max = left_first ? base.max.x() + scale_i(2.5) : base.min.x() - scale_i(1.5);
+            const Polygon shared_strip = BoundingBox(Point(strip_min, base.min.y() + scale_i(5.)),
+                Point(strip_max, base.max.y() - scale_i(5.))).polygon();
+            ExPolygons second_slices = second_handle->layers().front().lslices();
+            for (ExPolygon &slice : second_slices)
+                slice.translate(second_saved.front().shift.x(), second_saved.front().shift.y());
+            const ExPolygons strip_area{ExPolygon(shared_strip)};
+            REQUIRE(intersection_ex(strip_area, first_slices).empty());
+            REQUIRE(intersection_ex(strip_area, second_slices).empty());
+            REQUIRE_FALSE(intersection_pl(first_reference, shared_strip).empty());
+            REQUIRE_FALSE(intersection_pl(second_reference, shared_strip).empty());
+            CHECK(intersection_pl(second_paths, shared_strip).empty());
+            CHECK_FALSE(intersection_pl(first_paths, shared_strip).empty());
+        }
+    }
 }
 
 // Inspect generated auxiliary geometry before ordering: each closed brim parent

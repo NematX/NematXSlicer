@@ -24,7 +24,7 @@
 #include <clipper/clipper_z.hpp>
 #include "ClipperUtils.hpp"
 #include "EdgeGrid.hpp"
-#include "ExtrusionEntityCollection.hpp"
+#include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityVisitors.hpp"
 #include "Flow.hpp"
 #include "Layer.hpp"
@@ -43,12 +43,40 @@
     #include "SVG.hpp"
 #endif
 
+/* Build outer, interior, ear and model-patch brim geometry for the adhesion
+   generator. First-layer slices and the shared occupied area define where new
+   contours may be printed. Nested contours are clipped before extrusion so an
+   enclosing contour precedes its descendants, without ordering independent
+   islands. Generated generic nodes own their geometry and properties; closed
+   brim parents carry the same complete attributes as their leaf paths.
+   Callers exclusively own the output and occupied area. Cancellation and
+   allocation errors propagate and can leave partial output.
+
+       make_brim() / make_brim_interior() / make_brim_patch()
+           |-- derive and offset printable areas; retain occupied regions
+           `-- extrude_brim_from_tree(): clip and emit nested owned contours
+               `-- make_brim_path(): build a leaf and optional closed parent
+       make_brim_ears()
+           |-- derive ear areas and choose their fill pattern
+           |-- reorder_brim_polyline(): connect nearby nonconcentric lines
+           `-- emit owned paths or fill concentric ear areas
+*/
+
 namespace Slic3r {
 
-// Clip nested brim contours and append owned paths or loops with matching parent and leaf attributes.
+// Clip nested brim contours in place and append owned geometry to an exclusively borrowed Children destination.
+// Closed parents carry SKIRT and complete leaf attributes; cancellation and allocation failures can leave partial changes.
 void extrude_brim_from_tree(const Print &print, std::vector<std::vector<BrimLoop>> &loops,
                             const Polygons &frontiers, const Flow &flow,
-                            ExtrusionEntityCollection &out, bool reversed);
+                            ExtrusionEntity &out, bool reversed);
+
+// Return the input polylines reordered, with nearby ends reversed and joined; out is neither read nor changed.
+Polylines reorder_brim_polyline(Polylines lines, ExtrusionEntity &out, const Flow &flow);
+
+// Copy one brim path into a generic leaf, wrapping closed paths in a fixed rotatable parent.
+// Marked parents copy the complete attributes; unmarked ears keep attributes only on their leaf.
+static ExtrusionEntityUPtr make_brim_path(const Polyline &polyline, const ExtrusionAttributes &attributes,
+                                        bool can_reverse, bool mark_skirt);
 
 // Read the optional brim separation offset; an absent plugin-owned setting
 // reads as zero.
@@ -753,11 +781,25 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
 
 //superslicer
 
-// Clip mutable nested contours to the supplied frontiers using the flow width,
-// append owned paths and SKIRT loops to out, and copy complete leaf attributes
-// onto closed parents without changing leaf values. Print cancellation and
-// allocation failures propagate; the input contour tree is consumed in place.
-void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop>>& loops, const Polygons& frontiers, const Flow& flow, ExtrusionEntityCollection& out, bool reversed/*= false*/) {
+static ExtrusionEntityUPtr make_brim_path(const Polyline &polyline, const ExtrusionAttributes &attributes,
+                                        bool can_reverse, bool mark_skirt)
+{
+    ExtrusionEntityUPtr path = std::make_unique<ExtrusionEntity>(can_reverse, ArcPolyline(polyline));
+    path->add_property(attributes);
+    if (polyline.front() != polyline.back())
+        return path;
+
+    ExtrusionEntity::Children children;
+    children.emplace_back(std::move(path));
+    ExtrusionEntityUPtr loop = std::make_unique<ExtrusionEntity>(std::move(children), false, false, true);
+    if (mark_skirt) {
+        loop->add_property(ExtrusionPropertyLoopRole(elrSkirt));
+        loop->add_property(attributes);
+    }
+    return loop;
+}
+
+void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop>>& loops, const Polygons& frontiers, const Flow& flow, ExtrusionEntity& out, bool reversed/*= false*/) {
     if (loops.empty())
         return;
 
@@ -857,107 +899,73 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
     float mm3_per_mm = float(flow.mm3_per_mm());
     float width = float(flow.width());
     float height = float(unscaled(print.get_min_first_layer_height()));
-    int nextIdx = 0;
-    std::function<void(BrimLoop&, ExtrusionEntityCollection*)>* extrude_ptr;
+    std::function<void(BrimLoop&, ExtrusionEntity&)> extrude;
     // Append owned geometry in nesting order; closed parents copy complete path
     // attributes while leaves retain their own role, width, height and flow.
-    std::function<void(BrimLoop&, ExtrusionEntityCollection*) > extrude = [&mm3_per_mm, &width, &height, &extrude_ptr, &nextIdx, extrude_cw](BrimLoop& to_cut, ExtrusionEntityCollection* parent) {
-        DEBUG_TREE_VISIT(*parent, LoopAssertVisitor())
-        int idx = nextIdx++;
+    extrude = [&mm3_per_mm, &width, &height, &extrude, extrude_cw](BrimLoop& to_cut, ExtrusionEntity& parent) {
+        DEBUG_TREE_VISIT(parent, LoopAssertVisitor())
         //bool i_have_line = !to_cut.line.points.empty() && to_cut.line.is_valid();
         bool i_have_line = to_cut.lines.size() > 0 && to_cut.lines.front().size() > 0 && to_cut.lines.front().is_valid();
         if (!i_have_line && to_cut.children.empty()) {
             //nothing
         } else if (i_have_line && to_cut.children.empty()) {
-            ExtrusionEntitiesPtr to_add;
             for (Polyline& pline : to_cut.lines) {
                 pline.assert_valid();
                 assert(pline.size() > 0);
                 if (extrude_cw) {
                     pline.reverse();
                 }
-                if (pline.back() == pline.front()) {
-                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
-                    path.polyline() = pline;
-                    ExtrusionLoop *loop = new ExtrusionLoop(std::move(path), elrSkirt);
-                    loop->add_property(loop->paths().front().attributes());
-                    to_add.push_back(loop);
-                } else {
-                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
-                    extrusion_path->polyline() = pline;
-                    to_add.push_back(extrusion_path);
-                }
-                DEBUG_TREE_VISIT(*to_add.back(), LoopAssertVisitor())
+                parent.append_child(make_brim_path(pline, {ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false, true));
+                DEBUG_TREE_VISIT(*parent.children().back(), LoopAssertVisitor())
             }
-            parent->append(std::move(to_add));
         } else if (!i_have_line && !to_cut.children.empty()) {
             if (to_cut.children.size() == 1) {
-                (*extrude_ptr)(to_cut.children[0], parent);
+                extrude(to_cut.children[0], parent);
             } else {
-                ExtrusionEntityCollection* mycoll = new ExtrusionEntityCollection();
+                ExtrusionEntityUPtr mycoll = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, true, true, false);
                 //mycoll->no_sort = true;
                 for (BrimLoop& child : to_cut.children)
-                    (*extrude_ptr)(child, mycoll);
+                    extrude(child, *mycoll);
                 //remove un-needed collection if possible
-                if (mycoll->entities().size() == 1) {
-                    parent->append(*mycoll->entities().front()); //add clone
-                    DEBUG_TREE_VISIT(*parent->entities().back(), LoopAssertVisitor())
-                    delete mycoll; // remove coll & content
-                } else if (mycoll->entities().size() == 0) {
-                    delete mycoll;// remove coll & content
-                } else {
-                    parent->append(ExtrusionEntitiesPtr{ mycoll });
-                    DEBUG_TREE_VISIT(*parent->entities().back(), LoopAssertVisitor())
+                if (mycoll->child_count() == 1) {
+                    parent.append_child(std::move(mycoll->children().front()));
+                    DEBUG_TREE_VISIT(*parent.children().back(), LoopAssertVisitor())
+                } else if (mycoll->child_count() != 0) {
+                    parent.append_child(std::move(mycoll));
+                    DEBUG_TREE_VISIT(*parent.children().back(), LoopAssertVisitor())
                 }
             }
         } else {
-            ExtrusionEntityCollection* print_me_first = new ExtrusionEntityCollection();
-            print_me_first->set_can_sort_reverse(false, false);
-            parent->append(ExtrusionEntitiesPtr{ print_me_first });
-            ExtrusionEntitiesPtr to_add;
+            ExtrusionEntity &print_me_first = parent.append_child(
+                std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, false));
             for (Polyline& pline : to_cut.lines) {
                 assert(pline.size() > 0);
                 pline.assert_valid();
                 if (extrude_cw) {
                     pline.reverse();
                 }
-                if (pline.back() == pline.front()) {
-                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
-                    path.polyline() = pline;
-                    ExtrusionLoop *loop = new ExtrusionLoop(std::move(path), elrSkirt);
-                    loop->add_property(loop->paths().front().attributes());
-                    to_add.push_back(loop);
-                } else {
-                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
-                    extrusion_path->polyline() = pline;
-                    to_add.push_back(extrusion_path);
-                }
-                DEBUG_TREE_VISIT(*to_add.back(), LoopAssertVisitor())
+                print_me_first.append_child(make_brim_path(pline, {ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false, true));
+                DEBUG_TREE_VISIT(*print_me_first.children().back(), LoopAssertVisitor())
             }
-            print_me_first->append(std::move(to_add));
             if (to_cut.children.size() == 1) {
-                (*extrude_ptr)(to_cut.children[0], print_me_first);
+                extrude(to_cut.children[0], print_me_first);
             } else {
-                ExtrusionEntityCollection* children = new ExtrusionEntityCollection();
+                ExtrusionEntityUPtr children = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, true, true, false);
                 //children->no_sort = true;
                 for (BrimLoop& child : to_cut.children)
-                    (*extrude_ptr)(child, children);
+                    extrude(child, *children);
                 DEBUG_TREE_VISIT(*children, LoopAssertVisitor())
                 //remove un-needed collection if possible
-                if (children->entities().size() == 1) {
-                    print_me_first->append(*children->entities().front());
-                    delete children;
-                } else if (children->entities().size() == 0) {
-                    delete children;
-                } else {
-                    print_me_first->append(ExtrusionEntitiesPtr{ children });
+                if (children->child_count() == 1) {
+                    print_me_first.append_child(std::move(children->children().front()));
+                } else if (children->child_count() != 0) {
+                    print_me_first.append_child(std::move(children));
                 }
             }
-            assert(print_me_first->entities().size() > 0);
+            assert(print_me_first.child_count() > 0);
         }
-        DEBUG_TREE_VISIT(*parent, LoopAssertVisitor())
+        DEBUG_TREE_VISIT(parent, LoopAssertVisitor())
     };
-    extrude_ptr = &extrude;
 
     if (loops.empty()) {
         BOOST_LOG_TRIVIAL(error) << "Failed to extrude brim: no loops to extrude, are you sure your settings are ok?";
@@ -966,88 +974,15 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
 
     //launch extrude
     for (BrimLoop& loop : loops[0]) {
-        extrude(loop, &out);
+        extrude(loop, out);
     }
-}
-
-/// reorder & join polyline if their ending are near enough, then extrude the brim from the polyline into 'out'.
-Polylines reorder_brim_polyline(Polylines lines, ExtrusionEntityCollection& out, const Flow& flow) {
-    //reorder them
-    std::sort(lines.begin(), lines.end(), [](const Polyline& a, const Polyline& b)->bool { return a.closest_point(Point(0, 0))->y() < b.closest_point(Point(0, 0))->y(); });
-    Polylines lines_sorted;
-    Polyline* previous = NULL;
-    Polyline* best = NULL;
-    double best_dist = -1;
-    size_t best_idx = 0;
-    while (lines.size() > 0) {
-        if (previous == NULL) {
-            lines_sorted.push_back(lines.back());
-            previous = &lines_sorted.back();
-            lines.erase(lines.end() - 1);
-        } else {
-            best = NULL;
-            best_dist = -1;
-            best_idx = 0;
-            for (size_t i = 0; i < lines.size(); ++i) {
-                Polyline& viewed_line = lines[i];
-                double dist = viewed_line.points.front().distance_to(previous->points.front());
-                dist = std::min(dist, viewed_line.points.front().distance_to(previous->points.back()));
-                dist = std::min(dist, viewed_line.points.back().distance_to(previous->points.front()));
-                dist = std::min(dist, viewed_line.points.back().distance_to(previous->points.back()));
-                if (dist < best_dist || best == NULL) {
-                    best = &viewed_line;
-                    best_dist = dist;
-                    best_idx = i;
-                }
-            }
-            if (best != NULL) {
-                //copy new line inside the sorted array.
-                lines_sorted.push_back(lines[best_idx]);
-                lines.erase(lines.begin() + best_idx);
-
-                //connect if near enough
-                if (lines_sorted.size() > 1) {
-                    size_t idx = lines_sorted.size() - 2;
-                    bool connect = false;
-                    if (lines_sorted[idx].points.back().distance_to(lines_sorted[idx + 1].points.front()) < flow.scaled_spacing() * 2) {
-                        connect = true;
-                    } else if (lines_sorted[idx].points.back().distance_to(lines_sorted[idx + 1].points.back()) < flow.scaled_spacing() * 2) {
-                        lines_sorted[idx + 1].reverse();
-                        connect = true;
-                    } else if (lines_sorted[idx].points.front().distance_to(lines_sorted[idx + 1].points.front()) < flow.scaled_spacing() * 2) {
-                        lines_sorted[idx].reverse();
-                        connect = true;
-                    } else if (lines_sorted[idx].points.front().distance_to(lines_sorted[idx + 1].points.back()) < flow.scaled_spacing() * 2) {
-                        lines_sorted[idx].reverse();
-                        lines_sorted[idx + 1].reverse();
-                        connect = true;
-                    }
-
-                    if (connect) {
-                        //connect them
-                        lines_sorted[idx].points.insert(
-                            lines_sorted[idx].points.end(),
-                            lines_sorted[idx + 1].points.begin(),
-                            lines_sorted[idx + 1].points.end());
-                        lines_sorted.erase(lines_sorted.begin() + idx + 1);
-                        idx--;
-                    }
-                }
-
-                //update last position
-                previous = &lines_sorted.back();
-            }
-        }
-    }
-
-    return lines_sorted;
 }
 
 //note: unbrimmable must keep its ordering. don't union_ex it.
 
 //TODO: test if no regression vs old _make_brim.
 // this new one can extrude brim for an object inside an other object.
-void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntityCollection& out) {
+void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntity& out) {
     const coord_t scaled_spacing = flow.scaled_spacing();
     const PrintObjectConfig& brim_config = objects.front()->config();
     coord_t brim_offset = scale_i(brim_separation_value(brim_config));
@@ -1236,7 +1171,7 @@ void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& obje
     unbrimmable.insert(unbrimmable.end(), brimmable_areas.begin(), brimmable_areas.end());
 }
 
-void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntityCollection& out) {
+void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, const BrimGenerationParameters &parameters, ExPolygons& unbrimmable, ExtrusionEntity& out) {
     const PrintObjectConfig& brim_config = objects.front()->config();
     Points pt_ears;
     coord_t brim_offset = scale_i(brim_separation_value(brim_config));
@@ -1397,14 +1332,12 @@ void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs&
         print.throw_if_canceled();
 
         //push into extrusions
-        extrusion_entities_append_paths(
-            out,
-            //reorder & extrude them;
-            reorder_brim_polyline(lines, out, flow),
-            ExtrusionAttributes{ExtrusionRole::Skirt,
-                                {float(flow.mm3_per_mm()), float(flow.width()),
-                                    float(print.get_min_first_layer_height())}}
-        );
+        Polylines ear_lines = reorder_brim_polyline(lines, out, flow);
+        const ExtrusionAttributes attributes{ExtrusionRole::Skirt,
+            {float(flow.mm3_per_mm()), float(flow.width()), float(print.get_min_first_layer_height())}};
+        for (const Polyline &line : ear_lines)
+            if (line.is_valid())
+                out.append_child(make_brim_path(line, attributes, true, false));
 
         append(unbrimmable, offset_ex(mouse_ears_ex, flow.scaled_spacing() / 2));
 
@@ -1447,11 +1380,83 @@ void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs&
 
 }
 
+Polylines reorder_brim_polyline(Polylines lines, ExtrusionEntity& out, const Flow& flow) {
+    //reorder them
+    std::sort(lines.begin(), lines.end(), [](const Polyline& a, const Polyline& b)->bool { return a.closest_point(Point(0, 0))->y() < b.closest_point(Point(0, 0))->y(); });
+    Polylines lines_sorted;
+    Polyline* previous = NULL;
+    Polyline* best = NULL;
+    double best_dist = -1;
+    size_t best_idx = 0;
+    while (lines.size() > 0) {
+        if (previous == NULL) {
+            lines_sorted.push_back(lines.back());
+            previous = &lines_sorted.back();
+            lines.erase(lines.end() - 1);
+        } else {
+            best = NULL;
+            best_dist = -1;
+            best_idx = 0;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                Polyline& viewed_line = lines[i];
+                double dist = viewed_line.points.front().distance_to(previous->points.front());
+                dist = std::min(dist, viewed_line.points.front().distance_to(previous->points.back()));
+                dist = std::min(dist, viewed_line.points.back().distance_to(previous->points.front()));
+                dist = std::min(dist, viewed_line.points.back().distance_to(previous->points.back()));
+                if (dist < best_dist || best == NULL) {
+                    best = &viewed_line;
+                    best_dist = dist;
+                    best_idx = i;
+                }
+            }
+            if (best != NULL) {
+                //copy new line inside the sorted array.
+                lines_sorted.push_back(lines[best_idx]);
+                lines.erase(lines.begin() + best_idx);
+
+                //connect if near enough
+                if (lines_sorted.size() > 1) {
+                    size_t idx = lines_sorted.size() - 2;
+                    bool connect = false;
+                    if (lines_sorted[idx].points.back().distance_to(lines_sorted[idx + 1].points.front()) < flow.scaled_spacing() * 2) {
+                        connect = true;
+                    } else if (lines_sorted[idx].points.back().distance_to(lines_sorted[idx + 1].points.back()) < flow.scaled_spacing() * 2) {
+                        lines_sorted[idx + 1].reverse();
+                        connect = true;
+                    } else if (lines_sorted[idx].points.front().distance_to(lines_sorted[idx + 1].points.front()) < flow.scaled_spacing() * 2) {
+                        lines_sorted[idx].reverse();
+                        connect = true;
+                    } else if (lines_sorted[idx].points.front().distance_to(lines_sorted[idx + 1].points.back()) < flow.scaled_spacing() * 2) {
+                        lines_sorted[idx].reverse();
+                        lines_sorted[idx + 1].reverse();
+                        connect = true;
+                    }
+
+                    if (connect) {
+                        //connect them
+                        lines_sorted[idx].points.insert(
+                            lines_sorted[idx].points.end(),
+                            lines_sorted[idx + 1].points.begin(),
+                            lines_sorted[idx + 1].points.end());
+                        lines_sorted.erase(lines_sorted.begin() + idx + 1);
+                        idx--;
+                    }
+                }
+
+                //update last position
+                previous = &lines_sorted.back();
+            }
+        }
+    }
+
+    return lines_sorted;
+}
+
 void make_brim_patch(const Print &print,
                      const Flow &flow,
                      const Polygons &patches,
                      ExPolygons &unbrimmable_areas,
-                     ExtrusionEntityCollection &out)
+                     ExtrusionEntity &out)
 {
     coordf_t scaled_resolution_brim = (print.config().arc_fitting.value != ArcFittingType::Disabled) ? scale_d(print.config().resolution) : scale_d(print.config().resolution_internal) / 10;
     scaled_resolution_brim = std::max(scaled_resolution_brim, coordf_t(SCALED_EPSILON * 10));
@@ -1488,7 +1493,7 @@ void make_brim_patch(const Print &print,
     }
 }
 
-void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, ExPolygons& unbrimmable_areas, ExtrusionEntityCollection& out) {
+void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectPtrs& objects, ExPolygons& unbrimmable_areas, ExtrusionEntity& out) {
     // Brim is only printed on first layer and uses perimeter extruder.
 
     const PrintObjectConfig& brim_config = objects.front()->config();

@@ -47,6 +47,7 @@
 #include "ExtrusionEntity.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "ExtrusionEntityVisitors.hpp"
+#include "ExtrusionGeometryUnits.hpp"
 #include "Geometry.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "Geometry/MedialAxis.hpp"
@@ -73,10 +74,34 @@
 #include "Utils.hpp"
 #endif
 
+/* Build native classic or Arachne perimeters and return their remaining fill
+   domains to layer consumers. Classic offset loops retain nesting, overhang
+   fragments and thin-wall anchors. Arachne builds variable-width walls before
+   traversal. Perimeter groups are copied to the caller's destination; gap-fill
+   and unanchored thin-wall pointers are adopted without replacing their nodes.
+
+   Thin-wall helpers read generic stored geometry rather than native Path/Loop
+   casts. Orientation preserves handles. Flow changes mutate the local cache
+   cumulatively while scratch paths retain independent owned copies; connecting
+   travel belongs only to scratch. These helpers expect native producer data,
+   not arbitrary command-bearing plugin trees. Failures can leave partial output.
+
+       process()
+           |-- process_classic() -> _traverse_loops_classic()
+           |   |-- detail::orient_thin_wall(): preserve contour orientation
+           |   `-- _merge_thin_walls()
+           |       |-- detail::append_thin_wall_flow(): mutate and copy anchored flow
+           |       `-- detail::ensure_thin_wall_return(): reconnect scratch paths
+           `-- process_arachne() -> _traverse_extrusions(): order variable-width walls
+*/
+
 
 namespace Slic3r::PerimeterGenerator {
 
 namespace {
+
+// Count stored segments in native geometric caches without joining paths or copying points.
+size_t thin_wall_segment_count(const ExtrusionEntity &entity);
 
 // Plugin-owned region settings can be absent when their provider is disabled.
 bool region_setting_has_many(const RegionSettings &settings, const ConfigBase &config, const char *key)
@@ -131,6 +156,16 @@ bool region_option_is_enabled(const ConfigBase &config, const char *key)
 {
     const ConfigOption *option = config.option(key);
     return option != nullptr && option->is_enabled();
+}
+
+size_t thin_wall_segment_count(const ExtrusionEntity &entity)
+{
+    if (const ArcPolyline *polyline = entity.polyline_or_null())
+        return polyline->size() > 1 ? polyline->size() - 1 : 0;
+    size_t segments = 0;
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        segments += thin_wall_segment_count(*child);
+    return segments;
 }
 
 } // namespace
@@ -557,6 +592,35 @@ bool PerimeterGenerator::_enforce_speed_overhangs(ExtrusionPaths &paths, int cou
     return has_overhang;
 }
 
+bool detail::thin_wall_is_contour(const ExtrusionEntity &thin_wall)
+{
+    return !thin_wall.ExtrusionEntity::empty() && thin_wall.is_continuous() &&
+        thin_wall.ExtrusionEntity::first_point().coincides_with_epsilon(thin_wall.ExtrusionEntity::last_point()) &&
+        thin_wall_segment_count(thin_wall) > 2;
+}
+
+void detail::orient_thin_wall(ExtrusionEntity &thin_wall)
+{
+    if (thin_wall_is_contour(thin_wall) && !(extrusion_geometry_area(thin_wall) > 0))
+        thin_wall.reverse();
+}
+
+void detail::unwrap_single_perimeter_group(ExtrusionEntity &peri_entities)
+{
+    if (peri_entities.child_count() != 1)
+        return;
+    ExtrusionEntity &group = peri_entities.child(0);
+    if (group.is_leaf() || thin_wall_is_contour(group))
+        return;
+    const bool can_sort = group.can_sort();
+    const bool can_reverse = group.can_reverse();
+    const bool can_rotate = group.can_rotate();
+    ExtrusionEntity::Children children = std::move(group.children());
+    peri_entities.set_can_sort_reverse(can_sort, can_reverse);
+    peri_entities.set_can_rotate(can_rotate);
+    peri_entities.children() = std::move(children);
+}
+
 ExtrusionEntityCollection PerimeterGenerator::_traverse_loops_classic(const Parameters &params,
     const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls, int count_since_overhang /*= -1*/) const
 {
@@ -740,11 +804,7 @@ ExtrusionEntityCollection PerimeterGenerator::_traverse_loops_classic(const Para
                 coll_out.entities().back()->reverse();
             }
             //if thin extrusion is a loop, make it ccw like a normal contour.
-            if (ExtrusionLoop* loop = dynamic_cast<ExtrusionLoop*>(coll_out.entities().back())) {
-                if (loop->is_clockwise()) {
-                    loop->reverse();
-                }
-            }
+            detail::orient_thin_wall(*coll_out.entities().back());
         } else {
             const PerimeterGeneratorLoop &loop = loops[idx.first];
 
@@ -3432,7 +3492,7 @@ static void export_perimeters_to_svg(const std::string &path, const Polygons &co
 
 // Thanks, Cura developers, for implementing an algorithm for generating perimeters with variable width (Arachne) that is based on the paper
 // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling"
-ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &params, int& loop_number, const ExPolygon& surface_expolygon, ExtrusionEntityCollection &loops) {
+ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &params, int& loop_number, const ExPolygon& surface_expolygon, ExtrusionEntity &loops) {
 
     ProcessSurfaceResult result;
 
@@ -3994,7 +4054,7 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
         this->throw_if_canceled();
     if (ExtrusionEntityCollection extrusion_coll = _traverse_extrusions(params, ordered_extrusions); !extrusion_coll.empty()) {
         extrusion_coll.set_can_sort_reverse(false, false);
-        loops.append(extrusion_coll);
+        loops.append_child(extrusion_coll);
     }
 
     const coord_t spacing = (perimeters.size() == 1) ? params.ext_perimeter_spacing2 : params.get_perimeter_spacing();
@@ -5269,8 +5329,8 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                                                          int &                      contour_count,
                                                          int &                      holes_count,
                                                          const ExPolygon &          surface_expolygon,
-                                                         ExtrusionEntityCollection &loops,
-                                                         ExtrusionEntityCollection &gap_fill)
+                                                         ExtrusionEntity &loops,
+                                                         ExtrusionEntity &gap_fill)
 {
     ProcessSurfaceResult results;
     //this var store infill surface removed from last to not add any more perimeters to it.
@@ -6249,16 +6309,7 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
 #endif
         // remove the un-needed top collection if only one child.
         //peri_entities.visit(CollectionSimplifyVisitor{});
-        if (peri_entities.entities().size() == 1) {
-            if (ExtrusionEntityCollection *coll_child = dynamic_cast<ExtrusionEntityCollection *>(
-                    peri_entities.entities().front());
-                coll_child != nullptr) {
-                peri_entities.set_can_sort_reverse(coll_child->can_sort(), coll_child->can_reverse());
-                peri_entities.set_can_rotate(coll_child->can_rotate());
-                peri_entities.append_move_from(*coll_child);
-                peri_entities.remove(0);
-            }
-        }
+        detail::unwrap_single_perimeter_group(peri_entities);
 
         //{
         //    static int aodfjiaqsdz = 0;
@@ -6278,7 +6329,7 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
         // append perimeters for this slice as a collection
         if (!peri_entities.empty()) {
             //move it, to avoid to clone evrything and then delete it
-            loops.append(peri_entities);
+            loops.append_child(peri_entities);
         }
     } // if contour & hole
 #ifdef _DEBUGINFO
@@ -6381,12 +6432,19 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                                                   params.perimeter_flow.height(),
                                                   region_option_effective_value(params.config, "gap_fill_overlap", 1.), false);
         if (!polylines.empty()) {
-            gap_fill.append(Geometry::thin_variable_width(
-                polylines,
-                ExtrusionRole::GapFill, 
-                gap_fill_flow, 
-                scale_i(params.print_config.resolution_internal),
-                true));
+            // Adopt each generated node directly, keeping its identity and position in the output.
+            {
+                ExtrusionEntitiesPtr paths = Geometry::thin_variable_width(
+                    polylines,
+                    ExtrusionRole::GapFill,
+                    gap_fill_flow,
+                    scale_i(params.print_config.resolution_internal),
+                    true);
+                gap_fill.children().reserve(gap_fill.children().size() + paths.size());
+                for (ExtrusionEntity *path : paths)
+                    gap_fill.append_child(ExtrusionEntityUPtr(path));
+                paths.clear();
+            }
             /*  Make sure we don't infill narrow parts that are already gap-filled
                 (we only consider this surface's gaps to reduce the diff() complexity).
                 Growing actual extrusions ensures that gaps not filled by medial axis
@@ -6452,78 +6510,68 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
     return results;
 }
 
-void PerimeterGenerator::_merge_thin_walls(const Parameters &params, ExtrusionEntityCollection &extrusions, ThickPolylines &thin_walls) const
+void detail::append_thin_wall_flow(ExtrusionEntity &entity, ExtrusionPaths &paths, const Point *&first_point,
+                                   float percent_extrusion, bool no_seam, coordf_t resolution_sqr)
+{
+    if (!entity.is_leaf()) {
+        for (ExtrusionEntityUPtr &child : entity.children())
+            if (child)
+                append_thin_wall_flow(*child, paths, first_point, percent_extrusion, no_seam, resolution_sqr);
+        return;
+    }
+    ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    ArcPolyline *polyline = entity.polyline_or_null();
+    if (attributes == nullptr || polyline == nullptr)
+        return;
+    // Keep the first copied segment connected to the surrounding perimeter.
+    if (first_point != nullptr) {
+        if (*first_point != polyline->front()) {
+            if (first_point->distance_to_square(polyline->front()) < resolution_sqr) {
+                polyline->set_front(*first_point);
+            } else {
+                ExtrusionPath travel(ExtrusionAttributes(ExtrusionRole::Travel, ExtrusionFlow(0, attributes->width, attributes->height)), nullptr, false);
+                travel.polyline().append(*first_point);
+                travel.polyline().append(polyline->front());
+                travel.attributes_mutable().no_seam = no_seam;
+                paths.push_back(travel);
+            }
+        }
+        first_point = nullptr;
+    }
+    attributes->mm3_per_mm *= percent_extrusion;
+    attributes->width *= percent_extrusion;
+    attributes->no_seam = no_seam;
+    ExtrusionPath path(*attributes, nullptr, entity.can_reverse());
+    path.ExtrusionEntity::operator=(entity);
+    paths.push_back(std::move(path));
+}
+
+void detail::ensure_thin_wall_return(ExtrusionPaths &paths, const Point &pt, bool no_seam, coordf_t resolution_sqr)
+{
+    assert(!paths.empty());
+    Point last_point = paths.back().last_point();
+    if (last_point != pt) {
+        if (last_point.distance_to_square(pt) < resolution_sqr) {
+            paths.back().polyline().set_back(pt);
+        } else {
+            //add travel
+            ExtrusionPath travel({ExtrusionRole::Travel}, nullptr, false);
+            travel.attributes_mutable().width = paths.back().width();
+            travel.attributes_mutable().height = paths.back().height();
+            travel.attributes_mutable().mm3_per_mm = 0;
+            travel.attributes_mutable().no_seam = no_seam;
+            travel.polyline().append(last_point);
+            travel.polyline().append(pt);
+            paths.push_back(travel);
+        }
+    }
+}
+
+void PerimeterGenerator::_merge_thin_walls(const Parameters &params, ExtrusionEntity &extrusions, ThickPolylines &thin_walls) const
 {
 #if _DEBUG
     LoopAssertVisitor().traverse(extrusions);
 #endif
-    //TODO: find a way to avoid double copy (from EntityCollection to ChangeFlow to searcher.search_result.loop
-    class ChangeFlow : public ExtrusionVisitor {
-    public:
-        ChangeFlow(coordf_t resolution) : resolution_sqr(resolution * resolution) {}
-        float percent_extrusion;
-        bool no_seam = false;
-        std::vector<ExtrusionPath> paths;
-        const Point* first_point = nullptr;
-        coordf_t resolution_sqr;
-        //TODO real travel with role & width
-        void ensure_travel_to(const Point &pt) {
-            assert(!paths.empty());
-            Point last_point = paths.back().last_point();
-            if (last_point != pt) {
-                if (last_point.distance_to_square(pt) < resolution_sqr) {
-                    paths.back().polyline().set_back(pt);
-                } else {
-                    //add travel
-                    ExtrusionPath travel({ExtrusionRole::Travel}, nullptr, false);
-                    travel.attributes_mutable().width = paths.back().width();
-                    travel.attributes_mutable().height = paths.back().height();
-                    travel.attributes_mutable().mm3_per_mm = 0;
-                    travel.attributes_mutable().no_seam = no_seam;
-                    travel.polyline().append(last_point);
-                    travel.polyline().append(pt);
-                    paths.push_back(travel);
-                }
-            }
-        }
-        virtual void default_use(ExtrusionEntity &entity) override {
-            if (!entity.is_leaf()) {
-                for (ExtrusionEntityUPtr &child : entity.children())
-                    if (child)
-                        child->visit(*this);
-                return;
-            }
-            ExtrusionPath *path_ptr = dynamic_cast<ExtrusionPath*>(&entity);
-            ExtrusionPath tmp_path(ExtrusionAttributes(ExtrusionRole::None), nullptr);
-            ExtrusionPath &path = path_ptr != nullptr ? *path_ptr : tmp_path;
-            if (path_ptr == nullptr) {
-                const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
-                if (attributes == nullptr || entity.polyline_or_null() == nullptr)
-                    return;
-                path = ExtrusionPath(entity.polyline_ref(), *attributes, entity.clone_properties(), entity.can_reverse());
-            }
-            //ensure the loop is continue.
-            if (first_point != nullptr) {
-                if (*first_point != path.first_point()) {
-                    if (first_point->distance_to_square(path.first_point()) < resolution_sqr) {
-                        path.polyline().set_front(*first_point);
-                    } else {
-                        //add travel
-                        ExtrusionPath travel(ExtrusionAttributes(ExtrusionRole::Travel, ExtrusionFlow(0, path.width(), path.height())), nullptr, false);
-                        travel.polyline().append(*first_point);
-                        travel.polyline().append(path.first_point());
-                        travel.attributes_mutable().no_seam = no_seam;
-                        paths.push_back(travel);
-                    }
-                }
-                first_point = nullptr;
-            }
-            path.attributes_mutable().mm3_per_mm *= percent_extrusion;
-            path.attributes_mutable().width *= percent_extrusion;
-            path.attributes_mutable().no_seam = no_seam;
-            paths.push_back(path);
-        }
-    };
     struct BestPoint {
         //Point p;
         ExtrusionPath *path;
@@ -6697,28 +6745,37 @@ void PerimeterGenerator::_merge_thin_walls(const Parameters &params, ExtrusionEn
             LoopAssertVisitor().traverse(*searcher.search_result.loop);
 #endif
             
-            //create thin wall path extrusion
-            ExtrusionEntityCollection tws;
-            tws.append(Geometry::thin_variable_width({tw}, ExtrusionRole::ThinWall, params.ext_perimeter_flow,
-                                                     std::max(params.ext_perimeter_flow.scaled_width() / 10,
-                                                              scale_i(params.print_config.resolution)),
-                                                     false));
-            assert(!tws.entities().empty());
+            // Keep generated thin-wall nodes local while building the anchored path copies.
+            ExtrusionEntity tws(ExtrusionEntity::Children{}, true, true, false);
+            // Adopt generated nodes in order without cloning their roots.
+            {
+                ExtrusionEntitiesPtr paths = Geometry::thin_variable_width({tw}, ExtrusionRole::ThinWall, params.ext_perimeter_flow,
+                                                                        std::max(params.ext_perimeter_flow.scaled_width() / 10,
+                                                                                 scale_i(params.print_config.resolution)),
+                                                                        false);
+                tws.children().reserve(tws.children().size() + paths.size());
+                for (ExtrusionEntity *path : paths)
+                    tws.append_child(ExtrusionEntityUPtr(path));
+                paths.clear();
+            }
+            assert(tws.child_count() > 0);
 #if _DEBUG
             LoopAssertVisitor().traverse(*searcher.search_result.loop);
             LoopAssertVisitor().traverse(tws);
 #endif
-            ChangeFlow change_flow(std::max(scale_i(params.print_config.resolution.value), SCALED_EPSILON));
-            if (tws.entities().size() == 1 && tws.entities()[0]->is_loop()) {
+            const coordf_t resolution = std::max(scale_i(params.print_config.resolution.value), SCALED_EPSILON);
+            const coordf_t resolution_sqr = resolution * resolution;
+            ExtrusionPaths changed_paths;
+            const Point *first_point = nullptr;
+            if (tws.child_count() == 1 && detail::thin_wall_is_contour(tws.child(0))) {
                 //loop, just add it 
-                change_flow.first_point = &point;
-                change_flow.percent_extrusion = 1;
-                change_flow.use(tws);
-                // ChangeFlow added the first move if needed, now add the second
-                change_flow.ensure_travel_to(point);
+                first_point = &point;
+                detail::append_thin_wall_flow(tws, changed_paths, first_point, 1.f, false, resolution_sqr);
+                // Complete the return connection after adding any initial move.
+                detail::ensure_thin_wall_return(changed_paths, point, false, resolution_sqr);
                 //add move around
                 searcher.search_result.loop->paths().insert(searcher.search_result.loop->paths().begin() + idx_path_to_add,
-                    change_flow.paths.begin(), change_flow.paths.end());
+                    changed_paths.begin(), changed_paths.end());
                 ////add move to -> ??? i don't remember why i wrote that, so here it's removed.
                 assert(poly_after.front() == point);
                 //if (poly_after.first_point() != point) {
@@ -6732,40 +6789,34 @@ void PerimeterGenerator::_merge_thin_walls(const Parameters &params, ExtrusionEn
                 LoopAssertVisitor().traverse(*searcher.search_result.loop);
 #endif
             } else {
-                //make these thin wall un-seamable
-                change_flow.no_seam = true;
-
                 //first add the return path
                 //ExtrusionEntityCollection tws_second = tws; // this does a deep copy
-                change_flow.first_point = &poly_after.front(); // end at the start of the next path
-                change_flow.percent_extrusion = 0.1f;
-                change_flow.use(tws); // tws_second); //does not need the deep copy if the change_flow copy the content instead of re-using it.
+                first_point = &poly_after.front(); // end at the start of the next path
+                detail::append_thin_wall_flow(tws, changed_paths, first_point, 0.1f, true, resolution_sqr);
                 // force reverse
-                for (ExtrusionPath &path : change_flow.paths)
+                for (ExtrusionPath &path : changed_paths)
                     path.reverse();
-                std::reverse(change_flow.paths.begin(), change_flow.paths.end());
+                std::reverse(changed_paths.begin(), changed_paths.end());
                 size_t idx_path_to_add_after = idx_path_to_add < searcher.search_result.loop->paths().size() ?
                     idx_path_to_add :
                     searcher.search_result.loop->paths().size() - 1;
-                assert(searcher.search_result.loop->paths()[idx_path_to_add_after].polyline().front() == change_flow.paths.back().polyline().back());
-                //std::reverse(change_flow.paths.begin(), change_flow.paths.end());
+                assert(searcher.search_result.loop->paths()[idx_path_to_add_after].polyline().front() == changed_paths.back().polyline().back());
                 searcher.search_result.loop->paths().insert(searcher.search_result.loop->paths().begin() + idx_path_to_add,
-                    change_flow.paths.begin(), change_flow.paths.end()); //TODO 2.7:change role by a kind of thinwalltravel that won't be considered for seam
+                    changed_paths.begin(), changed_paths.end()); //TODO 2.7:change role by a kind of thinwalltravel that won't be considered for seam
                 //add the real extrusion path
-                change_flow.first_point = &point; // start at the end of previous extrusion
-                change_flow.percent_extrusion = 9.f; // 0.9 but as we modified it by 0.1 just before, has to multiply by 10
-                change_flow.paths = std::vector<ExtrusionPath>();
-                change_flow.use(tws);
+                first_point = &point; // start at the end of previous extrusion
+                changed_paths.clear();
+                detail::append_thin_wall_flow(tws, changed_paths, first_point, 9.f, true, resolution_sqr);
 #if _DEBUG
-                for (ExtrusionPath &path : change_flow.paths)
+                for (ExtrusionPath &path : changed_paths)
                     LoopAssertVisitor().traverse(path);
 #endif
                 size_t idx_path_to_add_before = (idx_path_to_add - 1) < searcher.search_result.loop->paths().size() ?
                     (idx_path_to_add - 1) :
                     searcher.search_result.loop->paths().size() - 1;
-                assert(searcher.search_result.loop->paths()[idx_path_to_add_before].polyline().back() == change_flow.paths.front().polyline().front());
+                assert(searcher.search_result.loop->paths()[idx_path_to_add_before].polyline().back() == changed_paths.front().polyline().front());
                 searcher.search_result.loop->paths().insert(searcher.search_result.loop->paths().begin() + idx_path_to_add,
-                    change_flow.paths.begin(), change_flow.paths.end());
+                    changed_paths.begin(), changed_paths.end());
 #if _DEBUG
                 LoopAssertVisitor().traverse(*searcher.search_result.loop);
 #endif
@@ -6778,7 +6829,14 @@ void PerimeterGenerator::_merge_thin_walls(const Parameters &params, ExtrusionEn
     LoopAssertVisitor().traverse(extrusions);
 #endif
     //now add thinwalls that have no anchor (make them reversable)
-    extrusions.append(Geometry::thin_variable_width(not_added, ExtrusionRole::ThinWall, params.ext_perimeter_flow, std::max(params.ext_perimeter_flow.scaled_width() / 4, scale_i(params.print_config.resolution)), true));
+    // Adopt unanchored nodes directly without cloning their roots or changing their order.
+    {
+        ExtrusionEntitiesPtr paths = Geometry::thin_variable_width(not_added, ExtrusionRole::ThinWall, params.ext_perimeter_flow, std::max(params.ext_perimeter_flow.scaled_width() / 4, scale_i(params.print_config.resolution)), true);
+        extrusions.children().reserve(extrusions.children().size() + paths.size());
+        for (ExtrusionEntity *path : paths)
+            extrusions.append_child(ExtrusionEntityUPtr(path));
+        paths.clear();
+    }
 #if _DEBUG
     LoopAssertVisitor().traverse(extrusions);
 #endif

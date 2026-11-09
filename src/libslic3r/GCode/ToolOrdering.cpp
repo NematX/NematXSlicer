@@ -31,6 +31,8 @@
 
 namespace Slic3r {
 
+// Return whether this entity may use a replacement extruder.
+[[nodiscard]] static bool is_overriddable(const ExtrusionEntity& eec, const LayerTools& lt, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region);
 
 // Returns true in case that extruder a comes before b (b does not have to be present). False otherwise.
 bool LayerTools::is_extruder_order(extruder_index_t a, extruder_index_t b) const
@@ -67,8 +69,7 @@ extruder_index_t LayerTools::solid_infill_extruder(const PrintRegion &region) co
 	return ((this->extruder_override == 0) ? region.config().solid_infill_extruder.value : this->extruder_override) - 1;
 }
 
-// Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
-extruder_index_t LayerTools::extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const
+extruder_index_t LayerTools::extruder(const ExtrusionEntity &extrusions, const PrintRegion &region) const
 {
     assert(region.config().perimeter_extruder.value > 0);
     assert(region.config().infill_extruder.value > 0);
@@ -295,21 +296,6 @@ void ToolOrdering::initialize_layers(std::vector<coord_t> &zs)
     }
 }
 
-// Decides whether this entity could be overridden
-[[nodiscard]] static bool is_overriddable(const ExtrusionEntityCollection& eec, const LayerTools& lt, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region)
-{
-    if (print_config.filament_soluble.get_at(lt.extruder(eec, region)))
-        return false;
-
-    if (object.config().wipe_into_objects)
-        return true;
-
-    if (!region.config().wipe_into_infill || eec.role() != ExtrusionRole::InternalInfill)
-        return false;
-
-    return true;
-}
-
 // Collect extruders reuqired to print layers.
 void ToolOrdering::collect_extruders(
     const PrintObject                              &object,
@@ -410,11 +396,11 @@ void ToolOrdering::collect_extruders(
                 bool something_nonoverriddable = false;
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::INFILLS)) {
                     // fill represents infill extrusions of a single island.
-                    const auto &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
+                    const ExtrusionEntity &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
                     // we search as deep as available, in case there is some gapfill role
-                    if (HasRoleVisitor::search(fill.entities(), HasSolidInfillVisitor{}))
+                    if (fill.child_count() > 0 && HasRoleVisitor::search(fill, HasSolidInfillVisitor{}))
                         has_solid_infill = true;
-                    else if (HasRoleVisitor::search(fill.entities(), HasInfillVisitor{}))
+                    else if (fill.child_count() > 0 && HasRoleVisitor::search(fill, HasInfillVisitor{}))
                         has_infill = true;
 
                     if (m_print_config_ptr) {
@@ -911,7 +897,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, const LayerTo
                     bool wipe_into_infill_only = ! object->config().wipe_into_objects && one_region.config().wipe_into_infill;
                     if (region_island_ptr.has_extrusion(LayerRegionIsland::INFILLS) && 
                         (one_region.config().infill_first != perimeters_done || wipe_into_infill_only)) {
-                        const ExtrusionEntityCollection &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
+                        const ExtrusionEntity &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
 
                         if (!is_overriddable(fill, lt, print.config(), *object, one_region))
                             continue;
@@ -934,7 +920,7 @@ float WipingExtrusions::mark_wiping_extrusions(const Print& print, const LayerTo
                     if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS) &&
                         object->config().wipe_into_objects && one_region.config().infill_first == perimeters_done)
                     {
-                        const ExtrusionEntityCollection &perimeter = region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS);
+                        const ExtrusionEntity &perimeter = region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS);
                         if (is_overriddable(perimeter, lt, print.config(), *object, one_region) &&
                                                          !is_entity_overridden(&perimeter, copy) &&
                                                          perimeter.total_volume() > min_infill_volume) {
@@ -984,7 +970,7 @@ void WipingExtrusions::ensure_perimeters_infills_order(const Print& print, const
                         continue;
 
                     if (region_island_ptr.has_extrusion(LayerRegionIsland::INFILLS)) { // iterate through all infill Collections
-                        const ExtrusionEntityCollection &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
+                        const ExtrusionEntity &fill = region_island_ptr.extrusion(LayerRegionIsland::INFILLS);
 
                         if (!is_overriddable(fill, lt, print.config(), *object, one_region)
                             || is_entity_overridden(&fill, copy) )
@@ -1007,7 +993,7 @@ void WipingExtrusions::ensure_perimeters_infills_order(const Print& print, const
 
                     // Now the same for perimeters - see comments above for explanation:
                     if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS)) { // iterate through all perimeter Collections
-                        const ExtrusionEntityCollection &perimeter = region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS);
+                        const ExtrusionEntity &perimeter = region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS);
                         if (is_overriddable(perimeter, lt, print.config(), *object, one_region) && ! is_entity_overridden(&perimeter, copy))
                             set_extruder_override(&perimeter, copy, (one_region.config().infill_first ? last_nonsoluble_extruder : first_nonsoluble_extruder), num_of_copies);
                     }
@@ -1031,6 +1017,20 @@ int ToolOrdering::toolchanges_count() const
     if (tools_in_order.size() > 1 && tools_in_order.back() == tools_in_order[tools_in_order.size()-2])
         tools_in_order.pop_back();
     return std::max(0, int(tools_in_order.size())-1); // 5 tools = 4 toolchanges
+}
+
+static bool is_overriddable(const ExtrusionEntity& eec, const LayerTools& lt, const PrintConfig& print_config, const PrintObject& object, const PrintRegion& region)
+{
+    if (print_config.filament_soluble.get_at(lt.extruder(eec, region)))
+        return false;
+
+    if (object.config().wipe_into_objects)
+        return true;
+
+    if (!region.config().wipe_into_infill || eec.role() != ExtrusionRole::InternalInfill)
+        return false;
+
+    return true;
 }
 
 } // namespace Slic3r

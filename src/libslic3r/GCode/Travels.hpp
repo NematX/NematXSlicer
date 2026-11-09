@@ -8,6 +8,13 @@
 /**
  * @file
  * @brief Utility functions for travel gcode generation.
+ *
+ * external_perimeter_lines() projects effective exterior paths while retaining
+ * each outer continuous unit's source identity. TravelObstacleTracker registers
+ * those lines and marks complete units using the same source domain plus the
+ * emitted copy. Source trees and their inherited attributes remain borrowed and
+ * unchanged; emitted copies must retain source IDs. The remaining helpers slice
+ * and elevate travel geometry without changing this ownership contract.
  */
 
 #include <cstddef>
@@ -55,6 +62,11 @@ public:
     const uint64_t         extrusion_entity_id = 0;
 };
 
+// Project only effective external-perimeter paths. Every selected segment keeps
+// its outer continuous unit's identity; the borrowed tree is not changed.
+std::vector<ObjectOrExtrusionLinef> external_perimeter_lines(const ExtrusionEntity &root, const Point &shift,
+                                                          size_t object_layer_idx, size_t instance_idx);
+
 struct ExtrudedExtrusionEntity
 {
     const int              object_layer_idx = -1;
@@ -74,7 +86,10 @@ public:
     void init_layer(const Layer &layer, const ObjectsLayerToPrint &objects_to_print);
     bool is_init() const { return !m_current_layer_distancer.get_lines().empty(); }
 
-    void mark_extruded(const ExtrusionEntity *extrusion_entity, size_t object_layer_idx, size_t instance_idx);
+    // Mark complete source units whose identities occur in the emitted tree.
+    // The domain supplies ancestral attributes; an isolated descendant is not a complete unit.
+    void mark_extruded(const ExtrusionEntity &domain, const ExtrusionEntity &emitted,
+                       size_t object_layer_idx, size_t instance_idx);
 
     bool is_extruded(const ObjectOrExtrusionLinef &line) const;
 

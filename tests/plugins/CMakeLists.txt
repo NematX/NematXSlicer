@@ -36,6 +36,7 @@ add_executable(${_TEST_NAME}_tests
     test_config_translations.cpp
     test_deferred_callback_exception.cpp
     test_extrusion_continuity.cpp
+    test_extrusion_geometry_units.cpp
     test_extrusion_linear_points.cpp
     test_extrusion_ordered_leaf.cpp
     test_geometry_primitives.cpp
@@ -63,6 +64,13 @@ add_executable(${_TEST_NAME}_tests
     test_line_pattern.cpp
     test_arachne_infill.cpp
     test_concentric_pattern.cpp
+    test_native_extrusion_nesting.cpp
+    test_native_extrusion_publication.cpp
+    test_native_fill_caches.cpp
+    test_native_fill_producers.cpp
+    test_native_medial_producers.cpp
+    test_native_support_modulation.cpp
+    test_native_thin_wall_flow.cpp
     test_smooth_pattern.cpp
     test_post_full_fill_volume.cpp
     test_rectilinear_edge_grid.cpp
@@ -174,6 +182,7 @@ test_support_tree_family.cpp
     test_support_step.cpp
     test_layer_extrusion_edit_support_acceleration.cpp
     test_support_pattern_service.cpp
+    ../libslic3r/test_support_spots_generator.cpp
     test_support_tool_ordering.cpp
     test_surface_clean_infill_surfaces.cpp
     test_surface_initial_typed_surface_builder.cpp

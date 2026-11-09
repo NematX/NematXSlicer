@@ -10,7 +10,11 @@
 
 /* Collections own their children through the extrusion tree. The compatibility pointer view borrows those children and is
    validated under a cache spin lock on every access; direct child queries need no pointer cache. Readers may run concurrently,
-   while all mutations require exclusive access and invalidate borrowed views. */
+   while all mutations require exclusive access and invalidate borrowed views.
+   Path and ring factories are declared on the base interface in ExtrusionEntity.hpp;
+   they accept collections too, but construct generic owned children.
+   swap() exchanges complete node identities and resources, unlike swap_content(),
+   which exchanges their content while retaining the two outer identities. */
 
 #include <atomic>
 
@@ -67,8 +71,9 @@ public:
     ExtrusionEntityCollection& operator=(const ExtrusionEntityCollection &other);
     ExtrusionEntityCollection& operator=(ExtrusionEntityCollection &&other);
     ~ExtrusionEntityCollection() override { clear(); }
-    // move all entitites from src into this
-    void append_move_from(ExtrusionEntityCollection &src);
+    // Move source children to the end in order, preserving root properties and child identities.
+    // Both trees require exclusive access; reacquire views after mutation. Local geometry may materialize and failures propagate.
+    void append_move_from(ExtrusionEntity &src);
 
     /// Operator to convert and flatten this collection to a single vector of ExtrusionPaths.
     explicit operator ExtrusionPaths() const;
@@ -87,7 +92,8 @@ public:
     bool can_sort() const { return ExtrusionEntity::can_sort(); }
     bool can_reverse() const override { return can_sort() || this->m_can_reverse; }
     void clear();
-    // Exchange content, identity and ordering permissions and invalidate both borrowed pointer caches.
+    // Exchange content, identity, ordering permissions and owned properties with their resources; invalidate both pointer caches.
+    // Both trees require exclusive access; reacquire borrowed views after mutation. No allocation is performed.
     void swap (ExtrusionEntityCollection &c);
     void append(const ExtrusionEntity &entity) { this->append_child(ExtrusionEntityUPtr(entity.clone())); m_entities_cache.clear(); }
     void append(ExtrusionEntity &&entity) { this->append_child(ExtrusionEntityUPtr(entity.clone_move())); m_entities_cache.clear(); }
@@ -136,7 +142,6 @@ public:
     void erase(size_t begin, size_t end);
     void replace(size_t i, const ExtrusionEntity &entity);
     void remove(size_t i);
-    ExtrusionEntityReferences chained_path_from(const Point &start_near);
     void reverse() override;
     // Returns the first child's first point; requires a nonempty collection and a child able to provide that point,
     // recursively for nested collections. Empty children are not skipped.
@@ -173,9 +178,11 @@ public:
     /// the original tree and choose candidates without destroying hierarchy.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
     ExtrusionEntityCollection flatten(bool preserve_ordering) const;
-    // Reads the source and flattens into out, mutating its children and cache; out requires exclusive access throughout the call.
+    // When preserving a non-sortable source with more than one direct child, append the entire owned flattened Collection.
+    // Otherwise prefix its owned flattened children. Borrow out exclusively; reacquire descendant and pointer views after mutation.
+    // Local destination geometry may materialize and change ordering permissions. Errors can leave partial output.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
-    void flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const;
+    void flatten(bool preserve_ordering, ExtrusionEntity& out) const;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities()) volume+=ent->total_volume(); return volume; }
 
     // Following methods shall never be called on an ExtrusionEntityCollection.
@@ -209,89 +216,6 @@ public:
     virtual void visit(ExtrusionVisitor &visitor) override;
     virtual void visit(ExtrusionVisitorConst &visitor) const override;
 };
-
-inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Polylines &polylines, ExtrusionRole role, double mm3_per_mm, float width, float height, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines)
-        if (polyline.is_valid()) {
-            if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
-                path.polyline() = polyline;
-                dst.append(ExtrusionLoop(std::move(path)));
-            } else {
-                ExtrusionPath extrusion_path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
-                extrusion_path.polyline() = polyline;
-                dst.append(std::move(extrusion_path));
-            }
-        }
-}
-
-inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Polylines &&polylines, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines)
-        if (polyline.is_valid()) {
-            if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(path_attr, nullptr, can_reverse);
-                path.polyline() = polyline;
-                dst.append(ExtrusionLoop(std::move(path)));
-            } else {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(std::move(extrusion_path));
-            }
-        }
-    polylines.clear();
-}
-
-inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Polygons &loops, ExtrusionAttributes &&path_attr, bool can_reverse = true) {
-    //dst.reserve(dst.size() + loops.size());
-    for (Polygon & polygon : loops) {
-        if (polygon.is_valid()) {
-            ExtrusionPath path(path_attr, nullptr, can_reverse);
-            path.polyline().append(polygon.points);
-            path.polyline().append(path.polyline().front());
-            dst.append(ExtrusionLoop(std::move(path)));
-        }
-    }
-}
-
-inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Polygons &&loops, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + loops.size());
-    for (Polygon &polygon : loops) {
-        if (polygon.is_valid()) {
-            ExtrusionPath path(path_attr, nullptr, can_reverse);
-            path.polyline().append(std::move(polygon.points));
-            path.polyline().append(path.polyline().front());
-            ExtrusionLoop loop(std::move(path));
-            //default to ccw
-            if (loop.is_clockwise()) loop.reverse(); //loop.make_counter_clockwise();
-            dst.append(std::move(loop));
-        }
-    }
-    loops.clear();
-}
-
-inline void extrusion_entities_append_loops_and_paths(ExtrusionEntityCollection &dst, Polylines &&polylines, ExtrusionAttributes &&path_attr, bool can_reverse = true)
-{
-    //dst.reserve(dst.size() + polylines.size());
-    for (Polyline &polyline : polylines) {
-        if (polyline.is_valid()) {
-            if (polyline.is_closed()) {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(ExtrusionLoop(std::move(extrusion_path)));
-            } else {
-                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
-                extrusion_path.polyline() = std::move(polyline);
-                dst.append(std::move(extrusion_path));
-            }
-        }
-    }
-    polylines.clear();
-}
 
 } // namespace Slic3r
 

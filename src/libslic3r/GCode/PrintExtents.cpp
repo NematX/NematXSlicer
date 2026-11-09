@@ -10,18 +10,58 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/PointUtils.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 
-/* Extent queries flatten Print skirt/brim and PrintObject layer paths into XY
-   bounding boxes, expanded by half their line widths and translated for each
-   instance. Optional Z limits exclude higher object layers. */
+/* Extent queries walk stored paths with inherited attributes and expand their
+   XY bounds by half the line width. Object queries apply instance translations
+   and an optional layer-Z limit without rebuilding the extrusion hierarchy.
+   Property-only commands have no local position; missing attributes and empty
+   local bounds contribute nothing. All roots remain borrowed and unchanged.
+
+       get_print_extrusions_extents() / get_print_object_extrusions_extents()
+           `-- get_extrusion_extents()
+               `-- ExtrusionExtentVisitor::visit_leaf()
+                   `-- extrusion_polyline_extents() [expand by effective half-width]
+*/
 namespace Slic3r {
 
-static inline BoundingBox extrusion_polyline_extents(const Polyline &polyline, const coord_t radius)
+namespace {
+
+// Accumulate projected paths while the existing tree visitor resolves scopes.
+class ExtrusionExtentVisitor final : public ExtrusionTreeConstVisitor<true>
+{
+public:
+    BoundingBox bounds;
+
+    // Include local geometry only; property-only leaves retain no position.
+    void visit_leaf(const ExtrusionEntity &entity) override;
+};
+
+// Expand every projected point by the supplied half-width in scaled coordinates.
+BoundingBox extrusion_polyline_extents(const Polyline &polyline, coord_t radius);
+
+} // namespace
+
+BoundingBoxf get_extrusion_extents(const ExtrusionEntity &entity)
+{
+    ExtrusionExtentVisitor visitor;
+    visitor.traverse(entity);
+    BoundingBoxf result;
+    if (!empty(visitor.bounds)) {
+        result.min = unscale_p(visitor.bounds.min);
+        result.max = unscale_p(visitor.bounds.max);
+        result.defined = true;
+    }
+    return result;
+}
+
+namespace {
+
+BoundingBox extrusion_polyline_extents(const Polyline &polyline, const coord_t radius)
 {
     BoundingBox bbox;
     if (! polyline.points.empty())
@@ -35,80 +75,23 @@ static inline BoundingBox extrusion_polyline_extents(const Polyline &polyline, c
     return bbox;
 }
 
-static inline BoundingBoxf extrusionentity_extents(const ExtrusionPath &extrusion_path)
+void ExtrusionExtentVisitor::visit_leaf(const ExtrusionEntity &entity)
 {
-    BoundingBox bbox = extrusion_polyline_extents(extrusion_path.polyline().to_polyline(), scale_i(0.5 * extrusion_path.width()));
-    BoundingBoxf bboxf;
-    if (! empty(bbox)) {
-        bboxf.min = unscale_p(bbox.min);
-        bboxf.max = unscale_p(bbox.max);
-		bboxf.defined = true;
+    const ArcPolyline *polyline = entity.polyline_or_null();
+    const ExtrusionAttributes *attributes = current_property<ExtrusionAttributes>();
+    if (polyline != nullptr && attributes != nullptr) {
+        const BoundingBox projected = extrusion_polyline_extents(polyline->to_polyline(), scale_i(0.5 * attributes->width));
+        if (!empty(projected))
+            bounds.merge(projected);
     }
-    return bboxf;
 }
 
-static inline BoundingBoxf extrusionentity_extents(const ExtrusionLoop &extrusion_loop)
-{
-    BoundingBox bbox;
-    for (const ExtrusionPath &extrusion_path : extrusion_loop.paths())
-        bbox.merge(extrusion_polyline_extents(extrusion_path.polyline().to_polyline(), scale_i(0.5 * extrusion_path.width())));
-    BoundingBoxf bboxf;
-    if (! empty(bbox)) {
-        bboxf.min = unscale_p(bbox.min);
-        bboxf.max = unscale_p(bbox.max);
-		bboxf.defined = true;
-	}
-    return bboxf;
-}
-
-static inline BoundingBoxf extrusionentity_extents(const ExtrusionMultiPath &extrusion_multi_path)
-{
-    BoundingBox bbox;
-    for (const ExtrusionPath &extrusion_path : extrusion_multi_path.paths())
-        bbox.merge(extrusion_polyline_extents(extrusion_path.polyline().to_polyline(), scale_i(0.5 * extrusion_path.width())));
-    BoundingBoxf bboxf;
-    if (! empty(bbox)) {
-        bboxf.min = unscale_p(bbox.min);
-        bboxf.max = unscale_p(bbox.max);
-		bboxf.defined = true;
-	}
-    return bboxf;
-}
-
-static BoundingBoxf extrusionentity_extents(const ExtrusionEntity *extrusion_entity);
-
-static inline BoundingBoxf extrusionentity_extents(const ExtrusionEntityCollection &extrusion_entity_collection)
-{
-    BoundingBoxf bbox;
-    for (const ExtrusionEntity *extrusion_entity : extrusion_entity_collection.entities())
-        bbox.merge(extrusionentity_extents(extrusion_entity));
-    return bbox;
-}
-
-static BoundingBoxf extrusionentity_extents(const ExtrusionEntity *extrusion_entity)
-{
-    if (extrusion_entity == nullptr)
-        return BoundingBoxf();
-    auto *extrusion_path = dynamic_cast<const ExtrusionPath*>(extrusion_entity);
-    if (extrusion_path != nullptr)
-        return extrusionentity_extents(*extrusion_path);
-    auto *extrusion_loop = dynamic_cast<const ExtrusionLoop*>(extrusion_entity);
-    if (extrusion_loop != nullptr)
-        return extrusionentity_extents(*extrusion_loop);
-    auto *extrusion_multi_path = dynamic_cast<const ExtrusionMultiPath*>(extrusion_entity);
-    if (extrusion_multi_path != nullptr)
-        return extrusionentity_extents(*extrusion_multi_path);
-    auto *extrusion_entity_collection = dynamic_cast<const ExtrusionEntityCollection*>(extrusion_entity);
-    if (extrusion_entity_collection != nullptr)
-        return extrusionentity_extents(*extrusion_entity_collection);
-    throw Slic3r::RuntimeError("Unexpected extrusion_entity type in extrusionentity_extents()");
-    return BoundingBoxf();
-}
+} // namespace
 
 BoundingBoxf get_print_extrusions_extents(const Print &print)
 {
-    BoundingBoxf bbox(extrusionentity_extents(print.brim()));
-    bbox.merge(extrusionentity_extents(print.skirt()));
+    BoundingBoxf bbox(get_extrusion_extents(print.brim()));
+    bbox.merge(get_extrusion_extents(print.skirt()));
     return bbox;
 }
 
@@ -122,17 +105,17 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
         for (const LayerSliceIsland &layer_island_ptr : layer.islands()) {
             for (const LayerRegionIsland &region_island_ptr : layer_island_ptr.regions_islands()) {
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::PERIMETERS)) {
-                    bbox_this.merge(extrusionentity_extents(region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS)));
+                    bbox_this.merge(get_extrusion_extents(region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS)));
                 }
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::INFILLS)) {
-                    bbox_this.merge(extrusionentity_extents(region_island_ptr.extrusion(LayerRegionIsland::INFILLS)));
+                    bbox_this.merge(get_extrusion_extents(region_island_ptr.extrusion(LayerRegionIsland::INFILLS)));
                 }
                 // 2 next take care of the case 'layer.get_property<LayerSupportProperty>() != nullptr;'
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                    bbox_this.merge(extrusionentity_extents(region_island_ptr.extrusion(LayerRegionIsland::SUPPORT)));
+                    bbox_this.merge(get_extrusion_extents(region_island_ptr.extrusion(LayerRegionIsland::SUPPORT)));
                 }
                 if (region_island_ptr.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                    bbox_this.merge(extrusionentity_extents(region_island_ptr.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)));
+                    bbox_this.merge(get_extrusion_extents(region_island_ptr.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)));
                 }
             }
         }

@@ -6,6 +6,19 @@
 #ifndef slic3r_Geometry_MedialAxis_hpp_
 #define slic3r_Geometry_MedialAxis_hpp_
 
+/* Build width-bearing centerlines with MedialAxis::build(), then discretize their
+   widths with variable_width() for one owned generic sequence or
+   thin_variable_width() for role-specific owned outputs. For example:
+       ExtrusionEntity sequence = variable_width(line, role, flow, resolution, tolerance, true);
+   Inputs remain borrowed and unchanged. The sequence owns generic leaves with
+   direct flow attributes; its reversal and rotation permissions are explicit.
+   thin_variable_width() returns raw owning pointers for legacy callers, which
+   must adopt or delete every result. unsafe_variable_width() instead returns
+   constructive path values for algorithms that still edit individual segments.
+   Epsilon-close contour selection does not make stored endpoints bit-identical;
+   generic loop queries retain the exact XY closure contract.
+*/
+
 ///// Copyright (c) Prusa Research 2021 - 2022 Vojtěch Bubník @bubnikv
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
@@ -15,7 +28,7 @@
 #include "Voronoi.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Geometry.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Flow.hpp"
 
 #include <vector>
@@ -180,14 +193,16 @@ private:
     void remove_bits(ThickPolylines& pp);
 };
 
-/// create a ExtrusionEntitiesPtr from ThickPolylines, discretizing the variable width into little sections (of 4*SCALED_RESOLUTION length) where needed. Please delete all ptr if not used.
+// Discretize centerline widths into owned generic outputs; the caller owns every returned pointer.
+// Contours keep epsilon-selected envelopes without changing their stored endpoints. Allocation failures propagate without leaks.
 ExtrusionEntitiesPtr thin_variable_width(const ThickPolylines& polylines, const ExtrusionRole role, const Flow &flow, const coord_t resolution_internal, bool can_reverse);
 /// Same as thin_variable_width(), but lets callers choose the width variation
 /// that starts a new constant-flow segment.
 ExtrusionEntitiesPtr thin_variable_width(const ThickPolylines& polylines, const ExtrusionRole role, const Flow &flow, const coord_t resolution_internal, coord_t tolerance, bool can_reverse);
-// used by thin_variable_width. Only does the work for a single polyline.
-ExtrusionMultiPath variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance, bool can_reverse);
-//prefer using multi_variable_width
+// Own one centerline's constant-flow leaves in a fixed-start generic sequence; preserve leaf properties and permissions.
+// The requested reversal applies to the sequence only. Allocation failures destroy any partially acquired output.
+ExtrusionEntity variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance, bool can_reverse);
+// Return constructive path values for perimeter algorithms that need mutable segments and local flow.
 ExtrusionPaths unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, const Flow& flow, const coord_t resolution_internal, const coord_t tolerance);
 
 } // namespace Slicer::Geometry

@@ -23,7 +23,6 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
@@ -1036,7 +1035,7 @@ extrusion_entity_handle *layer_region_island_get_mutable_extrusion(layer_region_
         return nullptr;
     if (!Slic3r::region_island_editable(*Slic3r::to_layer_region_island(me), "layer_region_island_get_mutable_extrusion"))
         return nullptr;
-    Slic3r::ExtrusionEntityCollection &collection = Slic3r::to_layer_region_island(me)->mutable_extrusion(Slic3r::to_extrusion_role(role));
+    Slic3r::ExtrusionEntity &collection = Slic3r::to_layer_region_island(me)->mutable_extrusion(Slic3r::to_extrusion_role(role));
     return reinterpret_cast<extrusion_entity_handle*>(&collection);
 }
 

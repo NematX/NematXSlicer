@@ -26,7 +26,6 @@ namespace Slic3r {
 class Print;
 class PrintObject;
 class ExtrusionEntity;
-class ExtrusionEntityCollection;
 class LayerTools;
 class ToolOrdering;
 namespace CustomGCode { struct Item; }
@@ -102,8 +101,8 @@ public:
     extruder_index_t perimeter_extruder(const PrintRegion &region) const;
     extruder_index_t infill_extruder(const PrintRegion &region) const;
     extruder_index_t solid_infill_extruder(const PrintRegion &region) const;
-	// Returns a zero based extruder this eec should be printed with, according to PrintRegion config or extruder_override if overriden.
-    extruder_index_t extruder(const ExtrusionEntityCollection &extrusions, const PrintRegion &region) const;
+    // Select the zero-based extruder from the region's infill or perimeter settings, unless overridden.
+    extruder_index_t extruder(const ExtrusionEntity &extrusions, const PrintRegion &region) const;
 
     coord_t                     _print_z = 0;
     bool 						has_object = false;

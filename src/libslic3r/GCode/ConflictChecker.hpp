@@ -106,7 +106,9 @@ public:
     LineWithIDs getCurLines() const;
 };
 
-void getExtrusionPathsFromEntity(const ExtrusionEntityCollection *entity, ExtrusionPaths &paths);
+// Append owned geometry values with effective attributes; source trees remain unchanged.
+// Commands, paths without attributes and point-only paths contribute no collision segment.
+void getExtrusionPathsFromEntity(const ExtrusionEntity &entity, ExtrusionPaths &paths);
 
 ExtrusionPaths getExtrusionPathsFromLayer(LayerSliceIslandCRefs layer_islands);
 

@@ -24,12 +24,19 @@
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
+
+/* Define native fill patterns and their shared flow/connection parameters.
+   Create a Fill, configure its layer and spacing, then call fill_surface() for
+   centerlines or fill_surface_extrusion() for owned extrusion geometry. The
+   generic Children destination overload retains its existing root state and
+   appends new children; raw-pointer output transfers ownership to the caller.
+   FillWithPerimeter adds boundary paths to the selected fill algorithm.
+*/
 
 namespace Slic3r {
 
@@ -194,9 +201,11 @@ public:
     // Do not sort the fill lines to optimize the print head path?
     virtual bool no_sort() const { return false; }
 
-    // This method have to fill the ExtrusionEntityCollection. It call fill_surface by default
+    // Produce owned raw pointers for this recipe; the default implementation calls fill_surface.
     virtual void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) const;
-    void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntityCollection &out) const;
+    // Acquire the virtual producer's output into a destination that already contains Children.
+    // Existing children, root identity, properties and permissions stay unchanged, even for empty output.
+    void fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntity &out) const;
     // called & use fill_surface_extrusion and put gap fill after in empty spaces.
     void fill_surface_extrusion_with_gap_fill(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) const;
     // Perform the fill.

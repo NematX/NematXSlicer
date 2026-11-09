@@ -14,6 +14,17 @@
 #include "libslic3r.h"
 #include "Point.hpp"
 
+/* Order points, polygons and extrusion units by travel distance. For extrusion
+   inputs, call chain_extrusion_entities() for source indexes and absolute reversal
+   flags, or chain_extrusion_references() to borrow the ordered direct children:
+       ExtrusionEntityReferences route = chain_extrusion_references(root, &near);
+   Stored endpoints and exact XY closure define the route, independently of legacy
+   virtual projections. A reversed input view changes only reversible units;
+   unsortable roots retain direct child order. Queries never mutate geometry or
+   ownership. Source nodes must remain alive and unchanged while references are
+   used. The separate reorder helpers apply a caller-supplied route in place.
+*/
+
 namespace Slic3r {
 
 	namespace ClipperLib {
@@ -29,9 +40,10 @@ std::vector<size_t> 				 chain_points(const Points &points, Point *start_near = 
 // Used to give layer islands a print order.
 std::vector<size_t> 				 chain_expolygons(const ExPolygons &expolygons, Point *start_near = nullptr);
 
-// Chain extrusion entities by a shortest distance. Returns the ordered extrusions together with a "reverse" flag.
-// Set input "reversed" to true if the vector of "entities" is to be considered to be reversed once already.
+// Chain stored geometry by shortest distance, returning source indexes and absolute reversal flags without mutation.
+// Read exact closure and real endpoints; reversed considers only reversible inputs reversed once already.
 std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<ExtrusionEntity*> &entities, const Point *start_near = nullptr, const bool reversed = false);
+// Apply the same geometry and permission contract to borrowed const inputs; allocation errors propagate.
 std::vector<std::pair<size_t, bool>> chain_extrusion_entities(const std::vector<const ExtrusionEntity*> &entities, const Point *start_near = nullptr, const bool reversed = false);
 // Reorder & reverse extrusion entities in place based on the "chain" ordering.
 //template<typename ExtrusionEntityConstOrNot>
@@ -56,7 +68,7 @@ inline void chain_and_reorder_extrusion_entities(std::vector<ExtrusionEntity*> &
 }
 
 // Chain extrusion entities by a shortest distance. Returns the ordered extrusions together with a "reverse" flag.
-// Set input "reversed" to true if the vector of "entities" is to be considered to be reversed.
+// The reversed input view applies only to reversible entities; results retain source ownership.
 // FIXME: change const Point* by optional<Point>
 template<typename ExtrusionEntityConstOrNot>
 ExtrusionEntityReferences chain_extrusion_references(const std::vector<ExtrusionEntityConstOrNot*> &entities, const Point *start_near = nullptr, const bool reversed = false)
@@ -71,8 +83,9 @@ ExtrusionEntityReferences chain_extrusion_references(const std::vector<Extrusion
     return out;
 }
 
-// The same as above, respect eec.no_sort flag.
-ExtrusionEntityReferences			 chain_extrusion_references(const ExtrusionEntityCollection &eec, const Point *start_near = nullptr, const bool reversed = false);
+// Order direct children without mutation, preserving stored order when can_sort() is false.
+// Results borrow the children; reversed changes only permitted orientations, not fixed child order. Allocation errors propagate.
+ExtrusionEntityReferences			 chain_extrusion_references(const ExtrusionEntity &eec, const Point *start_near = nullptr, const bool reversed = false);
 
 std::vector<std::pair<size_t, bool>> chain_extrusion_paths(std::vector<ExtrusionPath> &extrusion_paths, const Point *start_near = nullptr);
 void                                 reorder_extrusion_paths(std::vector<ExtrusionPath> &extrusion_paths, std::vector<std::pair<size_t, bool>> &chain);

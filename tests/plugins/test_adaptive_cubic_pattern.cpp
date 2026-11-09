@@ -45,12 +45,57 @@ Adaptive Cubic pattern integration tests
 The pattern prepares its cache through setup(), without a preparatory pipeline
 step. Directed path parity, generation lifetime and source immutability are
 checked independently of the sortable group's output order.
+
+The integration cases run Adaptive Cubic and Support Cubic through STEP_INFILL
+after perimeter and surface generation. ScopedActivePlugins limits each run to
+the required plugins and restores the previous selection on leaving the scope.
+The published INFILLS buckets must contain more than one item according to the
+shallow count_infill_paths() convention; this is not the geometry-parity check.
+
+Separate helper and lifecycle cases compare directed paths with the native
+filler, including holes, bridge surfaces, connections, anchors and transforms.
+They also check marked-bridge preparation, configured widths, cache reuse and
+replacement, independent Adaptive/Support caches, cancellation and unchanged
+source surfaces. Geometry comparisons collect leaf paths and do not depend on
+the order chosen for a sortable output group.
+
+The main test flows are separate:
+
+    STEP_INFILL integration cases
+    |-- prepare_cube_print() with Adaptive or Support Cubic configuration
+    |-- ScopedActivePlugins selects the perimeter, surface, generator and pattern plugins
+    |-- run_until_infill()
+    |   |-- clear and run StepGeneratePerimeter
+    |   |-- clear and run StepSurfaceGeneration
+    |   `-- clear and run StepGenerateInfill
+    |       |-- discover object recipes and initialize patterns through setup()
+    |       `-- generate and publish the surface extrusion trees
+    `-- count_infill_paths() after the step returns; require a result greater than one
+
+    Direct geometry cases
+    |-- build matching native and plugin inputs
+    |-- compare chaining, triangulation, octree preparation or surface filling
+    `-- require_paths() / snapshots compare coordinates and directed paths
+
+    Direct cache-lifecycle cases
+    |-- prepare_surfaces() or prepare_mixed_cubic_surfaces()
+    |-- snapshot the source surfaces and build pattern initialization assignments
+    |-- pattern.setup() prepares generation-owned object caches
+    |-- pattern.setup_run(), then pattern.run() into temporary output
+    |-- collect_paths() walks leaves for output comparisons
+    `-- check repeated/rebuilt output, cache separation, cancellation and source snapshots
 */
 
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
 
 namespace {
+
+// Count one path per ungrouped entity and the direct children of each logical group.
+// This is a shallow output measure, not a recursive count of printable leaf paths.
+// The STEP_INFILL checks require more than one counted item; directed geometry parity
+// is checked separately by collecting leaf paths and comparing their coordinates.
+size_t count_infill_paths(const Print &print);
 
 class ScopedActivePlugins
 {
@@ -113,8 +158,7 @@ size_t count_infill_paths(const Print &print)
                     if (!region_island.has_extrusion(LayerRegionIsland::INFILLS))
                         continue;
                     for (const ExtrusionEntity *entity : region_island.extrusion(LayerRegionIsland::INFILLS).entities())
-                        paths += entity->is_collection() ?
-                            static_cast<const ExtrusionEntityCollection *>(entity)->entities().size() : 1;
+                        paths += entity->is_collection() ? entity->child_count() : 1;
                 }
     return paths;
 }

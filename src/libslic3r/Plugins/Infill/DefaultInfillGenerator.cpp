@@ -22,7 +22,7 @@
 #include "libslic3r/Api/host/InfillBridgeFlow.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Layer.hpp"
@@ -84,6 +84,11 @@ Representative direct calls, not loop nesting or a timeline:
 Discovery visits layers, islands, region groups and surfaces, skipping empty,
 void or invalid recipes. It accumulates progress totals and reports each pattern.
 Normal execution reuses that cache; an uncached direct run rebuilds recipes.
+Temporary pattern output uses a generic owned Children root. A usable result
+receives its source-surface identity, recipe values and optional target area
+before host publication. Empty or failed results are discarded without publishing
+partial output. Prepared bridge dimensions are restored only for matching
+transport, independently of this root's representation.
 
 The generator works through the public step context and callbacks. It reads
 the existing print data but leaves ownership and direct publication of the
@@ -130,6 +135,20 @@ void restore_prepared_bridge_dimensions(Slic3r::ExtrusionEntity &output, const c
 
 const char *k_default_infill_generator_id = "infill.generator.default";
 const char *k_no_dependencies[] = { nullptr };
+
+// Generate one surface and publish its recipe-bearing subtree unless the pattern fails or produces no geometry.
+// Callbacks borrow the local output for each call; cancellation checks may throw.
+void generate_surface_from_recipe(const run_ctx_generate_infill &ctx,
+                                  const Slic3r::Layer &layer,
+                                  const Slic3r::LayerSliceIsland &island,
+                                  const Slic3r::LayerRegionIsland &region_island,
+                                  const Slic3r::LayerRegion &region,
+                                  const Slic3r::Surface &surface,
+                                  infill_pattern_runtime_id pattern_id,
+                                  const raw_infill_pattern_params &params,
+                                  const Slic3r::ExPolygons &no_overlap_areas,
+                                  double area_to_fill_mm2,
+                                  const plugin_run_context *run_ctx);
 
 // The generator owns the five infill pattern lists. Pattern plugins may extend
 // them through orchestrator_modify_option_def(); every value is a plugin id.
@@ -641,7 +660,7 @@ void generate_surface_from_recipe(const run_ctx_generate_infill &ctx,
                                   double area_to_fill_mm2,
                                   const plugin_run_context *run_ctx)
 {
-    Slic3r::ExtrusionEntityCollection output;
+    Slic3r::ExtrusionEntity output(Slic3r::ExtrusionEntity::Children{}, true, true, false);
     output.set_can_sort_reverse(false, false);
 
     throw_if_cancelled(run_ctx);

@@ -6,6 +6,12 @@
 #ifndef slic3r_FillSmooth_hpp_
 #define slic3r_FillSmooth_hpp_
 
+/* Use FillSmooth through Fill::fill_surface_extrusion() after configuring its
+   layer and spacing. Deposition and ironing share native filler recipes but
+   remain separate ordered passes. Each pass owns its generic output subtree;
+   centerline-only fill_surface() is not supported by this pattern.
+*/
+
 #include "FillBase.hpp"
 
 namespace Slic3r {
@@ -63,9 +69,11 @@ protected:
     //fill algorithm to call
     InfillPattern fillPattern[3];
 
-    void perform_single_fill(const int idx, ExtrusionEntityCollection &eecroot, const Surface &srf_source,
+    // Append one pass after resolving its density, flow distribution and overlap region.
+    void perform_single_fill(const int idx, ExtrusionEntity &eecroot, const Surface &srf_source,
         const FillParams &params) const;
-    void fill_expolygon(const int idx, ExtrusionEntityCollection &eec, const Surface &srf_to_fill,
+    // Acquire this pass's native filler output into the supplied owned group.
+    void fill_expolygon(const int idx, ExtrusionEntity &eec, const Surface &srf_to_fill,
         const FillParams &params) const;
 };
 

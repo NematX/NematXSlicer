@@ -16,8 +16,22 @@
 #include <cmath>
 #include <set>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
+
+/* Exercise Arachne perimeter generation on closed, thin and variable-width
+   surfaces. Captures retain the host-allocated outer root; every generated
+   descendant must be a base ExtrusionEntity. Existing geometry, widths, roles,
+   direct loop metadata, settings and cancellation checks remain independent of
+   that representation assertion. The test does not impose an order on independent
+   Clipper islands and does not change the default perimeter generator.
+
+       TEST_CASE -> run_arachne_regression()
+           |-- run_perimeter_multi_island_case(): capture owned output per island
+           |-- require_leaf_fill_area_consistency(): check source/fill area agreement
+           `-- inspect_arachne_extrusion(): inspect types, loop metadata and geometry
+*/
 
 namespace {
 using namespace Slic3r;
@@ -35,6 +49,10 @@ struct ArachneRegressionResult
     size_t loop_count = 0;
     double extrusion_length = 0.;
 };
+
+// Check every produced node while keeping the preallocated capture root's existing oracles.
+void inspect_arachne_extrusion(const ExtrusionEntity &entity, ArachneRegressionResult &result,
+                              bool check_published_type = true);
 
 Polygon circle_polygon(const double center_x, const double center_y, const double radius, const size_t point_count)
 {
@@ -199,8 +217,11 @@ DynamicPrintConfig arachne_regression_config(
     return config;
 }
 
-void inspect_arachne_extrusion(const ExtrusionEntity &entity, ArachneRegressionResult &result)
+void inspect_arachne_extrusion(const ExtrusionEntity &entity, ArachneRegressionResult &result,
+                              bool check_published_type)
 {
+    if (check_published_type)
+        REQUIRE(typeid(entity) == typeid(ExtrusionEntity));
     if (entity.is_nop())
         return;
 
@@ -266,7 +287,7 @@ ArachneRegressionResult run_arachne_regression(
         }
         require_leaf_fill_area_consistency(capture);
         result.extrusion_length += extrusion_length(capture.external_perimeters);
-        inspect_arachne_extrusion(capture.external_perimeters, result);
+        inspect_arachne_extrusion(capture.external_perimeters, result, false);
     }
     return result;
 }

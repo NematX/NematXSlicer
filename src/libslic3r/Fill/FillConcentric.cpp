@@ -16,22 +16,57 @@
 #include "libslic3r/EdgeGrid.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/Surface.hpp"
 
 #include "Arachne/WallToolPaths.hpp"
 
+/* Supply native concentric fill as centerlines or owned extrusion trees.
+   Repeated offsets create shells; nesting associates each shell with its parent
+   before the next gap-fill pass. Generic fixed groups retain those dependencies,
+   while separate branches remain sortable. Ring leaves own their flow values.
+   MedialAxis supplies gap-fill geometry and the combined output is corrected
+   for the requested volume before ownership passes to the caller.
+
+       _fill_surface_single(): offset and connect centerlines
+       fill_surface_extrusion()
+           |-- derive shells and gaps from the input surface
+           |-- append_concentric_loop(): emit exactly closed owned rings
+           |-- Geometry::thin_variable_width(): fill narrow gaps
+           `-- correct flow on the combined tree and release owned output
+*/
+
 namespace Slic3r {
 
 namespace {
 
-// Plugin-owned region settings can be absent when their provider is disabled.
+// Read optional plugin-owned region settings, falling back when their provider is disabled.
+double fill_region_option_effective_value(const PrintRegionConfig *config, const char *key, double fallback);
+
+// Consume a valid polygon into an exactly closed generic ring with leaf-local flow.
+void append_concentric_loop(ExtrusionEntity &storage, ExtrusionRole role, const FillParams &params, Polygon &polygon);
+
 double fill_region_option_effective_value(const PrintRegionConfig *config, const char *key, double fallback)
 {
     const ConfigOption *option = config != nullptr ? config->option(key) : nullptr;
     return option != nullptr ? option->get_effective_value(fallback) : fallback;
+}
+
+void append_concentric_loop(ExtrusionEntity &storage, ExtrusionRole role, const FillParams &params, Polygon &polygon)
+{
+    if (ensure_valid(polygon, params.fill_resolution)) {
+        polygon.make_counter_clockwise();
+        ArcPolyline polyline;
+        polyline.append(std::move(polygon.points));
+        polyline.append(polyline.front());
+        ExtrusionEntityUPtr path = std::make_unique<ExtrusionEntity>(false, std::move(polyline));
+        path->add_property(ExtrusionAttributes{role, ExtrusionFlow{params.flow.mm3_per_mm(),
+            float(params.flow.width()), float(params.flow.height())}});
+        ExtrusionEntity::Children children;
+        children.emplace_back(std::move(path));
+        storage.append_child(std::make_unique<ExtrusionEntity>(std::move(children), false, false, true));
+    }
 }
 
 } // namespace
@@ -101,20 +136,6 @@ FillConcentric::_fill_surface_single(
     // otherwise the outermost loop starts at the closest point to (0, 0).
     // We want the loops to be split inside the G-code generator to get optimum path planning.
     assert_valid(polylines_out);
-}
-
-void append_loop_into_collection(ExtrusionEntityCollection& storage, ExtrusionRole& good_role, const FillParams& params, Polygon& polygon) {
-    double flow = params.flow.mm3_per_mm();
-    double width = params.flow.width();
-    double height = params.flow.height();
-    if (ensure_valid(polygon, params.fill_resolution)) {
-        //default to ccw
-        polygon.make_counter_clockwise();
-        ExtrusionPath path(ExtrusionAttributes{good_role, ExtrusionFlow{flow, float(width), float(height)}}, nullptr, false);
-        path.polyline().append(std::move(polygon.points));
-        path.polyline().append(path.polyline().front());
-        storage.append(ExtrusionLoop{ std::move(path) });
-    }
 }
 
 void
@@ -225,10 +246,10 @@ FillConcentric::fill_surface_extrusion(
         //get the role
         ExtrusionRole good_role = getRoleFromSurfaceType(params, surface);
 
-        ExtrusionEntityCollection* root_collection_nosort = new ExtrusionEntityCollection(false, false);
+        ExtrusionEntityUPtr root_collection_nosort = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, false);
 
         //pattern (don't modify/move it)
-        const ExtrusionEntityCollection eec_pattern_no_sort{ false, false };
+        const ExtrusionEntity eec_pattern_no_sort(ExtrusionEntity::Children{}, false, false, false);
 
         assert(bunch_2_shell_2_loops.size() == bunch_2_gaps.size() || bunch_2_shell_2_loops.size() == bunch_2_gaps.size() + 1);
         //for each "shell" (loop to print before a gap)
@@ -240,15 +261,15 @@ FillConcentric::fill_surface_extrusion(
             assert(!shells.empty());
 
             // leafs where you can add a loop (only one per shell, or you need to split it)
-            std::vector<ExtrusionEntityCollection*> leafs;
+            std::vector<ExtrusionEntity*> leafs;
 
             //initialisation with first shell
-            root_collection_nosort->append(ExtrusionEntityCollection{});
-            ExtrusionEntityCollection* root_sortable = static_cast<ExtrusionEntityCollection*>(root_collection_nosort->entities().back());
+            ExtrusionEntity *root_sortable = &root_collection_nosort->append_child(
+                std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, true, true, false));
 
             struct Leaf {
                 size_t count;
-                ExtrusionEntityCollection* sortable;
+                ExtrusionEntity* sortable;
             };
             // for each shell of this bunch
             
@@ -264,19 +285,19 @@ FillConcentric::fill_surface_extrusion(
                         //hole -> it's the leafs that should be inside me
                         islands[idx_island].make_counter_clockwise();
                         for (size_t idx_child = 0; idx_child < nb_childs.size(); ++idx_child) {
-                            assert(!leafs[idx_child]->entities().empty());
-                            assert(leafs[idx_child]->entities().back()->is_loop());
-                            if (islands[idx_island].contains(leafs[idx_child]->entities().back()->first_point())) {
+                            assert(leafs[idx_child]->child_count() != 0);
+                            assert(leafs[idx_child]->children().back()->is_loop());
+                            if (islands[idx_island].contains(leafs[idx_child]->children().back()->first_point())) {
                                 added_idx = idx_child;
                                 break;
                             }
                         }
                     } else {
                         for (size_t idx_child = 0; idx_child < nb_childs.size(); ++idx_child) {
-                            assert(!leafs[idx_child]->entities().empty());
-                            assert(leafs[idx_child]->entities().back()->is_loop());
-                            if (leafs[idx_child]->entities().back()->is_loop() &&
-                                static_cast<ExtrusionLoop*>(leafs[idx_child]->entities().back())->polygon().contains(islands[idx_island].first_point())) {
+                            assert(leafs[idx_child]->child_count() != 0);
+                            assert(leafs[idx_child]->children().back()->is_loop());
+                            if (leafs[idx_child]->children().back()->is_loop() &&
+                                Slic3r::polygon(*leafs[idx_child]->children().back()).contains(islands[idx_island].first_point())) {
                                 added_idx = idx_child;
                                 break;
                             }
@@ -284,33 +305,33 @@ FillConcentric::fill_surface_extrusion(
                     }
                     if (added_idx != size_t(-1)) {
                         Leaf& leaf_count = nb_childs[added_idx];
-                        ExtrusionEntityCollection* leaf_coll = leafs[added_idx];
+                        ExtrusionEntity* leaf_coll = leafs[added_idx];
                         //check if it's taken
                         if (leaf_count.count == 0) {
-                            append_loop_into_collection(*leaf_coll, good_role, params, islands[idx_island]);
+                            append_concentric_loop(*leaf_coll, good_role, params, islands[idx_island]);
                         } else if (leaf_count.count == 1) {
                             //remove last entity (from the count==0) to put it into a new collection
-                            ExtrusionEntityUPtr elt = leaf_coll->release_back();
+                            ExtrusionEntityUPtr elt = std::move(leaf_coll->children().back());
+                            leaf_coll->children().pop_back();
                             //add sortbale collection inside
-                            leaf_coll->append(ExtrusionEntityCollection{});
-                            leaf_count.sortable = static_cast<ExtrusionEntityCollection*>(leaf_coll->entities().back());
-                            ExtrusionEntityCollection new_coll_nosort{ false, false };
-                            new_coll_nosort.append(std::move(elt));
-                            leaf_count.sortable->append(std::move(new_coll_nosort));
+                            leaf_count.sortable = &leaf_coll->append_child(
+                                std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, true, true, false));
+                            ExtrusionEntity new_coll_nosort(ExtrusionEntity::Children{}, false, false, false);
+                            new_coll_nosort.append_child(std::move(elt));
+                            leaf_count.sortable->append_child(std::move(new_coll_nosort));
                         }
                         if (leaf_count.sortable) {
                             //add new collection
-                            ExtrusionEntityCollection new_coll_nosort{ false, false };
-                            append_loop_into_collection(new_coll_nosort, good_role, params, islands[idx_island]);
-                            leaf_count.sortable->append(std::move(new_coll_nosort));
+                            ExtrusionEntity new_coll_nosort(ExtrusionEntity::Children{}, false, false, false);
+                            append_concentric_loop(new_coll_nosort, good_role, params, islands[idx_island]);
+                            leaf_count.sortable->append_child(std::move(new_coll_nosort));
                         }
                         ++leaf_count.count;
 
                     } else {
                         //create new root (should only happen on the first shell 'initialisation')
-                        root_sortable->append(eec_pattern_no_sort);
-                        leafs.push_back(static_cast<ExtrusionEntityCollection*>(root_sortable->entities().back()));
-                        append_loop_into_collection(*leafs.back(), good_role, params, islands[idx_island]);
+                        leafs.push_back(&root_sortable->append_child(eec_pattern_no_sort));
+                        append_concentric_loop(*leafs.back(), good_role, params, islands[idx_island]);
                     }
                 }
                 //remove old leafs
@@ -413,11 +434,14 @@ FillConcentric::fill_surface_extrusion(
 
                         //move them into the collection
                         if (gap_fill_entities.size() == 1) {
-                            root_collection_nosort->append(std::move(gap_fill_entities));
+                            root_collection_nosort->append_child(ExtrusionEntityUPtr(gap_fill_entities.front()));
+                            gap_fill_entities.clear();
                         } else {
-                            ExtrusionEntityCollection gapsCollection;
-                            gapsCollection.append(std::move(gap_fill_entities));
-                            root_collection_nosort->append(std::move(gapsCollection));
+                            ExtrusionEntity gaps_collection(ExtrusionEntity::Children{}, true, true, false);
+                            for (ExtrusionEntity *gap : gap_fill_entities)
+                                gaps_collection.append_child(ExtrusionEntityUPtr(gap));
+                            gap_fill_entities.clear();
+                            root_collection_nosort->append_child(std::move(gaps_collection));
                         }
                     }
                 }
@@ -425,9 +449,10 @@ FillConcentric::fill_surface_extrusion(
         }
 
 
-        if (!root_collection_nosort->entities().empty())
-            out_to_check.push_back(root_collection_nosort);
-        else delete root_collection_nosort;
+        if (root_collection_nosort->child_count() != 0) {
+            out_to_check.push_back(root_collection_nosort.get());
+            root_collection_nosort.release();
+        }
     }
 
     // external gapfill

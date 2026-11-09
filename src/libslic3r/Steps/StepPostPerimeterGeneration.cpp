@@ -95,7 +95,7 @@ extrusion_entity_handle *get_region_island_mutable_extrusion_callback(
     if (!region_island->has_extrusion(bucket_role))
         return nullptr;
 
-    ExtrusionEntityCollection &collection = region_island->mutable_extrusion(bucket_role);
+    ExtrusionEntity &collection = region_island->mutable_extrusion(bucket_role);
     return reinterpret_cast<extrusion_entity_handle *>(&collection);
 }
 

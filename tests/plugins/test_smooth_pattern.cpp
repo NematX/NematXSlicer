@@ -4,6 +4,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <typeinfo>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,13 @@ step, and only runs where its sub-fillers, which always rotate on odd layers,
 agree with the recipe C_INFILL_FLAG_CAN_ANGLE_CROSS that the plugin follows.
 The pipeline tests cover the region settings and the full-fill volume
 correction of both passes.
+Leaf comparisons borrow the stored polyline and direct attributes, so native
+legacy paths and generic leaves obey the same geometry and process checks.
+
+    direct TEST_CASE
+        |-- render_native() / render_plugin(): independently build owned trees
+        `-- compare_tree(): compare flags, hierarchy, stored points and flow
+    pipeline TEST_CASE -> run_pipeline() -> collect_roots() -> collect_flows()
 */
 
 using namespace Slic3r;
@@ -117,7 +125,7 @@ std::unique_ptr<ExtrusionEntity> render_native(const ExPolygon &surface, const E
 slic3r_api::StoredExtrusionEntity render_plugin(PluginStorage &storage, const ExPolygon &surface,
                                                 const ExPolygons *no_overlap, const raw_infill_pattern_params &raw,
                                                 const slic3r_api::Infill::SmoothSettings &settings);
-// Compare the collection flags, then the points, role and flow of every path.
+// Compare collection flags, then each leaf's stored points, direct role and flow.
 void compare_tree(const ExtrusionEntity &core, const slic3r_api::ExtrusionEntity &ported, const std::string &path);
 // Every point of the published tree, in publication order.
 std::vector<std::pair<coord_t, coord_t>> tree_points(const slic3r_api::ExtrusionEntity &entity);
@@ -221,6 +229,7 @@ slic3r_api::StoredExtrusionEntity render_plugin(PluginStorage &storage, const Ex
 void compare_tree(const ExtrusionEntity &core, const slic3r_api::ExtrusionEntity &ported, const std::string &path)
 {
     INFO(path);
+    REQUIRE(typeid(core) == typeid(ExtrusionEntity));
     REQUIRE(core.is_leaf() == ported.is_leaf());
     REQUIRE(core.child_count() == ported.child_count());
     CHECK(core.can_sort() == ported.sortable());
@@ -232,16 +241,16 @@ void compare_tree(const ExtrusionEntity &core, const slic3r_api::ExtrusionEntity
         return;
     }
 
-    const ExtrusionPath *core_path = dynamic_cast<const ExtrusionPath *>(&core);
+    const ArcPolyline *core_path = core.polyline_or_null();
     REQUIRE(core_path != nullptr);
     const std::vector<c_point> ported_points = ported.points();
-    REQUIRE(core_path->polyline().size() == ported_points.size());
+    REQUIRE(core_path->size() == ported_points.size());
     for (size_t idx = 0; idx < ported_points.size(); ++idx) {
-        CHECK(core_path->polyline().get_point(idx).x() == ported_points[idx].x);
-        CHECK(core_path->polyline().get_point(idx).y() == ported_points[idx].y);
+        CHECK(core_path->get_point(idx).x() == ported_points[idx].x);
+        CHECK(core_path->get_point(idx).y() == ported_points[idx].y);
     }
 
-    const ExtrusionAttributes *core_attributes = core_path->get_property<ExtrusionAttributes>();
+    const ExtrusionAttributes *core_attributes = core.get_property<ExtrusionAttributes>();
     const slic3r_api::EPropertyAttributes *ported_attributes = ported.get(slic3r_api::EPropertyAttributes::key);
     REQUIRE(core_attributes != nullptr);
     REQUIRE(ported_attributes != nullptr);

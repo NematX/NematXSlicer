@@ -18,7 +18,8 @@ with the content; ordered command boundaries forbid rotation of their wrapper.
         |-- mutable_view(): borrow a host-owned node through the SDK
         |-- copy/move/swap_content(): retain permissions and owned data
         |-- split or insert ordered leaves: keep geometry and execution boundaries
-        `-- check_canonical_copy(): compare owned copies recursively by content
+        |-- check_canonical_copy(): compare owned copies recursively by content
+        `-- check_ordinary_copy(): retain native descendants and independent resources
 
 Canonical-copy tests compare stored geometry and properties recursively, without
 requiring the virtual behavior of legacy path and collection views.
@@ -31,6 +32,11 @@ Seam plans are inspected before any materialization: local paths, nested sole
 contours, open atomic composites and event barriers must offer only legal entries
 without editing geometry, endpoint Z, identities or permissions. Native split
 previews distinguish the rounded input from the exact point they will publish.
+Ordinary-copy tests retain native descendants and distinguish root destruction effects.
+Loop-builder probes reject short polygons before invariant checks and preserve
+borrowed point arrays, while consuming overloads clear all processed inputs.
+Direct overhang tests compare copied native descendants and the exact fields of numeric fragments.
+Flattening tests distinguish whole-wrapper appends from child prefixes. Donation materializes local geometry as an owned child.
 */
 
 #include <catch2/catch.hpp>
@@ -60,6 +66,7 @@ previews distinguish the rounded input from the exact point they will publish.
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
+#include "libslic3r/GCode/ExtrusionProcessor.hpp"
 
 namespace {
 
@@ -68,6 +75,22 @@ extrusion_entity_handle *entity_handle(Slic3r::ExtrusionEntity &entity);
 slic3r_api::MutableExtrusionEntity mutable_view(Slic3r::ExtrusionEntity &entity);
 // Compare stored nodes and exact copied types without entering legacy path views.
 void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &copy);
+// Compare independently owned stored state, retaining the dynamic types of descendants but not requiring the same root shell.
+void check_ordinary_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &copy);
+// Build a native fixture path with optional dynamic overhang fields and an explicit Z profile.
+Slic3r::ExtrusionPath overhang_fixture_path(const Slic3r::Points &points, bool dynamic, bool with_z);
+// Record the flat native result's full attributes, overhang fields and geometry with trace-local identity names.
+// Reject other properties or shapes rather than silently omitting state; inputs remain borrowed and unchanged.
+std::string overhang_fragment_state(const Slic3r::ExtrusionEntityCollection &result,
+                                    const std::array<uint64_t, 2> &source_ids);
+// Copy borrowed points without modifying them into an owned native Path with complete attributes; construction failures propagate.
+Slic3r::ExtrusionPath flatten_fixture_path(const Slic3r::Points &points);
+// Return an owned discontinuous native tree with the requested root sorting permission; construction failures propagate.
+// Its fixed nested group has disjoint paths, so flattening must traverse it rather than copy it atomically.
+Slic3r::ExtrusionEntityCollection flatten_fixture(bool sortable);
+// Emit REQUIREs for a multi-child source collection with properties and for the rebuilt Collection's type.
+// Emit CHECKs for distinct addresses/IDs, matching permissions and absent group properties; neither borrowed input is modified.
+void check_rebuilt_flatten_group(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &group);
 
 Slic3r::ExtrusionEntityUPtr empty_child()
 {
@@ -141,8 +164,14 @@ TEST_CASE("Source publication retains property scopes for legacy and canonical t
         ExtrusionEntityUPtr source = canonical ? native->clone_canonical() : ExtrusionEntityUPtr(native.release());
         const ExtrusionEntityUPtr before = source->clone_canonical();
         ExtrusionEntityCollection copied;
-        Slic3r::detail::append_adhesion_extrusion_copy(copied, *source);
+        CHECK(copied.entities().empty());
+        ExtrusionEntity &copied_root = copied;
+        Slic3r::detail::append_adhesion_extrusion_copy(copied_root, *source);
         REQUIRE(copied.child_count() == 1);
+        const ExtrusionEntitiesPtr &copied_entities = copied.entities();
+        REQUIRE(copied_entities.size() == copied.child_count());
+        for (size_t index = 0; index < copied_entities.size(); ++index)
+            CHECK(copied_entities[index] == &copied.child(index));
         const ExtrusionEntityUPtr copy = copied.child(0).clone_canonical();
         check_canonical_copy(*before, *copy);
         CHECK(source->has_properties());
@@ -160,8 +189,14 @@ TEST_CASE("Source publication retains property scopes for legacy and canonical t
     ExtrusionEntity command(false);
     command.add_property(ExtrusionPropertyCustomGcodeText("M117 geometry-less command"));
     ExtrusionEntityCollection copied;
-    Slic3r::detail::append_adhesion_extrusion_copy(copied, command);
+    CHECK(copied.entities().empty());
+    ExtrusionEntity &copied_root = copied;
+    Slic3r::detail::append_adhesion_extrusion_copy(copied_root, command);
     CHECK(copied.child_count() == 1);
+    const ExtrusionEntitiesPtr &copied_entities = copied.entities();
+    REQUIRE(copied_entities.size() == copied.child_count());
+    for (size_t index = 0; index < copied_entities.size(); ++index)
+        CHECK(copied_entities[index] == &copied.child(index));
     ExtrusionEntity moved(ExtrusionEntity::Children(), false, false, false);
     append_source_extrusions(moved, command);
     REQUIRE(moved.child_count() == 1);
@@ -1179,6 +1214,172 @@ TEST_CASE("Legacy Nop copies keep private state without reintroducing it into ca
     }
 }
 
+TEST_CASE("Ordinary Collection and base copies own identical stored trees and resources",
+          "[plugins][extrusion][native-copy-lifetime]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    const std::array<uint64_t, 8> expected{{1, 23, 456, 7890, 12345, 67890, 123456, 789012}};
+    std::array<extrusion_data_id, 4> data_ids{};
+    std::array<uint64_t, 4> node_ids{};
+    std::array<std::string, 4> texts;
+    std::unique_ptr<ExtrusionEntityCollection> native_copy;
+    ExtrusionEntityUPtr base_copy;
+    {
+        ExtrusionEntityCollection source(false, true);
+        source.set_can_rotate(false);
+        std::unique_ptr<ExtrusionEntityCollection> group = std::make_unique<ExtrusionEntityCollection>(false, false);
+        group->set_can_rotate(false);
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+        ArcPolyline geometry;
+        geometry.append(Point(1000, 0));
+        geometry.append(Geometry::ArcWelder::Segment(Point(0, 1000), 1000.f, Geometry::ArcWelder::Orientation::CCW));
+        geometry.set_z_offset(0, 100);
+        geometry.set_z_offset(1, 900);
+        path->set_polyline(std::move(geometry));
+        path->set_can_rotate(false);
+        std::unique_ptr<ExtrusionNop> command = std::make_unique<ExtrusionNop>(
+            ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::EXTRUSION, -17.5));
+        command->set_role(ExtrusionRole::WipeTowerWipe);
+        command->position = Point(1200, 3400);
+        group->append_child(std::move(path));
+        group->append_child(std::move(command));
+        source.append_child(std::move(group));
+        const std::array<ExtrusionEntity *, 4> nodes{{&source, &source.child(0),
+            &source.child(0).child(0), &source.child(0).child(1)}};
+        for (size_t index = 0; index < nodes.size(); ++index) {
+            texts[index] = std::string(180, char('a' + index)) + '-' + std::to_string(index);
+            nodes[index]->add_property(ExtrusionPropertyCustomGcodeText(texts[index]));
+            nodes[index]->add_property(ExtrusionAttributes{ExtrusionRole::Perimeter,
+                ExtrusionFlow(0.125 * (index + 1), 0.5f, index % 2 == 0 ? 0.25f : -2.f)});
+            data_ids[index] = Access::store_data_aligned(*nodes[index], expected.data(), sizeof(expected), 64);
+            REQUIRE(data_ids[index] != EXTRUSION_DATA_ID_INVALID);
+            node_ids[index] = nodes[index]->get_id();
+        }
+        native_copy = std::make_unique<ExtrusionEntityCollection>(source);
+        base_copy = std::make_unique<ExtrusionEntity>(source);
+        check_ordinary_copy(source, *native_copy);
+        check_ordinary_copy(source, *base_copy);
+        check_ordinary_copy(*native_copy, *base_copy);
+        const std::array<const ExtrusionEntity *, 4> copied{{base_copy.get(), &base_copy->child(0),
+            &base_copy->child(0).child(0), &base_copy->child(0).child(1)}};
+        for (size_t index = 0; index < nodes.size(); ++index)
+            CHECK(Access::stored_data(*copied[index], data_ids[index], nullptr) !=
+                  Access::stored_data(*nodes[index], data_ids[index], nullptr));
+    }
+    REQUIRE(typeid(*native_copy) == typeid(ExtrusionEntityCollection));
+    REQUIRE(typeid(*base_copy) == typeid(ExtrusionEntity));
+    const std::array<const ExtrusionEntity *, 2> roots{{native_copy.get(), base_copy.get()}};
+    for (const ExtrusionEntity *root : roots) {
+        REQUIRE(root->child_count() == 1);
+        REQUIRE(root->child(0).child_count() == 2);
+        CHECK(typeid(root->child(0)) == typeid(ExtrusionEntityCollection));
+        CHECK(typeid(root->child(0).child(0)) == typeid(ExtrusionPath));
+        REQUIRE(typeid(root->child(0).child(1)) == typeid(ExtrusionNop));
+        const std::array<const ExtrusionEntity *, 4> nodes{{root, &root->child(0),
+            &root->child(0).child(0), &root->child(0).child(1)}};
+        for (size_t index = 0; index < nodes.size(); ++index) {
+            CAPTURE(index);
+            CHECK(nodes[index]->get_id() == node_ids[index]);
+            const ExtrusionAttributes *attributes = nodes[index]->get_property<ExtrusionAttributes>();
+            REQUIRE(attributes != nullptr);
+            CHECK(attributes->mm3_per_mm == 0.125 * (index + 1));
+            CHECK(attributes->width == 0.5f);
+            CHECK(attributes->height == (index % 2 == 0 ? 0.25f : -2.f));
+            const ExtrusionPropertyCustomGcode *text = nodes[index]->get_property<ExtrusionPropertyCustomGcode>();
+            REQUIRE(text != nullptr);
+            CHECK(nodes[index]->custom_gcode_string(*text) == texts[index]);
+            uint32_t size = 0;
+            const void *buffer = Access::stored_data(*nodes[index], data_ids[index], &size);
+            REQUIRE(buffer != nullptr);
+            REQUIRE(size == sizeof(expected));
+            CHECK(reinterpret_cast<uintptr_t>(buffer) % 64 == 0);
+            CHECK(std::memcmp(buffer, expected.data(), sizeof(expected)) == 0);
+        }
+        const ExtrusionNop &command = static_cast<const ExtrusionNop &>(root->child(0).child(1));
+        CHECK(command.role() == ExtrusionRole::WipeTowerWipe);
+        CHECK(command.position == Point(1200, 3400));
+        const ExtrusionPropertySpecialCommand *action = command.get_property<ExtrusionPropertySpecialCommand>();
+        REQUIRE(action != nullptr);
+        CHECK(action->command_code() == ExtrusionPropertySpecialCommand::Code::EXTRUSION);
+        CHECK(action->extra_data == -17.5);
+    }
+    native_copy->child(0).child(0).polyline_ref().translate(Point(123, 456));
+    CHECK(base_copy->child(0).child(0).polyline_ref().front() == Point(1000, 0));
+    CHECK(native_copy->child(0).child(0).polyline_ref().front() == Point(1123, 456));
+}
+
+TEST_CASE("Ordinary root copy destruction distinguishes Children from local geometry",
+          "[plugins][extrusion][native-copy-lifetime]")
+{
+    using namespace Slic3r;
+    for (const bool local_geometry : {false, true}) {
+        ExtrusionEntityCollection source(false, false);
+        const Points expected{{0, 0}, {10000, 0}};
+        if (local_geometry) {
+            ExtrusionEntity geometry(false, ArcPolyline(expected));
+            REQUIRE(extrusion_move_from(entity_handle(source), entity_handle(geometry)) != 0);
+            REQUIRE_FALSE(geometry.has_polyline());
+        } else {
+            std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+            path->set_polyline(ArcPolyline(expected));
+            source.append_child(std::move(path));
+        }
+        REQUIRE(source.has_polyline() == local_geometry);
+        REQUIRE(source.child_count() == (local_geometry ? 0 : 1));
+        const uint64_t source_id = source.get_id();
+        for (const bool native_shell : {false, true}) {
+            CAPTURE(local_geometry, native_shell);
+            const ExtrusionEntity before(false);
+            if (native_shell) {
+                const ExtrusionEntityCollection copy(source);
+                CHECK(copy.get_id() == source_id);
+                CHECK(copy.has_polyline() == local_geometry);
+            } else {
+                const ExtrusionEntity copy(source);
+                CHECK(copy.get_id() == source_id);
+                CHECK(copy.has_polyline() == local_geometry);
+            }
+            // The source stays alive so its own destruction cannot affect these relative ID markers.
+            const ExtrusionEntity after(false);
+            CHECK(after.get_id() == before.get_id() + 1 + (native_shell && local_geometry ? 1 : 0));
+            CHECK(source.get_id() == source_id);
+            CHECK(source.has_polyline() == local_geometry);
+            CHECK(source.child_count() == (local_geometry ? 0 : 1));
+            const ExtrusionEntity &geometry = local_geometry ? static_cast<const ExtrusionEntity &>(source) : source.child(0);
+            CHECK(geometry.polyline_ref().to_polyline().points == expected);
+        }
+    }
+}
+
+// Reject short inputs before the polygon invariant without consuming borrowed points.
+TEST_CASE("Native loop builders ignore polygons with fewer than three vertices", "[plugins][native-fill]")
+{
+    using namespace Slic3r;
+    const ExtrusionAttributes attributes{ExtrusionRole::SolidInfill, ExtrusionFlow{0.12, 0.45f, 0.2f}};
+    for (const bool consume : {false, true}) {
+        CAPTURE(consume);
+        // Populate public points directly so constructor checks do not preempt the input filter.
+        Polygons loops(3);
+        loops[1].points = {Point(0, 0)};
+        loops[2].points = {Point(0, 0), Point(1000000, 0)};
+        const std::vector<Points> before{loops[0].points, loops[1].points, loops[2].points};
+        ExtrusionEntityCollection output;
+        if (consume)
+            extrusion_entities_append_loops(output, std::move(loops), ExtrusionAttributes(attributes), false);
+        else
+            extrusion_entities_append_loops(output, loops, ExtrusionAttributes(attributes), false);
+        CHECK(output.child_count() == 0);
+        if (consume) {
+            CHECK(loops.empty());
+        } else {
+            REQUIRE(loops.size() == before.size());
+            for (size_t index = 0; index < loops.size(); ++index)
+                CHECK(loops[index].points == before[index]);
+        }
+    }
+}
+
 // Compare raw defaults and both SDK functions without changing geometric classification or legacy flags.
 TEST_CASE("Rotation permission is independent of geometry and legacy flags",
           "[plugins][extrusion][rotation]")
@@ -1664,3 +1865,551 @@ TEST_CASE("Invalid ordered leaf arguments leave the entity unchanged",
     CHECK(root.child_count() == 0);
     CHECK(root.get_property<Slic3r::ExtrusionPropertySpeed>() != nullptr);
 }
+
+TEST_CASE("Native overhang root processing preserves dispatch copies and numeric fragments",
+          "[plugins][extrusion][native-overhang-root]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    const std::vector<Linef> rectangle{
+        Linef(Vec2d(-2., -2.), Vec2d(2., -2.)), Linef(Vec2d(2., -2.), Vec2d(2., 2.)),
+        Linef(Vec2d(2., 2.), Vec2d(-2., 2.)), Linef(Vec2d(-2., 2.), Vec2d(-2., -2.))};
+    const AABBTreeLines::LinesDistancer<Linef> previous(rectangle);
+    const AABBTreeLines::LinesDistancer<CurledLine> no_curled;
+    const double nozzle = 0.4;
+
+    SECTION("empty root projects permissions but not direct root properties")
+    {
+        ExtrusionEntityCollection source(false, true);
+        source.set_can_rotate(false);
+        source.add_property(ExtrusionPropertySpeed(19.f));
+        const ExtrusionEntityCollection before(source);
+        const ExtrusionEntity &borrowed_source = source;
+        const ExtrusionEntityCollection result =
+            ExtrusionProcessor::calculate_and_split_overhanging_extrusions(borrowed_source, previous, no_curled, nozzle);
+        CHECK(result.child_count() == 0);
+        CHECK(result.can_sort() == source.can_sort());
+        CHECK(result.can_reverse() == source.can_reverse());
+        CHECK(result.can_rotate() == source.can_rotate());
+        CHECK(result.get_id() != source.get_id());
+        CHECK(Access::property_count(result) == 0);
+        check_ordinary_copy(source, before);
+    }
+    SECTION("mixed native children retain their order types and exact copies including Z bypass")
+    {
+        ExtrusionEntityCollection source(false, false);
+        source.set_can_rotate(false);
+        source.add_property(ExtrusionPropertySpeed(23.f));
+        source.append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false)));
+        source.append_child(std::make_unique<ExtrusionLoop>(overhang_fixture_path(
+            Points{{0, 0}, {scale_i(1.), 0}, {scale_i(1.), scale_i(1.)}, {0, 0}}, false, false)));
+        const ExtrusionPaths joined{
+            overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false),
+            overhang_fixture_path(Points{{scale_i(1.), 0}, {scale_i(2.), 0}}, false, false)};
+        source.append_child(std::make_unique<ExtrusionMultiPath>(joined));
+        std::unique_ptr<ExtrusionEntityCollection> nested = std::make_unique<ExtrusionEntityCollection>(true, false);
+        nested->set_can_rotate(false);
+        nested->add_property(ExtrusionPropertySpeed(29.f));
+        nested->append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{0, 0}, {0, scale_i(1.)}}, false, false)));
+        source.append_child(std::move(nested));
+        source.append_child(std::make_unique<ExtrusionPath>(
+            overhang_fixture_path(Points{{scale_i(-3.), 0}, {scale_i(3.), 0}}, true, true)));
+        REQUIRE(source.child_count() == 5);
+        const std::array<const ExtrusionEntity *, 5> addresses{
+            &source.child(0), &source.child(1), &source.child(2), &source.child(3), &source.child(4)};
+        const ExtrusionEntityCollection before(source);
+        const ExtrusionEntity &borrowed_source = source;
+        const ExtrusionEntityCollection result =
+            ExtrusionProcessor::calculate_and_split_overhanging_extrusions(borrowed_source, previous, no_curled, nozzle);
+        REQUIRE(result.child_count() == 5);
+        CHECK(result.get_id() != source.get_id());
+        CHECK(result.can_sort() == source.can_sort());
+        CHECK(result.can_reverse() == source.can_reverse());
+        CHECK(result.can_rotate() == source.can_rotate());
+        CHECK(Access::property_count(result) == 0);
+        for (const size_t index : {size_t(0), size_t(1), size_t(2), size_t(4)}) {
+            CHECK(typeid(result.child(index)) == typeid(source.child(index)));
+            check_ordinary_copy(source.child(index), result.child(index));
+        }
+        REQUIRE(typeid(result.child(3)) == typeid(ExtrusionEntityCollection));
+        REQUIRE(result.child(3).child_count() == 1);
+        CHECK(result.child(3).get_id() != source.child(3).get_id());
+        CHECK(result.child(3).can_sort() == source.child(3).can_sort());
+        CHECK(result.child(3).can_reverse() == source.child(3).can_reverse());
+        CHECK(result.child(3).can_rotate() == source.child(3).can_rotate());
+        CHECK(Access::property_count(result.child(3)) == 0);
+        check_ordinary_copy(source.child(3).child(0), result.child(3).child(0));
+        check_ordinary_copy(source, before);
+        for (size_t index = 0; index < addresses.size(); ++index)
+            CHECK(&source.child(index) == addresses[index]);
+    }
+    SECTION("real planar fragments are independent and survive their input owners")
+    {
+        const AABBTreeLines::LinesDistancer<CurledLine> curled(std::vector<CurledLine>{
+            CurledLine(Point(scale_i(2.25), scale_i(-1.)), Point(scale_i(2.25), scale_i(1.)), 0.3f)});
+        for (const bool with_curled : {false, true}) {
+            CAPTURE(with_curled);
+            std::unique_ptr<ExtrusionEntityCollection> result;
+            std::array<uint64_t, 2> source_ids;
+            std::string state;
+            {
+                ExtrusionEntityCollection source(false, false);
+                source.set_can_rotate(false);
+                source.append_child(std::make_unique<ExtrusionPath>(overhang_fixture_path(
+                    Points{{scale_i(-3.), 0}, {0, 0}, {scale_i(3.), 0}}, true, false)));
+                const ExtrusionEntity *address = &source.child(0);
+                source_ids = {source.get_id(), address->get_id()};
+                const ExtrusionEntityCollection before(source);
+                const ExtrusionEntity &borrowed_source = source;
+                result = std::make_unique<ExtrusionEntityCollection>(
+                    ExtrusionProcessor::calculate_and_split_overhanging_extrusions(
+                        borrowed_source, previous, with_curled ? curled : no_curled, nozzle));
+                REQUIRE(result->child_count() > 0);
+                CHECK(result->get_id() != source.get_id());
+                const ExtrusionPath *first = dynamic_cast<const ExtrusionPath *>(&result->child(0));
+                const ExtrusionPath *last = dynamic_cast<const ExtrusionPath *>(&result->child(result->child_count() - 1));
+                REQUIRE(first != nullptr);
+                REQUIRE(last != nullptr);
+                CHECK(first->first_point() == Point(scale_i(-3.), 0));
+                CHECK(last->last_point() == Point(scale_i(3.), 0));
+                bool positive_proximity = false;
+                for (const ExtrusionEntityUPtr &child : result->children()) {
+                    const ExtrusionPropertyOverhang *overhang = child->get_property<ExtrusionPropertyOverhang>();
+                    REQUIRE(overhang != nullptr);
+                    CHECK(child.get() != address);
+                    CHECK(child->get_id() != address->get_id());
+                    positive_proximity = positive_proximity || overhang->proximity_to_curled_lines > 0.f;
+                }
+                CHECK(positive_proximity == with_curled);
+                check_ordinary_copy(source, before);
+                CHECK(&source.child(0) == address);
+                state = overhang_fragment_state(*result, source_ids);
+            }
+            REQUIRE(result != nullptr);
+            CHECK(overhang_fragment_state(*result, source_ids) == state);
+            const std::string expected = with_curled ?
+                "Collection,2,0,0,0,16;"
+                "Path,3,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.a666660000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:-3000000,0,0/-2599999,0,0/;"
+                "Path,4,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.a666660000000p-1,0x1.b333300000000p-2,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2599999,0,0/-2199999,0,0/;"
+                "Path,5,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.b333300000000p-2,0x1.cccccc0000000p-3,0x1.5d879a0000000p-13,0,0,1,1,2,0,0:-2199999,0,0/-2000000,0,0/;"
+                "Path,6,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0x1.8937980000000p-10,0,0,1,1,2,0,0:-2000000,0,0/-1599999,0,0/;"
+                "Path,7,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.5ebd640000000p-8,0,0,1,1,2,0,0:-1599999,0,0/-1199999,0,0/;"
+                "Path,8,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.7b42820000000p-7,0,0,1,1,2,0,0:-1199999,0,0/-799999,0,0/;"
+                "Path,9,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.4a693c0000000p-6,0,0,1,1,2,0,0:-799999,0,0/-399999,0,0/;"
+                "Path,10,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.fe073e0000000p-6,0,0,1,1,2,0,0:-399999,0,0/0,0,0/;"
+                "Path,11,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.6c3d980000000p-5,0,0,1,1,2,0,0:0,0,0/400000,0,0/;"
+                "Path,12,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.ece2a60000000p-5,0,0,1,1,2,0,0:400000,0,0/800000,0,0/;"
+                "Path,13,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.40795e0000000p-4,0,0,1,1,2,0,0:800000,0,0/1200000,0,0/;"
+                "Path,14,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x1.9436ec0000000p-4,0,0,1,1,2,0,0:1200000,0,0/1600000,0,0/;"
+                "Path,15,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x1.cccccc0000000p-3,0x1.f1a9fe0000000p-4,0,0,1,1,2,0,0:1600000,0,0/2000000,0,0/;"
+                "Path,16,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.4000000000000p-1,0x1.4000000000000p-1,0x1.2c694a0000000p-3,0,0,1,1,2,0,0:2000000,0,0/2400000,0,0/;"
+                "Path,17,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.0666660000000p+0,0x1.0666660000000p+0,0x1.0545900000000p-3,0,0,1,1,2,0,0:2400000,0,0/2800000,0,0/;"
+                "Path,18,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.39999a0000000p+0,0x1.c1b9c40000000p-4,0,0,1,1,2,0,0:2800000,0,0/3000000,0,0/;"
+                :
+                "Collection,2,0,0,0,9;"
+                "Path,3,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.a666660000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:-3000000,0,0/-2599999,0,0/;"
+                "Path,4,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.a666660000000p-1,0x1.b333300000000p-2,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2599999,0,0/-2199999,0,0/;"
+                "Path,5,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.b333300000000p-2,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2199999,0,0/-2000000,0,0/;"
+                "Path,6,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:-2000000,0,0/-1599999,0,0/;"
+                "Path,7,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x0.0000000000000p+0,0x0.0000000000000p+0,0x0.0000000000000p+0,0,0,1,1,9,0,0:-1599999,0,0/-1199999,0,0/-799999,0,0/-399999,0,0/0,0,0/400000,0,0/800000,0,0/1200000,0,0/1600000,0,0/;"
+                "Path,8,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.cccccc0000000p-3,0x1.cccccc0000000p-3,0x0.0000000000000p+0,0,0,1,1,2,0,0:1600000,0,0/2000000,0,0/;"
+                "Path,9,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.4000000000000p-1,0x1.4000000000000p-1,0x0.0000000000000p+0,0,0,1,1,2,0,0:2000000,0,0/2400000,0,0/;"
+                "Path,10,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.0666660000000p+0,0x1.0666660000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:2400000,0,0/2800000,0,0/;"
+                "Path,11,0,0,1,0x1.eb851eb851eb8p-4,0x1.cccccc0000000p-2,0x1.99999a0000000p-3,1,1,0x1.39999a0000000p+0,0x1.39999a0000000p+0,0x0.0000000000000p+0,0,0,1,1,2,0,0:2800000,0,0/3000000,0,0/;";
+            CHECK(state == expected);
+        }
+    }
+    SECTION("generic polyline and generic group children retain rejection")
+    {
+        for (const bool group : {false, true}) {
+            CAPTURE(group);
+            ExtrusionEntityCollection source;
+            std::unique_ptr<ExtrusionEntity> child;
+            if (group) {
+                child = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, false);
+                child->append_child(std::make_unique<ExtrusionPath>(
+                    overhang_fixture_path(Points{{0, 0}, {scale_i(1.), 0}}, false, false)));
+            } else {
+                child = std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {scale_i(1.), 0}}));
+            }
+            source.append_child(std::move(child));
+            const ExtrusionEntity *address = &source.child(0);
+            const ExtrusionEntityCollection before(source);
+            const ExtrusionEntity &borrowed_source = source;
+            REQUIRE_THROWS_AS(ExtrusionProcessor::calculate_and_split_overhanging_extrusions(
+                borrowed_source, previous, no_curled, nozzle), InvalidArgument);
+            check_ordinary_copy(source, before);
+            CHECK(&source.child(0) == address);
+        }
+    }
+}
+
+TEST_CASE("Native flatten destinations preserve wrappers prefixes caches and local donation",
+          "[plugins][extrusion][native-flatten-destination]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    SECTION("explicit false fixed true fixed and true sortable destination layouts")
+    {
+        for (const int mode : {0, 1, 2}) {
+            CAPTURE(mode);
+            std::unique_ptr<ExtrusionEntityCollection> output;
+            std::unique_ptr<ExtrusionEntityCollection> survivor_reference;
+            {
+                ExtrusionEntityCollection source = flatten_fixture(mode == 2);
+                REQUIRE(source.is_collection());
+                REQUIRE(source.child_count() == 4);
+                REQUIRE(source.child(1).is_collection());
+                REQUIRE(source.child(1).child_count() == 2);
+                CHECK(source.can_sort() == (mode == 2));
+                CHECK_FALSE(source.child(1).can_sort());
+                CHECK_FALSE(source.child(2).is_collection());
+                CHECK_FALSE(source.child(3).is_collection());
+                const std::array<const ExtrusionEntity *, 6> addresses{
+                    &source.child(0), &source.child(1), &source.child(2), &source.child(3),
+                    &source.child(1).child(0), &source.child(1).child(1)};
+                const ExtrusionEntityCollection before(source);
+                output = std::make_unique<ExtrusionEntityCollection>(false, false);
+                output->set_can_rotate(false);
+                output->add_property(ExtrusionPropertySpeed(83.f));
+                output->append_child(std::make_unique<ExtrusionPath>(
+                    flatten_fixture_path(Points{{-20000, 0}, {-19000, 0}})));
+                const ExtrusionEntity *sentinel = &output->child(0);
+                const uint64_t output_id = output->get_id();
+                const ExtrusionEntityCollection output_before(*output);
+                REQUIRE(output->entities().size() == 1);
+
+                ExtrusionEntity &borrowed_output = *output;
+                source.flatten(mode != 0, borrowed_output);
+
+                CHECK(output->get_id() == output_id);
+                CHECK_FALSE(output->can_sort());
+                CHECK_FALSE(output->can_reverse());
+                CHECK_FALSE(output->can_rotate());
+                REQUIRE(Access::property_count(*output) == 1);
+                CHECK(Access::same_property_payload(output_before, extrusion_property_type_speed, *output));
+                const size_t sentinel_index = mode == 0 ? 5 : (mode == 1 ? 0 : 4);
+                REQUIRE(output->child_count() == (mode == 0 ? 6 : (mode == 1 ? 2 : 5)));
+                CHECK(&output->child(sentinel_index) == sentinel);
+                check_ordinary_copy(output_before.child(0), output->child(sentinel_index));
+                const std::array<const ExtrusionEntity *, 5> originals{
+                    &source.child(0), &source.child(1).child(0), &source.child(1).child(1),
+                    &source.child(2), &source.child(3)};
+                std::array<const ExtrusionEntity *, 5> copies;
+                if (mode == 0) {
+                    copies = {&output->child(0), &output->child(1), &output->child(2),
+                              &output->child(3), &output->child(4)};
+                } else {
+                    const ExtrusionEntity *expanded = output.get();
+                    if (mode == 1) {
+                        const ExtrusionEntity &outer = output->child(1);
+                        REQUIRE(typeid(outer) == typeid(ExtrusionEntityCollection));
+                        REQUIRE(outer.child_count() == 1);
+                        CHECK(outer.can_sort());
+                        CHECK(outer.can_reverse());
+                        CHECK(outer.can_rotate());
+                        CHECK(Access::property_count(outer) == 0);
+                        CHECK(outer.get_id() != source.get_id());
+                        CHECK(outer.get_id() != output_id);
+                        expanded = &outer.child(0);
+                        check_rebuilt_flatten_group(source, *expanded);
+                        REQUIRE(expanded->child_count() == 4);
+                        CHECK(expanded->get_id() != outer.get_id());
+                    }
+                    const ExtrusionEntity &nested = expanded->child(1);
+                    check_rebuilt_flatten_group(source.child(1), nested);
+                    REQUIRE(nested.child_count() == 2);
+                    copies = {&expanded->child(0), &nested.child(0), &nested.child(1),
+                              &expanded->child(2), &expanded->child(3)};
+                }
+                for (size_t index = 0; index < originals.size(); ++index) {
+                    CHECK(typeid(*copies[index]) == typeid(*originals[index]));
+                    check_ordinary_copy(*originals[index], *copies[index]);
+                }
+                REQUIRE(output->entities().size() == output->child_count());
+                for (size_t index = 0; index < output->child_count(); ++index)
+                    CHECK(output->entities()[index] == &output->child(index));
+                check_ordinary_copy(source, before);
+                for (size_t index = 0; index < 4; ++index)
+                    CHECK(&source.child(index) == addresses[index]);
+                CHECK(&source.child(1).child(0) == addresses[4]);
+                CHECK(&source.child(1).child(1) == addresses[5]);
+                survivor_reference = std::make_unique<ExtrusionEntityCollection>(*output);
+            }
+            REQUIRE(output != nullptr);
+            REQUIRE(survivor_reference != nullptr);
+            check_ordinary_copy(*survivor_reference, *output);
+        }
+    }
+    SECTION("local geometry is donated before prefixing or appending the whole wrapper")
+    {
+        for (const bool preserve : {false, true}) {
+            CAPTURE(preserve);
+            ExtrusionEntityCollection source(false, false);
+            source.set_can_rotate(false);
+            source.add_property(ExtrusionPropertySpeed(91.f));
+            source.append_child(std::make_unique<ExtrusionPath>(
+                flatten_fixture_path(Points{{0, 0}, {1000, 0}})));
+            source.append_child(std::make_unique<ExtrusionPath>(
+                flatten_fixture_path(Points{{10000, 0}, {11000, 0}})));
+            REQUIRE(source.is_collection());
+            REQUIRE(source.child_count() == 2);
+            const ExtrusionEntityCollection before(source);
+            const ExtrusionEntity *first_address = &source.child(0);
+            const ExtrusionEntity *second_address = &source.child(1);
+            ArcPolyline geometry(Points{{-9000, 0}, {-8000, 0}});
+            geometry.set_z_offset(0, 100);
+            geometry.set_z_offset(1, 900);
+            ExtrusionEntity local_content(false, std::move(geometry));
+            local_content.set_can_rotate(false);
+            local_content.add_property(ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.12, 0.45f, 0.2f)));
+            local_content.add_property(ExtrusionPropertySpeed(61.f));
+            ExtrusionEntityCollection output;
+            static_cast<ExtrusionEntity &>(output) = std::move(local_content);
+            REQUIRE(output.is_leaf());
+            REQUIRE(output.has_polyline());
+            CHECK_FALSE(output.can_sort());
+            CHECK_FALSE(output.can_reverse());
+            const ExtrusionEntityCollection output_before(output);
+            const uint64_t output_id = output.get_id();
+
+            ExtrusionEntity &borrowed_output = output;
+            source.flatten(preserve, borrowed_output);
+
+            CHECK(output.get_id() == output_id);
+            CHECK_FALSE(output.is_leaf());
+            CHECK_FALSE(output.has_polyline());
+            CHECK(output.can_sort());
+            CHECK(output.can_reverse());
+            CHECK_FALSE(output.can_rotate());
+            REQUIRE(output.child_count() == (preserve ? 2 : 3));
+            const ExtrusionEntity &donated = output.child(preserve ? 0 : 2);
+            REQUIRE(typeid(donated) == typeid(ExtrusionEntity));
+            CHECK(donated.get_id() != output_id);
+            CHECK_FALSE(donated.can_sort());
+            CHECK_FALSE(donated.can_reverse());
+            CHECK_FALSE(donated.can_rotate());
+            REQUIRE(donated.has_polyline());
+            REQUIRE(donated.polyline_ref().size() == 2);
+            CHECK_FALSE(donated.polyline_ref().has_arc());
+            REQUIRE(donated.polyline_ref().has_z_offset());
+            CHECK(donated.polyline_ref().get_point(0) == Point(-9000, 0));
+            CHECK(donated.polyline_ref().get_point(1) == Point(-8000, 0));
+            CHECK(donated.polyline_ref().z_offset(0) == 100);
+            CHECK(donated.polyline_ref().z_offset(1) == 900);
+            REQUIRE(Access::property_count(output) == 2);
+            REQUIRE(Access::property_count(donated) == 2);
+            for (const extrusion_property_type type : {extrusion_property_type_attributes, extrusion_property_type_speed}) {
+                CHECK(Access::same_property_payload(output_before, type, output));
+                CHECK(Access::same_property_payload(output_before, type, donated));
+                CHECK(Access::property_data(output, type) != Access::property_data(donated, type));
+            }
+            const ExtrusionEntity *copied_root = &output;
+            if (preserve) {
+                const ExtrusionEntity &outer = output.child(1);
+                REQUIRE(typeid(outer) == typeid(ExtrusionEntityCollection));
+                REQUIRE(outer.child_count() == 1);
+                CHECK(outer.can_sort());
+                CHECK(outer.can_reverse());
+                CHECK(outer.can_rotate());
+                CHECK(Access::property_count(outer) == 0);
+                copied_root = &outer.child(0);
+                check_rebuilt_flatten_group(source, *copied_root);
+                REQUIRE(copied_root->child_count() == 2);
+            }
+            for (size_t index = 0; index < 2; ++index) {
+                CHECK(typeid(copied_root->child(index)) == typeid(ExtrusionPath));
+                check_ordinary_copy(source.child(index), copied_root->child(index));
+            }
+            REQUIRE(output.entities().size() == output.child_count());
+            for (size_t index = 0; index < output.child_count(); ++index)
+                CHECK(output.entities()[index] == &output.child(index));
+            check_ordinary_copy(source, before);
+            CHECK(&source.child(0) == first_address);
+            CHECK(&source.child(1) == second_address);
+        }
+    }
+}
+
+namespace {
+
+void check_ordinary_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &copy)
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    CHECK(&source != &copy);
+    CHECK(copy.get_id() == source.get_id());
+    CHECK(copy.can_sort() == source.can_sort());
+    CHECK(copy.can_reverse() == source.can_reverse());
+    CHECK(copy.can_rotate() == source.can_rotate());
+    CHECK(copy.is_nop() == source.is_nop());
+    CHECK(copy.is_leaf() == source.is_leaf());
+    REQUIRE(copy.has_polyline() == source.has_polyline());
+    if (source.has_polyline()) {
+        const ArcPolyline &original = source.polyline_ref();
+        const ArcPolyline &copied = copy.polyline_ref();
+        REQUIRE(copied.size() == original.size());
+        REQUIRE(copied.has_arc() == original.has_arc());
+        REQUIRE(copied.has_z_offset() == original.has_z_offset());
+        for (size_t index = 0; index < original.size(); ++index) {
+            CHECK(copied.get_point(index) == original.get_point(index));
+            if (original.has_z_offset())
+                CHECK(copied.z_offset(index) == original.z_offset(index));
+            if (original.has_arc()) {
+                CHECK(copied.get_arc(index).radius == original.get_arc(index).radius);
+                CHECK(copied.get_arc(index).orientation == original.get_arc(index).orientation);
+            }
+        }
+    }
+    REQUIRE(Access::property_count(copy) == Access::property_count(source));
+    for (size_t index = 0; index < Access::property_count(source); ++index) {
+        const extrusion_property_type type = Access::property_type_at(source, index);
+        CHECK(Access::property_type_at(copy, index) == type);
+        CHECK(Access::same_property_payload(source, type, copy));
+        CHECK(Access::property_data(source, type) != Access::property_data(copy, type));
+    }
+    if (const ExtrusionPropertyCustomGcode *text = source.get_property<ExtrusionPropertyCustomGcode>()) {
+        const ExtrusionPropertyCustomGcode *copied = copy.get_property<ExtrusionPropertyCustomGcode>();
+        REQUIRE(copied != nullptr);
+        CHECK(copy.custom_gcode_string(*copied) == source.custom_gcode_string(*text));
+        uint32_t original_size = 0;
+        uint32_t copied_size = 0;
+        const void *original = Access::stored_data(source, text->text_id, &original_size);
+        const void *buffer = Access::stored_data(copy, copied->text_id, &copied_size);
+        REQUIRE(original != nullptr);
+        REQUIRE(buffer != nullptr);
+        REQUIRE(original_size == copied_size);
+        CHECK(buffer != original);
+        CHECK(std::memcmp(original, buffer, original_size) == 0);
+    }
+    REQUIRE(copy.child_count() == source.child_count());
+    for (size_t index = 0; index < source.child_count(); ++index) {
+        CHECK(typeid(copy.child(index)) == typeid(source.child(index)));
+        check_ordinary_copy(source.child(index), copy.child(index));
+    }
+}
+
+Slic3r::ExtrusionPath overhang_fixture_path(const Slic3r::Points &points, bool dynamic, bool with_z)
+{
+    using namespace Slic3r;
+    ExtrusionAttributes attributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.12, 0.45f, 0.2f));
+    attributes.no_seam = 1;
+    ExtrusionPath path(ArcPolyline(points), attributes, ExtrusionPropertyUPtr{}, false);
+    path.set_can_rotate(true);
+    if (dynamic)
+        path.add_property(ExtrusionPropertyOverhang(17.f, 19.f, 0.f, false, false, true, true));
+    if (with_z) {
+        path.polyline().set_z_offset(0, 100);
+        path.polyline().set_z_offset(points.size() - 1, 900);
+    }
+    return path;
+}
+
+std::string overhang_fragment_state(const Slic3r::ExtrusionEntityCollection &result,
+                                    const std::array<uint64_t, 2> &source_ids)
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    std::map<uint64_t, size_t> identities{{source_ids[0], 0}, {source_ids[1], 1}};
+    const auto identity = [&identities](uint64_t id) {
+        const std::map<uint64_t, size_t>::const_iterator found = identities.find(id);
+        if (found != identities.end())
+            return found->second;
+        const size_t next = identities.size();
+        identities.emplace(id, next);
+        return next;
+    };
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::hexfloat;
+    REQUIRE(Access::property_count(result) == 0);
+    out << "Collection," << identity(result.get_id()) << ',' << result.can_sort() << ',' << result.can_reverse()
+        << ',' << result.can_rotate() << ',' << result.child_count() << ';';
+    for (const ExtrusionEntityUPtr &child : result.children()) {
+        const ExtrusionPath *path = dynamic_cast<const ExtrusionPath *>(child.get());
+        REQUIRE(path != nullptr);
+        REQUIRE(path->has_polyline());
+        REQUIRE(Access::property_count(*path) == 2);
+        const ExtrusionAttributes *attributes = path->get_property<ExtrusionAttributes>();
+        const ExtrusionPropertyOverhang *overhang = path->get_property<ExtrusionPropertyOverhang>();
+        REQUIRE(attributes != nullptr);
+        REQUIRE(overhang != nullptr);
+        const ArcPolyline &polyline = path->polyline_ref();
+        out << "Path," << identity(path->get_id()) << ',' << path->can_sort() << ',' << path->can_reverse()
+            << ',' << path->can_rotate() << ',' << attributes->mm3_per_mm << ',' << attributes->width
+            << ',' << attributes->height << ',' << attributes->role << ',' << unsigned(attributes->no_seam)
+            << ',' << overhang->start_distance_from_prev_layer << ',' << overhang->end_distance_from_prev_layer
+            << ',' << overhang->proximity_to_curled_lines << ',' << unsigned(overhang->has_full_overhangs_flow)
+            << ',' << unsigned(overhang->has_full_overhangs_speed) << ',' << unsigned(overhang->has_dynamic_overhangs_flow)
+            << ',' << unsigned(overhang->has_dynamic_overhangs_speed) << ',' << polyline.size()
+            << ',' << polyline.has_z_offset() << ',' << polyline.has_arc() << ':';
+        for (size_t index = 0; index < polyline.size(); ++index) {
+            out << polyline.get_point(index).x() << ',' << polyline.get_point(index).y() << ','
+                << (polyline.has_z_offset() ? polyline.z_offset(index) : 0);
+            if (polyline.has_arc())
+                out << ',' << polyline.get_arc(index).radius << ',' << unsigned(polyline.get_arc(index).orientation);
+            out << '/';
+        }
+        out << ';';
+    }
+    return out.str();
+}
+
+Slic3r::ExtrusionPath flatten_fixture_path(const Slic3r::Points &points)
+{
+    using namespace Slic3r;
+    ExtrusionAttributes attributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.12, 0.45f, 0.2f));
+    attributes.no_seam = 1;
+    ExtrusionPath path(ArcPolyline(points), attributes, ExtrusionPropertyUPtr{}, false);
+    path.set_can_rotate(false);
+    path.add_property(ExtrusionPropertySpeed(37.f));
+    return path;
+}
+
+Slic3r::ExtrusionEntityCollection flatten_fixture(bool sortable)
+{
+    using namespace Slic3r;
+    ExtrusionEntityCollection source(sortable, false);
+    source.set_can_rotate(false);
+    source.add_property(ExtrusionPropertySpeed(17.f));
+    source.append_child(std::make_unique<ExtrusionPath>(
+        flatten_fixture_path(Points{{0, 0}, {1000, 0}})));
+    std::unique_ptr<ExtrusionEntityCollection> nested = std::make_unique<ExtrusionEntityCollection>(false, false);
+    nested->set_can_rotate(false);
+    nested->add_property(ExtrusionPropertySpeed(29.f));
+    nested->append_child(std::make_unique<ExtrusionPath>(
+        flatten_fixture_path(Points{{10000, 0}, {11000, 0}})));
+    nested->append_child(std::make_unique<ExtrusionPath>(
+        flatten_fixture_path(Points{{20000, 0}, {21000, 0}})));
+    source.append_child(std::move(nested));
+    std::unique_ptr<ExtrusionLoop> loop = std::make_unique<ExtrusionLoop>(flatten_fixture_path(
+        Points{{40000, 0}, {41000, 0}, {41000, 1000}, {40000, 0}}));
+    loop->add_property(ExtrusionPropertySpeed(47.f));
+    source.append_child(std::move(loop));
+    const ExtrusionPaths joined{
+        flatten_fixture_path(Points{{50000, 0}, {51000, 0}}),
+        flatten_fixture_path(Points{{51000, 0}, {52000, 0}})};
+    std::unique_ptr<ExtrusionMultiPath> multi = std::make_unique<ExtrusionMultiPath>(joined);
+    multi->add_property(ExtrusionPropertySpeed(53.f));
+    source.append_child(std::move(multi));
+    return source;
+}
+
+void check_rebuilt_flatten_group(const Slic3r::ExtrusionEntity &source, const Slic3r::ExtrusionEntity &group)
+{
+    using namespace Slic3r;
+    REQUIRE(source.is_collection());
+    REQUIRE(source.child_count() > 1);
+    REQUIRE(source.has_properties());
+    REQUIRE(typeid(group) == typeid(ExtrusionEntityCollection));
+    CHECK(&group != &source);
+    CHECK(group.get_id() != source.get_id());
+    CHECK(group.can_sort() == source.can_sort());
+    CHECK(group.can_reverse() == source.can_reverse());
+    CHECK(group.can_rotate() == source.can_rotate());
+    CHECK(ApiInternal::ExtrusionPropertyAccess::property_count(group) == 0);
+}
+
+} // namespace

@@ -32,6 +32,9 @@ The source Print supplies borrowed geometry and settings for one export. GCode
 owns its writer state, temporary ordering/output data and placeholder values.
 Do not confuse that temporary export state with the layers owned by Print or
 with the independently implemented plugin-based printing-plan writer.
+Obstacle marking receives the source bucket as well as the emitted copy. The
+source supplies inherited roles and complete-unit identities; copied grouping
+or seam preparation must not turn an isolated descendant into a printed unit.
 
 The legacy generator writes ordered layer paths, tracks writer state and supplies
 script placeholders. Each export owns a WipeTower2 for global-tower paths;
@@ -4432,7 +4435,7 @@ namespace Skirt {
 	static void skirt_loops_per_extruder_all_printing(const Print &print, const LayerTools &layer_tools, std::map<extruder_index_t, std::pair<size_t, size_t>> &skirt_loops_per_extruder_out)
 	{
         // Prime all extruders printing over the 1st layer over the skirt lines.
-        size_t n_loops = print.skirt().entities().size();
+        size_t n_loops = print.skirt().child_count();
         size_t n_tools = layer_tools.extruders.size();
         size_t lines_per_extruder = (n_loops + n_tools - 1) / n_tools;
         for (size_t i = 0; i < n_loops; i += lines_per_extruder)
@@ -4450,7 +4453,7 @@ namespace Skirt {
         std::map<extruder_index_t, std::pair<size_t, size_t>> skirt_loops_per_extruder_out;
         //For sequential print, the following test may fail when extruding the 2nd and other objects.
         // assert(skirt_done.empty());
-        if (skirt_done.empty() && print.has_skirt() && ! print.skirt().entities().empty() && layer_tools.has_skirt) {
+        if (skirt_done.empty() && print.has_skirt() && print.skirt().child_count() > 0 && layer_tools.has_skirt) {
             if (print.skirt_first_layer()) {
                 size_t n_loops = print.skirt_first_layer()->entities().size();
                 size_t n_tools = layer_tools.extruders.size();
@@ -4473,7 +4476,7 @@ namespace Skirt {
         // Extrude skirt at the print_z of the raft layers and normal object layers
         // not at the print_z of the interlaced support material layers.
         std::map<extruder_index_t, std::pair<size_t, size_t>> skirt_loops_per_extruder_out;
-        if (print.has_skirt() && ! print.skirt().entities().empty() && layer_tools.has_skirt &&
+        if (print.has_skirt() && print.skirt().child_count() > 0 && layer_tools.has_skirt &&
             // infinite or high skirt does not make sense for sequential print here
             //(if it is selected, it's done in the "extrude object-only skirt" in process_layer)
             // Not enough skirt layers printed yet.
@@ -4629,19 +4632,19 @@ LayerResult GCodeGenerator::process_layer(
                 for (const LayerRegionIsland &region_island : layer_island.regions_islands()) {
                     size_t nb_peri = 0;
                     if (region_island.has_extrusion(LayerRegionIsland::PERIMETERS)) {
-                        nb_peri = region_island.extrusion(LayerRegionIsland::PERIMETERS).items_count();
+                        nb_peri = CountEntities().count(region_island.extrusion(LayerRegionIsland::PERIMETERS));
                     }
                     size_t nb_gap_fill = 0;
                     if (region_island.has_extrusion(LayerRegionIsland::GAP_FILLS)) {
-                        nb_gap_fill = region_island.extrusion(LayerRegionIsland::GAP_FILLS).items_count();
+                        nb_gap_fill = CountEntities().count(region_island.extrusion(LayerRegionIsland::GAP_FILLS));
                     }
                     size_t nb_fill = 0;
                     if (region_island.has_extrusion(LayerRegionIsland::INFILLS)) {
-                        nb_fill = region_island.extrusion(LayerRegionIsland::INFILLS).items_count();
+                        nb_fill = CountEntities().count(region_island.extrusion(LayerRegionIsland::INFILLS));
                     }
                     size_t nb_ironing = 0;
                     if (region_island.has_extrusion(LayerRegionIsland::IRONINGS)) {
-                        nb_ironing = region_island.extrusion(LayerRegionIsland::IRONINGS).items_count();
+                        nb_ironing = CountEntities().count(region_island.extrusion(LayerRegionIsland::IRONINGS));
                     }
                     // note: not needed i think. peris & infill are enough.
                     bool inside_a_bottom_solid_layers = false;
@@ -5029,11 +5032,11 @@ LayerResult GCodeGenerator::process_layer(
             const double layer_skirt_height = unscaled(
                 m_skirt_done.back() -
                 (m_skirt_done.size() == 1 ? 0 : m_skirt_done[m_skirt_done.size() - 2]));
-            const ExtrusionEntityCollection& coll = first_layer && print.skirt_first_layer() ? *print.skirt_first_layer() : print.skirt();
+            const ExtrusionEntity &coll = first_layer && print.skirt_first_layer() ? *print.skirt_first_layer() : print.skirt();
             for (size_t i = loops.first; i < loops.second; ++i) {
                 m_region = nullptr;
                 set_region_for_extrude(print, nullptr, nullptr, gcode);
-                this->extrude_skirt(*coll.entities()[i], layer_skirt_height, gcode, "skirt"sv);
+                this->extrude_skirt(coll.child(i), layer_skirt_height, gcode, "skirt"sv);
             }
             m_last_too_small.polyline().clear();
             m_avoid_crossing_perimeters->use_external_mp(false);
@@ -5052,7 +5055,8 @@ LayerResult GCodeGenerator::process_layer(
             m_avoid_crossing_perimeters->use_external_mp();
             m_region = nullptr;
             set_region_for_extrude(print, nullptr, nullptr, gcode);
-            for (const ExtrusionEntity* brim_entity : print.brim().entities()) {
+            for (const ExtrusionEntityUPtr &child : print.brim().children()) {
+                const ExtrusionEntity *brim_entity = child.get();
                 //if first layer, ask for a bigger lift for travel to each brim, to be on the safe side
                 set_extra_lift(m_last_layer_z_, layer.id(), print.config(), m_writer, extruder_id);
                 gcode += this->extrude_entity({*brim_entity, false}, "Brim"sv);
@@ -5079,11 +5083,15 @@ LayerResult GCodeGenerator::process_layer(
             if (this->m_layer != nullptr && (this->m_layer->id() < m_config.skirt_height || print.has_infinite_skirt() )) {
                 //TODO: check if I don't need to call extrude_skirt to have arcs.
                 if(first_layer && print.skirt_first_layer())
-                    for (const ExtrusionEntity* ee : print_object->skirt_first_layer()->entities())
+                    for (const ExtrusionEntityUPtr &child : print_object->skirt_first_layer()->children()) {
+                        const ExtrusionEntity *ee = child.get();
                         gcode += this->extrude_entity({*ee, false}, "");
+                    }
                 else
-                    for (const ExtrusionEntity *ee : print_object->skirt().entities())
+                    for (const ExtrusionEntityUPtr &child : print_object->skirt().children()) {
+                        const ExtrusionEntity *ee = child.get();
                         gcode += this->extrude_entity({*ee, false}, "");
+                    }
                 m_last_too_small.polyline().clear();
             }
         }
@@ -5098,8 +5106,10 @@ LayerResult GCodeGenerator::process_layer(
             this->set_origin(unscale_p(print_object->instances()[single_object_instance_idx].shift));
             if (this->m_layer != nullptr && this->m_layer->id() == 0) {
                 m_avoid_crossing_perimeters->use_external_mp(true);
-                for (const ExtrusionEntity* ee : print_object->brim().entities())
+                for (const ExtrusionEntityUPtr &child : print_object->brim().children()) {
+                    const ExtrusionEntity *ee = child.get();
                     gcode += this->extrude_entity({*ee, false}, "Brim"sv);
+                }
                 m_avoid_crossing_perimeters->use_external_mp(false);
                 m_avoid_crossing_perimeters->disable_once();
                 m_last_too_small.polyline().clear();
@@ -5301,16 +5311,24 @@ void GCodeGenerator::process_layer_single_object(
                     ExtrusionEntitiesPtr entities;
                     for (const LayerRegionIsland &region_island : layer_island.regions_islands()) {
                         if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                            for (ExtrusionEntity *ee : region_island.extrusion(LayerRegionIsland::SUPPORT)) {
+                            const ExtrusionEntity &support_fills = region_island.extrusion(LayerRegionIsland::SUPPORT);
+                            for (const ExtrusionEntityUPtr &child : support_fills.children()) {
+                                ExtrusionEntity *ee = child.get();
                                 assert(ee->role() == ExtrusionRole::SupportMaterial);
                             }
-                            append(entities, region_island.extrusion(LayerRegionIsland::SUPPORT).entities());
+                            entities.reserve(entities.size() + support_fills.child_count());
+                            for (const ExtrusionEntityUPtr &child : support_fills.children())
+                                entities.emplace_back(child.get());
                         }
                         if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                            for (ExtrusionEntity *ee : region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                            const ExtrusionEntity &support_fills = region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE);
+                            for (const ExtrusionEntityUPtr &child : support_fills.children()) {
+                                ExtrusionEntity *ee = child.get();
                                 assert(ee->role() == ExtrusionRole::SupportMaterialInterface);
                             }
-                            append(entities, region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE).entities());
+                            entities.reserve(entities.size() + support_fills.child_count());
+                            for (const ExtrusionEntityUPtr &child : support_fills.children())
+                                entities.emplace_back(child.get());
                         }
                     }
                     if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 &&
@@ -5540,13 +5558,11 @@ void GCodeGenerator::emit_milling_commands(std::string& gcode, const ObjectsLaye
     }
 }
 
-// Check whether this ExtrusionEntityCollection should be printed now with extruder_id, given print_wipe_extrusions
-// (wipe extrusions are printed before regular extrusions).
-bool GCodeGenerator::shall_print_this_extrusion_collection(const ExtrudeArgs &print_args, const ExtrusionEntityCollection *eec, const PrintRegion &region)
+bool GCodeGenerator::shall_print_this_extrusion_collection(const ExtrudeArgs &print_args, const ExtrusionEntity *eec, const PrintRegion &region)
 {
 //    [extruder_id, instance_id = print_instance.instance_id, &layer_tools, is_anything_overridden, print_wipe_extrusions] -> bool
     assert(eec != nullptr);
-    if (eec->entities().empty()) {
+    if (eec->child_count() == 0) {
         assert(false);
         // This shouldn't happen. FIXME why? but first_point() would fail.
         return false;
@@ -8097,7 +8113,7 @@ void GCodeGenerator::extrude_perimeters(const ExtrudeArgs &print_args, const Lay
             //#endif
             gcode += this->extrude_entity(next_entity, comment_perimeter, -1.);
             if (m_travel_obstacle_tracker->is_init())
-                m_travel_obstacle_tracker->mark_extruded(&next_entity.extrusion_entity(),
+                m_travel_obstacle_tracker->mark_extruded(eec, next_entity.extrusion_entity(),
                                                         print_args.print_instance.object_layer_to_print_id,
                                                         print_args.print_instance.instance_id);
         }
@@ -8120,7 +8136,7 @@ void GCodeGenerator::extrude_perimeters(const ExtrudeArgs &print_args, const Lay
         for (const ExtrusionEntityReference &next_entity : chained) {
             gcode += this->extrude_entity(next_entity, comment_perimeter, -1.);
             if (m_travel_obstacle_tracker->is_init())
-                m_travel_obstacle_tracker->mark_extruded(&next_entity.extrusion_entity(),
+                m_travel_obstacle_tracker->mark_extruded(eec, next_entity.extrusion_entity(),
                                                         print_args.print_instance.object_layer_to_print_id,
                                                         print_args.print_instance.instance_id);
         }

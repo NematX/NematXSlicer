@@ -12,13 +12,31 @@
 /* Const pointer-view access serializes cache validation and rebuilding with a scope-owned flag guard. Owned children remain
    immutable during concurrent reads; mutators retain the caller's exclusive-access requirement.
    reverse() inverts an entire caller-authorized unit, including fixed children
-   and their command phases, then clears the borrowed pointer-order cache. */
+   and their command phases, then clears the borrowed pointer-order cache.
+   swap() exchanges the complete nodes: identity, owned geometry, permissions,
+   properties and their detached resource buffers travel together. It requires
+   exclusive access and invalidates both pointer caches without allocating.
+   This differs from swap_content(), which preserves the two outer identities.
+   The deprecated flatten() destination overload accepts base storage. It appends
+   a whole flattened collection when fixed order needs a wrapper, but otherwise
+   prefixes flattened children. Materializing local destination geometry and
+   rebuilding groups retain the legacy flattening contract, including its known
+   loss of inherited group properties; this is not canonical plan acquisition.
+   append_move_from() transfers the source's owned children after the destination
+   prefix. Root properties and identities stay in place; local source geometry
+   first becomes an owned child. Both trees require exclusive access throughout.
+
+       entities() -> EntitiesCacheLock -> rebuild_entities_cache()
+       reverse() -> reverse owned children and order -> invalidate pointer cache
+       swap() -> exchange properties/resources and node state -> invalidate both caches
+       flatten(preserve_ordering, out) -> FlatenEntities -> append wrapper or prefix children
+       append_move_from() -> materialize children -> reserve -> transfer in source order
+*/
 
 #include <algorithm>
 #include <thread>
 
 #include "ExtrusionEntityVisitors.hpp"
-#include "ShortestPath.hpp"
 
 namespace Slic3r {
 namespace {
@@ -122,7 +140,7 @@ ExtrusionEntityCollection& ExtrusionEntityCollection::operator=(ExtrusionEntityC
     return *this;
 }
 
-void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
+void ExtrusionEntityCollection::append_move_from(ExtrusionEntity &src)
 {
     Children &dst = this->children();
     Children &src_children = src.children();
@@ -131,9 +149,9 @@ void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
     src_children.clear();
 }
 
-// Exchange owned content, identity and ordering permissions, invalidating both borrowed pointer caches without allocation.
 void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
+    std::swap(static_cast<ExtrusionPropertyContainer &>(*this), static_cast<ExtrusionPropertyContainer &>(c));
     std::swap(this->m_content, c.m_content);
     std::swap(this->m_can_sort, c.m_can_sort);
     std::swap(this->m_can_reverse, c.m_can_reverse);
@@ -233,71 +251,6 @@ void ExtrusionEntityCollection::erase(size_t begin, size_t end)
     this->m_entities_cache.clear();
 }
 
-// note: chained_path_from only this collection. You still need to chained_path_from the child collections.
-ExtrusionEntityReferences ExtrusionEntityCollection::chained_path_from(const Point &start_near)
-{
-    if (!this->can_sort()) {
-        ExtrusionEntityReferences result{};
-        bool need_reverse = false;
-        if (this->m_can_reverse) {
-            Children &children = this->children();
-            if (!children.empty()) {
-                if (children.front()->is_collection()) {
-                    assert(dynamic_cast<ExtrusionEntityCollection *>(children.front().get()) != nullptr);
-                    ExtrusionEntityCollection *front_coll = static_cast<ExtrusionEntityCollection *>(
-                        children.front().get());
-                    result = front_coll->chained_path_from(start_near);
-                    assert(!result.empty());
-                } else if (children.front()->can_reverse() &&
-                           children.front()->first_point().distance_to_square(start_near) >
-                               children.front()->last_point().distance_to_square(start_near)) {
-                    result.emplace_back(*children.front(), true);
-                } else {
-                    result.emplace_back(*children.front(), false);
-                }
-            }
-            if (children.size() > 1) {
-                if (children.back()->is_collection()) {
-                    assert(dynamic_cast<ExtrusionEntityCollection *>(children.front().get()) != nullptr);
-                    static_cast<ExtrusionEntityCollection *>(children.back().get())->chained_path_from(start_near);
-                } else if (children.back()->can_reverse() &&
-                           children.back()->first_point().distance_to_square(start_near) >
-                               children.back()->last_point().distance_to_square(start_near)) {
-                    result.emplace_back(*children.back(), true);
-                } else {
-                    result.emplace_back(*children.back(), false);
-                }
-                // can't sort myself, ask first and last thing to sort itself so the first point of each are the best ones
-
-                // now check if it's better for us to reverse
-                Point first_point = result.front().flipped() ? result.front().extrusion_entity().last_point() :
-                                                               result.front().extrusion_entity().first_point();
-                Point last_point = result.back().flipped() ? result.back().extrusion_entity().first_point() :
-                                                             result.back().extrusion_entity().last_point();
-                if (start_near.distance_to_square(first_point) > start_near.distance_to_square(last_point)) {
-                    // switch entities
-                    need_reverse = true;
-                    // this->reverse();
-                }
-            } else {
-                // only one child (useless collection)
-                need_reverse = result.front().flipped();
-            }
-            result.clear();
-        }
-        // now we are in our good order, update the internals to the final order
-        for (ExtrusionEntityUPtr &entity : this->children()) {
-            result.emplace_back(*entity, need_reverse);
-        }
-        if (need_reverse) {
-            std::reverse(result.begin(), result.end());
-        }
-        return result;
-    } else {
-        return chain_extrusion_references(this->entities(), &start_near);
-    }
-}
-
 void ExtrusionEntityCollection::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const
 {
     for (const ExtrusionEntity *entity : this->entities())
@@ -336,22 +289,19 @@ ExtrusionEntityCollection ExtrusionEntityCollection::flatten(bool preserve_order
 
 }
 
-// Reads the source through FlatenEntities, appending an ordered wrapper or transferring flattened children into out and clearing
-// its cache. out owns the added children and requires exclusive access throughout the call; allocation/traversal failures propagate.
-void ExtrusionEntityCollection::flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const
+void ExtrusionEntityCollection::flatten(bool preserve_ordering, ExtrusionEntity& out) const
 {
     if (!this->can_sort() && preserve_ordering && this->entities().size() > 1) {
-        out.append(this->flatten(preserve_ordering));
+        out.append_child(this->flatten(preserve_ordering));
     } else {
         FlatenEntities flattener(preserve_ordering);
         flattener.traverse(*this);
         //tranfert owner of entities.
-        ExtrusionEntityCollection &flat = flattener.set();
+        ExtrusionEntity &flat = flattener.set();
         Children &out_children = out.children();
         Children &flat_children = flat.children();
         out_children.insert(out_children.begin(), std::make_move_iterator(flat_children.begin()), std::make_move_iterator(flat_children.end()));
         flat_children.clear();
-        out.m_entities_cache.clear();
     }
 }
 

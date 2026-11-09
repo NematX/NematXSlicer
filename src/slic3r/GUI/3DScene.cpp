@@ -16,10 +16,19 @@
    approximate display estimate from configured purge volumes and layer heights,
    not generated wipe geometry. Its orange rectangular body has a +Y open-side
    zig-zag and brim, but no cone. A local 0.3 mm safety expansion supports tower
-   arrangement; this estimate is excluded from outside-bed shader detection. */
+   arrangement; this estimate is excluded from outside-bed shader detection.
+   Extrusion previews consume core-owned CPU line projections of compatible
+   continuous runs. Inherited widths and heights and the requested XY shift are
+   resolved before meshing; role destinations and unsupported paths split meshes.
+
+       _3DScene::extrusionentity_to_verts()
+           |-- project_extrusion_geometry() [core-owned XY lines and dimensions]
+           `-- thick_lines_to_verts() [append to the selected GUI geometry]
+*/
 #include "3DScene.hpp"
 
 #include <cassert>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -36,7 +45,7 @@
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/PointUtils.hpp"
@@ -1482,131 +1491,23 @@ void _3DScene::thick_lines_to_verts(
     thick_lines_to_geometry(lines, widths, heights, closed, geometry);
 }
 
-static void extrusionentity_polyline_to_verts(const ExtrusionEntity &entity,
-                                              float print_z,
-                                              const Point &copy,
-                                              GUI::GLModel::Geometry &geometry)
-{
-    const ArcPolyline *arc_polyline = entity.polyline_or_null();
-    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
-    if (arc_polyline == nullptr || attributes == nullptr)
-        return;
-
-    // New pipeline entities may be plain ExtrusionEntity leaves instead of the
-    // historical ExtrusionPath subclass. They still carry the same ArcPolyline
-    // and ExtrusionAttributes, which is enough to build the preview mesh.
-    Polyline polyline = arc_polyline->to_polyline();
-    polyline.remove_duplicate_points();
-    if (polyline.points.size() < 2)
-        return;
-
-    polyline.translate(copy);
-    const Lines lines = polyline.lines();
-    if (lines.empty())
-        return;
-
-    std::vector<double> widths(lines.size(), attributes->width);
-    std::vector<double> heights(lines.size(), attributes->height);
-    const bool closed = entity.is_loop() || polyline.points.front() == polyline.points.back();
-    _3DScene::thick_lines_to_verts(lines, widths, heights, closed, print_z, geometry);
-}
-
-// Fill in the qverts and tverts with quads and triangles for the extrusion_path.
-void _3DScene::extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
-{
-    Polyline            polyline = extrusion_path.polyline().to_polyline(); //TODO: 2.7 check: need to set a resolution?
-    polyline.remove_duplicate_points();
-    polyline.translate(copy);
-    const Lines               lines = polyline.lines();
-    std::vector<double> widths(lines.size(), extrusion_path.width());
-    std::vector<double> heights(lines.size(), extrusion_path.height());
-    thick_lines_to_verts(lines, widths, heights, false, print_z, geometry);
-}
-
-// Fill in the qverts and tverts with quads and triangles for the extrusion_loop.
-void _3DScene::extrusionentity_to_verts(const ExtrusionLoop& extrusion_loop, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
-{
-    Lines               lines;
-    std::vector<double> widths;
-    std::vector<double> heights;
-    for (const ExtrusionPath& extrusion_path : extrusion_loop.paths()) {
-        Polyline            polyline = extrusion_path.polyline().to_polyline();
-        polyline.remove_duplicate_points();
-        polyline.translate(copy);
-        const Lines lines_this = polyline.lines();
-        append(lines, lines_this);
-        widths.insert(widths.end(), lines_this.size(), extrusion_path.width());
-        heights.insert(heights.end(), lines_this.size(), extrusion_path.height());
-    }
-    thick_lines_to_verts(lines, widths, heights, true, print_z, geometry);
-}
-
-// Fill in the qverts and tverts with quads and triangles for the extrusion_multi_path.
-void _3DScene::extrusionentity_to_verts(const ExtrusionMultiPath& extrusion_multi_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
-{
-    Lines               lines;
-    std::vector<double> widths;
-    std::vector<double> heights;
-    for (const ExtrusionPath& extrusion_path : extrusion_multi_path.paths()) {
-        Polyline            polyline = extrusion_path.polyline().to_polyline();
-        polyline.remove_duplicate_points();
-        polyline.translate(copy);
-        const Lines lines_this = polyline.lines();
-        append(lines, lines_this);
-        widths.insert(widths.end(), lines_this.size(), extrusion_path.width());
-        heights.insert(heights.end(), lines_this.size(), extrusion_path.height());
-    }
-    thick_lines_to_verts(lines, widths, heights, false, print_z, geometry);
-}
-
 void _3DScene::extrusionentity_to_verts(const ExtrusionEntity &extrusion_entity, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry,
     std::optional<std::map<GCodeExtrusionRole, GUI::GLModel::Geometry*>> gl_map)
 {
-    if (!gl_map.has_value() || gl_map.value().empty()) {
-        ExtrusionToVert visitor(print_z, copy, geometry);
-        extrusion_entity.visit(visitor);
-    } else{
-        ExtrusionToVertMap visitor(print_z, copy, geometry, gl_map.value());
-        extrusion_entity.visit(visitor);
+    std::vector<GUI::GLModel::Geometry *> geometries{&geometry};
+    std::map<GCodeExtrusionRole, size_t> destinations;
+    if (gl_map) {
+        for (const auto &[role, destination] : *gl_map) {
+            const std::vector<GUI::GLModel::Geometry *>::iterator found =
+                std::find(geometries.begin(), geometries.end(), destination);
+            const size_t index = size_t(found - geometries.begin());
+            if (found == geometries.end())
+                geometries.push_back(destination);
+            destinations.emplace(role, index);
+        }
     }
-}
-
-void ExtrusionToVert::default_use(const ExtrusionEntity &entity)
-{
-    if (const ExtrusionPath *path = dynamic_cast<const ExtrusionPath*>(&entity)) {
-        _3DScene::extrusionentity_to_verts(*path, print_z, copy, geometry);
-    } else if (const ExtrusionMultiPath *multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity)) {
-        _3DScene::extrusionentity_to_verts(*multipath, print_z, copy, geometry);
-    } else if (const ExtrusionLoop *loop = dynamic_cast<const ExtrusionLoop*>(&entity)) {
-        _3DScene::extrusionentity_to_verts(*loop, print_z, copy, geometry);
-    } else {
-        if (entity.polyline_or_null() != nullptr)
-            extrusionentity_polyline_to_verts(entity, print_z, copy, geometry);
-        else if (!entity.is_leaf())
-            for (const ExtrusionEntityUPtr &child : entity.children())
-                if (child)
-                    child->visit(*this);
-    }
-}
-
-void ExtrusionToVertMap::default_use(const ExtrusionEntity& entity)
-{
-    if (const ExtrusionPath *path = dynamic_cast<const ExtrusionPath*>(&entity)) {
-        _3DScene::extrusionentity_to_verts(*path, print_z, copy, get_geometry(*path));
-    } else {
-        if (entity.polyline_or_null() != nullptr)
-            extrusionentity_polyline_to_verts(entity, print_z, copy, get_geometry(entity));
-        else if (!entity.is_leaf())
-            for (const ExtrusionEntityUPtr &child : entity.children())
-                if (child)
-                    child->visit(*this);
-    }
-}
-GUI::GLModel::Geometry& ExtrusionToVertMap::get_geometry(const ExtrusionEntity& e) {
-    auto it = geometries.find(extrusion_role_to_gcode_extrusion_role(e.role()));
-    if (it == geometries.end())
-        return default_geometry;
-    return *it->second;
+    for (const ExtrusionGeometryMesh &mesh : project_extrusion_geometry(extrusion_entity, copy, destinations))
+        thick_lines_to_verts(mesh.lines, mesh.widths, mesh.heights, mesh.closed, print_z, *geometries[mesh.destination]);
 }
 
 

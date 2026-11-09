@@ -3,6 +3,7 @@
    Freshly appended collections exercise first-read pointer-cache construction; assertions run only after workers join.
    Hybrid trees retain a legacy C++ dynamic type after generic mutations replace its content with ordered children.
    Content snapshots read const local polylines and stored children, ignoring geometrically empty event nodes.
+   Near-closed MedialAxis output is continuous but not a loop until its stored XY endpoints match exactly.
 
        TEST_CASE
            |-- hybrid_square() / hybrid_wrap(): build or mutate owned legacy views
@@ -476,7 +477,7 @@ TEST_CASE("Content queries preserve stationary points arcs Z travel and legacy h
 }
 
 // Convert a real near-closed variable-width centerline and own every returned pointer immediately;
-// preserve its unequal endpoints and compare generic closure to stored XY, not to the legacy Loop override.
+// preserve its unequal endpoints and compare the native producer's closure to stored XY.
 TEST_CASE("Thin variable width output keeps exact XY closure semantics",
           "[plugins][extrusion][extrusion-hybrid][hybrid-thin-width]")
 {
@@ -491,8 +492,9 @@ TEST_CASE("Thin variable width output keeps exact XY closure semantics",
     for (ExtrusionEntity *entity : raw) parent.append_child(ExtrusionEntityUPtr(entity));
     REQUIRE(parent.child_count() == 1);
     const ExtrusionEntity &view = parent;
-    REQUIRE(dynamic_cast<const ExtrusionLoop *>(&view.child(0)) != nullptr);
-    CHECK(raw.front()->is_loop());
+    REQUIRE(view.child(0).child_count() == 1);
+    CHECK(raw.front()->is_continuous());
+    CHECK_FALSE(raw.front()->is_loop());
     CHECK_FALSE(raw.front()->ExtrusionEntity::is_loop());
     CHECK(extrusion_is_loop(hybrid_handle(*raw.front())) == 0);
     std::vector<ArcPolyline> geometry;

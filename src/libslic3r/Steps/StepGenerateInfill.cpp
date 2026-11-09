@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -17,7 +18,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -38,6 +39,10 @@ The host retains the C++ step state behind the data passed to C callbacks.
 It catches callback failures before returning through C. Stop checks pass the
 owning Print to Orchestrator. A registered execution uses its own stop flag;
 an unregistered Print uses the shared flag.
+Publication stages owned scopes in a generic Children root. Existing buckets
+retain their prefixes; a new bucket receives the prepared base state. Source
+scopes and child order survive without a compatibility collection staging object.
+This source publication is distinct from canonical acquisition into PrintingPlan.
 
 Operation notes:
 - run_step: coordinate the generator and pattern work
@@ -59,6 +64,10 @@ Representative direct calls (branches are not a timeline):
         |-- orchestrator.prepare_plugin_run_context()
         |-- plugin.run()
         `-- Detail::throw_if_plugin_stopped()
+
+    append_region_island_extrusion_callback()
+        |-- append_source_extrusions() [prepare owned scopes before touching output]
+        `-- append prepared children or exchange an empty bucket's base state
 */
 
 namespace Slic3r::Steps::StepGenerateInfill {
@@ -185,7 +194,9 @@ int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
                                        const surface_handle *surface,
                                        const expolygon_collection_handle *no_overlap_areas,
                                        raw_infill_pattern_params *params) noexcept;
-// Stage generated children before publishing them into their infill bucket.
+// Append staged source scopes to the selected bucket; return 1 on success and 0 on a stop or contained failure.
+// Borrow handles under exclusive access for this call. Preparation may partly consume the source before publication.
+// The host records failures and requests plugin cancellation; print cancellation is handled by the runner.
 int32_t append_region_island_extrusion_callback(layer_region_island_handle *region_island_handle,
                                                 raw_extrusion_role role,
                                                 extrusion_entity_handle *extrusion_handle) noexcept;
@@ -424,10 +435,6 @@ ExtrusionRole bucket_role_from_raw(raw_extrusion_role role)
     return LayerRegionIsland::INFILLS;
 }
 
-// Stage moved source children before changing the region island. Destination paths remain unchanged on failure;
-// staging can partially consume the caller-owned source. A pending plugin stop refuses publication; this callback
-// has no print handle, so the generator and runner handle print cancellation. Any C++ failure is recorded through
-// the singleton orchestrator before the callback returns 0.
 int32_t append_region_island_extrusion_callback(layer_region_island_handle *region_island_handle,
                                                 raw_extrusion_role role,
                                                 extrusion_entity_handle *extrusion_handle) noexcept
@@ -445,7 +452,7 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
         if (region_island == nullptr || extrusion == nullptr)
             return 0;
 
-        ExtrusionEntityCollection prepared;
+        ExtrusionEntity prepared(ExtrusionEntity::Children{}, true, true, false);
         append_source_extrusions(prepared, *extrusion);
         region_island->remove_empty_extrusions();
         if (prepared.child_count() == 0)
@@ -453,12 +460,15 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
 
         const ExtrusionRole bucket_role = bucket_role_from_raw(role);
         if (region_island->has_extrusion(bucket_role)) {
-            ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role);
-            dst.children().reserve(dst.child_count() + prepared.child_count());
-            dst.append_move_from(prepared);
+            ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role);
+            ExtrusionEntity::Children &dst_children = dst.children();
+            ExtrusionEntity::Children &src_children = prepared.children();
+            dst_children.reserve(dst_children.size() + src_children.size());
+            dst_children.insert(dst_children.end(), std::make_move_iterator(src_children.begin()), std::make_move_iterator(src_children.end()));
+            src_children.clear();
         } else {
-            ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role);
-            dst.swap(prepared);
+            ExtrusionEntity &dst = region_island->mutable_extrusion(bucket_role);
+            std::swap(dst, prepared);
         }
         return 1;
     } catch (...) {

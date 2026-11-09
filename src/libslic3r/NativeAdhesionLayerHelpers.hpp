@@ -8,7 +8,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "ExtrusionEntityCollection.hpp"
+#include "ExtrusionEntity.hpp"
 #include "Layer.hpp"
 #include "PluginProperty.hpp"
 #include "PrintObject.hpp"
@@ -40,7 +40,7 @@ instance; global auxiliary-object layers are already in plateau coordinates.
 
 The helpers classify, traverse and place adhesion geometry:
 - test an auxiliary layer with a small predicate;
-- copy matched extrusion roots into a legacy compatibility collection;
+- append owned copies of matched extrusion content to a destination tree;
 - remove matched auxiliary layers;
 - visit matched extrusion roots for post-processing;
 - project the physical layer slice points used by first-layer hull rebuilding.
@@ -55,6 +55,11 @@ cache) collects local compatibility geometry into cache, while
 append_matching_auxiliary_layer_points(object, layer_is_any_adhesion, points)
 adds physically placed points to a plate-space hull. Returned copies own their
 trees; input layers are borrowed and are not retained by these helpers.
+Copy destinations may be generic roots or compatibility collections. Leaf and
+property-bearing source roots remain complete scopes; unmarked structural roots
+contribute independent child copies in order. Destination identities and existing
+prefix children stay in place. Mutations require exclusive destination access,
+and allocation errors may leave an already appended prefix.
 */
 
 inline bool layer_is_brim_adhesion(const Layer &layer)
@@ -82,18 +87,20 @@ inline bool layer_is_any_adhesion(const Layer &layer)
     return layer_is_brim_adhesion(layer) || layer_is_any_skirt_adhesion(layer);
 }
 
-inline void append_auxiliary_layer_extrusions(const Layer &layer, ExtrusionEntityCollection &dst);
+// Copy perimeter content into the destination's children, preserving leaves and marked root scopes.
+inline void append_auxiliary_layer_extrusions(const Layer &layer, ExtrusionEntity &dst);
 
 /*
 Collect the perimeter-bucket extrusion roots from every auxiliary layer matched
 by matches_layer. The predicate can be a named helper or a lambda with the shape
 `bool(const Layer&)`; it should only inspect the layer and must not keep
 references to the borrowed layer after the call.
+Copies are appended without changing source roots; allocation failures propagate.
 */
 template<class MatchesLayer>
 void collect_auxiliary_layer_extrusions(const PrintObject &object,
                                         MatchesLayer matches_layer,
-                                        ExtrusionEntityCollection &dst);
+                                        ExtrusionEntity &dst);
 
 /*
 Remove every auxiliary layer matched by matches_layer. The predicate can be a
@@ -126,7 +133,9 @@ void append_matching_auxiliary_layer_points(const PrintObject &object,
 
 namespace detail {
 
-inline void append_adhesion_extrusion_copy(ExtrusionEntityCollection &dst,
+// Append ordinary virtual copies, preserving leaves and marked roots; otherwise copy children in order.
+// The source is unchanged; allocation failures propagate after any earlier successful appends.
+inline void append_adhesion_extrusion_copy(ExtrusionEntity &dst,
                                            const ExtrusionEntity &src)
 {
     if (src.is_nop() && !src.has_properties())
@@ -134,12 +143,12 @@ inline void append_adhesion_extrusion_copy(ExtrusionEntityCollection &dst,
 
     // Root properties apply to the complete subtree for both native and SDK output.
     if (src.is_leaf() || src.has_properties()) {
-        dst.append(src);
+        dst.append_child(src);
         return;
     }
 
     for (const ExtrusionEntityUPtr &child : src.children())
-        dst.append(*child);
+        dst.append_child(*child);
 }
 
 template<class Visitor, class = void> struct HasTraverse : std::false_type {};
@@ -166,7 +175,7 @@ void visit_extrusion_tree(ExtrusionEntity &entity, Visitor &visitor)
 
 } // namespace detail
 
-inline void append_auxiliary_layer_extrusions(const Layer &layer, ExtrusionEntityCollection &dst)
+inline void append_auxiliary_layer_extrusions(const Layer &layer, ExtrusionEntity &dst)
 {
     for (const LayerSliceIsland &island : layer.islands()) {
         for (const LayerRegionIsland &region_island : island.regions_islands()) {
@@ -179,7 +188,7 @@ inline void append_auxiliary_layer_extrusions(const Layer &layer, ExtrusionEntit
 template<class MatchesLayer>
 void collect_auxiliary_layer_extrusions(const PrintObject &object,
                                         MatchesLayer matches_layer,
-                                        ExtrusionEntityCollection &dst)
+                                        ExtrusionEntity &dst)
 {
     for (const Layer &layer : object.auxiliary_layers())
         if (matches_layer(layer))

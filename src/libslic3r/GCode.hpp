@@ -430,8 +430,9 @@ private:
                        std::string &gcode,
                        const std::string_view description);
     std::string     extrude_support(const ExtrusionEntityReferences &support_fills);
+    // Return whether a borrowed, nonempty child group belongs to the current extruder and wipe pass.
     bool            shall_print_this_extrusion_collection(const ExtrudeArgs &              print_args,
-                                                          const ExtrusionEntityCollection *eec,
+                                                          const ExtrusionEntity *          eec,
                                                           const PrintRegion &              region);
     // for helical layer change for vase mode
      std::string generate_travel_gcode(

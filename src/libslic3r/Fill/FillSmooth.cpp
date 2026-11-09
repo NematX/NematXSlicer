@@ -10,9 +10,20 @@
 #include <iostream>
 
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/Surface.hpp"
+
+/* Supply native deposition followed by smoothing passes to Fill consumers.
+   Each pass resolves density, flow distribution and overlap independently,
+   then delegates geometry to its selected native filler. Generic owned groups
+   preserve pass order while retaining each pass's internal permissions.
+   Empty passes are omitted; the caller owns the completed nonempty result.
+
+       fill_surface_extrusion()
+           `-- perform_single_fill(): resolve one pass's recipe and domain
+               `-- fill_expolygon(): create the native filler and acquire output
+*/
 
 namespace Slic3r {
 
@@ -25,14 +36,13 @@ namespace Slic3r {
         return polylines_out;
     }
 
-    /// @idx: the index of the step (0 = first step, 1 = second step, ...) The first lay down the volume and the others smoothen the surface.
-    void FillSmooth::perform_single_fill(const int idx, ExtrusionEntityCollection &eecroot, const Surface &srf_source,
+    void FillSmooth::perform_single_fill(const int idx, ExtrusionEntity &eecroot, const Surface &srf_source,
         const FillParams &params) const {
         if (srf_source.expolygon.empty()) return;
         
         // Save into layer smoothing path.
-        ExtrusionEntityCollection *eec = new ExtrusionEntityCollection();
-        eec->set_can_sort_reverse(!params.monotonic, !params.monotonic);
+        ExtrusionEntityUPtr eec = std::make_unique<ExtrusionEntity>(
+            ExtrusionEntity::Children{}, !params.monotonic, !params.monotonic, false);
         FillParams params_modifided = params;
         if (params.config != NULL && idx > 0) params_modifided.density /= (float)params.config->fill_smooth_width.get_effective_value(1);
         else if (params.config != NULL && idx == 0) params_modifided.density *= 1;
@@ -64,11 +74,11 @@ namespace Slic3r {
             }
         }
         
-        if (eec->entities().empty()) delete eec;
-        else eecroot.append(ExtrusionEntitiesPtr{ eec });
+        if (eec->child_count() != 0)
+            eecroot.append_child(std::move(eec));
     }
     
-    void FillSmooth::fill_expolygon(const int idx, ExtrusionEntityCollection &eec, const Surface &srf_to_fill, 
+    void FillSmooth::fill_expolygon(const int idx, ExtrusionEntity &eec, const Surface &srf_to_fill,
         const FillParams &params_init) const {
         
         FillParams params = params_init;
@@ -149,9 +159,7 @@ namespace Slic3r {
         coordf_t init_spacing = this->get_spacing();
 
         //create root node
-        ExtrusionEntityCollection *eecroot = new ExtrusionEntityCollection();
-        //you don't want to sort the extrusions: big infill first, small second
-        eecroot->set_can_sort_reverse(false, false);
+        ExtrusionEntityUPtr eecroot = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children{}, false, false, false);
 
         // first infill
         FillParams first_pass_params = params;
@@ -173,13 +181,12 @@ namespace Slic3r {
             perform_single_fill(2, *eecroot, *surface, monotonic_params);
         }
         
-        if (!eecroot->entities().empty()) {
+        if (eecroot->child_count() != 0) {
 #ifdef _DEBUGINFO
             LoopAssertVisitor().traverse(*eecroot);
 #endif
-            out.push_back(eecroot);
-        } else {
-            delete eecroot;
+            out.push_back(eecroot.get());
+            eecroot.release();
         }
     }
 

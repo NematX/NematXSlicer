@@ -25,12 +25,45 @@ The gyroid pattern is the reference INFILL_PATTERN plugin implemented with the
 public plugin API only. These tests exercise STEP_INFILL directly: they build a
 sliced cube, run perimeter and surface generation, then run the infill step with
 only the plugins it needs.
+
+One case checks that gyroid is registered as an INFILL_PATTERN provider. The
+generation case uses ScopedActivePlugins to select the required perimeter,
+surface, infill-generator and gyroid plugins, restoring the previous selection
+when the scope ends. It inspects the published INFILLS buckets after STEP_INFILL
+returns and requires more than one item under count_infill_paths()'s shallow
+counting convention; it does not compare gyroid paths with a geometry reference.
+
+The two cases run independently:
+
+    Registration case
+    |-- ensure_plugin_test_runtime_initialized()
+    `-- get_plugin("gyroid") and check its INFILL_PATTERN step
+
+    Generation case
+    |-- prepare_cube_print() with gyroid at 20% density and no solid top/bottom
+    |-- ScopedActivePlugins selects only the required plugins
+    |-- run_until_infill()
+    |   |-- clear and run StepGeneratePerimeter
+    |   |-- clear and run StepSurfaceGeneration
+    |   `-- clear and run StepGenerateInfill
+    |       |-- discover recipes and initialize the used pattern
+    |       `-- generate gyroid output and publish it through host callbacks
+    |-- count_infill_paths() after return
+    |   `-- visit objects, layers, islands and region-island INFILLS buckets
+    |       `-- return the shallow count of entities and direct group children
+    `-- require that count to be greater than one
 */
 
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
 
 namespace {
+
+// Count one path per ungrouped entity and the direct children of each logical group.
+// Do not recurse into nested groups: this measures shallow published output, not
+// the total number of printable leaf paths. The gyroid generation test requires
+// more than one counted item; it does not use this count to compare path geometry.
+size_t count_infill_paths(const Print &print);
 
 // Local copy of the perimeter test scope helper so the infill test can restrict
 // the active plugin set without touching the shared helper.
@@ -94,8 +127,7 @@ size_t count_infill_paths(const Print &print)
                     if (!region_island.has_extrusion(LayerRegionIsland::INFILLS))
                         continue;
                     for (const ExtrusionEntity *entity : region_island.extrusion(LayerRegionIsland::INFILLS).entities())
-                        paths += entity->is_collection() ?
-                            static_cast<const ExtrusionEntityCollection *>(entity)->entities().size() : 1;
+                        paths += entity->is_collection() ? entity->child_count() : 1;
                 }
     return paths;
 }

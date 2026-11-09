@@ -14,8 +14,9 @@
    scopes remain whole, so descendants keep inherited metadata. Source handles
    stay valid but become empty after transfer. This is not canonical plan ingress;
    native producer types and their child handles need not be replaced here.
-   The caller exclusively owns both distinct trees and provides a collection
-   destination. Destination capacity is reserved before source consumption.
+   The caller exclusively owns both distinct trees and provides a
+   destination with Children storage, whether generic or a compatibility shell.
+   Destination capacity is reserved before source consumption.
 */
 
 namespace Slic3r {

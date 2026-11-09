@@ -7,6 +7,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "ExtrusionEntity.hpp"
+#include "ExtrusionGeometryUnits.hpp"
 
 #include <cmath>
 #include <iterator>
@@ -18,7 +19,6 @@
 #include "Exception.hpp"
 #include "ExPolygon.hpp"
 #include "Extruder.hpp"
-#include "ExtrusionEntityCollection.hpp"
 #include "ExtrusionEntityVisitors.hpp"
 #include "Flow.hpp"
 
@@ -64,6 +64,17 @@
        clone_canonical()
            |-- copy a local ArcPolyline, or recursively copy owned children
            `-- construct a base node with copied properties and owned resources
+
+   Path factories append generic leaves with direct attributes. Closed paths are
+   owned by fixed rotatable ring parents without direct attributes. Copy overloads
+   retain source geometry; consuming overloads clear their source vectors after
+   processing and retain each overload's closure and winding rules. Allocation
+   failure can leave an appended prefix and partly consumed source geometry.
+
+       extrusion_entities_append_paths() / extrusion_entities_append_loops()
+       extrusion_entities_append_loops_and_paths()
+           `-- make_extrusion_path() [attributed leaf, optional ring parent]
+       consuming polygon overload -> extrusion_geometry_area() [normalize winding]
 */
 
 namespace Slic3r {
@@ -84,6 +95,10 @@ static_assert(std::is_nothrow_move_assignable<ExtrusionPropertyContainer>::value
               "Ordered extrusion publication requires non-throwing property moves.");
 
 namespace {
+
+// Create a generic geometric leaf, optionally owned by a fixed rotatable ring without direct attributes.
+ExtrusionEntityUPtr make_extrusion_path(ArcPolyline &&polyline, const ExtrusionAttributes &attributes,
+                                       bool can_reverse, bool closed);
 
 struct EffectiveExtrusionProperty
 {
@@ -234,6 +249,82 @@ bool simplify_extrusion_tree_recursive(ExtrusionEntity &root,
     }
 
     return changed;
+}
+
+} // namespace
+
+void extrusion_entities_append_paths(ExtrusionEntity &dst, Polylines &polylines, ExtrusionRole role,
+                                      double mm3_per_mm, float width, float height, bool can_reverse)
+{
+    const ExtrusionAttributes attributes(role, ExtrusionFlow(mm3_per_mm, width, height));
+    for (const Polyline &polyline : polylines)
+        if (polyline.is_valid())
+            dst.append_child(make_extrusion_path(ArcPolyline(polyline), attributes, can_reverse,
+                                                polyline.back() == polyline.front()));
+}
+
+void extrusion_entities_append_paths(ExtrusionEntity &dst, Polylines &&polylines,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse)
+{
+    for (Polyline &polyline : polylines)
+        if (polyline.is_valid()) {
+            const bool closed = polyline.back() == polyline.front();
+            dst.append_child(make_extrusion_path(ArcPolyline(std::move(polyline)), path_attr, can_reverse, closed));
+        }
+    polylines.clear();
+}
+
+void extrusion_entities_append_loops(ExtrusionEntity &dst, Polygons &loops,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse)
+{
+    for (const Polygon &polygon : loops)
+        if (polygon.size() >= 3 && polygon.is_valid()) {
+            ArcPolyline polyline;
+            polyline.append(polygon.points);
+            polyline.append(polyline.front());
+            dst.append_child(make_extrusion_path(std::move(polyline), path_attr, can_reverse, true));
+        }
+}
+
+void extrusion_entities_append_loops(ExtrusionEntity &dst, Polygons &&loops,
+                                      ExtrusionAttributes &&path_attr, bool can_reverse)
+{
+    for (Polygon &polygon : loops)
+        if (polygon.size() >= 3 && polygon.is_valid()) {
+            ArcPolyline polyline;
+            polyline.append(std::move(polygon.points));
+            polyline.append(polyline.front());
+            ExtrusionEntityUPtr loop = make_extrusion_path(std::move(polyline), path_attr, can_reverse, true);
+            if (!(extrusion_geometry_area(*loop) > 0))
+                loop->reverse();
+            dst.append_child(std::move(loop));
+        }
+    loops.clear();
+}
+
+void extrusion_entities_append_loops_and_paths(ExtrusionEntity &dst, Polylines &&polylines,
+                                               ExtrusionAttributes &&path_attr, bool can_reverse)
+{
+    for (Polyline &polyline : polylines)
+        if (polyline.is_valid()) {
+            const bool closed = polyline.is_closed();
+            dst.append_child(make_extrusion_path(ArcPolyline(std::move(polyline)), path_attr, can_reverse, closed));
+        }
+    polylines.clear();
+}
+
+namespace {
+
+ExtrusionEntityUPtr make_extrusion_path(ArcPolyline &&polyline, const ExtrusionAttributes &attributes,
+                                       bool can_reverse, bool closed)
+{
+    ExtrusionEntityUPtr leaf = std::make_unique<ExtrusionEntity>(can_reverse, std::move(polyline));
+    leaf->add_property(attributes);
+    if (!closed)
+        return leaf;
+    ExtrusionEntity::Children children;
+    children.emplace_back(std::move(leaf));
+    return std::make_unique<ExtrusionEntity>(std::move(children), false, false, true);
 }
 
 } // namespace
@@ -889,32 +980,11 @@ const ExtrusionPropertyOverhang *ExtrusionPath::overhang_attributes() const {
     return this->get_property<ExtrusionPropertyOverhang>();
 }
 
-void ExtrusionPath::intersect_expolygons(const ExPolygons &collection, ExtrusionEntityCollection *retval) const
-{
-    this->_inflate_collection(intersection_pl(Polylines{this->polyline().to_polyline()}, collection), retval);
-}
-
-void ExtrusionPath::subtract_expolygons(const ExPolygons &collection, ExtrusionEntityCollection *retval) const
-{
-    this->_inflate_collection(diff_pl(Polylines{this->polyline().to_polyline()}, collection), retval);
-}
-
 void ExtrusionPath::clip_end(coordf_t distance) { this->polyline().clip_end(distance); }
 
 coordf_t ExtrusionPath::length() const
 {
     return this->has_polyline() ? this->polyline().length() : ExtrusionEntity::length();
-}
-
-// Append owned clipped paths with the source's properties and ordering permissions; allocation failures propagate.
-void ExtrusionPath::_inflate_collection(const Polylines &polylines, ExtrusionEntityCollection *collection) const
-{
-    ExtrusionEntitiesPtr to_add;
-    for (const Polyline &polyline : polylines) {
-        to_add.push_back(new ExtrusionPath(ArcPolyline{polyline}, this->attributes(), this->clone_properties(), this->can_reverse()));
-        to_add.back()->set_can_rotate(this->can_rotate());
-    }
-    collection->append(std::move(to_add));
 }
 
 void ExtrusionPath::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const
@@ -952,33 +1022,9 @@ void ExtrusionPath::polygons_covered_by_spacing(Polygons &out, const float spaci
     }
 }
 
-//note: don't suppport arc
 double ExtrusionLoop::area() const
 {
-    double a = 0;
-    for (const ExtrusionPath &path : this->paths()) {
-        assert(path.size() >= 2);
-        if (path.size() >= 2) {
-            if (path.polyline().has_arc()) {
-                Polyline poly = path.polyline().to_polyline();
-                Point prev = poly.front();
-                for (size_t idx = 1; idx < poly.size(); ++idx) {
-                    const Point &curr = poly[idx];
-                    a += cross2(prev.cast<double>(), curr.cast<double>());
-                    prev = curr;
-                }
-            } else {
-                // Assumming that the last point of one path segment is repeated at the start of the following path segment.
-                Point prev = path.polyline().front();
-                for (size_t idx = 1; idx < path.polyline().size(); ++idx) {
-                    const Point &curr = path.polyline().get_point(idx);
-                    a += cross2(prev.cast<double>(), curr.cast<double>());
-                    prev = curr;
-                }
-            }
-        }
-    }
-    return a * 0.5;
+    return extrusion_geometry_area(*this);
 }
 
 bool ExtrusionLoop::is_counter_clockwise() const {

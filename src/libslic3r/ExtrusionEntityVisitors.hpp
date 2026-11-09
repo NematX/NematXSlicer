@@ -291,7 +291,9 @@ public:
     void set_use_gap_fill(bool with_gap_fill = true) { _with_gap_fill = (with_gap_fill); }
     void set_flow_mult(double mult) { _flow_ratio = (mult); }
     void visit_leaf(const ExtrusionEntity &entity) override;
-    double get(const ExtrusionEntityCollection &coll);
+    // Add direct-attribute terminal volumes using the current gap-fill filter and flow multiplier.
+    // Borrow any stored root and return the running total without resetting prior contributions.
+    double get(const ExtrusionEntity &coll);
 };
 
 class ExtrusionModifyFlow : public ExtrusionTreeVisitor<false> {
@@ -299,7 +301,9 @@ class ExtrusionModifyFlow : public ExtrusionTreeVisitor<false> {
 public:
     ExtrusionModifyFlow(double flow_mult) : _flow_mult(flow_mult) {}
     void visit_leaf(ExtrusionEntity &entity) override;
-    void set(ExtrusionEntityCollection &coll);
+    // Borrow any mutable root and multiply direct terminal mm3_per_mm and width in place;
+    // leave height, geometry and tree structure unchanged. The caller excludes concurrent mutation.
+    void set(ExtrusionEntity &coll);
 };
 
 class CreateBoundingBoxVisitor : public ExtrusionTreeConstVisitor<false> {
@@ -327,7 +331,7 @@ FlatenEntities : public ExtrusionTreeConstVisitor<true> {
     bool preserve_ordering;
     size_t m_skip_depth = 0;
     std::vector<bool> m_publish_group_stack;
-    std::vector<ExtrusionEntityCollection*> m_output_stack;
+    std::vector<ExtrusionEntity*> m_output_stack;
     std::vector<std::unique_ptr<ExtrusionEntityCollection>> m_group_stack;
 
 public:
@@ -348,13 +352,17 @@ public:
         to_fill.set_can_rotate(pattern.can_rotate());
         m_output_stack.push_back(&to_fill);
     }
-    const ExtrusionEntityCollection &get() { return to_fill; };
-    ExtrusionEntityCollection& set() {
+    // Borrow the owned output without transferring it; the flattener must outlive the reference.
+    const ExtrusionEntity &get() { return to_fill; };
+    // Borrow the owned output for exclusive mutation; reacquire child views after changing it.
+    ExtrusionEntity& set() {
         return to_fill;
     };
+    // Rebuild borrowed source hierarchy and offer owned output for transfer from this expiring visitor.
     ExtrusionEntityCollection&& flatten(const ExtrusionEntity &to_flatten) &&;
     void enter_node(const ExtrusionEntity &entity) override;
     void visit_leaf(const ExtrusionEntity &entity) override;
+    // Adopt a completed grouping Collection after leaving its output frame; allocation failures propagate.
     void leave_node(const ExtrusionEntity &entity) override;
 };
 
