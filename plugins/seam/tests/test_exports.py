@@ -174,6 +174,9 @@ def main() -> int:
         library = 'plugin.dll' if os.name == 'nt' else 'plugin.dylib' if sys.platform == 'darwin' else 'plugin.so'
         assert (staged / 'nematx-seam' / library).is_file(), 'Missing standalone library; do not qualify the embedded fallback by accident'
         assert (staged / 'nematx-seam/version.ini').is_file(), 'Missing standalone ABI manifest'
+        manifest = (staged / 'nematx-seam/version.ini').read_text(encoding='utf-8')
+        required_volume = re.search(r'^slic3r_volume\.h\s*=\s*(\d+)\.(\d+)\s*$', manifest, re.MULTILINE)
+        assert required_volume and int(required_volume[1]) == 2 and int(required_volume[2]) >= 1, 'Manifest omits the Volume 2.1 contract used by the decorator'
         shutil.copytree(staged, data / 'plugins')
     env = dict(os.environ)
     key = 'PATH' if os.name == 'nt' else 'DYLD_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'

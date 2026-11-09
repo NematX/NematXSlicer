@@ -7,6 +7,8 @@
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+// The binary manifest is emitted here, including APIs used by the decorator's other translation unit.
+#include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 
 /*
 NematX seam provider registration and service composition
