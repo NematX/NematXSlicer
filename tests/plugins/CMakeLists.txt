@@ -310,6 +310,22 @@ endforeach()
 
 target_link_libraries(${_TEST_NAME}_tests test_common test_common_data libslic3r)
 
+# A fresh production runtime keeps packaged seam providers out of the shared test registry.
+if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/seam/tests/host_tests.cpp")
+    add_executable(nematx_seam_host_tests "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/seam/tests/host_tests.cpp")
+    target_link_libraries(nematx_seam_host_tests PRIVATE libslic3r)
+    set_target_properties(nematx_seam_host_tests PROPERTIES FOLDER "tests")
+    if(WIN32)
+        prusaslicer_copy_dlls(nematx_seam_host_tests)
+        set_target_properties(nematx_seam_host_tests PROPERTIES ENABLE_EXPORTS ON)
+    endif()
+    add_test(NAME nematx_seam_host COMMAND nematx_seam_host_tests
+        "${CMAKE_BINARY_DIR}/temp/seam-host-data"
+        "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+        "${CMAKE_SOURCE_DIR}/resources")
+    set_tests_properties(nematx_seam_host PROPERTIES LABELS "seam;plugin-e2e" TIMEOUT 30)
+endif()
+
 # Use a separate production plugin runtime for the independently maintained module's replay checks.
 if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/support_interface_perimeters/tests/host_tests.cpp")
     add_executable(nematx_support_interface_host_tests

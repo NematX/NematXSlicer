@@ -82,6 +82,10 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
         PLUGIN_IDS gcode.firmware.nematx gcode.reader.nematx)
     nematx_add_builtin_module(regional_fan
         SOURCES plugins/regional_fan/src/RegionalFan.cpp PLUGIN_IDS nematx_regional_fan)
+    # Constraint geometry is already provided by libslic3r; Cost remains a host service.
+    nematx_add_builtin_module(seam
+        SOURCES plugins/seam/src/InternalSeam.cpp plugins/seam/src/InternalSeamPlugin.cpp
+        PLUGIN_IDS nematx_seam)
     nematx_add_builtin_module(wipetower
         SOURCES plugins/wipetower/src/WipeTowerManager.cpp
             plugins/wipetower/src/WipeTowerLayout.cpp
