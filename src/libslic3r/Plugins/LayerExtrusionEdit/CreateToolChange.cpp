@@ -223,6 +223,7 @@ void append_tool_change_event(storage_handle *storage,
     // tool-group. append_before_move() then moves both text and Config buffers
     // into the PrintingPlan-owned event tree.
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     if (has_visible_text(script)) {
         StoredConfig arguments(storage);
         set_int_argument(arguments, "layer_num", layer_number);

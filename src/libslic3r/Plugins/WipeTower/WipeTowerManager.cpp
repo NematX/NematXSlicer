@@ -661,6 +661,7 @@ void append_visit_speed_command(storage_handle *storage, PrintingToolGroup tool,
                                 const c_extrusion_special_command code, const double value)
 {
     StoredExtrusionEntity command(storage);
+    command.set_can_rotate(false);
     command.get_or_add(EPropertySpecialCommand::key).set(code, value);
     command.disable_sort().disable_reverse();
     if (!tool.events().append_before_move(command.mutable_view()).valid())
@@ -720,6 +721,7 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Slic3r::Pr
             speed = std::max(speed, minimum->value);
     }
     StoredExtrusionEntity root(storage);
+    root.set_can_rotate(false);
     const Slic3r::Polygon rectangle({Slic3r::Point::new_scale(0., 0.), Slic3r::Point::new_scale(tower.footprint.width, 0.),
         Slic3r::Point::new_scale(tower.footprint.width, layer.depth), Slic3r::Point::new_scale(0., layer.depth)});
     Slic3r::Polygon envelope = rectangle;

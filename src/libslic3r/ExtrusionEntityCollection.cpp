@@ -10,7 +10,9 @@
 #include "ExtrusionEntityCollection.hpp"
 
 /* Const pointer-view access serializes cache validation and rebuilding with a scope-owned flag guard. Owned children remain
-   immutable during concurrent reads; mutators retain the caller's exclusive-access requirement. */
+   immutable during concurrent reads; mutators retain the caller's exclusive-access requirement.
+   reverse() inverts an entire caller-authorized unit, including fixed children
+   and their command phases, then clears the borrowed pointer-order cache. */
 
 #include <algorithm>
 #include <thread>
@@ -129,11 +131,13 @@ void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
     src_children.clear();
 }
 
+// Exchange owned content, identity and ordering permissions, invalidating both borrowed pointer caches without allocation.
 void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
     std::swap(this->m_content, c.m_content);
     std::swap(this->m_can_sort, c.m_can_sort);
     std::swap(this->m_can_reverse, c.m_can_reverse);
+    std::swap(this->m_can_rotate, c.m_can_rotate);
     std::swap(this->m_id, c.m_id);
     this->m_entities_cache.clear();
     c.m_entities_cache.clear();
@@ -182,14 +186,9 @@ ExtrusionEntityCollection::operator ExtrusionPaths() const
 
 void ExtrusionEntityCollection::reverse()
 {
-    for (ExtrusionEntityUPtr &ptr : this->children())
-    {
-        // Don't reverse it if it's a loop, as it doesn't change anything in terms of elements ordering
-        // and caller might rely on winding order
-        if (ptr->can_reverse() && !ptr->is_loop())
-            ptr->reverse();
-    }
-    std::reverse(this->children().begin(), this->children().end());
+    // Reverse the entire authorized unit without child vetoes or replacements,
+    // then invalidate the borrowed pointer-order cache.
+    ExtrusionEntity::reverse();
     this->m_entities_cache.clear();
 }
 

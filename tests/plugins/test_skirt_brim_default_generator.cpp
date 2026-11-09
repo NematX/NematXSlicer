@@ -8,6 +8,7 @@
 #include <sstream>
 #include <map>
 #include <set>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,8 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
+#include "libslic3r/Api/internal/PrintAccess.hpp"
+#include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
@@ -25,6 +28,7 @@
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry/ConvexHull.hpp"
+#include "libslic3r/ExtrusionGenerationWinding.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
@@ -46,6 +50,8 @@ Default skirt/brim generator tests
 
 These tests exercise STEP_SKIRT_BRIM and final placement of adhesion paths.
 They slice a cube, run the adhesion plugins and inspect auxiliary layers.
+Winding probes compare native, canonical and wrapped stored contours, retaining
+entry points, arc/Z data, command phases and independent ordering permissions.
 
 - STEP_SKIRT_BRIM is a non-exclusive chain, while brim and skirt sub-features
   are separate exclusive groups selected by plugin id.
@@ -385,6 +391,59 @@ void collect_diagnostic_brim_coverage(const ExtrusionEntity &entity, Polygons &c
     for (const ExtrusionEntityUPtr &child : entity.children())
         if (child)
             collect_diagnostic_brim_coverage(*child, coverage);
+}
+
+// Build two non-reversible curved halves with distinct endpoint Z values for winding checks.
+std::unique_ptr<ExtrusionLoop> winding_arc_loop();
+// Gather stored paths in traversal order without invoking legacy projection views.
+ArcPolyline stored_winding_geometry(const ExtrusionEntity &entity);
+// Compare every arc and endpoint Z value, including the closed contour's entry.
+void check_winding_geometry(const ArcPolyline &actual, const ArcPolyline &expected);
+
+std::unique_ptr<ExtrusionLoop> winding_arc_loop()
+{
+    std::unique_ptr<ExtrusionLoop> loop = std::make_unique<ExtrusionLoop>(elrSkirt);
+    for (const bool upper : {true, false}) {
+        ArcPolyline arc;
+        arc.append(upper ? Point(10000, 0) : Point(-10000, 0));
+        arc.append(Geometry::ArcWelder::Segment(upper ? Point(0, 10000) : Point(0, -10000),
+            10000.f, Geometry::ArcWelder::Orientation::CCW));
+        arc.append(Geometry::ArcWelder::Segment(upper ? Point(-10000, 0) : Point(10000, 0),
+            10000.f, Geometry::ArcWelder::Orientation::CCW));
+        arc.set_z_offset(0, upper ? 100 : 900);
+        arc.set_z_offset(1, upper ? 500 : 700);
+        arc.set_z_offset(2, upper ? 900 : 100);
+        std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(
+            ExtrusionAttributes(ExtrusionRole::Skirt, ExtrusionFlow(0.08, 0.4f, 0.2f)), false);
+        path->set_polyline(std::move(arc));
+        path->add_property(ExtrusionPropertySpeed(20.f));
+        loop->append_child(std::move(path));
+    }
+    return loop;
+}
+
+ArcPolyline stored_winding_geometry(const ExtrusionEntity &entity)
+{
+    if (const ArcPolyline *path = entity.polyline_or_null())
+        return *path;
+    ArcPolyline out;
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (child)
+            out.append(stored_winding_geometry(*child));
+    return out;
+}
+
+void check_winding_geometry(const ArcPolyline &actual, const ArcPolyline &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    CHECK(actual.has_z_offset() == expected.has_z_offset());
+    for (size_t index = 0; index < actual.size(); ++index) {
+        CHECK(actual.get_point(index) == expected.get_point(index));
+        CHECK(actual.get_arc(index).radius == expected.get_arc(index).radius);
+        CHECK(actual.get_arc(index).orientation == expected.get_arc(index).orientation);
+        if (expected.has_z_offset())
+            CHECK(actual.z_offset(index) == expected.z_offset(index));
+    }
 }
 
 } // namespace
@@ -1672,6 +1731,341 @@ TEST_CASE("Default skirt generator creates global skirt", "[plugins][skirt-brim]
     REQUIRE(prepared.print.objects().size() == 1);
     CHECK(prepared.print.objects().front().skirt().empty());
     CHECK(hull_area_mm2(prepared.print) > first_layer_slice_area_mm2(prepared.print));
+}
+
+TEST_CASE("Clockwise skirt normalization works with one or two nonreversible loops",
+          "[plugins][skirt-brim][source-winding][source-winding-reproduction]")
+{
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const bool per_object : {false, true}) {
+        for (const int skirts : {1, 2}) {
+            CAPTURE(per_object, skirts);
+            PreparedBrimPrint prepared;
+            DynamicPrintConfig config = skirt_test_config(skirts, 0, per_object);
+            config.set_deserialize_strict("perimeter_direction", "cw_ccw");
+            run_until_skirt_brim(prepared, config, false);
+            const PrintObject *owner = per_object ? &prepared.print.object(0) : prepared.print.auxiliary_object();
+            REQUIRE(owner != nullptr);
+            std::vector<const ExtrusionEntity *> leaves;
+            const auto collect = [&leaves](auto &&self, const ExtrusionEntity &entity) -> void {
+                if (entity.polyline_or_null() != nullptr) {
+                    leaves.push_back(&entity);
+                    return;
+                }
+                for (const ExtrusionEntityUPtr &child : entity.children())
+                    if (child)
+                        self(self, *child);
+            };
+            for (const Layer &layer : owner->auxiliary_layers()) {
+                if (!LayerAdhesionProperty::layer_is_normal_skirt(layer))
+                    continue;
+                for (const LayerSliceIsland &island : layer.islands())
+                    for (const LayerRegionIsland &region : island.regions_islands())
+                        if (region.has_extrusion(LayerRegionIsland::PERIMETERS))
+                            collect(collect, region.extrusion(LayerRegionIsland::PERIMETERS));
+            }
+            REQUIRE(leaves.size() == size_t(skirts));
+            std::vector<ExtrusionEntityUPtr> snapshots;
+            for (const ExtrusionEntity *leaf : leaves) {
+                REQUIRE(leaf->polyline_ref().front() == leaf->polyline_ref().back());
+                CHECK(Polygon(leaf->polyline_ref().to_polyline().points).is_clockwise());
+                CHECK_FALSE(leaf->can_reverse());
+                snapshots.push_back(leaf->clone_canonical());
+            }
+            ApiInternal::PrintAccess::normalize_skirt_brim_direction(prepared.print);
+            for (size_t index = 0; index < leaves.size(); ++index) {
+                const ExtrusionEntity &leaf = *leaves[index];
+                const ExtrusionEntity &snapshot = *snapshots[index];
+                CHECK(leaf.get_id() == snapshot.get_id());
+                CHECK(leaf.polyline_ref().front() == snapshot.polyline_ref().front());
+                CHECK(Polygon(leaf.polyline_ref().to_polyline().points).is_clockwise());
+                CHECK(leaf.can_sort() == snapshot.can_sort());
+                CHECK(leaf.can_reverse() == snapshot.can_reverse());
+                CHECK(leaf.can_rotate() == snapshot.can_rotate());
+                CHECK(Access::same_property_payload(leaf, EXTRUSION_PROPERTY_TYPE_ATTRIBUTES, snapshot));
+                CHECK(Access::same_property_payload(leaf, EXTRUSION_PROPERTY_TYPE_PERIMETER, snapshot));
+                CHECK(leaf.polyline_ref().to_polyline().points == snapshot.polyline_ref().to_polyline().points);
+            }
+        }
+    }
+}
+
+TEST_CASE("PrintAccess winding treats stored brim contours equally without changing ordering permissions",
+          "[plugins][skirt-brim][source-winding]")
+{
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const std::string direction : {"cw_ccw", "cw_cw", "ccw_cw", "ccw_ccw"}) {
+        for (const std::string form : {"local", "native", "canonical", "collection", "event-wrapper"}) {
+            CAPTURE(direction, form);
+            PreparedBrimPrint prepared;
+            DynamicPrintConfig config = brim_test_config(true, true);
+            config.set_deserialize_strict("perimeter_direction", direction);
+            run_until_skirt_brim(prepared, config, false);
+            const std::vector<const Layer *> layers = object_brim_auxiliary_layers(prepared.print.object(0));
+            REQUIRE(layers.size() == 1);
+            Layer &layer = const_cast<Layer &>(*layers.front());
+            REQUIRE_FALSE(layer.islands().empty());
+            REQUIRE_FALSE(layer.island(0).regions_islands().empty());
+            ExtrusionEntityCollection &bucket = layer.island(0).regions_island(0).mutable_extrusion(LayerRegionIsland::PERIMETERS);
+            bucket.clear();
+            std::unique_ptr<ExtrusionLoop> source = winding_arc_loop();
+            const ArcPolyline original = stored_winding_geometry(*source);
+            std::unique_ptr<ExtrusionLoop> expected_loop = std::make_unique<ExtrusionLoop>(*source);
+            const bool clockwise = direction.rfind("cw_", 0) == 0;
+            if (clockwise)
+                expected_loop->reverse(); // Existing generation behavior is the oracle.
+            const ArcPolyline expected = stored_winding_geometry(*expected_loop);
+            ExtrusionEntityUPtr root;
+            if (form == "local") {
+                root = std::make_unique<ExtrusionEntity>(false, original);
+                root->add_property(ExtrusionAttributes(ExtrusionRole::Skirt, ExtrusionFlow(0.08, 0.4f, 0.2f)));
+            } else if (form == "native") {
+                root.reset(source->clone());
+            } else if (form == "canonical") {
+                root = source->clone_canonical();
+            } else if (form == "collection") {
+                std::unique_ptr<ExtrusionEntityCollection> collection = std::make_unique<ExtrusionEntityCollection>();
+                collection->set_can_sort_reverse(false, false);
+                collection->append_child(ExtrusionEntityUPtr(source->clone()));
+                (void)collection->entities(); // Exercise a primed legacy pointer cache.
+                root = std::move(collection);
+            } else {
+                root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+                root->set_can_rotate(false);
+                ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+                event->add_property(ExtrusionPropertyCustomGcodeText("M117 unmoved phase"));
+                root->append_child(std::move(event));
+                root->append_child(source->clone_canonical());
+            }
+            const ExtrusionEntity *identity = root.get();
+            const ExtrusionEntity *event = form == "event-wrapper" ? &root->child(0) : nullptr;
+            const size_t id = root->get_id();
+            const bool sortable = root->can_sort(), reversible = root->can_reverse(), rotatable = root->can_rotate();
+            const ExtrusionEntityUPtr before = root->clone_canonical();
+            bucket.append(std::move(root));
+            // A real non-adhesion object layer is outside this consumer's scope.
+            Layer &ordinary = prepared.print.object(0).layers().front();
+            REQUIRE_FALSE(ordinary.islands().empty());
+            LayerSliceIsland &ordinary_island = ordinary.island(0);
+            // Slicing alone has not produced extrusion role buckets yet. Build
+            // the non-adhesion witness explicitly instead of indexing a missing one.
+            ExtrusionEntityCollection &untouched = ordinary_island.get_or_add_region_island(ordinary_island.regions(), 0)
+                .mutable_extrusion(LayerRegionIsland::PERIMETERS);
+            untouched.clear();
+            untouched.append(source->clone_canonical());
+            ApiInternal::PrintAccess::normalize_skirt_brim_direction(prepared.print);
+            REQUIRE(bucket.child_count() == 1);
+            const ExtrusionEntity &actual = bucket.child(0);
+            CHECK(&actual == identity);
+            CHECK(actual.get_id() == id);
+            CHECK(actual.can_sort() == sortable);
+            CHECK(actual.can_reverse() == reversible);
+            CHECK(actual.can_rotate() == rotatable);
+            check_winding_geometry(stored_winding_geometry(actual), expected);
+            check_winding_geometry(stored_winding_geometry(*source), original);
+            check_winding_geometry(stored_winding_geometry(untouched), original);
+            CHECK(Access::property_count(actual) == Access::property_count(*before));
+            for (const extrusion_property_type type : {EXTRUSION_PROPERTY_TYPE_PERIMETER, EXTRUSION_PROPERTY_TYPE_ATTRIBUTES}) {
+                const bool present = Access::has_property(actual, type);
+                CHECK(present == Access::has_property(*before, type));
+                if (present)
+                    CHECK(Access::same_property_payload(actual, type, *before));
+            }
+            if (event != nullptr) {
+                CHECK(&actual.child(0) == event);
+                REQUIRE(event->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+                CHECK(event->custom_gcode_string(*event->get_property<ExtrusionPropertyCustomGcode>()) == "M117 unmoved phase");
+            }
+            ApiInternal::PrintAccess::normalize_skirt_brim_direction(prepared.print);
+            check_winding_geometry(stored_winding_geometry(actual), expected);
+        }
+    }
+}
+
+TEST_CASE("Generation winding reports fragmented event contours without moving or consuming them",
+          "[plugins][skirt-brim][source-winding]")
+{
+    for (const bool one_shot : {false, true}) {
+        CAPTURE(one_shot);
+        std::unique_ptr<ExtrusionLoop> source = winding_arc_loop();
+        const ExtrusionEntity &view = *source;
+        ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+        root->append_child(ExtrusionEntityUPtr(view.child(0).clone()));
+        if (one_shot) {
+            REQUIRE(ApiInternal::ExtrusionPropertyAccess::get_or_add_property_data_mutable(root->child(0),
+                EXTRUSION_PROPERTY_TYPE_HEATER, sizeof(c_extrusion_property_heater), alignof(c_extrusion_property_heater)) != nullptr);
+        } else {
+            ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+            event->add_property(ExtrusionPropertyCustomGcodeText("M117 fragmented phase"));
+            root->append_child(std::move(event));
+        }
+        root->append_child(ExtrusionEntityUPtr(view.child(1).clone()));
+        const ArcPolyline before = stored_winding_geometry(*root);
+        const ExtrusionEntityUPtr snapshot = root->clone_canonical();
+        std::vector<const ExtrusionEntity *> children;
+        for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(*root).children())
+            children.push_back(child.get());
+        const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(result.reversed_contours == 0);
+        CHECK(result.deferred_contours == 1);
+        REQUIRE(root->child_count() == children.size());
+        for (size_t index = 0; index < children.size(); ++index) {
+            CHECK(&root->child(index) == children[index]);
+            CHECK(root->child(index).get_id() == snapshot->child(index).get_id());
+            CHECK(root->child(index).can_sort() == snapshot->child(index).can_sort());
+            CHECK(root->child(index).can_reverse() == snapshot->child(index).can_reverse());
+            CHECK(root->child(index).can_rotate() == snapshot->child(index).can_rotate());
+            using Access = ApiInternal::ExtrusionPropertyAccess;
+            CHECK(Access::property_count(root->child(index)) == Access::property_count(snapshot->child(index)));
+            for (size_t property = 0; property < Access::property_count(snapshot->child(index)); ++property)
+                CHECK(Access::same_property_payload(root->child(index),
+                    Access::property_type_at(snapshot->child(index), property), snapshot->child(index)));
+        }
+        check_winding_geometry(stored_winding_geometry(*root), before);
+        CHECK(root->can_rotate());
+        if (!one_shot) {
+            const ExtrusionPropertyCustomGcode *property = root->child(1).get_property<ExtrusionPropertyCustomGcode>();
+            REQUIRE(property != nullptr);
+            CHECK(root->child(1).custom_gcode_string(*property) == "M117 fragmented phase");
+        }
+    }
+    ExtrusionNop positioned;
+    positioned.set_can_sort_reverse(false, false);
+    positioned.position = Point(1234, 5678);
+    positioned.set_polyline(stored_winding_geometry(*winding_arc_loop()));
+    const ArcPolyline before = positioned.polyline_ref();
+    const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(positioned, true);
+    CHECK(result.reversed_contours == 1);
+    CHECK(result.deferred_contours == 0);
+    CHECK(positioned.position == Point(1234, 5678));
+    ArcPolyline expected = before;
+    expected.reverse();
+    check_winding_geometry(positioned.polyline_ref(), expected);
+    ExtrusionEntity open(false, ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}}));
+    const ArcPolyline unchanged = open.polyline_ref();
+    const ExtrusionTreeTransforms::GenerationWindingResult no_loop = ExtrusionTreeTransforms::normalize_generation_winding(open, true);
+    CHECK(no_loop.reversed_contours == 0);
+    CHECK(no_loop.deferred_contours == 0);
+    check_winding_geometry(open.polyline_ref(), unchanged);
+}
+
+TEST_CASE("Generation winding reverses authorized contours together with their command phases",
+          "[plugins][skirt-brim][source-winding][tree-reverse]")
+{
+    for (const bool wrapped : {false, true}) {
+        CAPTURE(wrapped);
+        std::unique_ptr<ExtrusionLoop> source = winding_arc_loop();
+        std::unique_ptr<ExtrusionNop> contour = std::make_unique<ExtrusionNop>();
+        contour->position = Point(1234, 5678);
+        contour->set_can_sort_reverse(false, true);
+        contour->set_can_rotate(false);
+        ExtrusionEntityUPtr before_event = std::make_unique<ExtrusionEntity>(false);
+        before_event->add_property(ExtrusionPropertyCustomGcodeText("M117 contour before"));
+        ExtrusionEntity *before = before_event.get();
+        contour->append_child(std::move(before_event));
+        contour->append_child(ExtrusionEntityUPtr(source->child(0).clone()));
+        ExtrusionEntityUPtr after_event = std::make_unique<ExtrusionEntity>(false);
+        after_event->add_property(ExtrusionPropertyCustomGcodeText("M117 contour after"));
+        ExtrusionEntity *after = after_event.get();
+        contour->append_child(std::move(after_event));
+        contour->append_child(ExtrusionEntityUPtr(source->child(1).clone()));
+        contour->set_can_sort_reverse(false, true);
+        REQUIRE(contour->ExtrusionEntity::is_loop());
+        ExtrusionNop *target = contour.get();
+        ExtrusionEntityUPtr root;
+        const ExtrusionEntity *outer_event = nullptr;
+        if (wrapped) {
+            root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+            root->append_child(std::make_unique<ExtrusionEntity>(false));
+            outer_event = &root->child(0);
+            root->append_child(std::move(contour));
+        } else root = std::move(contour);
+        ArcPolyline expected = stored_winding_geometry(*root);
+        expected.reverse();
+        const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(result.reversed_contours == 1);
+        CHECK(result.deferred_contours == 0);
+        check_winding_geometry(stored_winding_geometry(*root), expected);
+        CHECK(&target->child(1) == after);
+        CHECK(&target->child(3) == before);
+        CHECK(target->position == Point(1234, 5678));
+        CHECK(target->can_reverse());
+        CHECK_FALSE(target->can_rotate());
+        CHECK(before->custom_gcode_string(*before->get_property<ExtrusionPropertyCustomGcode>()) == "M117 contour before");
+        CHECK(after->custom_gcode_string(*after->get_property<ExtrusionPropertyCustomGcode>()) == "M117 contour after");
+        if (wrapped) CHECK(&root->child(0) == outer_event);
+        const ExtrusionTreeTransforms::GenerationWindingResult again = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(again.reversed_contours == 0);
+        CHECK(again.deferred_contours == 0);
+        check_winding_geometry(stored_winding_geometry(*root), expected);
+    }
+}
+
+TEST_CASE("Generation winding keeps target one shots at their entry and uses exact stored closure",
+          "[plugins][skirt-brim][source-winding]")
+{
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const bool wrapped : {false, true}) {
+        CAPTURE(wrapped);
+        ExtrusionEntityUPtr geometry = std::make_unique<ExtrusionEntity>(false, stored_winding_geometry(*winding_arc_loop()));
+        geometry->set_can_rotate(false);
+        REQUIRE(Access::get_or_add_property_data_mutable(*geometry, EXTRUSION_PROPERTY_TYPE_HEATER,
+            sizeof(c_extrusion_property_heater), alignof(c_extrusion_property_heater)) != nullptr);
+        const ExtrusionEntityUPtr snapshot = geometry->clone_canonical();
+        ArcPolyline expected = geometry->polyline_ref();
+        expected.reverse();
+        ExtrusionEntity *target = geometry.get();
+        ExtrusionEntityUPtr root;
+        if (wrapped) {
+            root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+            root->set_can_rotate(false);
+            ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+            event->add_property(ExtrusionPropertyCustomGcodeText("M117 stationary target phase"));
+            root->append_child(std::move(event));
+            root->append_child(std::move(geometry));
+        } else {
+            root = std::move(geometry);
+        }
+        const ExtrusionEntity *event = wrapped ? &root->child(0) : nullptr;
+        const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(result.reversed_contours == 1);
+        CHECK(result.deferred_contours == 0);
+        CHECK(target->get_id() == snapshot->get_id());
+        CHECK_FALSE(target->can_rotate());
+        CHECK_FALSE(target->can_reverse());
+        CHECK(Access::same_property_payload(*target, EXTRUSION_PROPERTY_TYPE_HEATER, *snapshot));
+        check_winding_geometry(target->polyline_ref(), expected);
+        if (event != nullptr) {
+            CHECK(&root->child(0) == event);
+            REQUIRE(event->get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(event->custom_gcode_string(*event->get_property<ExtrusionPropertyCustomGcode>()) == "M117 stationary target phase");
+        }
+    }
+    std::unique_ptr<ExtrusionLoop> loop = winding_arc_loop();
+    ArcPolyline original = stored_winding_geometry(*loop);
+    ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Skirt}, false);
+    path.set_polyline(original);
+    ExtrusionMultiPath fixed(path);
+    REQUIRE_FALSE(fixed.is_loop());
+    REQUIRE(fixed.ExtrusionEntity::is_loop());
+    REQUIRE_FALSE(fixed.can_rotate());
+    const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(fixed, true);
+    CHECK(result.reversed_contours == 1);
+    CHECK(result.deferred_contours == 0);
+    CHECK_FALSE(fixed.can_rotate());
+    original.reverse();
+    check_winding_geometry(stored_winding_geometry(fixed), original);
+
+    ExtrusionPath near_path(ExtrusionAttributes{ExtrusionRole::Skirt}, false);
+    near_path.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {1, 0}}));
+    ExtrusionLoop near(near_path);
+    REQUIRE(near.is_loop());
+    REQUIRE_FALSE(near.ExtrusionEntity::is_loop());
+    const ArcPolyline before = stored_winding_geometry(near);
+    const ExtrusionTreeTransforms::GenerationWindingResult not_closed = ExtrusionTreeTransforms::normalize_generation_winding(near, true);
+    CHECK(not_closed.reversed_contours == 0);
+    CHECK(not_closed.deferred_contours == 0);
+    check_winding_geometry(stored_winding_geometry(near), before);
 }
 
 TEST_CASE("Default skirt generator can publish object-owned skirt", "[plugins][skirt-brim]")

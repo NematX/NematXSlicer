@@ -6254,6 +6254,7 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                     peri_entities.entities().front());
                 coll_child != nullptr) {
                 peri_entities.set_can_sort_reverse(coll_child->can_sort(), coll_child->can_reverse());
+                peri_entities.set_can_rotate(coll_child->can_rotate());
                 peri_entities.append_move_from(*coll_child);
                 peri_entities.remove(0);
             }

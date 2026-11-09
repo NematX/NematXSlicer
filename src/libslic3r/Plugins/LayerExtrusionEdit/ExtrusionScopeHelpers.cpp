@@ -292,11 +292,12 @@ OrderedExtrusionScope ensure_scope(
     return OrderedExtrusionScope(entity, key);
 }
 
-/* Preserve phase order and build a collection only after content exists. */
+/* Fix a borrowed phase's cyclic start and append an owned ordered event when needed; invalid views and allocation failures remain errors. */
 MutableExtrusionEntity append_phase_leaf(MutableExtrusionEntity phase)
 {
     if (!phase.valid())
         throw std::invalid_argument("An ordered event needs an existing scope phase.");
+    phase.set_can_rotate(false);
     if (phase.segment_count() == 0 && phase.child_count() == 0 &&
         phase.property_count() == 0)
         return phase;

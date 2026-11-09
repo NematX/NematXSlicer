@@ -15,6 +15,7 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
 #include "libslic3r/Layer.hpp"
@@ -37,6 +38,7 @@ The fixtures build already ordered PrintingPlan trees directly. The entry-state
 producer first publishes each layer boundary; the travel producer then runs in
 the real parallel host and must connect the leaves without consulting another
 worker's layer or changing their original printable properties.
+Fixture trees acquire canonical storage on entry to the plan, before validation.
 */
 
 namespace {
@@ -108,6 +110,7 @@ std::unique_ptr<ExtrusionPath> make_closed_arc_path(const Point &seam)
             ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true);
 }
 
+// Acquire canonical fixture content before publishing it to the plan.
 void append_extrusion(PrintingToolGroup &tool,
                       std::unique_ptr<ExtrusionEntity> root,
                       const LayerRegionIsland *region_island = nullptr,
@@ -116,7 +119,7 @@ void append_extrusion(PrintingToolGroup &tool,
     PrintingExtrusion extrusion;
     extrusion.region_island = region_island;
     extrusion.printing_catalog_id = printing_catalog_id;
-    extrusion.root = std::move(root);
+    extrusion.root = CanonicalExtrusion::acquire(*root);
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
     tool.extrusions.push_back(std::move(extrusion));
 }
@@ -537,8 +540,8 @@ TEST_CASE("Travel connects distinct scopes in one PrintingExtrusion",
                            scale_i(0.01), scale_i(0.01)));
     root->append(make_path(Point(scale_i(3.), 0), Point(scale_i(4.), 0),
                            scale_i(0.03), scale_i(0.03)));
-    ExtrusionEntity *const owner_root = root.get();
     append_extrusion(tool, std::move(root));
+    ExtrusionEntity *const owner_root = tool.extrusions.back().root.get();
 
     run_travel_plugins(print);
 

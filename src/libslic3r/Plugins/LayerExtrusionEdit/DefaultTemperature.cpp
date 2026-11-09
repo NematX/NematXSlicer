@@ -483,6 +483,7 @@ void append_heater_event(storage_handle *storage,
     if (storage == nullptr)
         throw std::invalid_argument("A temperature event needs plugin storage.");
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     EPropertyHeater &heater = event.get_or_add(EPropertyHeater::key);
     if (request.heater == HeaterKind::Tool)
         heater.set_tool(request.temperature, request.tool, request.wait);

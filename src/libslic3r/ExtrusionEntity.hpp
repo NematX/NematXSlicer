@@ -41,6 +41,17 @@
    Example after a publication caller has validated its destination and donor:
        destination.swap_content(prepared);
    This single nonthrowing exchange is not itself a multi-root transaction.
+
+   Base continuity and endpoint queries follow stored content, even after a
+   legacy path or loop has acquired generic children. Continuity uses exact XY
+   joins and ignores empty geometry, not event ordering semantics. Borrowed
+   endpoint references remain valid only until the owning content changes.
+
+   clone_canonical() returns an independent owned tree of base nodes. Commands
+   are represented by properties and need no local polyline or legacy position.
+   It copies permissions, identities and properties without entering legacy views:
+       ExtrusionEntityUPtr independent = source.clone_canonical();
+   The source is unchanged, and allocation failures publish no partial result.
 */
 
 namespace Slic3r {
@@ -87,10 +98,11 @@ protected:
     static Point NOT_A_POINT;
 
     uint32_t m_id; // for travel map
-    // even if no_sort, allow to reverse() us (and our entities if they allow it, but they should) 
+    // Reversing an authorized unit reverses its complete content, including fixed descendants.
     bool m_can_reverse; //TODO: use (int64_t) m_id sign to embed this property, currently not an issue as 32+8 <= 64
     Content m_content;
     bool    m_can_sort = false;
+    bool    m_can_rotate = true;
 
 public:
     explicit ExtrusionEntity(bool can_reverse)
@@ -105,38 +117,49 @@ public:
         : ExtrusionPropertyContainer(std::move(eprop)), m_id(++id_generator), m_can_reverse(can_reverse) {}
     ExtrusionEntity(ExtrusionPropertyUPtrs &&eprops, bool can_reverse)
         : ExtrusionPropertyContainer(std::move(eprops)), m_id(++id_generator), m_can_reverse(can_reverse) {}
+    // Deep-copy content and properties while preserving identity and all ordering permissions.
     ExtrusionEntity(const ExtrusionEntity &rhs)
         : ExtrusionPropertyContainer(rhs)
         , m_id(rhs.m_id)
         , m_can_reverse(rhs.m_can_reverse)
         , m_content(clone_content(rhs.m_content))
-        , m_can_sort(rhs.m_can_sort) {}
+        , m_can_sort(rhs.m_can_sort)
+        , m_can_rotate(rhs.m_can_rotate) {}
+    // Transfer content and properties while preserving identity and all ordering permissions.
     ExtrusionEntity(ExtrusionEntity &&rhs)
         : ExtrusionPropertyContainer(std::move(rhs))
         , m_id(rhs.m_id)
         , m_can_reverse(rhs.m_can_reverse)
         , m_content(std::move(rhs.m_content))
-        , m_can_sort(rhs.m_can_sort) {}
+        , m_can_sort(rhs.m_can_sort)
+        , m_can_rotate(rhs.m_can_rotate) {}
     
+    // Replace state with an independent copy, including the source rotation permission.
     ExtrusionEntity &operator=(const ExtrusionEntity &rhs) {
         this->m_id = rhs.m_id;
         this->m_can_reverse = rhs.m_can_reverse;
         this->m_content = clone_content(rhs.m_content);
         this->m_can_sort = rhs.m_can_sort;
+        this->m_can_rotate = rhs.m_can_rotate;
         ExtrusionPropertyContainer::operator=(rhs);
         return *this;
     }
+    // Replace state by transfer, including the source rotation permission.
     ExtrusionEntity &operator=(ExtrusionEntity &&rhs) {
         this->m_id = rhs.m_id;
         this->m_can_reverse = rhs.m_can_reverse;
         this->m_content = std::move(rhs.m_content);
         this->m_can_sort = rhs.m_can_sort;
+        this->m_can_rotate = rhs.m_can_rotate;
         ExtrusionPropertyContainer::operator=(std::move(rhs));
         return *this;
     }
 
 protected:
+    // Copy identity, raw permissions and owned properties into already independent content.
+    ExtrusionEntity(const ExtrusionEntity &source, Content &&content);
     static Content clone_content(const Content &content);
+    // Materialize children while carrying local geometry's rotation permission into its preserved child.
     Children& ensure_children();
 
 public:
@@ -146,13 +169,20 @@ public:
     bool has_polyline() const;
     bool is_leaf() const;
     bool is_nop() const;
+    // Check stored child order for exact XY continuity, ignoring geometrically empty children.
     bool is_continuous() const;
+
+    // Move the stored geometry of this tree, and the position of a positioned command, by shift.
+    // Each point moves once; handles, properties, arcs, Z offsets and permissions are kept.
+    void translate(const Point &shift);
 
     const ArcPolyline* polyline_or_null() const;
     ArcPolyline* polyline_or_null();
     const ArcPolyline& polyline_ref() const;
     ArcPolyline& polyline_ref();
+    // Copy local geometry without changing cyclic-start permission.
     void set_polyline(const ArcPolyline &polyline);
+    // Transfer local geometry without changing cyclic-start permission.
     void set_polyline(ArcPolyline &&polyline);
 
     const Children& children() const;
@@ -188,17 +218,30 @@ public:
 
     virtual ExtrusionRole role() const;
     virtual bool has_role(ExtrusionRole test_role) const;
+    // Classify non-leaf content that does not form an ordered continuous sequence.
     virtual bool is_collection() const;
+    // Base implementation checks nonempty continuous XY closure; Loop and MultiEntity overrides return true and false respectively.
     virtual bool is_loop() const;
     bool can_sort() const { return m_can_sort && this->is_collection(); }
     virtual bool can_reverse() const { return this->can_sort() || m_can_reverse; }
+    // Read the independent permission to change a closed contour's cyclic starting point.
+    bool can_rotate() const { return m_can_rotate; }
+    // Set cyclic-start permission without changing geometry, sorting or reversal permissions.
+    void set_can_rotate(bool enabled) { m_can_rotate = enabled; }
     void set_can_sort_reverse(bool can_sort, bool can_reverse);
     virtual ExtrusionEntity* clone() const { return new ExtrusionEntity(*this); }
+    // Deep-copy stored content into exact base nodes; commands use properties and no local polyline.
+    // The source is unchanged; allocation failures propagate before any copy is published.
+    ExtrusionEntityUPtr clone_canonical() const;
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionEntity(std::move(*this)); }
     virtual ~ExtrusionEntity() = default;
+    // Reverse all stored paths and child order as one unit, without descendant permission vetoes.
+    // The caller chooses/authorizes the operation; properties, resources and handles stay on their nodes.
     virtual void reverse();
+    // Borrow the first stored XY point, skipping empty children, or the no-point sentinel.
     virtual const Point& first_point() const;
+    // Borrow the last stored XY point, skipping empty children, or the no-point sentinel.
     virtual const Point& last_point() const;
     // Returns an approximately middle point of a path, loop or an extrusion collection.
     // Used to get a sample point of an extrusion or extrusion collection, which is possibly deep inside its island.
@@ -219,6 +262,7 @@ public:
     virtual void   collect_points(Points &dst) const;
     virtual ArcPolylines as_polylines() const { ArcPolylines dst; this->collect_polylines(dst); return dst; }
     virtual coordf_t length() const;
+    // Check recursively whether base content contains no stored geometry points.
     virtual bool empty() const;
     virtual double total_volume() const;
     virtual void visit(ExtrusionVisitor &visitor);
@@ -234,9 +278,9 @@ Remove transparent structural collection children from an extrusion tree.
 The function keeps the current node in place and only deletes direct children
 that are plain collections carrying no state different from their parent. This
 is useful after plugin processing, where small wrapper collections are often
-created to group temporary output. Loops, continuous multipaths and leaf
-extrusions are intentionally left untouched because their structure carries
-printing semantics.
+created to group temporary output. Continuous sequences and leaf extrusions
+are left untouched; a discontinuous node can be a collection regardless of
+its dynamic type.
 */
 bool simplify_extrusion_tree(ExtrusionEntity &root);
 
@@ -271,7 +315,7 @@ public:
     ExtrusionEntity *clone() const override { return new ExtrusionNop(*this); }
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionNop(std::move(*this)); }
-    void reverse() override {}
+    void reverse() override { ExtrusionEntity::reverse(); }
     const Point &first_point() const override { return position; }
     const Point& last_point() const override { return position; }
     const Point& middle_point() const override { return position; }
@@ -378,12 +422,7 @@ public:
     // A structural plugin operation may replace this path's local polyline by
     // ordered path children while keeping the object's stable handle. Read and
     // traversal operations therefore delegate to ExtrusionEntity in that state.
-    void reverse() override {
-        if (this->has_polyline())
-            this->polyline().reverse();
-        else
-            ExtrusionEntity::reverse();
-    }
+    void reverse() override { ExtrusionEntity::reverse(); }
     void set_can_reverse(bool can_reverse) { this->m_can_reverse = can_reverse; }
     const Point& first_point() const override {
         return this->has_polyline() ? this->polyline().front() : ExtrusionEntity::first_point();
@@ -669,11 +708,14 @@ public:
 template <typename THING = ExtrusionEntity>
 class ExtrusionMultiEntity : public ExtrusionEntity {
 public:
-    ExtrusionMultiEntity(): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {};
+    // Create an ordered sequence whose starting point must not rotate.
+    ExtrusionMultiEntity(): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); };
     ExtrusionMultiEntity(const ExtrusionMultiEntity &rhs) : ExtrusionEntity(rhs) {}
     ExtrusionMultiEntity(ExtrusionMultiEntity &&rhs) : ExtrusionEntity(std::move(rhs)) {}
-    ExtrusionMultiEntity(const std::vector<THING> &paths) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->paths() = paths; };
-    ExtrusionMultiEntity(const THING &path): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->paths().push_back(path); }
+    // Copy paths into a fixed-start ordered sequence.
+    ExtrusionMultiEntity(const std::vector<THING> &paths) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); this->paths() = paths; };
+    // Copy one path into a fixed-start ordered sequence.
+    ExtrusionMultiEntity(const THING &path): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); this->paths().push_back(path); }
 
     ExtrusionMultiEntity &operator=(const ExtrusionMultiEntity &rhs) {
         ExtrusionEntity::operator=(rhs);
@@ -691,11 +733,7 @@ public:
     virtual const Point& first_point() const override { return this->paths().front().polyline().front(); }
     virtual const Point& last_point() const override { return this->paths().back().polyline().back(); }
 
-    virtual void reverse() override {
-        for (THING &entity : this->paths())
-            entity.reverse();
-        std::reverse(this->paths().begin(), this->paths().end());
-    }
+    virtual void reverse() override { ExtrusionEntity::reverse(); }
     ExtrusionRole role() const override
     {
         if (this->paths().empty())
@@ -806,26 +844,35 @@ class ExtrusionLoop : public ExtrusionEntity
 {
 public:
     //ExtrusionLoop(const ExtrusionLoop& rhs) : ExtrusionEntity(rhs), m_loop_role(rhs.m_loop_role) {}
-    ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_loop_role(role); }
+    // Create an empty loop with cyclic-start permission and the requested perimeter role.
+    ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(true); this->set_loop_role(role); }
+    // Copy a nonempty closed sequence and permit choosing its cyclic start.
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths() = paths;
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Transfer a nonempty closed sequence and permit choosing its cyclic start.
     ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths() = std::move(paths);
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Copy one closed path into a loop with cyclic-start permission.
     ExtrusionLoop(const ExtrusionPath &path, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths().push_back(path);
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Transfer one closed path into a loop with cyclic-start permission.
     ExtrusionLoop(ExtrusionPath &&path, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths().emplace_back(std::move(path));
         assert(!this->paths().empty());

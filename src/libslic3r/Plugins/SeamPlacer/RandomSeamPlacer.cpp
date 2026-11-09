@@ -45,11 +45,24 @@ constraints and temporary allocations before publication. The session then owns
 only result values and non-owning loop/region identities, which the host must keep
 alive. Queries are const cache lookups; adding loops or changing configuration or
 geometry requires a new session. The service adapter owns session destruction.
+
+Rotation eligibility also carries the surrounding sequence's seam restrictions.
+Adhesion loops are not random-seam sources: exclude skirt/brim roles, markers and
+source layers before drawing or selecting alignment references. Layer provenance
+matters because an adhesion tree may use an unmarked perimeter-bucket wrapper.
+
+    RandomSession::initialize()
+    |-- collect_loops(): retain eligible non-adhesion contours and assigned regions
+    |-- make_domain() -> random_seam(): classify geometry, then sample a seam
+    `-- align_loops(): align internal seams before publishing immutable results
+    RandomSession::place_seam(): look up the prepared identity without new draws
 */
 
 #include "RandomSeamPlacer.hpp"
 #include "SeamInitializationCancellation.hpp"
 #include "SeamPlacementConstraints.hpp"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/DataTreeProperties.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -60,6 +73,7 @@ geometry requires a new session. The service adapter owns session destruction.
 #include <map>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -138,7 +152,8 @@ void collect_loops(const ConstPrintingExtrusion &source, const ExtrusionEntity &
                    uint16_t object_instance_idx,
                    raw_extrusion_role role, uint16_t flags, const RegionFilter &filter,
                    std::vector<Loop> &loops,
-                   const plugin_run_context *run_context);
+                    const plugin_run_context *run_context,
+                    bool ancestors_allow_seams = true);
 /* Align each internal loop against immutable external random seams. */
 void align_loops(const SeamPlacementConstraints &constraints,
                  std::vector<Loop> &loops,
@@ -298,7 +313,12 @@ c_point random_seam(const SeamPlacementConstraints &constraints, const Loop &loo
         }
     }
     if (!loop.domain.vertices.empty()) return loop.domain.vertices[random_index(state,loop.domain.vertices.size())].point;
-    throw std::runtime_error("Random seam has no representable admissible point.");
+    const c_extrusion_property_perimeter *perimeter = static_cast<const c_extrusion_property_perimeter *>(
+        loop.entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    throw std::runtime_error("Random seam has no representable admissible point (curves=" +
+        std::to_string(loop.curves.size()) + ", object_layers=" +
+        std::to_string(loop.region.layer().object().layer_count()) + ", direct_perimeter_flags=" +
+        std::to_string(perimeter ? perimeter->perimeter_flags : 0) + ").");
 }
 
 Candidate nearest(const SeamPlacementConstraints &constraints, const Loop &loop,
@@ -489,23 +509,34 @@ void collect_loops(const ConstPrintingExtrusion &source, const ExtrusionEntity &
                    const uint16_t object_instance_idx,
                    raw_extrusion_role role, uint16_t flags, const RegionFilter &filter,
                    std::vector<Loop> &loops,
-                   const plugin_run_context *run_context)
+                    const plugin_run_context *run_context,
+                    const bool ancestors_allow_seams)
 {
     InitializationCancellation::check(run_context);
     const c_extrusion_property_attributes *attributes=static_cast<const c_extrusion_property_attributes *>(entity.property_data(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
     const c_extrusion_property_perimeter *perimeter=static_cast<const c_extrusion_property_perimeter *>(entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER));
     if (attributes!=nullptr) role=attributes->role;
     if (perimeter!=nullptr) flags=perimeter->perimeter_flags;
-    if (!entity.is_loop()) {
+    if (!(ancestors_allow_seams && entity.is_seam_unit())) {
         for (uint32_t i=0;i<entity.child_count();++i) {
             InitializationCancellation::check_periodic(run_context,i);
             collect_loops(source,entity.child(i),object_instance_idx,role,flags,
-                          filter,loops,run_context);
+                          filter,loops,run_context,
+                          Ordering::TreeOrderingGeometry::can_choose_child_seam(entity,entity.child(i),ancestors_allow_seams));
         }
         return;
     }
+    // Adhesion loops have no provider route or ordinary-layer constraint domain.
+    // Preparing them would consume draws and could affect inner-loop alignment.
+    if (RAW_EXTRUSION_ROLE_IS_SKIRT(role) || (flags & C_EXTRUSION_PERIMETER_FLAG_SKIRT) != 0)
+        return;
     const LayerRegionIsland island=source.region_island();
     if (!island_is_assigned(island,filter)) return;
+    const Layer source_layer = island.region(0).layer();
+    // Adhesion is stored in the perimeter bucket, so a wrapper's inherited role
+    // need not identify it. Source-layer provenance remains authoritative.
+    if (layer_is_brim(source_layer) || layer_has_adhesion_kind(source_layer, RAW_LAYER_ADHESION_KIND_SKIRT))
+        return;
     Loop loop;
     loop.entity=entity;
     loop.instance=object_instance_idx;

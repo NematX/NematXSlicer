@@ -4,6 +4,7 @@
 ///|/
 
 #include "SeamPlacerRouter.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/DataTreeProperties.hpp"
 
 #include <cmath>
 #include <limits>
@@ -156,7 +157,8 @@ void build_entity_routes(
     const ExtrusionEntity &entity,
     const std::set<const extrusion_entity_handle *> &marked_loops,
     const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions,
-    std::map<const extrusion_entity_handle *, LoopRoute> &routes);
+    std::map<const extrusion_entity_handle *, LoopRoute> &routes,
+    bool ancestors_allow_seams = true);
 
 /*
 Walk every PrintingExtrusion root in plan order and populate the immutable
@@ -182,7 +184,7 @@ struct LoopRoute
     // The LayerRegion whose configuration was selected for this loop; unused without a session.
     LayerRegion region;
     // Shared because all loops assigned to one provider use the same session.
-    // Null for a loop without a marker, whose seam place_seam() projects instead.
+    // Null for unmarked or source-adhesion loops, whose seam is projected instead.
     std::shared_ptr<SeamPlacer> session;
 };
 
@@ -337,6 +339,14 @@ std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> create_sessio
 std::set<const extrusion_entity_handle *> collect_marked_loops(const PrintingExtrusion &extrusion)
 {
     std::set<const extrusion_entity_handle *> marked;
+    const LayerRegionIsland island = extrusion.region_island();
+    if (island.valid() && island.region_count() > 0) {
+        const Layer layer = island.region(0).layer();
+        // Adhesion may inherit perimeter-bucket markers through unmarked wrappers.
+        // Keep its geometric distance route, but never assign a perimeter policy.
+        if (layer_is_brim(layer) || layer_has_adhesion_kind(layer, RAW_LAYER_ADHESION_KIND_SKIRT))
+            return marked;
+    }
     for (const CandidatePreparation::CollectedLoop &loop :
          CandidatePreparation::collect_perimeter_loops(extrusion.root(), extrusion.role()))
         marked.insert(loop.loop);
@@ -398,13 +408,14 @@ void build_entity_routes(
     const ExtrusionEntity &entity,
     const std::set<const extrusion_entity_handle *> &marked_loops,
     const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions,
-    std::map<const extrusion_entity_handle *, LoopRoute> &routes)
+    std::map<const extrusion_entity_handle *, LoopRoute> &routes,
+    const bool ancestors_allow_seams)
 {
     // Empty nodes carry no executable geometry and cannot produce a route.
     if (entity.empty())
         return;
-    if (entity.is_loop()) {
-        // A loop without a marker is not bound by any provider. Its route has no
+    if (ancestors_allow_seams && entity.is_seam_unit()) {
+        // An unmarked or source-adhesion loop is not bound by a provider. Its route has no
         // session, and its source regions are not resolved: that lookup throws for
         // loops without a source island or without an overlapping region.
         LoopRoute route;
@@ -421,7 +432,8 @@ void build_entity_routes(
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         build_entity_routes(
             scratch_storage, plan, extrusion, entity.child(child_idx),
-            marked_loops, sessions, routes);
+            marked_loops, sessions, routes,
+            Ordering::TreeOrderingGeometry::can_choose_child_seam(entity, entity.child(child_idx), ancestors_allow_seams));
 }
 
 /*
@@ -496,6 +508,22 @@ SeamPlacerRouter::SeamPlacerRouter(orchestrator_handle *orchestrator,
 
 SeamPlacerRouter::~SeamPlacerRouter() = default;
 
+bool SeamPlacerRouter::has_loop_route(const ExtrusionEntity &entity) const
+{
+    return m_impl->routes.find(entity.handle()) != m_impl->routes.end();
+}
+
+// Precondition: the borrowed, still-live subtree is already geometrically empty.
+// Recursively test immutable route membership and throw if an initial unit is
+// encountered; no handles are retained and no geometry, flags or state is changed.
+void SeamPlacerRouter::validate_empty_subtree(const ExtrusionEntity &entity) const
+{
+    if (has_loop_route(entity))
+        throw std::runtime_error("A precomputed seam unit became empty during ordering.");
+    for (uint32_t index = 0; index < entity.child_count(); ++index)
+        validate_empty_subtree(entity.child(index));
+}
+
 /*
 Return the selected provider's seam for a routed marked loop, or project the
 approach position onto a routed unmarked loop. The loop is borrowed and must be
@@ -510,7 +538,7 @@ c_point SeamPlacerRouter::place_seam(const ExtrusionEntity &loop,
     // provider and region decisions were made during construction, so this
     // method only performs const map lookup and then either delegates to the
     // selected session or projects the caller's travel position onto the loop.
-    if (!loop.is_loop())
+    if (!loop.is_seam_unit())
         throw std::invalid_argument(
             "SeamPlacerRouter needs a non-empty fixed continuous closed loop.");
     const std::map<const extrusion_entity_handle *, LoopRoute>::const_iterator route =

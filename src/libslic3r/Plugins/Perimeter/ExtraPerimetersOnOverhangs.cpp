@@ -1262,7 +1262,8 @@ void prepend_extra_perimeters_to_root(MutableExtrusionEntity root,
     const bool original_was_collection = root.child_count() > 0;
     const bool original_was_fixed_collection =
         original_was_collection &&
-        (root.flags() & (RAW_EXTRUSION_FLAG_SORTABLE | RAW_EXTRUSION_FLAG_REVERSIBLE)) == 0;
+        (root.flags() & (RAW_EXTRUSION_FLAG_SORTABLE | RAW_EXTRUSION_FLAG_REVERSIBLE)) == 0 &&
+        !root.readonly().can_rotate();
 
     /*
     Each insertion happens at the first ordered boundary. Walking the generated

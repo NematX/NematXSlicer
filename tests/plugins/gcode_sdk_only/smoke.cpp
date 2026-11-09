@@ -11,6 +11,7 @@ other translation unit, so package compatibility checks see the real requirement
 
 #include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
 #include "libslic3r/Api/plugin/c/slic3r_fan_policy.h"
 #include "libslic3r/Api/plugin/c/slic3r_printing_layer_time.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
@@ -36,5 +37,8 @@ int main()
     if (versions[SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME].major != SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME_MAJOR ||
         versions[SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME].minor != SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME_MINOR)
         return 13;
+    if (versions[SLIC3R_PLUGIN_API_EXTRUSION_ENTITY].major != SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MAJOR ||
+        versions[SLIC3R_PLUGIN_API_EXTRUSION_ENTITY].minor != SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MINOR)
+        return 14;
     return gcode_sdk_probe();
 }

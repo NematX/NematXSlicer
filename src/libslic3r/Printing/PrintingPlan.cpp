@@ -4,6 +4,7 @@
 ///|/
 
 #include "PrintingPlan.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -13,6 +14,7 @@
 #include <utility>
 
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -220,14 +222,6 @@ expensive travel optimizer.
 size_t find_polyline_point_index(const ArcPolyline &polyline, const Point &point);
 
 /*
-Return true when entity contains point as an existing vertex.
-
-This is used to rotate composed loops: the parent first finds which direct child
-contains the selected vertex, then rotates the child list around that child.
-*/
-bool entity_contains_point(const ExtrusionEntity &entity, const Point &point);
-
-/*
 Move all children out of entity while preserving the concrete node object.
 
 ExtrusionEntityCollection has an entity cache, so collections must be drained
@@ -313,15 +307,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
                                               const std::vector<ExtrusionRole> &roles);
 
 /*
-Translate every geometric point stored in an extrusion tree.
-
-The source extrusion tree stays untouched. This operates only on the cloned
-tree that belongs to the PrintingPlan. Empty placeholders keep their sentinel
-position unchanged to avoid overflowing the special NOT_A_POINT value.
-*/
-void translate_extrusion_tree(ExtrusionEntity &entity, const Point &shift);
-
-/*
 Sort the layer groups by increasing print Z after all objects have contributed.
 
 The builder discovers layers object-by-object. Sorting at the end makes the
@@ -329,23 +314,15 @@ final plan match the normal by-layer printing order.
 */
 void sort_layer_groups_by_print_z(PrintingGroup &group);
 
-/* Copy each already-ordered event child into a fixed scope root. Appending by
-   const reference deep-clones extrusion properties and owned script data. */
-void copy_scope_events(const PrintingScopeEvents &source,
-                       PrintingScopeEvents &destination)
-{
-    for (size_t event_idx = 0; event_idx < source.before().child_count(); ++event_idx)
-        destination.append_before(source.before().child(event_idx));
-    for (size_t event_idx = 0; event_idx < source.after().child_count(); ++event_idx)
-        destination.append_after(source.after().child(event_idx));
-}
-
 } // namespace
 
+// Create two fixed event sequences; empty geometry never grants permission to rotate execution boundaries.
 PrintingScopeEvents::PrintingScopeEvents()
     : m_before(ExtrusionEntity::Children(), false, false, true)
     , m_after(ExtrusionEntity::Children(), false, false, true)
 {
+    m_before.set_can_rotate(false);
+    m_after.set_can_rotate(false);
 }
 
 PrintingScopeEvents::PrintingScopeEvents(PrintingScopeEvents &&other) noexcept
@@ -437,36 +414,45 @@ ExtrusionEntity &PrintingScopeEvents::append_before(const ExtrusionEntity &event
 {
     // Cloning lets the caller keep its source tree while the scope owns an
     // independent event at the end of the fixed before sequence.
-    return m_before.append_child(event);
+    m_before.children().reserve(m_before.child_count() + 1);
+    return m_before.append_child(event.clone_canonical());
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_before(ExtrusionEntity &&event)
 {
     // Moving transfers the prepared event content into the scope without
     // changing the identity or ordering contract of the before root.
-    return m_before.append_child(std::move(event));
+    m_before.children().reserve(m_before.child_count() + 1);
+    return m_before.append_child(CanonicalExtrusion::acquire(event));
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_after(const ExtrusionEntity &event)
 {
     // After events use the same ownership and stable insertion order as the
     // before sequence so every PrintingPlan scope follows one contract.
-    return m_after.append_child(event);
+    m_after.children().reserve(m_after.child_count() + 1);
+    return m_after.append_child(event.clone_canonical());
 }
 
 ExtrusionEntity &PrintingScopeEvents::append_after(ExtrusionEntity &&event)
 {
     // The moved-from source remains valid but empty, matching the extrusion
     // tree move semantics already exposed by the plugin API.
-    return m_after.append_child(std::move(event));
+    m_after.children().reserve(m_after.child_count() + 1);
+    return m_after.append_child(CanonicalExtrusion::acquire(event));
 }
 
 void PrintingScopeEvents::clear()
 {
-    // Clearing content preserves the private roots and their immutable
-    // non-sortable/non-reversible flags for the next step execution.
-    m_before.clear_content();
-    m_after.clear_content();
+    // Retain the fixed sequence representation and the borrowed root identities,
+    // ids and direct properties. A monostate would let the next append recreate
+    // a sortable collection through ensure_children(). Also restore the empty
+    // sequence representation when clearing a valid moved-from scope.
+    for (ExtrusionEntity *root : {&m_before, &m_after}) {
+        root->children().clear();
+        root->set_can_sort_reverse(false, false);
+        root->set_can_rotate(false);
+    }
 }
 
 std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
@@ -478,7 +464,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
 
     copy->properties = properties;
     copy->object_instances = object_instances;
-    copy_scope_events(events, copy->events);
+    copy->events = events.clone();
     copy->groups.reserve(groups.size());
 
     for (const PrintingGroup &source_group : groups) {
@@ -486,7 +472,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
         group_copy.plan_identity = copy_identity;
         group_copy.properties = source_group.properties;
         group_copy.printing_catalog_ids = source_group.printing_catalog_ids;
-        copy_scope_events(source_group.events, group_copy.events);
+        group_copy.events = source_group.events.clone();
         group_copy.layers.reserve(source_group.layers.size());
 
         for (const PrintingLayerGroup &source_layer : source_group.layers) {
@@ -495,7 +481,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
             layer_copy.properties = source_layer.properties;
             layer_copy.print_z = source_layer.print_z;
             layer_copy.layers = source_layer.layers;
-            copy_scope_events(source_layer.events, layer_copy.events);
+            layer_copy.events = source_layer.events.clone();
             layer_copy.tool_groups.reserve(source_layer.tool_groups.size());
 
             for (const PrintingToolGroup &source_tool : source_layer.tool_groups) {
@@ -504,7 +490,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
                 tool_copy.properties = source_tool.properties;
                 tool_copy.extruder_id = source_tool.extruder_id;
                 tool_copy.region_islands = source_tool.region_islands;
-                copy_scope_events(source_tool.events, tool_copy.events);
+                tool_copy.events = source_tool.events.clone();
                 tool_copy.extrusions.reserve(source_tool.extrusions.size());
 
                 for (const PrintingExtrusion &source_extrusion : source_tool.extrusions) {
@@ -513,7 +499,7 @@ std::unique_ptr<PrintingPlan> PrintingPlan::clone() const
                     extrusion_copy.sregion_island_role = source_extrusion.sregion_island_role;
                     extrusion_copy.printing_catalog_id = source_extrusion.printing_catalog_id;
                     if (source_extrusion.root != nullptr)
-                        extrusion_copy.root.reset(source_extrusion.root->clone());
+                        extrusion_copy.root = source_extrusion.root->clone_canonical();
                     tool_copy.extrusions.emplace_back(std::move(extrusion_copy));
                 }
                 layer_copy.tool_groups.emplace_back(std::move(tool_copy));
@@ -530,8 +516,22 @@ PrintingExtrusion::PrintingExtrusion(const LayerRegionIsland &source,
                                      const ExtrusionEntity &source_root)
     : region_island(&source)
     , sregion_island_role(extrusion_role)
-    , root(ExtrusionEntityUPtr(source_root.clone()))
+    , root(source_root.clone_canonical())
 {
+}
+
+PrintingScopeEvents PrintingScopeEvents::clone() const
+{
+    PrintingScopeEvents copy;
+    static_cast<ExtrusionPropertyContainer &>(copy.m_before) = m_before;
+    static_cast<ExtrusionPropertyContainer &>(copy.m_after) = m_after;
+    copy.m_before.children().reserve(m_before.child_count());
+    copy.m_after.children().reserve(m_after.child_count());
+    for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(m_before).children())
+        copy.m_before.children().emplace_back(child ? child->clone_canonical() : nullptr);
+    for (const ExtrusionEntityUPtr &child : static_cast<const ExtrusionEntity &>(m_after).children())
+        copy.m_after.children().emplace_back(child ? child->clone_canonical() : nullptr);
+    return copy;
 }
 
 void order_printing_tool_groups(PrintingGroup &printing_group, const extruder_index_t first_extruder)
@@ -607,8 +607,8 @@ void order_extrusion_tree(PrintingGroup &printing_group,
                 context.role = extrusion.sregion_island_role;
 
                 order_extrusion_tree(*extrusion.root, current_point, loop_policy, context);
-                if (!extrusion.root->empty())
-                    current_point = extrusion.root->last_point();
+                if (!extrusion.root->ExtrusionEntity::empty())
+                    current_point = extrusion.root->ExtrusionEntity::last_point();
             }
 }
 
@@ -981,9 +981,9 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
         }
 
         /*
-        Empty and nop children do not have a printable entry point. Once only
-        such children remain, keep their relative order and append them after
-        the printable work already selected.
+        Children without stored geometry (including geometry-less Nops) have no
+        printable entry point. Once only such children remain, keep their relative
+        order and append them after the printable work already selected.
         */
         if (selected_idx == size_t(-1)) {
             for (ExtrusionEntityUPtr &child : remaining_children)
@@ -996,8 +996,8 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
         remaining_children.erase(remaining_children.begin() + selected_idx);
 
         prepare_child_for_entry(*child, selected_candidate, loop_policy, context);
-        if (!child->empty())
-            current_point = child->last_point();
+        if (!child->ExtrusionEntity::empty())
+            current_point = child->ExtrusionEntity::last_point();
         append_owned_child(entity, std::move(child));
     }
 
@@ -1006,6 +1006,7 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
     the computed continuity ambiguous again for later G-code and debug code.
     */
     entity.set_can_sort_reverse(false, false);
+    entity.set_can_rotate(false);
 }
 
 ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
@@ -1014,7 +1015,7 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
                                              const LoopEntryContext &context)
 {
     ExtrusionEntryCandidate best;
-    if (entity.empty())
+    if (entity.ExtrusionEntity::empty())
         return best;
 
     if (entity.can_sort()) {
@@ -1041,10 +1042,14 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
         return best;
     }
 
-    if (entity.is_loop()) {
+    if (is_seam_unit(entity)) {
         std::unique_ptr<LoopEntryAnalysis> analysis = loop_policy.analyze_loop(entity, context);
-        if (!analysis || analysis->candidate_count() == 0)
+        if (!analysis || analysis->candidate_count() == 0) {
+            best.point = entity.ExtrusionEntity::first_point();
+            best.score = current_point.distance_to_square(best.point);
+            best.valid = true;
             return best;
+        }
 
         std::shared_ptr<const LoopEntryAnalysis> shared_analysis(std::move(analysis));
         const size_t candidate_count = shared_analysis->candidate_count();
@@ -1052,6 +1057,8 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
         for (size_t candidate_idx = 0; candidate_idx < candidate_count; ++candidate_idx) {
             ExtrusionEntryCandidate candidate;
             candidate.point = shared_analysis->candidate_point(candidate_idx);
+            if (!is_directly_legal_seam(entity, candidate.point, true))
+                continue;
             candidate.score = shared_analysis->score_candidate(candidate_idx, current_point);
             candidate.loop_analysis = shared_analysis;
             candidate.loop_candidate_idx = candidate_idx;
@@ -1059,16 +1066,23 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
             if (!best.valid || candidate.score < best.score)
                 best = candidate;
         }
+        if (!best.valid) {
+            best.point = entity.ExtrusionEntity::first_point();
+            best.score = current_point.distance_to_square(best.point);
+            best.valid = true;
+        }
         return best;
     }
 
-    best.point = entity.first_point();
+    // Commands may occupy either boundary of a composed unit. Like the SDK,
+    // choose endpoints from stored geometry, not legacy first/last projections.
+    best.point = entity.ExtrusionEntity::first_point();
     best.score = current_point.distance_to_square(best.point);
     best.valid = true;
 
     if (entity.can_reverse()) {
         ExtrusionEntryCandidate reversed;
-        reversed.point = entity.last_point();
+        reversed.point = entity.ExtrusionEntity::last_point();
         reversed.score = current_point.distance_to_square(reversed.point);
         reversed.reverse_before_printing = true;
         reversed.valid = true;
@@ -1110,94 +1124,73 @@ void prepare_child_for_entry(ExtrusionEntity &child,
 {
     assert(candidate.valid);
 
-    if (candidate.loop_analysis)
+    const bool finalized_unit = is_seam_unit(child);
+    if (candidate.loop_analysis) {
+        if (!finalized_unit || !is_directly_legal_seam(child, candidate.point, true))
+            throw std::runtime_error("A native loop candidate is no longer directly materializable.");
         candidate.loop_analysis->rotate_loop_to_candidate(child, candidate.loop_candidate_idx);
-    else if (candidate.reverse_before_printing)
+        if (child.ExtrusionEntity::first_point() != candidate.point)
+            throw std::runtime_error("A native loop callback did not produce its announced entry.");
+    } else if (candidate.reverse_before_printing)
         child.reverse();
 
     if (child.can_sort())
         order_sortable_extrusion_children(child, candidate.point, loop_policy, context);
+    else if (finalized_unit) {
+        const auto consume = [](auto &&self, ExtrusionEntity &entity) -> void {
+            for (size_t index = 0; index < entity.child_count(); ++index)
+                self(self, entity.child(index));
+            entity.set_can_rotate(false);
+        };
+        consume(consume, child);
+    }
 }
 
 void rotate_loop_to_point(ExtrusionEntity &entity, const Point &entry_point)
 {
-    if (ArcPolyline *polyline = entity.polyline_or_null()) {
-        const size_t point_idx = find_polyline_point_index(*polyline, entry_point);
-        if (point_idx != size_t(-1))
-            rotate_polyline_to_index(*polyline, point_idx);
+    const auto plan = legal_seam_entry(entity, entry_point, true);
+    if (!plan || plan->point != entry_point)
+        throw std::runtime_error("The native vertex seam is outside its legal domain.");
+    ExtrusionEntity *target = &entity;
+    for (const size_t index : plan->delegation)
+        target = &target->child(index);
+    using Operation = ExtrusionSeamPlan::Operation;
+    if (plan->operation == Operation::KeepStart)
+        return;
+    if (plan->operation == Operation::RotateLocal) {
+        ArcPolyline &polyline = target->polyline_ref();
+        const size_t point_idx = find_polyline_point_index(polyline, entry_point);
+        if (point_idx == size_t(-1))
+            throw std::runtime_error("The native vertex policy requires a stored local vertex.");
+        rotate_polyline_to_index(polyline, point_idx);
         return;
     }
 
-    if (entity.is_leaf())
-        return;
-
-    ExtrusionEntity::Children children = release_all_children(entity);
-    if (children.empty())
-        return;
-
-    size_t containing_idx = size_t(-1);
-    for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
-        if (children[child_idx] && entity_contains_point(*children[child_idx], entry_point)) {
-            containing_idx = child_idx;
-            break;
-        }
-    }
-
-    if (containing_idx == size_t(-1)) {
-        for (ExtrusionEntityUPtr &child : children)
-            append_owned_child(entity, std::move(child));
-        return;
-    }
-
-    size_t start_idx = containing_idx;
+    const size_t start_idx = plan->child_index;
     ExtrusionEntityUPtr closing_piece;
-
-    if (ArcPolyline *polyline = children[containing_idx]->polyline_or_null()) {
-        const size_t point_idx = find_polyline_point_index(*polyline, entry_point);
-        if (point_idx == size_t(-1)) {
-            assert(false);
-        } else if (point_idx == 0) {
-            start_idx = containing_idx;
-        } else if (point_idx == polyline->size() - 1) {
-            /*
-            The chosen point is the end of this child and the start of the next
-            child in the continuous loop. Starting from the next child avoids
-            making an unnecessary one-point split.
-            */
-            start_idx = (containing_idx + 1) % children.size();
-        } else {
-            /*
-            The chosen point is inside a leaf path that participates in a larger
-            loop. Split that leaf into tail and head, print the tail first, then
-            append the head after the rest of the loop closes back to it.
-            */
-            ArcPolyline before_entry;
-            ArcPolyline after_entry;
-            const bool split = polyline->split_at_index(point_idx, before_entry, after_entry);
-            assert(split);
-            if (split) {
-                closing_piece = ExtrusionEntityUPtr(children[containing_idx]->clone());
-                closing_piece->set_polyline(std::move(before_entry));
-                children[containing_idx]->set_polyline(std::move(after_entry));
-            }
-            start_idx = containing_idx;
-        }
-    } else {
-        /*
-        A child collection may itself contain the selected vertex. Rotate it
-        first, then move the child collection to the front of this loop.
-        */
-        rotate_loop_to_point(*children[containing_idx], entry_point);
-        start_idx = containing_idx;
+    if (plan->operation == Operation::SplitChild) {
+        ExtrusionEntity &child = target->child(start_idx);
+        if (has_one_shot_extrusion_event(child))
+            throw std::runtime_error("A native seam split must not duplicate a one-shot event.");
+        ArcPolyline &polyline = child.polyline_ref();
+        const size_t point_idx = find_polyline_point_index(polyline, entry_point);
+        ArcPolyline before;
+        ArcPolyline after;
+        if (point_idx == size_t(-1) || !polyline.split_at_index(point_idx, before, after))
+            throw std::runtime_error("The native vertex policy could not split its direct leaf.");
+        closing_piece.reset(child.clone());
+        closing_piece->set_polyline(std::move(before));
+        child.set_polyline(std::move(after));
     }
-
+    ExtrusionEntity::Children children = release_all_children(*target);
     for (size_t offset = 0; offset < children.size(); ++offset) {
         const size_t child_idx = (start_idx + offset) % children.size();
-        append_owned_child(entity, std::move(children[child_idx]));
+        append_owned_child(*target, std::move(children[child_idx]));
     }
-
     if (closing_piece)
-        append_owned_child(entity, std::move(closing_piece));
+        append_owned_child(*target, std::move(closing_piece));
+    if (entity.ExtrusionEntity::first_point() != entry_point)
+        throw std::runtime_error("The native vertex seam differs from its legal plan.");
 }
 
 void rotate_polyline_to_index(ArcPolyline &polyline, const size_t point_idx)
@@ -1226,18 +1219,6 @@ size_t find_polyline_point_index(const ArcPolyline &polyline, const Point &point
         if (polyline.get_point(point_idx) == point)
             return point_idx;
     return size_t(-1);
-}
-
-bool entity_contains_point(const ExtrusionEntity &entity, const Point &point)
-{
-    if (const ArcPolyline *polyline = entity.polyline_or_null())
-        return find_polyline_point_index(*polyline, point) != size_t(-1);
-
-    if (!entity.is_leaf())
-        for (const ExtrusionEntityUPtr &child : entity.children())
-            if (child && entity_contains_point(*child, point))
-                return true;
-    return false;
 }
 
 ExtrusionEntity::Children release_all_children(ExtrusionEntity &entity)
@@ -1354,7 +1335,7 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
     */
     bool has_printable_root = false;
     for (const ExtrusionRole role : roles)
-        if (region_island.has_extrusion(role) && !region_island.extrusion(role).empty()) {
+        if (region_island.has_extrusion(role)) {
             has_printable_root = true;
             break;
         }
@@ -1367,8 +1348,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
             continue;
 
         const ExtrusionEntityCollection &source_root = region_island.extrusion(role);
-        if (source_root.empty())
-            continue;
 
         /*
         Each role bucket becomes its own PrintingExtrusion. Keeping role buckets
@@ -1378,7 +1357,7 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
         PrintingExtrusion extrusion(region_island, role, source_root);
         assert(extrusion.root != nullptr);
         if (extrusion.root != nullptr)
-            translate_extrusion_tree(*extrusion.root, instance.shift);
+            extrusion.root->translate(instance.shift);
         extrusion.printing_catalog_id = printing_catalog_id;
         tool_group.extrusions.push_back(std::move(extrusion));
     }
@@ -1390,37 +1369,6 @@ void append_region_island_instance_extrusions(PrintingLayerGroup &layer_group,
     tool group.
     */
     append_region_island_once(tool_group, region_island);
-}
-
-void translate_extrusion_tree(ExtrusionEntity &entity, const Point &shift)
-{
-    if (shift == Point(0, 0))
-        return;
-
-    /*
-    ExtrusionNop is not a path, but it may carry a position used by sequencing
-    code. Move that position when it is real; leave NOT_A_POINT untouched because
-    it is a sentinel, not a coordinate.
-    */
-    if (ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(&entity)) {
-        if (nop->position != ExtrusionNop::NOT_A_POINT)
-            nop->position += shift;
-        return;
-    }
-
-    /*
-    Leaf extrusion paths store their geometry in ArcPolyline. Collections do not
-    have their own points, so they fall through to the recursive child walk.
-    */
-    if (ArcPolyline *polyline = entity.polyline_or_null()) {
-        polyline->translate(shift);
-        return;
-    }
-
-    if (!entity.is_leaf())
-        for (ExtrusionEntityUPtr &child : entity.children())
-            if (child)
-                translate_extrusion_tree(*child, shift);
 }
 
 void sort_layer_groups_by_print_z(PrintingGroup &group)

@@ -860,6 +860,7 @@ void request_toolchange_temperature(storage_handle *storage, StoredExtrusionEnti
     if (config.filament_enable_toolchange_part_fan.get_at(idx)) {
         // Collection heater (and its wait) precedes this direct empty child.
         StoredExtrusionEntity fan_event(storage);
+        fan_event.set_can_rotate(false);
         fan_event.get_or_add(EPropertyFan::key).set(
             float(std::clamp(config.filament_toolchange_part_fan_speed.get_at(idx), 0, 100)),
             FAN_REQUEST_MODE_OVERRIDE);
@@ -910,6 +911,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     // The cooling moves happen on the work line; the firmware connects the ramming end to it.
     position.y = work_y;
     StoredExtrusionEntity unload(storage);
+    unload.set_can_rotate(false);
     unload.disable_sort().disable_reverse();
     unload.get_or_add(EPropertyModifier::key).set_disable_retraction();
     extrusion_entity_handle *unload_handle = unload.mutable_handle();
@@ -919,6 +921,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     // Pulls: in normal mode they wait for the toolchange temperature first, otherwise they run without
     // requesting one and the previous state stays in effect.
     StoredExtrusionEntity pulls(storage);
+    pulls.set_can_rotate(false);
     pulls.disable_sort().disable_reverse();
     extrusion_entity_handle *pulls_handle = pulls.mutable_handle();
     if (toolchange_temp && !fast_skinnydip) {
@@ -938,6 +941,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     // moves toward it during the cooling moves) and wait for it after them, otherwise they run at the incoming
     // filament temperature.
     StoredExtrusionEntity swap(storage);
+    swap.set_can_rotate(false);
     swap.disable_sort().disable_reverse();
     extrusion_entity_handle *swap_handle = swap.mutable_handle();
     if (toolchange_temp && fast_skinnydip)
@@ -968,6 +972,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
         throw std::runtime_error("Cannot append the filament unload cooling moves.");
     // The toolchange delay and the parking move run at the incoming filament temperature.
     StoredExtrusionEntity parking(storage);
+    parking.set_can_rotate(false);
     parking.disable_sort().disable_reverse();
     extrusion_entity_handle *parking_handle = parking.mutable_handle();
     if (incoming_known)
@@ -1002,6 +1007,7 @@ void append_load(storage_handle *storage, extrusion_entity_handle *root, const S
     // The load moves happen on the work line; the firmware connects the nozzle position to it.
     position.y = work_y;
     StoredExtrusionEntity load(storage);
+    load.set_can_rotate(false);
     load.disable_sort().disable_reverse();
     load.get_or_add(EPropertyModifier::key).set_disable_retraction();
     extrusion_entity_handle *load_handle = load.mutable_handle();
@@ -1030,6 +1036,7 @@ void append_command(storage_handle *storage, extrusion_entity_handle *root, cons
     if (code == C_EXTRUSION_SPECIAL_COMMAND_PAUSE && !(value > 0.))
         return;
     StoredExtrusionEntity command(storage);
+    command.set_can_rotate(false);
     command.get_or_add(EPropertySpecialCommand::key).set(code, value);
     if (speed > 0.)
         command.get_or_add(EPropertySpeed::key).speed_mm_per_s = float(speed);

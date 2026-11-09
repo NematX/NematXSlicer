@@ -19,6 +19,7 @@ namespace Slic3r { namespace ExtrusionProcessor {
 //public:
 
 
+// Return owned overhang fragments with source properties and ordering permissions; geometry processing failures propagate.
 ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath                             &path,
                                                           const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
                                                           const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
@@ -101,6 +102,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
 
     ExtrusionPaths      result;
     result.emplace_back(path.attributes(), path.clone_properties(), path.can_reverse());
+    result.back().set_can_rotate(path.can_rotate());
     ExtrusionPropertyOverhang overhang_attributes(calculated_distances[0].first,
                                                   calculated_distances[0].first,
                                                   calculated_distances[0].second);
@@ -131,6 +133,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
             sequence_start_index                                          = i;
             if (result.back().size() > 1) {
                 result.emplace_back(path.attributes(), path.clone_properties(), path.can_reverse());
+                result.back().set_can_rotate(path.can_rotate());
                 result.back().overhang_attributes_mutable() = overhang_attributes;
                 result.back().polyline().append(Point::new_scale(extended_points[i].position));
             } else {
@@ -197,6 +200,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
 //    double get(const ExtrusionEntityCollection &coll);
 //};
 
+// Split a nonnull borrowed collection into owned overhang paths while retaining its ordering permissions; geometry errors propagate.
 ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const ExtrusionEntityCollection            *ecc,
                                                                      const AABBTreeLines::LinesDistancer<Linef> &unscaled_prev_layer,
                                                                      const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
@@ -204,6 +208,7 @@ ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const Extru
 {
     ExtrusionEntityCollection result{};
     result.set_can_sort_reverse(ecc->can_sort(), ecc->can_reverse());
+    result.set_can_rotate(ecc->can_rotate());
     for (const auto *e : ecc->entities()) {
         if (auto *col = dynamic_cast<const ExtrusionEntityCollection *>(e)) {
             result.append(calculate_and_split_overhanging_extrusions(col, unscaled_prev_layer, prev_layer_curled_lines, nozzle_diameter));

@@ -1310,11 +1310,12 @@ std::pair<int, Point> ArcPolyline::foot_pt(const Point &pt) const
             || Geometry::ArcWelder::point_to_path_projection({m_path[result.segment_id], m_path[result.segment_id + 1]},
                                                                       result.point,
                                                                       (result.distance2) + SCALED_EPSILON * 2).point.distance_to(result.point) < SCALED_EPSILON);
-        // if on strait segment, then no center, if on arc, then there is a center. (unless it's the first or last point)
+        // if on strait segment, then no center (unless it's the first or last point). An arc may be
+        // centred on the origin, so a null center does not mean a straight segment.
         if (result.segment_id > 0 && result.segment_id + 1 < m_path.size()) {
             bool has_center = result.center != Point(0, 0);
             bool has_radius = m_path[result.segment_id + 1].radius != 0;
-            assert((has_center && has_radius) || (!has_center && !has_radius)
+            assert(has_radius || !has_center
                 || m_path[result.segment_id].point == result.point
                 || (m_path[result.segment_id+1].point == result.point && result.segment_id+2 == m_path.size()));
         }
@@ -1616,7 +1617,7 @@ void ArcPolyline::split_at(Point &point, ArcPolyline &p1, ArcPolyline &p2) const
     //find the line to split at
     Geometry::ArcWelder::PathSegmentProjection result = Geometry::ArcWelder::point_to_path_projection(m_path, point);
     assert(result.segment_id + 1 < this->m_path.size());
-    assert(result.center != Point(0, 0) || this->m_path[result.segment_id + 1].linear()); // if no radius, then no center
+    // A line has no center. An arc may be centred on the origin, so a null center does not mean a line.
     assert(result.center == Point(0, 0) || !this->m_path[result.segment_id + 1].linear()); // if center defined, then the radius isn't null
     // the point to add is between m_path[result.segment_id] and m_path[result.segment_id + 1]
     //split and update point

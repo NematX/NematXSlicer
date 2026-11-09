@@ -521,16 +521,17 @@ c_point finalize_entity(MutableExtrusionEntity entity,
 {
     throw_if_cancelled(run_ctx);
     if (entity.empty()) {
+        seam_router.validate_empty_subtree(entity.readonly());
         TreeOrderingGeometry::disable_ordering_flags_recursively(entity, run_ctx);
         return current_position;
     }
-    if (entity.readonly().is_loop()) {
+    if (seam_router.has_loop_route(entity.readonly())) {
         throw_if_cancelled(run_ctx);
         const c_point seam = seam_router.place_seam(
             entity.readonly(), current_position);
         throw_if_cancelled(run_ctx);
-        TreeOrderingGeometry::rotate_loop_to_seam(
-            scratch_storage, entity, seam, run_ctx);
+        TreeOrderingGeometry::rotate_loop_to_legal_seam(
+            scratch_storage, entity, seam, true, run_ctx);
         throw_if_cancelled(run_ctx);
         TreeOrderingGeometry::disable_ordering_flags_recursively(entity, run_ctx);
         return entity.back();
@@ -559,6 +560,7 @@ c_point finalize_entity(MutableExtrusionEntity entity,
     throw_if_cancelled(run_ctx);
     entity.disable_sort();
     entity.disable_reverse();
+    entity.set_can_rotate(false);
     return entity.point_count() > 0 ? entity.back() : position;
 }
 
@@ -587,6 +589,7 @@ void finalize_plan_geometry(
                         tool_group.extrusion(extrusion_idx);
                     MutableExtrusionEntity root = extrusion.mutable_root();
                     if (root.empty()) {
+                        seam_router.validate_empty_subtree(root.readonly());
                         throw_if_cancelled(run_ctx);
                         entry_point_key.remove(root);
                         TreeOrderingGeometry::disable_ordering_flags_recursively(

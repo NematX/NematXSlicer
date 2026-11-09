@@ -41,6 +41,9 @@ tool ordering for preview ticks and legacy export. Statistics use measured
 export totals and the wipe-tower share for sidebar and placeholders.
 Validation checks print-level active settings against their selected plugin
 group providers; object/region overrides are not inspected by that guard.
+Adhesion winding normalization reads stored contours before ordering. It preserves
+entries, properties and ordering permissions, and reports fragmented event phases
+that cannot be reversed under the generation contract.
 
 Representative direct calls (branches are not a timeline):
 
@@ -57,6 +60,11 @@ Representative direct calls (branches are not a timeline):
         |-- PrintObject::update_layer_height_profile()
         |-- generate_object_layers()
         `-- PrintRegion::collect_object_printing_extruders()
+
+    ApiInternal::PrintAccess::normalize_skirt_brim_direction()
+        |-- visit_matching_auxiliary_layer_extrusions() [select adhesion layers]
+        `-- ExtrusionDirectionSetter::default_use()
+            `-- normalize_generation_winding() [preserve scopes and report deferred contours]
 */
 #include "Print.hpp"
 #include "WipeTowerFootprint.hpp"
@@ -89,6 +97,7 @@ Representative direct calls (branches are not a timeline):
 #include "Exception.hpp"
 #include "Extruder.hpp"
 #include "ExtrusionEntityVisitors.hpp"
+#include "ExtrusionGenerationWinding.hpp"
 #include "Fill/FillBase.hpp"
 #include "Flow.hpp"
 #include "format.hpp"
@@ -1739,62 +1748,18 @@ bool has_brim_patch(const std::vector<PrintObject*> &objs_group, ModelVolumeType
     return found;
 }
 
-struct ExtrusionDirectionSetter : public ExtrusionVisitorRecursive {
-    using ExtrusionVisitorRecursive::use;
+struct ExtrusionDirectionSetter : public ExtrusionVisitor {
+    using ExtrusionVisitor::use;
     bool m_set_cw;
+    size_t m_deferred_contours = 0;
     ExtrusionDirectionSetter() : m_set_cw(true) {}
     ExtrusionDirectionSetter(bool set_cw) : m_set_cw(set_cw) {}
     virtual void default_use(ExtrusionEntity& entity) override {
-        if (entity.is_loop()) {
-            Polygon polygon(entity.as_polyline().to_polyline().points);
-            if (polygon.is_counter_clockwise() == m_set_cw ) {
-                entity.reverse();
-            }
-            return;
-        }
-        ExtrusionVisitorRecursive::default_use(entity);
+        const ExtrusionTreeTransforms::GenerationWindingResult result =
+            ExtrusionTreeTransforms::normalize_generation_winding(entity, m_set_cw);
+        m_deferred_contours += result.deferred_contours;
     }
 };
-
-void append_extrusion_children_to_collection(ExtrusionEntityCollection &dst, ExtrusionEntity &src)
-{
-    if (src.is_nop())
-        return;
-
-    if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(&src)) {
-        /*
-        The plugin root is a temporary transport object. Clone its children
-        into the persistent Print tree, then clear the transport root. This is
-        a little more conservative than moving unique_ptrs across the API
-        boundary and keeps all long-lived adhesion extrusion owned by Print.
-        If the collection has properties, it is a semantic subtree and must
-        stay whole so descendants inherit them.
-        */
-        if (collection->has_properties()) {
-            dst.append(src);
-            src.clear_content();
-            src.clear_properties();
-            return;
-        }
-        for (const ExtrusionEntity *child : collection->entities())
-            dst.append(*child);
-        collection->clear();
-        return;
-    }
-
-    if (src.is_leaf()) {
-        dst.append(src);
-        src.clear_content();
-        src.clear_properties();
-        return;
-    }
-
-    ExtrusionEntity::Children &children = src.children();
-    for (const ExtrusionEntityUPtr &child : children)
-        dst.append(*child);
-    src.clear_content();
-    src.clear_properties();
-}
 
 void ApiInternal::PrintAccess::clear_brim(Print &print)
 {
@@ -1829,6 +1794,9 @@ void ApiInternal::PrintAccess::normalize_skirt_brim_direction(Print &print)
             visit_matching_auxiliary_layer_extrusions(*auxiliary_object, layer_is_any_adhesion, visitor);
         for (PrintObjectUPtr &object : print.m_objects)
             visit_matching_auxiliary_layer_extrusions(*object, layer_is_any_adhesion, visitor);
+        if (visitor.m_deferred_contours != 0)
+            BOOST_LOG_TRIVIAL(warning) << "Adhesion winding left " << visitor.m_deferred_contours
+                << " contour(s) unchanged: fragmented event phases require an explicit winding contract.";
     }
 }
 

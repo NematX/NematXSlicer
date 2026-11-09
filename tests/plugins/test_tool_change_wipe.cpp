@@ -819,7 +819,7 @@ TEST_CASE("Tool-change exported tower scales only its purge speed", "[plugins][w
 // The no-request check is limited to the layer of the first change because later layers legitimately
 // receive root-temperature requests from the layer plugin.
 TEST_CASE("SEMM tool change temperatures follow the swap phases",
-          "[plugins][wipe-tower][toolchange][semm]")
+          "[plugins][wipe-tower][toolchange][semm][rotation]")
 {
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -857,7 +857,44 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
         (std::string("toolchange_temperature_") + std::to_string(mode) + ".gcode")).string();
     GCodeProcessorResult result;
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, path, &result));
-
+    REQUIRE(print.printing_plan() != nullptr);
+    // The plan is produced during export. Inspect the unload/load groups and
+    // their direct sub-phases, not later split containers or automatic fan policy.
+    size_t fixed_groups = 0;
+    size_t fixed_fans = 0;
+    std::function<void(const ExtrusionEntity &)> require_fixed_phases =
+        [&](const ExtrusionEntity &entity) {
+            const auto *modifier = entity.get_property<ExtrusionPropertyModifier>();
+            if (modifier != nullptr && modifier->disable_retraction) {
+                ++fixed_groups;
+                CHECK_FALSE(entity.can_rotate());
+                for (size_t index = 0; index < entity.child_count(); ++index) {
+                    const ExtrusionEntity &phase = entity.child(index);
+                    if (phase.child_count() != 0) {
+                        ++fixed_groups;
+                        CHECK_FALSE(phase.can_rotate());
+                    }
+                }
+            }
+            const auto *fan = entity.get_property<ExtrusionPropertyFan>();
+            if (fan != nullptr && fan->mode == FAN_REQUEST_MODE_OVERRIDE &&
+                entity.child_count() == 0 && entity.ExtrusionEntity::empty()) {
+                ++fixed_fans;
+                CHECK_FALSE(entity.can_rotate());
+            }
+            for (size_t index = 0; index < entity.child_count(); ++index)
+                require_fixed_phases(entity.child(index));
+        };
+    for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers)
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    if (extrusion.root != nullptr && extrusion.sregion_island_role.is_wipetower())
+                        require_fixed_phases(*extrusion.root);
+    if (mode != 3)
+        CHECK(fixed_groups > 0);
+    if (toolchange)
+        CHECK(fixed_fans > 0);
     // The first change's ramming end opens its unload, whose pulls are E-only moves and whose cooling
     // moves are geometric; every temperature or fan command is recorded with the phase and the
     // counters in effect when it is emitted.

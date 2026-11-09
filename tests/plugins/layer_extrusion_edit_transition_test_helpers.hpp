@@ -32,6 +32,7 @@ scope phases and semantic process events can be inspected directly.
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -99,12 +100,12 @@ inline std::unique_ptr<ExtrusionPath> make_print_path(
         true);
 }
 
-/* Append one independently rooted path to an ordered tool visit. */
+/* Acquire canonical plan storage, retaining child handles of conforming trees. */
 inline void append_printing_extrusion(
     PrintingToolGroup &tool, std::unique_ptr<ExtrusionEntity> root)
 {
     PrintingExtrusion extrusion;
-    extrusion.root = std::move(root);
+    extrusion.root = root ? CanonicalExtrusion::acquire(*root) : nullptr;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
     tool.extrusions.push_back(std::move(extrusion));
 }

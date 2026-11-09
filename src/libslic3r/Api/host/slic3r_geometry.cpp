@@ -31,10 +31,17 @@ points, rings or collections unless a storage_new_* call allocates an owned
 result. Editing functions operate on the host's mutable views; read queries
 leave geometry untouched. Structural validators return status codes instead of
 invoking debug assertions, so malformed plugin input remains diagnosable.
+Medial-axis extrusion results are copied to canonical base nodes before their
+ownership enters PluginStorage. Temporary native results are released on failure;
+allocation errors propagate to the guarded plugin caller.
 
     expolygon_valid() / expolygons_valid()
     `-- expolygon_status_without_asserts(): check ring structure and orientation
         `-- polygon_points_valid_without_asserts(): check point separation
+
+    store_extrusion_entity()
+        |-- clone_canonical(): preserve stored geometry, properties and resources
+        `-- PluginStorage::store(): retain the new owned result
 
 Validation does not prove absence of self-intersections or containment of holes.
 Other geometry operations keep the preconditions documented in the public header.
@@ -278,7 +285,8 @@ static std::unique_ptr<ExtrusionEntity> build_medial_axis_tree(
     return root;
 }
 
-// Retain the extrusion in the locked registry; missing storage or entity returns null and insertion errors release the new entity.
+// Publish canonical stored content; missing arguments return null. Preparation
+// and registry allocation failures release unpublished geometry without leaking it.
 static extrusion_entity_handle *store_extrusion_entity(storage_handle *storage,
                                                        std::unique_ptr<ExtrusionEntity> entity)
 {
@@ -286,7 +294,7 @@ static extrusion_entity_handle *store_extrusion_entity(storage_handle *storage,
         return nullptr;
 
     PluginStorage *plugin_storage = to_storage(storage);
-    return to_handle(plugin_storage->store(std::move(entity)));
+    return to_handle(plugin_storage->store(entity->clone_canonical()));
 }
 
 static Slic3r::ExPolygons *to_expolygons(expolygon_collection_handle *me) {

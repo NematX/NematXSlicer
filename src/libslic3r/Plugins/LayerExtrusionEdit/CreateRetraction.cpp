@@ -711,6 +711,7 @@ void append_terminal_retraction(storage_handle *storage,
     if (storage == nullptr || target <= 0.0)
         return;
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     throw_if_cancelled(run_ctx);
     set_event_attributes(event.mutable_view(), RAW_EXTRUSION_ROLE_RETRACT);
     throw_if_cancelled(run_ctx);

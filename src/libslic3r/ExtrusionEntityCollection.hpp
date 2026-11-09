@@ -87,6 +87,7 @@ public:
     bool can_sort() const { return ExtrusionEntity::can_sort(); }
     bool can_reverse() const override { return can_sort() || this->m_can_reverse; }
     void clear();
+    // Exchange content, identity and ordering permissions and invalidate both borrowed pointer caches.
     void swap (ExtrusionEntityCollection &c);
     void append(const ExtrusionEntity &entity) { this->append_child(ExtrusionEntityUPtr(entity.clone())); m_entities_cache.clear(); }
     void append(ExtrusionEntity &&entity) { this->append_child(ExtrusionEntityUPtr(entity.clone_move())); m_entities_cache.clear(); }

@@ -13,6 +13,8 @@
 #include <limits>
 #include <utility>
 #include <vector>
+#include <cstdlib>
+#include <boost/dll/shared_library.hpp>
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -25,6 +27,63 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Utils.hpp"
 #include "plugin_test_helpers.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
+
+// Load packages with frozen extrusion 1.0/1.1 headers and the current plugin interface;
+// pre-rebase ABI3 binaries must be rebuilt for this explicit qualification. Keep loaded files under build.
+TEST_CASE("Extrusion ABI loads frozen-header packages and preserves rotation during old flag writes",
+          "[.][extrusion-rotation-abi]")
+{
+    const char *paths[] = {std::getenv("SLIC3R_TEST_EXTRUSION_ABI_10_DLL"),
+                           std::getenv("SLIC3R_TEST_EXTRUSION_ABI_11_DLL")};
+    using Toggle = int32_t(extrusion_entity_handle *, decltype(&extrusion_flags), decltype(&extrusion_set_flags));
+    for (size_t index = 0; index < 2; ++index) {
+        REQUIRE(paths[index] != nullptr);
+        const boost::filesystem::path binary(paths[index]);
+        REQUIRE(boost::filesystem::is_regular_file(binary));
+        const std::string id = std::string("rotation.abi.fixture.") + (index == 0 ? "10" : "11");
+        const boost::filesystem::path repository = boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+            "build" / "temp" / boost::filesystem::unique_path("rotation-abi-%%%%-%%%%");
+        const boost::filesystem::path package = repository / id;
+        boost::filesystem::create_directories(package);
+        {
+            boost::nowide::ofstream file((package / "description.ini").string());
+            file << "[plugin]\nid=" << id << "\nname=" << id << "\nfull_name=" << id << "\nslicer=SuperSlicer\ninternal=1\n";
+        }
+        {
+            boost::nowide::ofstream file((package / "version.ini").string());
+            file << "[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n[abi]\n"
+                    "slic3r_plugin_types.h=" << SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR << "."
+                 << SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR
+                 << "\nslic3r_extrusion_entity.h=" << (index == 0 ? "1.0" : "1.1") << "\n";
+        }
+#ifdef _WIN32
+        const char *filename = "plugin.dll";
+#elif defined(__APPLE__)
+        const char *filename = "plugin.dylib";
+#else
+        const char *filename = "plugin.so";
+#endif
+        boost::filesystem::copy_file(binary, package / filename);
+        Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+        host.clear_plugin_package_load_reports();
+        Slic3r::load_plugin_packages_from_repository(repository, host);
+        const auto *report = host.plugin_package_load_report(id);
+        REQUIRE(report != nullptr);
+        CHECK(report->state == Slic3r::PluginPackageLoadState::Loaded);
+        CHECK(report->issues.empty());
+        boost::dll::shared_library library(binary);
+        auto &toggle = library.get<Toggle>("rotation_fixture_toggle_known_flags");
+        Slic3r::ExtrusionEntity entity(false);
+        auto *handle = reinterpret_cast<extrusion_entity_handle *>(&entity);
+        for (const bool permission : {false, true}) {
+            entity.set_can_rotate(permission);
+            REQUIRE(toggle(handle, &extrusion_flags, &extrusion_set_flags) == 1);
+            CHECK(entity.can_rotate() == permission);
+        }
+    }
+}
 
 namespace {
 // Write package identity/version files using ABI major 4 under the borrowed test-owned directory; directory errors propagate.

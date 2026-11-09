@@ -248,7 +248,7 @@ TEST_CASE("PrintingExtrusion pre-sort moves only non-empty roots in one tool vec
     append_extrusion(tool,
         make_path(Point(scale_i(0.0), coord_t(0)), Point(scale_i(1.0), coord_t(0))), 10);
     PrintingExtrusion &empty = append_extrusion(
-        tool, std::make_unique<ExtrusionEntityCollection>(false, false), 20);
+        tool, std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, false), 20);
     EntryPointProperty &stale = entry_point_key().get_or_add(mutable_root(empty));
     stale.entry = c_point{123, 456};
     stale.exit = stale.entry;

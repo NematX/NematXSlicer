@@ -17,6 +17,7 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -37,6 +38,7 @@ properties have already been resolved. This isolates the post-processor from
 the providers it follows. The fixtures exercise direct and inherited process
 values, plus Travel runs spanning several trees, while verifying that target
 deceleration preserves travel speed and every unrelated process field.
+Fixture trees acquire canonical storage on entry to the plan, before validation.
 */
 
 namespace {
@@ -157,7 +159,7 @@ std::unique_ptr<ExtrusionPath> make_movement(const ExtrusionRole role,
         add_process_property);
 }
 
-// Append one independently owned extrusion root in final execution order.
+// Acquire canonical fixture storage and append it in final execution order.
 ExtrusionEntity &append_movement(PrintingToolGroup &tool,
                                  const LayerRegionIsland &source,
                                  std::unique_ptr<ExtrusionEntity> root,
@@ -168,7 +170,7 @@ ExtrusionEntity &append_movement(PrintingToolGroup &tool,
     extrusion.region_island = &source;
     extrusion.printing_catalog_id = printing_catalog_id;
     extrusion.sregion_island_role = root->role();
-    extrusion.root = std::move(root);
+    extrusion.root = CanonicalExtrusion::acquire(*root);
     ExtrusionEntity &result = *extrusion.root;
     tool.extrusions.push_back(std::move(extrusion));
     return result;
@@ -480,9 +482,10 @@ TEST_CASE("Deposits separate travel runs and supply their own target acceleratio
     PrintingLayerGroup &layer = prepare_three_movement_plan(prepared);
     PrintingToolGroup &tool = layer.tool_groups.front();
     const PrintingObjectInstanceId catalog_id = tool.extrusions.back().printing_catalog_id;
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(*tool.extrusions.back().root);
-    deposit.polyline() = ArcPolyline();
-    deposit.polyline().append(Point(scale_i(110.0), 0));
+    ExtrusionEntity &deposit = *tool.extrusions.back().root;
+    REQUIRE(deposit.has_polyline());
+    deposit.polyline_ref() = ArcPolyline();
+    deposit.polyline_ref().append(Point(scale_i(110.0), 0));
     deposit.get_or_add_property<ExtrusionAttributes>().set_role(ExtrusionRole::SupportMaterial);
     deposit.add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
@@ -502,7 +505,7 @@ TEST_CASE("Deposits separate travel runs and supply their own target acceleratio
     CHECK(leaves[4].role == ExtrusionRole::Travel);
     CHECK(leaves[5].role == ExtrusionRole::Travel);
     CHECK(leaves[5].acceleration == Approx(700.f));
-    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.polyline_ref().size() == 1);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
 }
 
@@ -521,7 +524,7 @@ TEST_CASE("Ordinary one-point leaves do not separate compatible travel runs",
     PrintingExtrusion event;
     event.region_island = prepared.source_region_island;
     event.printing_catalog_id = tool.extrusions.front().printing_catalog_id;
-    event.root = std::move(ignored);
+    event.root = CanonicalExtrusion::acquire(*ignored);
     tool.extrusions.insert(tool.extrusions.begin() + 2, std::move(event));
     run_travel_deceleration(prepared.print);
     const std::vector<ObservedLeaf> leaves = observed_leaves(layer);
@@ -701,15 +704,15 @@ TEST_CASE("Travel deceleration resolves its switch at the Travel destination",
 
         // Make the first target segment curved so the boundary probe must use
         // the extrusion polyline's arc-aware point interpolation.
-        ExtrusionPath *target = dynamic_cast<ExtrusionPath *>(
-            layer.tool_groups.front().extrusions.back().root.get());
+        ExtrusionEntity *target = layer.tool_groups.front().extrusions.back().root.get();
         REQUIRE(target != nullptr);
+        REQUIRE(target->has_polyline());
         ArcPolyline curved_target;
         curved_target.append(points.boundary + points.instance_shift);
         curved_target.append(Geometry::ArcWelder::Segment(
             points.target_inside_enabled + points.instance_shift,
             float(scale_i(2.)), Geometry::ArcWelder::Orientation::CCW));
-        target->polyline() = std::move(curved_target);
+        target->polyline_ref() = std::move(curved_target);
 
         run_travel_deceleration(prepared.print);
 
@@ -1110,9 +1113,9 @@ TEST_CASE("Travel deceleration preserves arc geometry and Z offsets",
     PreparedTravelDecelerationPrint prepared;
     prepare_source_context(prepared, true, "0");
     PrintingLayerGroup &layer = prepare_three_movement_plan(prepared);
-    ExtrusionPath *travel = dynamic_cast<ExtrusionPath *>(
-        layer.tool_groups.front().extrusions[1].root.get());
+    ExtrusionEntity *travel = layer.tool_groups.front().extrusions[1].root.get();
     REQUIRE(travel != nullptr);
+    REQUIRE(travel->has_polyline());
 
     ArcPolyline curved_travel;
     curved_travel.append(Point(scale_i(10.), scale_i(0.)));
@@ -1121,7 +1124,7 @@ TEST_CASE("Travel deceleration preserves arc geometry and Z offsets",
         Geometry::ArcWelder::Orientation::CCW));
     curved_travel.set_z_offset(0, scale_i(0.03));
     curved_travel.set_z_offset(1, scale_i(0.09));
-    travel->polyline() = std::move(curved_travel);
+    travel->polyline_ref() = std::move(curved_travel);
 
     run_travel_deceleration(prepared.print);
 

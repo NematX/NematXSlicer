@@ -77,7 +77,9 @@ bool LayerRegionIsland::has_extrusion(ExtrusionRole role) const {
     std::map<ExtrusionRole, ExtrusionEntityCollection>::const_iterator it = m_extrusion_regions.find(role);
     if (it == m_extrusion_regions.end())
         return false;
-    return !it->second.empty();
+    // Buckets describe stored geometry, not a legacy child's virtual emptiness
+    // (a transitional Nop may own a local path or geometric descendants).
+    return !it->second.ExtrusionEntity::empty();
 }
 
 const ExtrusionEntityCollection &LayerRegionIsland::extrusion(ExtrusionRole role) const {
@@ -92,7 +94,7 @@ ExtrusionEntityCollection &LayerRegionIsland::mutable_extrusion(ExtrusionRole ro
 void LayerRegionIsland::remove_empty_extrusions() {
     std::vector<ExtrusionRole> to_del;
     for (auto &entry : m_extrusion_regions) {
-        if (entry.second.empty()) {
+        if (entry.second.ExtrusionEntity::empty()) {
             to_del.push_back(entry.first);
         }
     }
@@ -139,7 +141,7 @@ void LayerRegionIsland::simplify_extrusion_entity(const Layer& layer)
 
 bool LayerRegionIsland::has_extrusions() const {
     for (auto &entry : this->m_extrusion_regions) {
-        if (!entry.second.empty()) {
+        if (!entry.second.ExtrusionEntity::empty()) {
             return true;
         }
     }

@@ -44,6 +44,7 @@ class PropertyHost:
         self.children = {1: [2], 2: []}
         self.freed = []
         self.polyline_set = None
+        self.rotation = {}
 
     def storage_free(self, storage, handle):
         self.freed.append((address(storage), address(handle)))
@@ -68,6 +69,15 @@ class PropertyHost:
 
     def extrusion_is_loop(self, entity):
         return address(entity) == 1
+
+    def extrusion_can_rotate(self, entity):
+        return bool(address(entity)) and self.rotation.get(address(entity), True)
+
+    def extrusion_set_can_rotate(self, entity, enabled):
+        if not address(entity):
+            return 0
+        self.rotation[address(entity)] = bool(enabled)
+        return 1
 
     def extrusion_child_count(self, entity):
         return len(self.children.get(address(entity), []))
@@ -245,6 +255,18 @@ class PythonExtrusionRegionViewTests(unittest.TestCase):
         arguments = api.host.print_resolve_default_region_config.call_args.args
         self.assertEqual(tuple(map(address, arguments)), (42, 43))
         api.host.object_count_print_region.assert_not_called()
+
+    def test_rotation_permission_is_independent_of_loop_classification(self):
+        """Rotation permission is independent of closure and legacy flags."""
+        api = self.make_api()
+        entity = self.extrusions.MutableExtrusionEntity(api, 2)
+        self.assertFalse(entity.is_loop())
+        self.assertTrue(entity.can_rotate())
+        self.assertTrue(entity.set_can_rotate(False))
+        self.assertFalse(entity.can_rotate())
+        self.assertTrue(entity.set_can_rotate(True))
+        self.assertTrue(entity.can_rotate())
+        self.assertFalse(entity.is_loop())
 
     def test_stored_extrusion_entity_has_unique_ownership(self):
         api = self.make_api()

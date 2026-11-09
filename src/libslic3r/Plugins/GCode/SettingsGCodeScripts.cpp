@@ -281,6 +281,7 @@ void append_script_event(storage_handle *storage,
     // The fixed scope root takes ownership of the complete temporary event,
     // including its text and typed argument buffers.
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     event.script_gcode(script, script_type, arguments, processing_extruder_id);
     if (position == ScopeEventPosition::Before)
         events.append_before_move(event.mutable_view());

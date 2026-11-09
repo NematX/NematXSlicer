@@ -209,12 +209,15 @@ public:
     static inline ExtrusionRole SUPPORT_INTERFACE = ExtrusionRole::SupportMaterialInterface;
 
 
+    // Geometric presence reads stored content, independently of legacy virtual
+    // empty() overrides. Pure command-only buckets retain their existing policy.
     bool has_extrusion(ExtrusionRole role) const;
     // Read every actually published bucket, including plugin-defined role combinations.
     const std::map<ExtrusionRole, ExtrusionEntityCollection> &extrusion_buckets() const { return m_extrusion_regions; }
     bool has_extrusions() const;
     const ExtrusionEntityCollection &extrusion(ExtrusionRole role) const;
 
+    // Remove only geometrically empty buckets using the same presence contract.
     void remove_empty_extrusions();
 
     ExtrusionEntityCollection & mutable_extrusion(ExtrusionRole role);

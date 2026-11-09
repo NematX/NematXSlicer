@@ -9,6 +9,27 @@ using namespace Slic3r;
 
 extern "C" int test_plugin_api_headers_c(void);
 
+// Check the additive extrusion contract without changing public structure sizes or the two legacy flag bits.
+TEST_CASE("Extrusion rotation publishes minor 1.1 and refuses later requirements",
+          "[plugins][abi][rotation]")
+{
+    const auto &contracts = host_plugin_api_contracts();
+    const auto found = std::find_if(contracts.begin(), contracts.end(),
+        [](const PluginApiRequirement &entry) { return entry.header == "slic3r_extrusion_entity.h"; });
+    REQUIRE(found != contracts.end());
+    CHECK(found->version.major == 1);
+    CHECK(found->version.minor == 1);
+    for (const char *version : {"1.0", "1.1", "1.2"}) {
+        PluginPackageMetadata metadata;
+        std::string error;
+        REQUIRE(parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
+            "[abi]\nslic3r_plugin_types.h=") + std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR) + "." +
+            std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR) +
+            "\nslic3r_extrusion_entity.h=" + version + "\n", metadata, error));
+        CHECK(metadata.compatibility.compatible() == (std::string(version) != "1.2"));
+    }
+}
+
 TEST_CASE("Package ABI diagnostics identify the manifest section key and invalid value", "[plugins][abi][repository]")
 {
     const std::string declaration = GENERATE(std::string(""),

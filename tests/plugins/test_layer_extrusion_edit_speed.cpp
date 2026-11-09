@@ -1210,7 +1210,8 @@ TEST_CASE("Deposits select regional process values without splitting their volum
         "perimeter_speed", {ExtrusionSpec{}, ExtrusionSpec{}, ExtrusionSpec{}});
     ExtrusionEntity &root = single_plan_root(prepared.print);
     REQUIRE(root.child_count() == 3);
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(1));
+    ExtrusionEntity &deposit = root.child(1);
+    REQUIRE(deposit.has_polyline());
     const Point center = (deposit.first_point() + deposit.last_point()) / 2;
     // The modifier is the central four-millimeter strip. Other choices test
     // the base region, the shared border, and a point outside every source area.
@@ -1247,8 +1248,8 @@ TEST_CASE("Deposits select regional process values without splitting their volum
                 {"perimeter_speed"}, c_point{point.x() - shift.x, point.y() - shift.y});
         REQUIRE(lookup.status == slic3r_api::RegionSettingsPointStatus::Ambiguous);
     }
-    deposit.polyline() = ArcPolyline();
-    deposit.polyline().append(point);
+    deposit.polyline_ref() = ArcPolyline();
+    deposit.polyline_ref().append(point);
     deposit.add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
 
@@ -1260,7 +1261,7 @@ TEST_CASE("Deposits select regional process values without splitting their volum
     CHECK(leaves[3].acceleration == Approx(location == 0 ? 300.0 : location == 1 ? 700.0 :
                                           fallback.float_or_default("default_acceleration", 0.0)));
     CHECK(deposit.child_count() == 0);
-    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.polyline_ref().size() == 1);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
     CHECK(deposit.first_point() == point);
 
@@ -1314,7 +1315,7 @@ TEST_CASE("Deposits select regional process values without splitting their volum
         control.region_island = tool.extrusions.back().region_island;
         control.printing_catalog_id = tool.extrusions.back().printing_catalog_id;
         control.sregion_island_role = ExtrusionRole::Perimeter;
-        control.root = std::move(path);
+        control.root = path->clone_canonical();
         tool.extrusions.insert(tool.extrusions.begin() + control_idx, std::move(control));
     }
 
@@ -2692,7 +2693,8 @@ TEST_CASE("Layer fan normalization does not create requests on service leaves or
     // A zero-flow connector between two deposits keeps their physical fan state.
     root.child(1).add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::EXTRUSION, 0.));
-    auto event = std::make_unique<ExtrusionNop>(ExtrusionPropertySpecialCommand(
+    ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+    event->add_property(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::EXTRUSION, 0.5));
     root.append_child(std::move(event));
     run_fan_editors(prepared);
@@ -2865,12 +2867,13 @@ TEST_CASE("PrintingPlan time estimator rejects malformed deposits before timing"
     ExtrusionSpec spec;
     spec.existing_speed = 20.f;
     prepare_ordered_plan(prepared, config, {{spec}});
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(single_plan_root(prepared.print).child(0));
-    deposit.polyline() = ArcPolyline();
+    ExtrusionEntity &deposit = single_plan_root(prepared.print).child(0);
+    REQUIRE(deposit.has_polyline());
+    deposit.polyline_ref() = ArcPolyline();
     if (invalid != 0)
-        deposit.polyline().append(Point(0, 0));
+        deposit.polyline_ref().append(Point(0, 0));
     if (invalid == 1)
-        deposit.polyline().append(Point(scale_i(1.0), 0));
+        deposit.polyline_ref().append(Point(scale_i(1.0), 0));
     const double volume = invalid == 2 ? 0.0 : invalid == 3 ? -1.0 :
         invalid == 4 ? std::numeric_limits<double>::quiet_NaN() :
         invalid == 5 ? std::numeric_limits<double>::infinity() : 0.5;
@@ -3932,19 +3935,21 @@ TEST_CASE("First-layer flow selects one regional value for a deposit without dup
         {{"first_layer_flow_ratio", "200%"}}, "first_layer_flow_ratio", {ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}});
     ExtrusionEntity &root = single_plan_root(prepared.print);
     REQUIRE(root.child_count() == 1);
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(0));
+    ExtrusionEntity &deposit = root.child(0);
+    REQUIRE(deposit.has_polyline());
     Point point = (deposit.first_point() + deposit.last_point()) / 2;
     if (!inside_modifier)
         point.x() -= scale_i(5.);
-    deposit.polyline() = ArcPolyline();
-    deposit.polyline().append(point);
-    deposit.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    deposit.polyline_ref() = ArcPolyline();
+    deposit.polyline_ref().append(point);
+    deposit.add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
     run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
     const std::vector<ObservedFlow> flows = observed_plan_flows(prepared.print);
     REQUIRE(flows.size() == 1);
     CHECK(flows.front().mm3_per_mm == Approx(0.2 * (inside_modifier ? 2. : 1.25) * 1.2));
     CHECK(deposit.child_count() == 0);
-    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.polyline_ref().size() == 1);
     CHECK(deposit.first_point() == point);
     REQUIRE(deposit.get_property<ExtrusionPropertySpecialCommand>() != nullptr);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
@@ -4438,13 +4443,12 @@ TEST_CASE("Slowdown keeps an interleaved deposit fixed and pairs both geometric 
     prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter, 20.f),
         slowdown_spec(ExtrusionRole::SupportMaterial, 40.f), slowdown_spec(ExtrusionRole::InternalInfill)}});
     PrintingLayerGroup &layer = *printed_layers(prepared).front();
-    ExtrusionEntityCollection &root = dynamic_cast<ExtrusionEntityCollection &>(
-        *layer.tool_groups.front().extrusions.front().root);
-    REQUIRE(root.size() == 3);
-    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(1));
+    ExtrusionEntity &root = *layer.tool_groups.front().extrusions.front().root;
+    REQUIRE(root.child_count() == 3);
+    ExtrusionEntity &deposit = root.child(1);
     const Point center = deposit.first_point();
-    deposit.polyline() = ArcPolyline();
-    deposit.polyline().append(center);
+    deposit.polyline_ref() = ArcPolyline();
+    deposit.polyline_ref().append(center);
     deposit.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
     const double flow = deposit.get_property<ExtrusionAttributes>()->mm3_per_mm;
     REQUIRE(flow > 0.0);
@@ -4470,8 +4474,8 @@ TEST_CASE("Slowdown keeps an interleaved deposit fixed and pairs both geometric 
 
     run_editors(prepared, {SLOWDOWN_PLUGIN});
 
-    REQUIRE(root.size() == 3);
-    CHECK(deposit.polyline().size() == 1);
+    REQUIRE(root.child_count() == 3);
+    CHECK(deposit.polyline_ref().size() == 1);
     CHECK(deposit.first_point() == center);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
     CHECK(deposit.get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 40.f);

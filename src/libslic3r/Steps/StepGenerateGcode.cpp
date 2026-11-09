@@ -29,6 +29,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Printing/PrintingPlanFacts.hpp"
+#include "libslic3r/Printing/PrintingPlanValidation.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
@@ -60,6 +61,9 @@ and no extrusion-axis request. This is the last common
 point where the host can describe an invalid tree with its complete
 PrintingPlan location; a firmware session sees only one borrowed tree at a
 time and cannot recover that context.
+Null owned children are reported without dereferencing them. Detailed movement
+and source errors take priority over the Debug canonical-storage check, which
+rejects legacy node types without replacing or repairing any tree.
 
 File format decisions still belong to the selected plugin, so external writers
 can replace the built-in implementation without changing the pipeline runner.
@@ -67,7 +71,7 @@ can replace the built-in implementation without changing the pipeline runner.
 Representative direct calls (branches are not a timeline):
 
     run_step()
-        |-- validate_pre()
+        |-- validate_pre() [movement diagnostics, then canonical storage in Debug]
         |-- create_firmware_session()
         |-- Detail::prepare_guarded_plugin_host_context()
         |-- plugin->setup()
@@ -859,9 +863,14 @@ void validate_extrusion_tree_movements(const Print &print,
 
     for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
         child_path.push_back(child_idx);
-        validate_extrusion_tree_movements(
-            print, entity.child(child_idx), location, child_path, state,
-            active_tool, extruder_count, report);
+        if (entity.children()[child_idx] == nullptr) {
+            report.add_missing_root("PrintingPlan location: " + extrusion_tree_path(location, child_path) +
+                                    "\nReason: null owned extrusion child.\n");
+        } else {
+            validate_extrusion_tree_movements(
+                print, entity.child(child_idx), location, child_path, state,
+                active_tool, extruder_count, report);
+        }
         child_path.pop_back();
     }
 
@@ -1137,11 +1146,17 @@ bool validate_pre(const Orchestrator &orchestrator, const Print &print, std::str
         validate_scope_event_movements(print, plan->events.after(), "plan.events.after",
                                        nullptr, nullptr, active_tool, extruder_count, report);
 
-    if (report.error_count == 0)
-        return true;
-    if (error != nullptr)
-        *error = speed_validation_message(report);
-    return false;
+    // Preserve detailed movement/source diagnostics before the debug storage check.
+    if (report.error_count != 0) {
+        if (error != nullptr)
+            *error = speed_validation_message(report);
+        return false;
+    }
+#ifndef NDEBUG
+    if (!Printing::validate_canonical_plan(*plan, error))
+        return false;
+#endif
+    return true;
 }
 
 bool validate_post(const Print &, std::string *)

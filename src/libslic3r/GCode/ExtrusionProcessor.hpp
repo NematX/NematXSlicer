@@ -259,6 +259,7 @@ std::vector<ExtendedPoint> estimate_points_properties(const POINTS              
 //                                                          const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
 //                                                          const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines);
 
+// Return owned split paths with the borrowed source collection's ordering permissions.
 ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(
     const ExtrusionEntityCollection                 *ecc,
     const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,

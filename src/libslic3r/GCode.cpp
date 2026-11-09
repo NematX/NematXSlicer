@@ -1563,8 +1563,12 @@ GCodeGenerator::GCodeGenerator() :
 
 GCodeGenerator::~GCodeGenerator() = default;
 
+// Borrow a nonnull Print and valid output path, emitting native text output and optionally updating the borrowed result;
+// Debug rejects entry during this Print's active STEP_GCODE before effects. File, allocation, callback and cancellation
+// failures propagate from export; files and generator state may already have changed, and no Print ownership is transferred.
 void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    assert(print->running_step() != STEP_GCODE && "The active STEP_GCODE pipeline must use its selected writer, not the native text exporter");
     // mutable print status, to make print unmutable.
     Print::StatusMonitor monitor{ *print };
 

@@ -4,6 +4,7 @@
 ///|/
 
 #include "DefaultOrdering.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -42,8 +43,9 @@ namespace {
 /*
 DefaultPlanBuilder is the first plugin in the ordering chain.
 
-It creates the mutable PrintingPlan from the read-only Print using only the
-public plugin views. The source data tree stays untouched: each printable role
+It creates the mutable PrintingPlan from the read-only Print through plugin
+views, with a private bridge for translating stored geometry. The source
+data tree stays untouched: each printable role
 bucket from a LayerRegionIsland is cloned into the plan, and the clone is shifted
 for the object instance it belongs to. Later ordering plugins can reorder those
 clones without changing perimeter, infill or support generation results.
@@ -250,11 +252,9 @@ bool append_print_auxiliary_group(
     const plugin_run_context *run_ctx);
 
 /*
-Translate every local polyline in an extrusion tree.
-
-The plugin ABI currently exposes path points and child trees, but not the
-position carried by an ExtrusionNop. Normal printable roots are path trees, so
-this is enough for the plan clones built here.
+Translate stored geometry in the owned canonical clone through the core bridge
+shared with the native builder. Commands without a polyline retain the implicit
+current position; the source tree and public ABI remain unchanged.
 */
 void translate_extrusion_tree(
     MutableExtrusionEntity entity,
@@ -640,27 +640,12 @@ void translate_extrusion_tree(
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if (shift.x == 0 && shift.y == 0)
+    if (!entity.valid())
         return;
-
-    if (entity.point_count() > 0) {
-        /*
-        A node with local points is a leaf path. Translate its polyline and stop:
-        by construction it cannot also have children.
-        */
-        throw_if_cancelled(run_ctx);
-        entity.translate(shift);
-        return;
-    }
-
-    /*
-    Collections do not own coordinates directly. Walk their children so every
-    printable path under the cloned root receives the same instance shift.
-    */
-    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        translate_extrusion_tree(entity.child_mutable(child_idx), shift, run_ctx);
-    }
+    // Translate the owned geometry without manufacturing points for commands
+    // or changing the source tree through the public SDK.
+    Slic3r::ExtrusionEntity *core = reinterpret_cast<Slic3r::ExtrusionEntity *>(entity.mutable_handle());
+    core->translate(Slic3r::Point(shift.x, shift.y));
 }
 
 void sort_layer_groups_by_print_z(

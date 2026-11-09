@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -27,6 +28,18 @@ namespace {
 These casts are the C ABI boundary for PrintingPlan. The C side only sees
 opaque handles; the host side always immediately converts them back to the C++
 objects that own the vectors and extrusion clones.
+Plan copies publish canonical base nodes; plan moves acquire new canonical roots
+after reserving publication capacity. Conforming child handles survive a move;
+legacy trees are copied before their source content is consumed. Root setters
+prepare their result before replacing the owner, so self/descendant aliases stay
+valid throughout preparation. Allocation errors propagate to the guarded plugin
+caller without publishing a partial tree. All handles remain borrowed from the
+live plan or source storage; callers exclude concurrent structural mutation.
+
+    printing_tool_group_append_extrusion_clone() -> clone_or_empty()
+        `-- clone_canonical(): independently copy stored content and properties
+    printing_tool_group_append_extrusion_move() -> move_or_empty()
+        `-- CanonicalExtrusion::acquire(): consume only after preparation
 */
 Printing::PrintingPlan *to_plan(printing_plan_handle *me)
 {
@@ -251,15 +264,13 @@ std::unique_ptr<ExtrusionEntity> clone_or_empty(const extrusion_entity_handle *r
 {
     if (root == nullptr)
         return std::make_unique<ExtrusionEntity>(true);
-    return ExtrusionEntityUPtr(to_extrusion(root)->clone());
+    return to_extrusion(root)->clone_canonical();
 }
 
 std::unique_ptr<ExtrusionEntity> move_or_empty(extrusion_entity_handle *root)
 {
-    std::unique_ptr<ExtrusionEntity> out = std::make_unique<ExtrusionEntity>(true);
-    if (root != nullptr)
-        extrusion_move_from(reinterpret_cast<extrusion_entity_handle *>(out.get()), root);
-    return out;
+    return root != nullptr ? CanonicalExtrusion::acquire(*to_extrusion(root)) :
+        std::make_unique<ExtrusionEntity>(true);
 }
 
 } // namespace
@@ -816,6 +827,8 @@ printing_extrusion_handle *printing_tool_group_append_extrusion_move(
     Slic3r::Printing::PrintingExtrusion extrusion;
     extrusion.region_island = region_island;
     extrusion.sregion_island_role = Slic3r::to_extrusion_role(source_role);
+    // Root handles point to heap-owned nodes and survive this vector reserve.
+    Slic3r::to_tool_group(me)->extrusions.reserve(tool_group->extrusions.size() + 1);
     extrusion.root = Slic3r::move_or_empty(root);
     extrusion.printing_catalog_id = printing_catalog_id;
     Slic3r::to_tool_group(me)->extrusions.push_back(std::move(extrusion));

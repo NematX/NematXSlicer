@@ -16,6 +16,9 @@ separate configuration copy, then read its published file for assertions.
 
 Default firmware-session tests verify neutral machine-state interpretation, extrusion traversal and extension hooks.
 Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
+Seam export probes materialize an exact entry, consume rotation permission and
+verify the writer's first extrusion and marker. Fixed closed sequences and their
+canonical copies keep their entry even when a child remains rotatable.
 
 Representative direct calls (branches are not a timeline):
 
@@ -29,9 +32,11 @@ Representative direct calls (branches are not a timeline):
 */
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <set>
@@ -76,6 +81,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
@@ -94,6 +100,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
@@ -507,10 +514,10 @@ std::unique_ptr<ExtrusionEntity> speed_validation_path(
         true));
     if (speed)
         path->add_property(ExtrusionPropertySpeed(*speed));
-    return path;
+    return path->clone_canonical();
 }
 
-/* Append one independently owned validation root to a tool group. */
+/* Acquire one canonical validation root, retaining an explicit missing-root probe. */
 PrintingExtrusion &append_speed_validation_extrusion(
     PrintingToolGroup &tool_group,
     std::unique_ptr<ExtrusionEntity> root,
@@ -520,7 +527,7 @@ PrintingExtrusion &append_speed_validation_extrusion(
     PrintingExtrusion extrusion;
     extrusion.region_island = region_island;
     extrusion.sregion_island_role = ExtrusionRole::Perimeter;
-    extrusion.root = std::move(root);
+    extrusion.root = root ? CanonicalExtrusion::acquire(*root) : nullptr;
     extrusion.printing_catalog_id = printing_catalog_id;
     tool_group.extrusions.push_back(std::move(extrusion));
     return tool_group.extrusions.back();
@@ -624,7 +631,7 @@ TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode d
     Print print;
     configure_standard_firmware(print);
     auto &tool = append_speed_validation_tool_group(print, scale_i(0.2), 0);
-    auto root = std::make_unique<ExtrusionNop>();
+    ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(false);
     auto &fan = root->get_or_add_property<ExtrusionPropertyFan>();
     // This fan-only event belongs to no model instance in the compact plan.
     append_speed_validation_extrusion(tool, std::move(root), nullptr, UINT32_MAX);
@@ -659,6 +666,27 @@ TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode d
     CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     fan.clear();
     CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+}
+
+// A malformed owned child is diagnosed before any firmware output or unsafe traversal.
+TEST_CASE("STEP_GCODE diagnoses null owned children without repairing the tree",
+          "[plugins][gcode][validation][canonical-ingress]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    PrintingToolGroup &tool = append_speed_validation_tool_group(print);
+    ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, false);
+    root->append_child(speed_validation_path(22.f));
+    root->children().emplace_back(nullptr);
+    PrintingExtrusion &extrusion = append_speed_validation_extrusion(tool, std::move(root));
+    const ExtrusionEntity *identity = extrusion.root.get();
+    std::string error;
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    CHECK(error.find("extrusions[0].root.children[1]") != std::string::npos);
+    CHECK(error.find("null owned extrusion child") != std::string::npos);
+    CHECK(extrusion.root.get() == identity);
+    REQUIRE(extrusion.root->child_count() == 2);
+    CHECK(extrusion.root->children()[1] == nullptr);
 }
 
 TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
@@ -2068,7 +2096,8 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
     });
 }
 
-// Export two owned cubes with different layer heights, verify each object's first extrusion marker, and read the output with the plugin reader; pipeline, export and parsing failures propagate.
+// Export two owned cubes with different layer heights, observe STEP_GCODE through
+// progress and STEP_NONE after export, then verify object markers and reader output.
 TEST_CASE("Default firmware exports different object layer heights in the by-layer plan",
           "[plugins][gcode][firmware][markers]")
 {
@@ -2096,10 +2125,22 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
     std::string output;
+    std::atomic<uint32_t> gcode_progress_calls{0};
+    // Progress observes the reference-generation step without moving thumbnail
+    // rendering back from STEP_EXPORT. Workers may report concurrently.
+    print.set_status_callback([&print, &gcode_progress_calls](const PrintBase::SlicingStatus &) {
+        if (print.running_step() == STEP_GCODE)
+            gcode_progress_calls.fetch_add(1, std::memory_order_relaxed);
+    });
+    CHECK(print.running_step() == STEP_NONE);
     try {
         Orchestrator::instance().export_gcode(print, output_path.string(), nullptr);
+        CHECK(gcode_progress_calls.load(std::memory_order_relaxed) > 0);
+        CHECK(print.running_step() == STEP_NONE);
+        print.set_status_callback(nullptr);
         output = read_text_file(output_path);
     } catch (...) {
+        print.set_status_callback(nullptr);
         remove_output_pair(output_path);
         throw;
     }
@@ -2527,6 +2568,88 @@ TEST_CASE("Default firmware emits one seam after a complete composed arc loop",
     CHECK(count_occurrences(output, ";TYPE:External perimeter\n") == 1);
     CHECK(count_occurrences(output, ";WIDTH:0.4\n") == 1);
     CHECK(count_occurrences(output, ";HEIGHT:0.2\n") == 1);
+}
+
+// The writer must serialize the chosen entry, not choose or cut a new seam.
+TEST_CASE("Active writer preserves a finalized legal seam after rotation is consumed",
+          "[plugins][gcode][firmware][markers][seam][seam-writer-preparation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    configure_standard_firmware(print);
+    PrintingLayerGroup &layer = append_marker_test_layer(print, scale_i(0.2));
+    std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+        Point::new_scale(1, 1), Point::new_scale(9, 1), Point::new_scale(9, 9),
+        Point::new_scale(1, 9), Point::new_scale(1, 1)}),
+        20.f, 500.f, -1.f, -1.f, -1.f, ExtrusionRole::ExternalPerimeter);
+    path->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(path.get()));
+    const Point chosen = Point::new_scale(9, 5);
+    slic3r_api::Ordering::TreeOrderingGeometry::rotate_loop_to_legal_seam(
+        handle, view, c_point{chosen.x(), chosen.y()}, true);
+    REQUIRE(path->ExtrusionEntity::first_point() == chosen);
+    // Simulate the final pass's consumption, not a new exemption in the writer.
+    path->set_can_rotate(false);
+    append_path_extrusion(layer.tool_groups.front(), std::move(path));
+    const ExtrusionEntity *root = layer.tool_groups.front().extrusions.back().root.get();
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    INFO(output);
+    CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:5"});
+    bool checked_first_extrusion = false;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&checked_first_extrusion](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (!checked_first_extrusion && line.extruding(state) && line.dist_XY(state) > 0.) {
+            CHECK(state.x() == 9.f);
+            CHECK(state.y() == 5.f);
+            checked_first_extrusion = true;
+        }
+    });
+    CHECK(checked_first_extrusion);
+    CHECK(root->ExtrusionEntity::first_point() == chosen);
+    CHECK_FALSE(root->can_rotate());
+}
+
+// Fixed parent entry governs export independently of the child's own permission.
+TEST_CASE("Active writer does not recut a closed fixed MultiPath or its canonical copy",
+          "[plugins][gcode][firmware][markers][seam][seam-writer-preparation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool canonical : {false, true}) {
+        CAPTURE(canonical);
+        Print print;
+        configure_standard_firmware(print);
+        PrintingLayerGroup &layer = append_marker_test_layer(print, scale_i(0.2));
+        std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+            Point::new_scale(9, 9), Point::new_scale(1, 9), Point::new_scale(1, 1),
+            Point::new_scale(9, 1), Point::new_scale(9, 9)}),
+            20.f, 500.f, -1.f, -1.f, -1.f, ExtrusionRole::ExternalPerimeter);
+        std::unique_ptr<ExtrusionMultiPath> fixed = std::make_unique<ExtrusionMultiPath>(*path);
+        fixed->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
+        std::unique_ptr<ExtrusionEntity> root = canonical ? fixed->clone_canonical() :
+                                                          std::unique_ptr<ExtrusionEntity>(std::move(fixed));
+        REQUIRE_FALSE(root->can_rotate());
+        REQUIRE(root->child(0).can_rotate());
+        append_path_extrusion(layer.tool_groups.front(), std::move(root));
+        const ExtrusionEntity *before = layer.tool_groups.front().extrusions.back().root.get();
+        const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+        INFO(output);
+        CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:9"});
+        bool checked_first_extrusion = false;
+        GCodeReader reader;
+        reader.parse_buffer(output, [&checked_first_extrusion](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (!checked_first_extrusion && line.extruding(state) && line.dist_XY(state) > 0.) {
+                CHECK(state.x() == 9.f);
+                CHECK(state.y() == 9.f);
+                checked_first_extrusion = true;
+            }
+        });
+        CHECK(checked_first_extrusion);
+        CHECK(before->ExtrusionEntity::first_point() == Point::new_scale(9, 9));
+        CHECK_FALSE(before->can_rotate());
+        CHECK(before->child(0).can_rotate());
+    }
 }
 
 TEST_CASE("Default firmware omits seam markers for ineligible roots",
@@ -5581,6 +5704,26 @@ TEST_CASE("Thumbnail configuration preserves serialized ids and binary codec lim
     REQUIRE(requests.size() == 1);
     CHECK(requests.front().render.color_mode == RAW_GCODE_THUMBNAIL_COLOR_UNIFORM);
 }
+
+#ifndef NDEBUG
+// Deliberately enter the native exporter under this Print's active STEP_GCODE marker; the routing assertion
+// must terminate before status or file effects. Explicit hidden-tag selection isolates the expected process failure.
+TEST_CASE("Legacy export rejects the active pipeline G-code context",
+          "[.][legacy-routing-assert]")
+{
+    const boost::filesystem::path output_path = boost::filesystem::absolute(
+        boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+        "build" / "temp" / boost::filesystem::unique_path("legacy-routing-%%%%-%%%%.gcode"));
+    REQUIRE_FALSE(boost::filesystem::exists(output_path));
+    REQUIRE_FALSE(boost::filesystem::exists(output_path.string() + ".tmp"));
+    std::cout << "LEGACY_ROUTING_PROBE_PATH=" << output_path.string() << std::endl;
+    Print print;
+    print.set_running_step(STEP_GCODE);
+    GCodeGenerator generator;
+    generator.do_export(&print, output_path.string().c_str());
+    FAIL("The active STEP_GCODE context must stop at the legacy exporter routing assertion");
+}
+#endif
 
 TEST_CASE("Legacy text export uses the dynamic thumbnail service",
           "[plugins][gcode][legacy][thumbnails]")
