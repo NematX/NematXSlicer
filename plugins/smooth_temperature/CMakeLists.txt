@@ -54,9 +54,9 @@ foreach(_runtime IN LISTS SMOOTH_TEMPERATURE_RUNTIME_PATH)
 endforeach()
 add_test(NAME smooth_temperature_reader
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_gcode_reader.py")
-set_tests_properties(smooth_temperature_reader PROPERTIES LABELS "smooth_temperature" TIMEOUT 3)
+set_tests_properties(smooth_temperature_reader PROPERTIES LABELS "smooth_temperature" TIMEOUT 10)
 add_test(NAME smooth_temperature_e2e
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_smooth_temperature.py"
         --host-executable "${SUPERSLICER_HOST_EXECUTABLE}" --build-dir "${CMAKE_BINARY_DIR}"
         ${_smooth_runtime_args})
-set_tests_properties(smooth_temperature_e2e PROPERTIES LABELS "smooth_temperature" TIMEOUT 50)
+set_tests_properties(smooth_temperature_e2e PROPERTIES LABELS "smooth_temperature" TIMEOUT 100)

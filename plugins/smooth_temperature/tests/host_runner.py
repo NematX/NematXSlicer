@@ -31,9 +31,12 @@ class HostRunner:
             raise AssertionError("SmoothTemperature E2E exceeded its global wall-clock budget")
         return remaining
 
-    def run(self, args: list[str], log: Path, per_command: float = 12.0) -> None:
-        """Execute one command and retain partial output even on a timeout or failure."""
-        timeout = min(per_command, self.remaining())
+    def run(self, args: list[str], log: Path, per_command: float | None = None) -> None:
+        """Execute one command and retain partial output even on a timeout or failure.
+
+        Without per_command, the command may use the whole remaining budget.
+        """
+        timeout = self.remaining() if per_command is None else min(per_command, self.remaining())
         start = time.monotonic()
         options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
         with log.open("wb") as stream:

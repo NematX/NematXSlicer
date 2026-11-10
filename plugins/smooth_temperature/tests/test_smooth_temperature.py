@@ -5,16 +5,18 @@ copies, a synthetic skirt, policy changes and two tools/standby. Separate small
 scenes compare the host with N=0/1 and SEMM and exercise sequential copies.
 Expected sequences are written explicitly; the C++ tests cover the large
 arithmetic matrix without slicing it. The first export also saves the default
-catalogue for all scenes. Each run owns its datadir/results, keeps its logs and
-shares one budget.
+catalogue for all scenes; the six others then run in parallel, each with its own
+datadir copy, before the tests read their cached results. All share one budget.
 
-    main -> SmoothTemperature -> export -> write_project / HostRunner.run
-                                      -> parse_gcode -> Result.series
+    main -> prefetch -> immediate_result, then *_result in parallel
+                     -> export -> write_project / HostRunner.run -> parse_gcode
+         -> SmoothTemperature -> cached *_result -> Result.series
          -> timings.json (including command and fixture/parser times)
 """
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import functools
 import json
 import os
@@ -176,11 +178,14 @@ def export(name: str, options: tuple[str, ...], objects: list[Object], save_defa
     merged = {option.split("=", 1)[0].strip(): option for option in BASE_PROFILE + options}
     profile.write_text("\n".join(merged.values()) + "\n", encoding="utf-8")
     write_project(model, objects)
+    # Exports run in parallel: each owns a copy of the template datadir, which the host fills at startup.
+    datadir = case / "datadir"
+    shutil.copytree(PLUGIN_DATADIR, datadir)
     prepared = time.monotonic()
-    # These handfuls of rectangular paths do not benefit from a machine-wide worker pool.
+    # These handfuls of rectangular paths do not benefit from more host threads.
     actions = ["--save", str(case / "defaults.ini")] if save_defaults else []
-    RUNNER.run([str(HOST_EXECUTABLE), "--threads", "1", "--dont-arrange", "--datadir", str(PLUGIN_DATADIR), *actions, "--export-gcode", "--load", str(profile),
-                "--output", str(output), str(model)], case / "host.log", per_command=18 if len(objects) > 3 else 12)
+    RUNNER.run([str(HOST_EXECUTABLE), "--threads", "1", "--dont-arrange", "--datadir", str(datadir), *actions, "--export-gcode", "--load", str(profile),
+                "--output", str(output), str(model)], case / "host.log")
     parsing = time.monotonic()
     log = (case / "host.log").read_text(encoding="utf-8", errors="replace")
     # This known firmware-group diagnostic is unrelated to the temperature provider.
@@ -250,6 +255,57 @@ def main_result() -> Result:
     return export("smooth", options, objects)
 
 
+@functools.lru_cache(maxsize=1)
+def host_result() -> Result:
+    """The host provider on the parity scene, to compare with N=0 and N=1."""
+    return export("host", (f"{selector()} = layer_extrusion_edit.temperature.default",
+                           "print_temperature_smooth_change = 3"), parity_scene())
+
+
+@functools.lru_cache(maxsize=1)
+def sequential_result() -> Result:
+    """Two copies of one mesh printed one after the other."""
+    return export("sequential", ("complete_objects = 1", "print_temperature_smooth_change = 3"),
+                  [Object("same", config={"print_first_layer_temperature": "205"}, height=1.5, copies=(0, 80))])
+
+
+@functools.lru_cache(maxsize=1)
+def tools_base_result() -> Result:
+    """The host provider on the tool scene, with a companion object and standby."""
+    options = two_extruder_options() + ("temperature = 220,200", "first_layer_temperature = 220,200",
+                                       "ooze_prevention = 1", "standby_temperature_delta = -30")
+    return export("tools-base", options + ("print_temperature_smooth_change = 4",
+                                           f"{selector()} = layer_extrusion_edit.temperature.default"),
+                  tool_scene() + [Object("companion")])
+
+
+def semm_options() -> tuple[str, ...]:
+    """A real two-material SEMM plan, without an expensive wipe tower."""
+    return two_extruder_options() + ("single_extruder_multi_material = 1", "print_temperature_smooth_change = 4")
+
+
+@functools.lru_cache(maxsize=1)
+def semm_base_result() -> Result:
+    """The host provider on the tool scene in SEMM mode."""
+    return export("semm-base", semm_options() + (f"{selector()} = layer_extrusion_edit.temperature.default",),
+                  tool_scene())
+
+
+@functools.lru_cache(maxsize=1)
+def semm_smooth_result() -> Result:
+    """The smoothing provider on the tool scene in SEMM mode."""
+    return export("semm-smooth", semm_options(), tool_scene())
+
+
+def prefetch() -> None:
+    """Run the first export, whose saved catalogue the others read, then the others in parallel."""
+    immediate_result()
+    exports = (main_result, host_result, sequential_result, tools_base_result, semm_base_result, semm_smooth_result)
+    with ThreadPoolExecutor(max_workers=len(exports)) as pool:
+        for future in [pool.submit(result) for result in exports]:
+            future.result()
+
+
 class SmoothTemperature(unittest.TestCase):
     """Check real extrusions, not merely the presence of temperature commands."""
 
@@ -265,8 +321,7 @@ class SmoothTemperature(unittest.TestCase):
 
     def test_02_common_scene(self) -> None:
         """Compare complete host commands and read modifier/copy/skirt setpoints."""
-        host = export("host", (f"{selector()} = layer_extrusion_edit.temperature.default",
-                                "print_temperature_smooth_change = 3"), parity_scene())
+        host = host_result()
         self.expect(host, "one", [205, 220, 210, 210, 230, 230, 200, 200, 200, 200])
         immediate = immediate_result()
         self.assertEqual(immediate.commands(), host.commands(), "N=0 and N=1: complete host G-code")
@@ -293,19 +348,13 @@ class SmoothTemperature(unittest.TestCase):
 
     def test_04_sequential_copies(self) -> None:
         """Two copies of one mesh start immediately, even after another copy's ramp."""
-        result = export("sequential", ("complete_objects = 1", "print_temperature_smooth_change = 3"),
-                        [Object("same", config={"print_first_layer_temperature": "205"}, height=1.5, copies=(0, 80))])
+        result = sequential_result()
         for copy in (0, 1):
             self.expect(result, "same", [205, 210, 215, 220, 220], copy=copy)
 
     def test_05_tools_and_semm(self) -> None:
         """Standby is immediate; an absent tool resumes its ramp with the base wait."""
-        objects = tool_scene()
-        options = two_extruder_options() + ("temperature = 220,200", "first_layer_temperature = 220,200",
-                                           "ooze_prevention = 1", "standby_temperature_delta = -30")
-        host = export("tools-base", options + ("print_temperature_smooth_change = 4",
-                                               f"{selector()} = layer_extrusion_edit.temperature.default"),
-                      objects + [Object("companion")])
+        host = tools_base_result()
         self.expect(host, "tools", [220, 240, 240, 240, 240, 240], positions=[0, 1, 6, 7, 8, 9])
         smooth = main_result()
         self.expect(smooth, "tools", [220, 225, 230, 235, 240, 240], positions=[0, 1, 6, 7, 8, 9])
@@ -317,10 +366,7 @@ class SmoothTemperature(unittest.TestCase):
                 continue
             first = next(values[0] for key, values in smooth.setpoints.items() if key[:2] == (layer, tool))
             self.assertEqual(temperature, first, "a returning tool waits for the first root's checked ramp value")
-        # SEMM is exercised with a real two-material plan, without an expensive wipe tower.
-        semm = two_extruder_options() + ("single_extruder_multi_material = 1", "print_temperature_smooth_change = 4")
-        semm_base = export("semm-base", semm + (f"{selector()} = layer_extrusion_edit.temperature.default",), objects)
-        semm_smooth = export("semm-smooth", semm, objects)
+        semm_base, semm_smooth = semm_base_result(), semm_smooth_result()
         self.assertEqual(semm_smooth.commands(), semm_base.commands(), "SEMM leaves all base decisions unchanged")
         self.expect(semm_smooth, "tools", [220, 240, 240, 240, 240, 240], positions=[0, 1, 6, 7, 8, 9])
         self.expect(semm_smooth, "tools", [240] * 4, tool=1, positions=[2, 3, 4, 5])
@@ -334,7 +380,7 @@ def main() -> int:
     parser.add_argument("--build-dir", type=Path, default=PROJECT / ".build")
     parser.add_argument("--runtime-path", action="append", default=[])
     parser.add_argument("--builtin", action="store_true", help="qualify the embedded provider without a standalone package")
-    parser.add_argument("--budget-seconds", type=float, default=45)
+    parser.add_argument("--budget-seconds", type=float, default=90)
     args, unittest_args = parser.parse_known_args()
     HOST_EXECUTABLE = args.host_executable.resolve()
     build = args.build_dir.resolve()
@@ -357,6 +403,7 @@ def main() -> int:
     print(f"SmoothTemperature logs: {OUTPUT_ROOT}", flush=True)
     succeeded = False
     try:
+        prefetch()
         program = unittest.main(argv=[sys.argv[0], *unittest_args], verbosity=2, exit=False)
         RUNNER.remaining()
         succeeded = program.result.wasSuccessful()
