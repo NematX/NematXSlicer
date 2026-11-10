@@ -6,6 +6,7 @@
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
@@ -20,8 +21,8 @@
 Exact boundary comparisons for the perimeter-avoiding travel router
 =================================================================
 The sliced-scene tests check that TravelBoundary reproduces the core
-AvoidCrossingPerimeters boundaries exactly. Direct subjects instead check inset
-branch outcomes and geometry properties without a core comparison.
+AvoidCrossingPerimeters boundaries exactly. A direct jagged perimeter subject also
+compares core caches; the other direct subjects check inset outcomes and geometry.
 For each sliced layer, compare copies the input, builds both
 plugin boundaries and calls core travel_to to fill the core's lazy caches. Checks
 compare rings, island indices, boxes, cumulative float lengths, original/inset
@@ -32,7 +33,10 @@ Scenes exercise different parts of construction:
   island indexing, tool clipping and top exclusions. Another object and repeated
   instances check external hole placement.
 - A faceted annulus supplies oblique edges; a 0.05 mm square skips inset attempts.
-  An auxiliary support layer checks the use of lower object slices.
+  An auxiliary support layer checks the use of lower object slices and the absence
+  of excluded tops while avoid_crossing_top is enabled in its regions.
+  A sliced top layer has excluded tops without the support marker and none with it;
+  both versions are compared with the core.
 - Dumbbells and frames vary neck or wall widths through 0.6, 1.0, 1.5 and 2.5 mm;
   frames keep their holes. A notched plate checks a passage facing a long edge.
 - A small-nozzle plate, with a pointed hole 0.005 mm from a long edge and spacing
@@ -40,9 +44,12 @@ Scenes exercise different parts of construction:
 - Direct owned LayerInput subjects bypass surface and extrusion generation. A
   square exhausts inset attempts and keeps its shape; narrow necks remain connected.
   Odd spacing gives a half-unit search radius.
+- A jagged perimeter subject replaces the perimeter cache of the cube layer before
+  both builders read it, bypassing slicing simplification. Its final inset splits into pieces;
+  exact core comparisons check the retained largest piece and its grid.
 
 No scene makes resampling grow outside the original island, so resample_original
-stays zero. No inset splits into several pieces. The odd-radius check reads the
+stays zero. The odd-radius check reads the
 core Point rounding; no subject distinguishes the port's rounding from truncation.
 The print and API storage outlive every input copy and grid.
 
@@ -59,6 +66,17 @@ The print and API storage outlive every input copy and grid.
     direct subject test
     |-- TravelBoundary::init_layer: reset inset branch counts
     `-- TravelBoundary::build_internal: exercise inset choices without slicing
+    direct jagged subject test
+    |-- Print::process: provide layer settings and owned perimeter storage
+    |-- build_input: copy the replaced perimeter cache into owned plugin input
+    |-- TravelBoundary::init_layer / AvoidCrossingPerimeters::init_layer: compare slice offsets
+    |-- TravelBoundary::build_internal: count final split insets
+    `-- AvoidCrossingPerimeters::travel_to / check_boundary: compare lazy core caches
+    support top witness test
+    |-- Print::process: generate real top fill surfaces
+    |-- build_input: copy the layer without, then with, the support marker
+    |-- TravelBoundary::init_layer / AvoidCrossingPerimeters::init_layer: compare slice offsets
+    `-- build_internal / travel_to / check_boundary: compare excluded tops and boundaries
 */
 namespace {
 using namespace Slic3r;
@@ -68,7 +86,7 @@ namespace work = slic3r_api::PluginCommon::work;
 namespace eg = slic3r_api::PluginCommon::EdgeGrid;
 
 struct Coverage {
-    size_t layers = 0, tools = 0, tops = 0, support = 0, holes = 0, islands = 0;
+    size_t layers = 0, tools = 0, tops = 0, support = 0, support_top_enabled = 0, holes = 0, islands = 0;
     size_t rings = 0, points = 0, growth = 0, external = 0, grids = 0;
     port::InnerOffsetCounts inset;
 };
@@ -93,6 +111,121 @@ void check_grid(const eg::Grid &actual, const EdgeGrid::Grid &expected, Coverage
 void check_boundary(const port::Boundary &actual, const AvoidCrossingPerimeters::Boundary &expected, Coverage &coverage);
 // Build snapshots and lazy core caches for one sliced layer, then compare both tool-specific interiors.
 void compare(const Print &print, const Layer &layer, port::LayerIdentity identity, Coverage &coverage);
+
+// Supply an owned jagged perimeter island to both builders and compare the retained largest inset piece.
+TEST_CASE("Direct jagged island matches core after a split inset", "[plugins][avoid-crossing-boundary]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Points outline{{4315200, 0}, {9433521, 2527704}, {2973758, 1716900}, {2591476, 2591476},
+        {2955400, 5118903}, {820016, 3060343}, {0, 6799000}, {-770582, 2875851},
+        {-2367600, 4100803}, {-2776879, 2776879}, {-3877889, 2238900}, {-5794106, 1552526},
+        {-5329200, 0}, {-5258790, -1409089}, {-7548797, -4358300}, {-5282724, -5282724},
+        {-179200, -310384}, {-1690787, -6310104}, {0, -280200}, {2285709, -8530381},
+        {807400, -1398458}, {2748312, -2748312}, {2566726, -1481900}, {2243749, -601211}};
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
+        {"bottom_solid_layers", "0"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"gap_fill_enabled", "0"}, {"thin_walls", "0"}, {"thin_perimeters", "0"},
+        {"avoid_crossing_top", "0"}, {"perimeter_extrusion_width", "0.492922"},
+        {"first_layer_extrusion_width", "0.492922"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 0.6), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Coverage coverage;
+    size_t multiple = 0;
+    uint32_t index = 0;
+    for (Layer &layer : print.object(0).layers()) {
+        REQUIRE(layer.islands().size() == 1);
+        // The mutable layer owns this cache; replace only its perimeter subject to avoid slicing simplification.
+        ExPolygon polygon;
+        polygon.contour.points = outline;
+        ApiInternal::LayerIslandAccess::perimeter_slices_mutable(layer.islands().front()) = {polygon};
+        PluginStorage storage;
+        storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+        const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
+        const port::Input input = port::build_input(handle, view, {0, index++, false});
+        std::cout << "jagged spacing=" << input.target->perimeter_spacing << std::endl;
+        port::TravelBoundary actual;
+        AvoidCrossingPerimeters expected;
+        actual.init_layer(handle, *input.target);
+        expected.init_layer(layer);
+        check_expolygons(actual.layer_slices_offset(), expected.layer_slices_offset(), coverage);
+        actual.build_internal(handle, input, 0);
+        multiple += actual.inner_offset_counts().multiple;
+        REQUIRE_FALSE(actual.internal_boundary().boundaries.empty());
+        const pw::Polygon &boundary = actual.internal_boundary().boundaries.front();
+        const Point from(boundary.front().x(), boundary.front().y());
+        const Point to(boundary[boundary.size() / 2].x(), boundary[boundary.size() / 2].y());
+        expected.travel_to({layer, from, Point::Zero(), extruder_index_t(0), 0., false}, to);
+        check_boundary(actual.internal_boundary(), expected.internal_boundary(), coverage);
+    }
+    std::cout << "jagged island multiple=" << multiple << std::endl;
+    REQUIRE(multiple > 0);
+}
+
+// Compare a real top layer with and without the support marker so omitted tops change the result.
+TEST_CASE("Support marker omits real top surfaces from travel boundaries", "[plugins][avoid-crossing-boundary]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"fill_density", "20%"}, {"top_solid_layers", "1"},
+        {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"gap_fill_enabled", "0"}, {"thin_walls", "0"}, {"thin_perimeters", "0"},
+        {"avoid_crossing_top", "1"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(20., 20., 0.6), ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE_FALSE(print.object(0).layers().empty());
+    const uint32_t index = uint32_t(print.object(0).layers().size() - 1);
+    Layer &layer = print.object(0).layers().back();
+    Coverage coverage;
+    for (bool support : {false, true}) {
+        CAPTURE(support);
+        if (support) layer.get_or_add_property<LayerSupportProperty>();
+        PluginStorage storage;
+        storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+        const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
+        const port::Input input = port::build_input(handle, view, {0, index, false});
+        REQUIRE(input.target->support == support);
+        size_t tops = 0;
+        REQUIRE_FALSE(input.target->regions.empty());
+        for (const port::RegionInput &region : input.target->regions) {
+            REQUIRE(region.avoid_crossing_top);
+            tops += region.top_surfaces.size();
+        }
+        if (!support) REQUIRE(tops > 0);
+        port::TravelBoundary actual;
+        AvoidCrossingPerimeters expected;
+        actual.init_layer(handle, *input.target);
+        expected.init_layer(layer);
+        check_expolygons(actual.layer_slices_offset(), expected.layer_slices_offset(), coverage);
+        actual.build_internal(handle, input, 0);
+        REQUIRE(actual.internal_boundary().to_avoid.empty() == support);
+        REQUIRE_FALSE(actual.internal_boundary().boundaries.empty());
+        const pw::Polygon &boundary = actual.internal_boundary().boundaries.front();
+        const Point from(boundary.front().x(), boundary.front().y());
+        const Point to(boundary[boundary.size() / 2].x(), boundary[boundary.size() / 2].y());
+        expected.travel_to({layer, from, Point::Zero(), extruder_index_t(0), 0., false}, to);
+        REQUIRE(expected.internal_boundary().to_avoid.empty() == support);
+        check_boundary(actual.internal_boundary(), expected.internal_boundary(), coverage);
+        std::cout << "top witness support=" << support << " input_tops=" << tops
+                  << " excluded_tops=" << actual.internal_boundary().to_avoid.size() << std::endl;
+    }
+}
 
 // Build owned polygon subjects to check retained small islands and narrow necks.
 TEST_CASE("Direct boundary subjects retain empty-inset squares and narrow necks", "[plugins][avoid-crossing-boundary]")
@@ -217,7 +350,8 @@ TEST_CASE("Plugin travel boundaries match sliced core caches", "[plugins][avoid-
     built.layer.mutable_properties().get_or_add(slic3r_api::LayerSupportProperty::key);
     compare(print, *reinterpret_cast<const Layer *>(built.layer.handle()), {0, 0, true}, coverage);
     std::cout << "boundary coverage: layers=" << coverage.layers << " tools=" << coverage.tools
-              << " tops=" << coverage.tops << " support=" << coverage.support << " holes=" << coverage.holes
+              << " tops=" << coverage.tops << " support=" << coverage.support
+              << " support_top_enabled=" << coverage.support_top_enabled << " holes=" << coverage.holes
               << " islands=" << coverage.islands << " rings=" << coverage.rings << " points=" << coverage.points
               << " growth=" << coverage.growth << " external=" << coverage.external << " grids=" << coverage.grids << std::endl;
     std::cout << "inner offset: original=" << coverage.inset.resample_original << " kept=" << coverage.inset.resample_kept
@@ -228,6 +362,7 @@ TEST_CASE("Plugin travel boundaries match sliced core caches", "[plugins][avoid-
     CHECK(coverage.tools > 0);
     CHECK(coverage.tops > 0);
     CHECK(coverage.support > 0);
+    REQUIRE(coverage.support_top_enabled > 0);
     CHECK(coverage.holes > 0);
     CHECK(coverage.islands > 0);
     CHECK(coverage.external > 0);
@@ -290,6 +425,8 @@ void compare(const Print &print, const Layer &layer, port::LayerIdentity identit
     if (input.target->support) {
         ++coverage.support;
         REQUIRE_FALSE(input.lower_perimeter_slices.empty());
+        for (const port::RegionInput &region : input.target->regions)
+            if (region.avoid_crossing_top) ++coverage.support_top_enabled;
     }
     for (const port::RegionInput &region : input.target->regions)
         coverage.tops += region.avoid_crossing_top ? region.top_surfaces.size() : 0;
@@ -310,6 +447,7 @@ void compare(const Print &print, const Layer &layer, port::LayerIdentity identit
         expected.init_layer(layer);
         check_expolygons(actual.layer_slices_offset(), expected.layer_slices_offset(), coverage);
         actual.build_internal(handle, input, tool);
+        if (input.target->support) REQUIRE(actual.internal_boundary().to_avoid.empty());
         const port::InnerOffsetCounts &counts = actual.inner_offset_counts();
         coverage.inset.resample_original += counts.resample_original;
         coverage.inset.resample_kept += counts.resample_kept;
