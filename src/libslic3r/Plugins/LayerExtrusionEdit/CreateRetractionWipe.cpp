@@ -49,8 +49,16 @@ wipe is too short. When the last printed leaf is not a loop, the wipe walks
 source content backwards and stops before a bridge, a discontinuity or a leaf
 without role attributes; only that connected tail is kept.
 A final loop instead continues forward
-from its seam without visiting older leaves. Segment vectors preserve lines,
+from its seam without visiting older leaves. A loop parent retains its ordered
+fragments, whose lengths together define one turn. Segment vectors preserve lines,
 arcs and endpoint Z offsets while the wipe is assembled and clipped.
+Inside-start and inside-end movements use the complete loop's orientation and
+hole flag to select the material side, while leaf endpoints locate the nozzle.
+An outgoing fragmented loop stops before its first bridge fragment. Such a
+partial turn is an open forward path, without loop repetition or turn rounding;
+a terminal bridge still prevents the outgoing wipe entirely.
+External loop prefixes retain the extra perimeter wipe distance, but only a
+complete turn supplies the orientation needed for an inside-end movement.
 No source geometry or neighbour pointer is retained after the callback.
 
 When wipe_only_crossing is enabled, the target's region identifies the layer
@@ -80,6 +88,7 @@ between workers or refreshed after print edits. Cancellation propagates.
     |-- add_inside_start: move an eligible unretract into an approach to the seam
     `-- add_outgoing_wipe: distribute the source retract over its printed tail
         |-- source_wipe_path: collect the reversed connected tail, or a forward final loop
+        |   `-- append_forward_loop: join ordered fragments and sum one complete turn
         |-- WipeCrossingChecker::crosses: gate wipes on the direct gap if requested
         |   |-- LayerInputCache::get: resolve and copy the target layer
         |   |-- PerimeterCrossing::prepare: prepare target areas for the tool
@@ -120,13 +129,16 @@ struct WipeLeaf
     bool loop = false;
 };
 
-/* Arc-preserving path emitted while the source content is walked backwards. */
+/* Arc-preserving path from the reversed open tail or a loop's usable forward turn. */
 struct WipePath
 {
     std::vector<c_extrusion_segment> segments;
     WipeLeaf source;
     bool has_source = false;
     bool stopped = false;
+    distf_t loop_length = 0.;
+    // True only when the collected geometry contains the whole loop, allowing repetition, turn rounding and an inside end.
+    bool complete_turn = false;
 };
 
 /* Own the worker's layer-input cache and crossing caches indexed by layer and tool. */
@@ -209,7 +221,12 @@ std::vector<c_extrusion_segment> reversed_segments(
 std::vector<c_extrusion_segment> rebased_segments(
     const WipeLeaf &leaf, coord_t phase_base_z);
 
-/* Walk source content backwards and append only its connected printable tail. */
+/* Append ordered loop leaves and sum their true lengths, optionally stopping geometry before the first bridge while retaining the last leaf's metadata. Missing attributes, process geometry or an out-of-range Z offset throws. */
+void append_forward_loop(MutableExtrusionEntity entity, coord_t print_z,
+                         coord_t phase_base_z, const EffectiveState &state,
+                         WipePath &path, bool stop_before_bridge = false);
+
+/* Walk source content backwards, collecting a resolved loop's forward prefix before a bridge or the connected reversed open tail; a terminal bridge prevents wiping. */
 void append_reverse_wipe_path(MutableExtrusionEntity entity,
                               coord_t print_z,
                               coord_t phase_base_z,
@@ -222,19 +239,22 @@ WipePath source_wipe_path(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key);
 
-/* Find the first printable leaf used by crossing and inside-start decisions. */
+/* Find the first printable leaf and optionally copy its complete loop once at the first composed loop node, relative to phase_base_z. Invalid process geometry in a collected loop throws. */
 bool find_first_printable_leaf(MutableExtrusionEntity entity,
                                coord_t print_z,
+                               coord_t phase_base_z,
                                const EffectiveState &parent,
                                WipeLeaf &leaf,
-                               bool entity_already_resolved = false);
+                               bool entity_already_resolved = false,
+                               std::vector<c_extrusion_segment> *loop_segments = nullptr);
 
-/* Resolve the first leaf and phase-relative base Z of one target scope. */
+/* Resolve the first leaf and phase-relative base Z of one target scope, optionally copying the complete loop for an inside approach. */
 bool target_first_leaf(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     WipeLeaf &leaf,
-    coord_t &phase_base_z);
+    coord_t &phase_base_z,
+    std::vector<c_extrusion_segment> *loop_segments = nullptr);
 
 /* Locate one semantic E-axis event inside a small ordered phase. */
 MutableExtrusionEntity find_axis_event(MutableExtrusionEntity entity,
@@ -246,16 +266,18 @@ std::vector<c_extrusion_segment> fit_wipe_length(
     bool loop,
     distf_t requested_length);
 
-/* Compute a point on the material side of an external perimeter seam. */
+/* Compute a point on the material side of an external perimeter seam using the complete loop and its hole flag; degenerate geometry returns no point. */
 std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
-                                         coord_t depth);
+                                       const std::vector<c_extrusion_segment> &segments,
+                                       coord_t depth);
 
-/* Extend a non-returning loop wipe from its tangent toward printed material. */
+/* Extend a non-returning loop wipe toward material, using the complete source loop for its orientation; a failed geometry assignment throws. */
 void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
+                       const std::vector<c_extrusion_segment> &source_segments,
                        coord_t depth);
 
-/* Add an inside-to-seam approach when the target starts with an eligible external loop; ineligible or missing geometry returns unchanged, while an out-of-range Z offset or a failed segment assignment throws. The borrowed target keeps ownership. */
+/* Add an inside-to-seam approach for an external loop, collecting its complete geometry only after the setting and unretract allow it. Ineligible or missing geometry returns unchanged; an out-of-range Z offset or a failed segment assignment throws. The borrowed target keeps ownership. */
 void add_inside_start(
     const ScopeEntity &target,
     const Config &print_config,
@@ -357,6 +379,39 @@ std::vector<c_extrusion_segment> rebased_segments(
     return result;
 }
 
+void append_forward_loop(MutableExtrusionEntity entity, const coord_t print_z,
+                         const coord_t phase_base_z, const EffectiveState &state,
+                         WipePath &path, const bool stop_before_bridge)
+{
+    for (uint32_t idx = 0; idx < entity.child_count(); ++idx) {
+        MutableExtrusionEntity child = entity.child_mutable(idx);
+        append_forward_loop(child, print_z, phase_base_z,
+                            resolved_state(child.readonly(), state), path, stop_before_bridge);
+    }
+    if (entity.segment_count() == 0)
+        return;
+    if (!state.attributes)
+        throw std::runtime_error("A printable loop fragment has no role attributes.");
+    const raw_extrusion_role role = state.attributes->extrusion_role();
+    if (RAW_EXTRUSION_ROLE_IS_TRAVEL(role) || RAW_EXTRUSION_ROLE_IS_WIPE(role) ||
+        RAW_EXTRUSION_ROLE_IS_RETRACT(role) || RAW_EXTRUSION_ROLE_IS_UNRETRACT(role))
+        throw std::runtime_error("Printable scope content contains process geometry.");
+    const uint16_t flags = state.perimeter ? state.perimeter->perimeter_flags() :
+        C_EXTRUSION_PERIMETER_FLAG_NONE;
+    WipeLeaf leaf{entity, role, flags,
+                  checked_add(print_z, state.z_offset), true};
+    // A bridge cuts the usable forward path, but later leaves still identify the nozzle position.
+    if (stop_before_bridge && RAW_EXTRUSION_ROLE_IS_BRIDGE(role))
+        path.stopped = true;
+    if (!path.stopped) {
+        std::vector<c_extrusion_segment> segments = rebased_segments(leaf, phase_base_z);
+        path.segments.insert(path.segments.end(), segments.begin(), segments.end());
+        path.loop_length += entity.local_length();
+    }
+    path.source = leaf;
+    path.has_source = true;
+}
+
 void append_reverse_wipe_path(
     MutableExtrusionEntity entity,
     const coord_t print_z,
@@ -369,6 +424,21 @@ void append_reverse_wipe_path(
         return;
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
+
+    // A loop node with several children is one composed turn; inherited LOOP flags must not make each fragment a whole loop.
+    // Single-child wrappers continue to the leaf or the node holding the fragments.
+    if (!path.has_source && entity.child_count() > 1 && state.perimeter &&
+        (state.perimeter->perimeter_flags() & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0) {
+        append_forward_loop(entity, print_z, phase_base_z, state, path, true);
+        // Only the immediately preceding printable leaf decides whether a bridge prevents wiping.
+        if (path.has_source && RAW_EXTRUSION_ROLE_IS_BRIDGE(path.source.role)) {
+            path.has_source = false;
+            path.segments.clear();
+        }
+        path.complete_turn = path.has_source && !path.stopped;
+        path.stopped = true;
+        return;
+    }
 
     // Reverse child order mirrors the machine's immediately preceding path.
     for (uint32_t child_idx = entity.child_count(); child_idx > 0; --child_idx) {
@@ -412,6 +482,8 @@ void append_reverse_wipe_path(
         path.source = leaf;
         path.has_source = true;
         path.segments = std::move(leaf_segments);
+        path.loop_length = entity.local_length();
+        path.complete_turn = true;
         path.stopped = true;
         return;
     }
@@ -449,12 +521,23 @@ WipePath source_wipe_path(
 bool find_first_printable_leaf(
     MutableExtrusionEntity entity,
     const coord_t print_z,
+    const coord_t phase_base_z,
     const EffectiveState &parent,
     WipeLeaf &leaf,
-    const bool entity_already_resolved)
+    const bool entity_already_resolved,
+    std::vector<c_extrusion_segment> *loop_segments)
 {
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
+    // Collect at the first composed loop node on descent, not again at its descendants or ancestors.
+    std::vector<c_extrusion_segment> *child_loop_segments = loop_segments;
+    if (loop_segments != nullptr && entity.child_count() > 1 && state.perimeter &&
+        (state.perimeter->perimeter_flags() & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0) {
+        WipePath loop;
+        append_forward_loop(entity, print_z, phase_base_z, state, loop);
+        *loop_segments = std::move(loop.segments);
+        child_loop_segments = nullptr;
+    }
     if (entity.segment_count() > 0) {
         if (!state.attributes)
             return false;
@@ -471,12 +554,15 @@ bool find_first_printable_leaf(
             checked_add(print_z, state.z_offset),
             (perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0
         };
+        if (loop_segments != nullptr && leaf.loop)
+            *loop_segments = entity.segments();
         return true;
     }
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         if (find_first_printable_leaf(entity.child_mutable(child_idx), print_z,
-                                      state, leaf))
+                                      phase_base_z, state, leaf, false, child_loop_segments)) {
             return true;
+        }
     return false;
 }
 
@@ -484,15 +570,16 @@ bool target_first_leaf(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     WipeLeaf &leaf,
-    coord_t &phase_base_z)
+    coord_t &phase_base_z,
+    std::vector<c_extrusion_segment> *loop_segments)
 {
     const ExtrusionScope::OrderedExtrusionScope ordered(scope.entity, key);
     const EffectiveState scope_state = traversal_state(scope.effective_properties);
     phase_base_z = checked_add(scope.layer_group.print_z(), scope_state.z_offset);
     MutableExtrusionEntity content = ordered.content();
     return find_first_printable_leaf(content, scope.layer_group.print_z(),
-                                     scope_state, leaf,
-                                     content.handle() == ordered.root().handle());
+                                     phase_base_z, scope_state, leaf,
+                                     content.handle() == ordered.root().handle(), loop_segments);
 }
 
 MutableExtrusionEntity find_axis_event(MutableExtrusionEntity entity,
@@ -540,11 +627,11 @@ std::vector<c_extrusion_segment> fit_wipe_length(
 }
 
 std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
-                                         const coord_t depth)
+                                       const std::vector<c_extrusion_segment> &segments,
+                                       const coord_t depth)
 {
-    if (!leaf.loop || depth <= 0 || leaf.entity.segment_count() < 2)
+    if (!leaf.loop || depth <= 0 || segments.size() < 2)
         return std::nullopt;
-    const std::vector<c_extrusion_segment> segments = leaf.entity.segments();
     const c_point seam = segments.front().point_a;
     const c_point next = segments.front().point_b;
     const c_point previous = segments.back().point_a;
@@ -595,12 +682,11 @@ std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
 
 void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
+                       const std::vector<c_extrusion_segment> &source_segments,
                        const coord_t depth)
 {
     if (!source.loop || depth <= 0 || wipe.segment_count() == 0)
         return;
-    const std::vector<c_extrusion_segment> source_segments =
-        source.entity.segments();
     long double signed_area_twice = 0.0L;
     for (const c_extrusion_segment &segment : source_segments)
         signed_area_twice += static_cast<long double>(segment.point_a.x) * segment.point_b.y -
@@ -652,12 +738,6 @@ void add_inside_start(
     if (!scope.has_incoming_transition())
         return;
 
-    WipeLeaf target_leaf;
-    coord_t phase_base_z = 0;
-    if (!target_first_leaf(target, key, target_leaf, phase_base_z) ||
-        !target_leaf.loop ||
-        !RAW_EXTRUSION_ROLE_HAS(target_leaf.role, RAW_EXTRUSION_ROLE_EXTERNAL))
-        return;
     const extruder_index_t extruder_id = target.tool_group.extruder_id();
     if (!print_config.vector_bool_or_default(
             "wipe_inside_start", extruder_id, false))
@@ -674,13 +754,21 @@ void add_inside_start(
         axis->toolchange != 0)
         return;
 
+    WipeLeaf target_leaf;
+    std::vector<c_extrusion_segment> loop_segments;
+    coord_t phase_base_z = 0;
+    if (!target_first_leaf(target, key, target_leaf, phase_base_z, &loop_segments) ||
+        !target_leaf.loop ||
+        !RAW_EXTRUSION_ROLE_HAS(target_leaf.role, RAW_EXTRUSION_ROLE_EXTERNAL))
+        return;
+
     const double nozzle_diameter = print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const double configured_depth = print_config.vector_percent_or_default(
         "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
     const coord_t depth = scale_i(
         configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5);
-    const std::optional<c_point> inside = loop_inside_point(target_leaf, depth);
+    const std::optional<c_point> inside = loop_inside_point(target_leaf, loop_segments, depth);
     if (!inside || target_leaf.entity.segment_count() == 0)
         return;
 
@@ -843,17 +931,17 @@ void add_outgoing_wipe(
             "wipe_extra_perimeter", extruder_id, 0.0);
     const bool return_to_seam = print_config.vector_bool_or_default(
         "wipe_return", extruder_id, false);
-    double requested_outbound_mm = return_to_seam && !path.source.loop ?
+    double requested_outbound_mm = return_to_seam && !path.complete_turn ?
         wipe_length_mm * 0.5 : wipe_length_mm;
-    if (return_to_seam && path.source.loop) {
-        const double turn_mm = unscaled(path.source.entity.local_length());
+    if (return_to_seam && path.complete_turn) {
+        const double turn_mm = unscaled(path.loop_length);
         if (turn_mm > EPSILON)
             requested_outbound_mm = std::ceil(wipe_length_mm / turn_mm) * turn_mm;
     }
 
     const distf_t requested_outbound = scale_d(requested_outbound_mm);
     std::vector<c_extrusion_segment> fitted = fit_wipe_length(
-        path.segments, path.source.loop, requested_outbound);
+        path.segments, path.complete_turn, requested_outbound);
     if (fitted.empty())
         return;
 
@@ -863,7 +951,7 @@ void add_outgoing_wipe(
     if (wipe.local_length() > requested_outbound + distf_t(SCALED_EPSILON) &&
         !wipe.clip_end(wipe.local_length() - requested_outbound))
         throw std::runtime_error("Unable to clip wipe geometry to its configured length.");
-    if (return_to_seam && !path.source.loop) {
+    if (return_to_seam && !path.complete_turn) {
         std::vector<c_extrusion_segment> round_trip = wipe.segments();
         const std::vector<c_extrusion_segment> return_path =
             reversed_segments(round_trip);
@@ -871,14 +959,14 @@ void add_outgoing_wipe(
         if (!wipe.set_segments(round_trip))
             throw std::runtime_error("Unable to append the wipe return path.");
     }
-    if (!return_to_seam && path.source.loop &&
+    if (!return_to_seam && path.complete_turn &&
         print_config.vector_bool_or_default(
             "wipe_inside_end", extruder_id, false)) {
         const double nozzle_diameter = print_config.vector_float_or_default(
             "nozzle_diameter", extruder_id, 0.4);
         const double configured_depth = print_config.vector_percent_or_default(
             "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
-        append_inside_end(wipe, path.source, scale_i(
+        append_inside_end(wipe, path.source, path.segments, scale_i(
             configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5));
     }
 

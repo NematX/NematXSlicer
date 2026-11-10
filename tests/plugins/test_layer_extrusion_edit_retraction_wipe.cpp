@@ -9,7 +9,7 @@ CreateRetractionWipe tests
 
 These cases exercise the wipe through the real ordered plugin step. They use
 separate PrintingExtrusion owners and layer boundaries. Path checks cover
-source-owner boundaries and wipes across layer transitions; the crossing cases
+source-owner boundaries, complete fragmented loops, and wipes across layer transitions; the crossing cases
 compare wipe presence only.
 
 The crossing cases slice cubes, obtain region and instance identities from the
@@ -35,6 +35,7 @@ so support preparation is not checked here.
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
@@ -140,10 +141,13 @@ struct GeometricLeaf
 /* Build one external square loop with the seam at its first point. */
 std::unique_ptr<ExtrusionEntity> make_external_loop(double origin_x);
 
+// Build a canonical square from four ordered sides; optionally inherit its loop property through a wrapper or mark the terminal or numbered side as Bridge.
+std::unique_ptr<ExtrusionEntity> make_fragmented_loop(bool wrapped, bool terminal_bridge = false, double origin_x = 0., size_t bridge_side = 0);
+
 /* Build one curved printable leaf with distinct endpoint Z offsets. */
 std::unique_ptr<ExtrusionPath> make_arc_path();
 
-/* Build the standard two-path plan with wipe settings enabled. */
+/* Build the standard two-path plan with wipe settings enabled and the requested extra perimeter distance. */
 void prepare_wipe_print(Print &print,
                         Model &model,
                         const char *wipe_min = "8",
@@ -151,7 +155,8 @@ void prepare_wipe_print(Print &print,
                         const char *inside_start = "0",
                         const char *inside_end = "0",
                         const char *wipe_return = "0",
-                        const char *retract_before_wipe = "20%");
+                        const char *retract_before_wipe = "20%",
+                        const char *wipe_extra_perimeter = "0");
 
 /* Read direct and inherited process properties from geometric leaves. */
 void collect_geometric_leaves(
@@ -189,6 +194,31 @@ std::unique_ptr<ExtrusionEntity> make_external_loop(const double origin_x)
     return loop;
 }
 
+std::unique_ptr<ExtrusionEntity> make_fragmented_loop(const bool wrapped, const bool terminal_bridge, const double origin_x, const size_t bridge_side)
+{
+    const Points corners{Point(0, 0), Point(scale_i(10.), 0),
+        Point(scale_i(10.), scale_i(10.)), Point(0, scale_i(10.)), Point(0, 0)};
+    ExtrusionEntity::Children fragments;
+    for (size_t idx = 1; idx < corners.size(); ++idx) {
+        ArcPolyline line;
+        line.append(corners[idx - 1] + Point(scale_i(origin_x), 0));
+        line.append(corners[idx] + Point(scale_i(origin_x), 0));
+        fragments.push_back(std::make_unique<ExtrusionPath>(line,
+            ExtrusionAttributes((terminal_bridge && idx + 1 == corners.size()) || idx == bridge_side ?
+                ExtrusionRole::OverhangPerimeter : ExtrusionRole::ExternalPerimeter,
+                ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true));
+    }
+    std::unique_ptr<ExtrusionEntity> loop = std::make_unique<ExtrusionEntity>(
+        std::move(fragments), false, false, false);
+    if (wrapped) {
+        ExtrusionEntity::Children children;
+        children.push_back(std::move(loop));
+        loop = std::make_unique<ExtrusionEntity>(std::move(children), false, false, false);
+    }
+    loop->get_or_add_property<ExtrusionPropertyLoopRole>().set_perimeter_role(elrDefault);
+    return CanonicalExtrusion::acquire(*loop);
+}
+
 std::unique_ptr<ExtrusionPath> make_arc_path()
 {
     ArcPolyline polyline;
@@ -216,7 +246,8 @@ void prepare_wipe_print(
     const char *inside_start,
     const char *inside_end,
     const char *wipe_return,
-    const char *retract_before_wipe)
+    const char *retract_before_wipe,
+    const char *wipe_extra_perimeter)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -237,7 +268,7 @@ void prepare_wipe_print(
         {"wipe_inside_start", inside_start},
         {"wipe_inside_end", inside_end},
         {"wipe_inside_depth", "50%"},
-        {"wipe_extra_perimeter", "0"},
+        {"wipe_extra_perimeter", wipe_extra_perimeter},
         {"use_firmware_retraction", "0"}
     });
     Slic3r::Test::init_print(
@@ -695,6 +726,151 @@ TEST_CASE("Retraction wipe stops at its PrintingExtrusion boundary",
     CHECK(find_axis_target(
         source.after(), C_EXTRUSION_AXIS_OPERATION_RETRACT_TO, 2.0, false)
         .valid());
+}
+
+// A fragmented square must continue from the nozzle seam and use its complete turn for return rounding.
+TEST_CASE("Fragmented loop wipes start at the seam and follow the complete loop",
+          "[plugins][layer-extrusion-edit][retraction][wipe][fragmented-loop]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool wrapped : {false, true})
+    for (const bool repeat_turn : {false, true})
+    for (const bool returning : {false, true}) {
+        CAPTURE(returning, repeat_turn, wrapped);
+        Print print;
+        Model model;
+        prepare_wipe_print(print, model, repeat_turn ? "45" : "8", "0", "0", "0", returning ? "1" : "0");
+        PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+            .layers.front().tool_groups.front();
+        tool.extrusions.front().root = make_fragmented_loop(wrapped);
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+        OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)),
+                                     scope_property_key());
+        const slic3r_api::MutableExtrusionEntity wipe = find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE);
+        REQUIRE(wipe.valid());
+        std::vector<GeometricLeaf> leaves;
+        collect_geometric_leaves(wipe, std::nullopt, leaves);
+        REQUIRE(!leaves.empty());
+        const c_extrusion_segment first = leaves.front().entity.segment(0);
+        CHECK(first.point_a.x == 0);
+        CHECK(first.point_a.y == 0);
+        CHECK(first.point_b.x > first.point_a.x);
+        CHECK(first.point_b.y == 0);
+        distf_t length = 0.;
+        for (const GeometricLeaf &leaf : leaves)
+            length += leaf.entity.local_length();
+        const double requested = repeat_turn ? 45. : 8.;
+        const double expected_length = returning ? (repeat_turn ? 80. : 40.) : requested;
+        CHECK(unscaled(length) == Approx(expected_length));
+        const slic3r_api::ExtrusionEntity last = leaves.back().entity;
+        const c_point end = last.segment(last.segment_count() - 1).point_b;
+        CHECK(end.x == (returning ? 0 : scale_i(repeat_turn ? 5. : 8.)));
+        CHECK(end.y == 0);
+    }
+}
+
+// A terminal Bridge side prevents an outgoing wipe even when earlier sides belong to the same loop.
+TEST_CASE("Fragmented loop with a terminal Bridge has no wipe",
+          "[plugins][layer-extrusion-edit][retraction][wipe][fragmented-loop]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_wipe_print(print, model);
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+        .layers.front().tool_groups.front();
+    tool.extrusions.front().root = make_fragmented_loop(true, true);
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+    OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)),
+                                 scope_property_key());
+    CHECK_FALSE(find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE).valid());
+}
+
+// Complete square orientation keeps the departure inside material and places the incoming approach inside its seam.
+TEST_CASE("Fragmented loop inside approaches use the complete turn",
+          "[plugins][layer-extrusion-edit][retraction][wipe][fragmented-loop]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool wrapped : {false, true}) {
+        CAPTURE(wrapped);
+        Print print;
+        Model model;
+        prepare_wipe_print(print, model, "8", "0", "1", "1");
+        PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+            .layers.front().tool_groups.front();
+        tool.extrusions.front().root = make_fragmented_loop(wrapped);
+        tool.extrusions.back().root = make_fragmented_loop(wrapped, false, 20.);
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+        OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)),
+                                     scope_property_key());
+        const slic3r_api::MutableExtrusionEntity wipe = find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE);
+        REQUIRE(wipe.valid());
+        std::vector<GeometricLeaf> leaves;
+        collect_geometric_leaves(wipe, std::nullopt, leaves);
+        REQUIRE(!leaves.empty());
+        const slic3r_api::ExtrusionEntity last = leaves.back().entity;
+        const c_point end = last.segment(last.segment_count() - 1).point_b;
+        CHECK(end.x == scale_i(8.));
+        // The depth follows the percent read as 0.5, multiplied by the 0.4 mm nozzle and 0.01.
+        const coord_t depth = scale_i(0.002);
+        CHECK(end.y == depth);
+        OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions.back().root)),
+                                     scope_property_key());
+        leaves.clear();
+        collect_geometric_leaves(target.before(), std::nullopt, leaves);
+        CHECK(leaves.size() == 1);
+        if (leaves.empty())
+            continue;
+        const c_extrusion_segment approach = leaves.front().entity.segment(0);
+        const coord_t diagonal = coord_t(std::llround(double(depth) / std::sqrt(2.)));
+        CHECK(approach.point_a.x == scale_i(20.) + diagonal);
+        CHECK(approach.point_a.y == diagonal);
+        CHECK(approach.point_b.x == scale_i(20.));
+        CHECK(approach.point_b.y == 0);
+    }
+}
+
+// A bridge cuts the forward prefix, which retains the extra perimeter distance but cannot repeat, round up or end inside as a complete loop.
+TEST_CASE("Fragmented loop wipes stop before an intermediate Bridge",
+          "[plugins][layer-extrusion-edit][retraction][wipe][fragmented-loop]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool extra_distance : {false, true})
+    for (const bool wrapped : {false, true})
+    for (const bool returning : {false, true}) {
+        CAPTURE(wrapped, returning, extra_distance);
+        Print print;
+        Model model;
+        prepare_wipe_print(print, model, extra_distance ? "8" : "45", "0", "0", "1",
+                           returning ? "1" : "0", "20%", extra_distance ? "4" : "0");
+        PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+            .layers.front().tool_groups.front();
+        tool.extrusions.front().root = make_fragmented_loop(wrapped, false, 0., 2);
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+        OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)),
+                                     scope_property_key());
+        const slic3r_api::MutableExtrusionEntity wipe = find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE);
+        REQUIRE(wipe.valid());
+        std::vector<GeometricLeaf> leaves;
+        collect_geometric_leaves(wipe, std::nullopt, leaves);
+        REQUIRE(!leaves.empty());
+        distf_t length = 0.;
+        for (const GeometricLeaf &leaf : leaves) {
+            length += leaf.entity.local_length();
+            for (uint32_t idx = 0; idx < leaf.entity.segment_count(); ++idx) {
+                CHECK(leaf.entity.segment(idx).point_a.y == 0);
+                CHECK(leaf.entity.segment(idx).point_b.y == 0);
+            }
+        }
+        CHECK(unscaled(length) == Approx(returning ? (extra_distance ? 12. : 20.) : 10.));
+        const c_point start = leaves.front().entity.segment(0).point_a;
+        CHECK(start.x == 0);
+        CHECK(start.y == 0);
+        const slic3r_api::ExtrusionEntity last = leaves.back().entity;
+        const c_point end = last.segment(last.segment_count() - 1).point_b;
+        CHECK(end.x == (returning ? 0 : scale_i(10.)));
+        CHECK(end.y == 0);
+    }
 }
 
 TEST_CASE("Wipe return retraces half the configured distance back to the seam",
