@@ -76,9 +76,7 @@ struct Boundary
 // Both init_layer and build_internal reset them; build_internal then fills them.
 struct InnerOffsetCounts
 {
-    // Count original islands kept when resampling grows outside them, and resampled islands kept otherwise.
-    size_t resample_original = 0, resample_kept = 0;
-    // Count islands whose epsilon-grown bounding box has area below (0.1 mm)^2; keep the original or resampled candidate.
+    // Count islands whose epsilon-grown bounding box has area below (0.1 mm)^2; keep the resampled candidate.
     size_t small = 0;
     // Count single-piece insets with unchanged hole count, and attempts retried with a wider threshold.
     // Final outcomes: one piece with changed holes, largest of several pieces, or no piece (keep pre-inset island).

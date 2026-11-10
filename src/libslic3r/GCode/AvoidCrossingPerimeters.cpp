@@ -63,6 +63,8 @@
 // width use this layer; external spacing uses all print objects at its print Z.
 // With no contributing region, the fallback is the mean nozzle diameter of this
 // object's extruders, which requires at least one extruder.
+// Internal insets keep resampled islands directly: intersection would discard
+// the collinear samples needed to measure local widths.
 //
 // Each Boundary owns its rings and excluded tops (to_avoid). init_boundary keeps
 // those tops across its reset, then builds grid over the routing rings and
@@ -2205,12 +2207,7 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
     for (const ExPolygon &expo : ex_polygons) {
         ex_poly_result.emplace_back(expo, expo);
         resample_expolygon(ex_poly_result.back().second, offset / 2, scale_d(0.5));
-        ExPolygons ensure_resample_dont_grow = diff_ex(ex_poly_result.back().second, ex_poly_result.back().first);
-        // Keep the original if resampling extends outside it. Otherwise keep the resampled island directly,
-        // because clipping by intersection would remove the collinear samples needed for local widths.
-        if (!ensure_resample_dont_grow.empty()) {
-            ex_poly_result.back().second = ex_poly_result.back().first;
-        }
+        // Keep the resampled island directly: intersection would remove the collinear samples needed for local widths.
     }
 
     for (std::pair<ExPolygon,ExPolygon> &old_2_new : ex_poly_result) {

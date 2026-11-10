@@ -48,8 +48,7 @@ Scenes exercise different parts of construction:
   both builders read it, bypassing slicing simplification. Its final inset splits into pieces;
   exact core comparisons check the retained largest piece and its grid.
 
-No scene makes resampling grow outside the original island, so resample_original
-stays zero. The odd-radius check reads the
+The odd-radius check reads the
 core Point rounding; no subject distinguishes the port's rounding from truncation.
 The print and API storage outlive every input copy and grid.
 
@@ -263,8 +262,7 @@ TEST_CASE("Direct boundary subjects retain empty-inset squares and narrow necks"
     const port::InnerOffsetCounts &counts = boundary.inner_offset_counts();
     std::cout << "direct subject=" << shape << " small=" << counts.small << " same_holes=" << counts.same_holes
               << " retry=" << counts.retry << " changed_holes=" << counts.changed_holes
-              << " multiple=" << counts.multiple << " empty_original=" << counts.empty_original
-              << " kept=" << counts.resample_kept << std::endl;
+              << " multiple=" << counts.multiple << " empty_original=" << counts.empty_original << std::endl;
     CHECK(counts.small == 0);
     REQUIRE(boundary.internal_boundary().boundary_growth.size() == 1);
     if (shape == 0) {
@@ -354,8 +352,7 @@ TEST_CASE("Plugin travel boundaries match sliced core caches", "[plugins][avoid-
               << " support_top_enabled=" << coverage.support_top_enabled << " holes=" << coverage.holes
               << " islands=" << coverage.islands << " rings=" << coverage.rings << " points=" << coverage.points
               << " growth=" << coverage.growth << " external=" << coverage.external << " grids=" << coverage.grids << std::endl;
-    std::cout << "inner offset: original=" << coverage.inset.resample_original << " kept=" << coverage.inset.resample_kept
-              << " small=" << coverage.inset.small << " same_holes=" << coverage.inset.same_holes
+    std::cout << "inner offset: small=" << coverage.inset.small << " same_holes=" << coverage.inset.same_holes
               << " retry=" << coverage.inset.retry << " changed_holes=" << coverage.inset.changed_holes
               << " multiple=" << coverage.inset.multiple << " empty_original=" << coverage.inset.empty_original << std::endl;
     CHECK(coverage.layers >= 31);
@@ -367,7 +364,6 @@ TEST_CASE("Plugin travel boundaries match sliced core caches", "[plugins][avoid-
     CHECK(coverage.islands > 0);
     CHECK(coverage.external > 0);
     CHECK(coverage.growth > 0);
-    CHECK(coverage.inset.resample_kept > 0);
     CHECK(coverage.inset.small > 0);
     CHECK(coverage.inset.same_holes > 0);
 }
@@ -449,8 +445,6 @@ void compare(const Print &print, const Layer &layer, port::LayerIdentity identit
         actual.build_internal(handle, input, tool);
         if (input.target->support) REQUIRE(actual.internal_boundary().to_avoid.empty());
         const port::InnerOffsetCounts &counts = actual.inner_offset_counts();
-        coverage.inset.resample_original += counts.resample_original;
-        coverage.inset.resample_kept += counts.resample_kept;
         coverage.inset.small += counts.small;
         coverage.inset.same_holes += counts.same_holes;
         coverage.inset.retry += counts.retry;

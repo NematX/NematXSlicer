@@ -37,15 +37,15 @@ Internal construction prepares the rings in four stages:
    islands for top removal and tool clipping. Where edges are long enough,
    resampling adds vertices offset/2 from corners and splits the intervening span
    at intervals of at most 0.5 mm so the inset can vary locally. The resampled island
-   is kept unless integer truncation pushes part outside the original; intersection
-   is not used because it drops collinear samples. At each vertex, contour_distance
+   is kept directly; intersection is not used because it drops the collinear samples
+   needed for local widths. At each vertex, contour_distance
    measures the nearest edge facing it across the island, capped by a search radius.
    The inset is zero below a width threshold, half the excess above it in between,
    and the full offset in wide areas. Thresholds offset/2, offset and 2*offset+epsilon
    are tried in order. The first single piece with unchanged hole count is accepted.
    After the last try, one piece with changed holes is accepted, otherwise the
-   largest of several pieces, otherwise the pre-inset candidate (original or
-   resampled) is kept. Islands whose bounding box, grown by epsilon, has area below
+   largest of several pieces, otherwise the resampled pre-inset candidate
+   is kept. Islands whose bounding box, grown by epsilon, has area below
    (0.1 mm)^2 skip inset attempts and keep that candidate. Original island/inset pairs
    are saved before any top removal or tool clipping. Routing uses these pairs for
    containment and to find an inset edge when no ring lies within the edge grid's
@@ -329,22 +329,14 @@ std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(storage_handle *storag
     for (const ExPolygon &polygon : polygons) {
         result.emplace_back(polygon, polygon);
         resample_expolygon(result.back().second, offset / 2, scale_d(0.5));
-        ExPolygons difference = clipper::diff_ex(storage, result.back().second, result.back().first);
-        // Keep the original if resampling extends outside it. Otherwise keep the resampled ring directly,
-        // because clipping by intersection would remove the collinear samples needed for local widths.
-        if (!difference.empty()) {
-            ++counts.resample_original;
-            result.back().second = result.back().first;
-        } else {
-            ++counts.resample_kept;
-        }
+        // Keep the resampled island directly: intersection would remove the collinear samples needed for local widths.
     }
     for (std::pair<ExPolygon, ExPolygon> &pair : result) {
         ExPolygon &polygon = pair.second;
         BoundingBox bbox = clipper::get_extents(polygon);
         bbox.offset(SCALED_EPSILON);
         const Vec2d size = to_vec2d(bbox.size());
-        // Skip insets when the epsilon-grown bounding box has area below (0.1 mm)^2; keep the original or resampled candidate.
+        // Skip insets when the epsilon-grown bounding box has area below (0.1 mm)^2; keep the resampled candidate.
         if (size.x() * size.y() < scale_d(0.1f) * scale_d(0.1f)) { ++counts.small; continue; }
         // Try thresholds offset/2, offset, then 2*offset+epsilon, increasingly protecting narrow parts.
         for (size_t round = 0; round < widths.size(); ++round) {
