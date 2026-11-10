@@ -23,6 +23,20 @@
 #include "I18N.hpp"
 #include "MsgDialog.hpp"
 
+/*
+ConfigManipulation validates edited settings and enables their GUI fields.
+Print and printer updates read borrowed configurations, apply dependent values
+through callbacks and ask for confirmation when a setting combination needs it.
+Field toggles combine local printer checks with rules evaluated by the plugin
+runtime. Crossing-only wipe follows wipe availability, not perimeter avoidance.
+
+    update_print_fff_config / update_printer_fff_config: validate related values
+        `-- apply: copy changed values and reload their controls
+    toggle_print_fff_options / toggle_printer_fff_options / toggle_print_sla_options
+        |-- toggle_field: forward enabled state to the owning page
+        `-- apply_plugin_gui_rules: forward the runtime's resolved field rules
+*/
+
 namespace Slic3r {
 namespace GUI {
 
@@ -396,7 +410,7 @@ void ConfigManipulation::update_printer_fff_config(DynamicPrintConfig *config,
         }
     }
 }
-void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, DynamicPrintConfig &full_config, const std::vector<OptionKeyIdx>* visible_settings)
+void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, const std::vector<OptionKeyIdx>* visible_settings)
 {
 
     size_t extruder_count = config->option("nozzle_diameter")->size();
@@ -485,10 +499,6 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
             toggle_field(el, wipe, i);
         }
 
-        // wipe_only_crossing can only work if avoid_crossing_perimeters
-        if (!full_config.option("avoid_crossing_perimeters")->get_bool()) {
-            toggle_field("wipe_only_crossing", false, i);
-        }
         
         toggle_field("travel_lift_before_obstacle", ramping_lift, i);
 

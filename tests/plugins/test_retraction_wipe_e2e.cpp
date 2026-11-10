@@ -12,6 +12,8 @@
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
@@ -22,8 +24,10 @@ This production gate slices two small square islands and publishes their G-code.
 It checks that the wipe plugin divides retraction between stationary and moving
 motions and applies nozzle-relative inside-end depths. Each Print owns its plan;
 only copied segments and parsed machine moves escape the processing phase.
+Both wipe passes are active; the crossing-only variation also requires a real
+generated crossing against the sliced target mask and a non-empty returning wipe.
 The setting catalogue requires a variation domain for every used and defined
-key.
+key of the first pass and every used key of the crossing pass.
 Catalogue variations change one setting at a time, except the dedicated depth
 and inside-end variants, which also enable inside-end and disable return.
 Only those variants measure inside-end depth.
@@ -60,6 +64,7 @@ struct Activation {
     {
         for (Plugin *plugin : host.active_plugins()) previous.push_back(plugin);
         success &= host.set_plugin_active(wipe_id, true);
+        success &= host.set_plugin_active("layer_extrusion_edit.wipe.crossing", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
     }
@@ -86,7 +91,11 @@ double check_output(const std::string &gcode, const DynamicPrintConfig &config, 
                     bool check_retraction, double stationary, double inside_depth);
 // Slice two islands, export with the production publication helper, check copied geometry and remove successful outputs.
 double run_case(const DynamicPrintConfig &config, const std::string &name, bool check_retraction,
-                double stationary, double inside_depth);
+                 double stationary, double inside_depth);
+
+// Count generated scope travels crossing the real target mask, in target-instance coordinates.
+size_t crossing_travels(slic3r_api::MutableExtrusionEntity entity, const Printing::PrintingExtrusion &extrusion,
+    const slic3r_api::ConstPrintingPlan &plan, extruder_index_t tool, double nozzle);
 
 // Exercise enabled defaults and one setting at a time, coupling inside-end with depth only to make it observable.
 TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][layer-extrusion-edit][wipe]")
@@ -109,6 +118,12 @@ TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][lay
     }
     for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys()) {
         INFO("defined setting: " << key.key);
+        REQUIRE(domains.count(key.key) == 1);
+    }
+    const Plugin *crossing = host.get_plugin("layer_extrusion_edit.wipe.crossing");
+    REQUIRE(crossing != nullptr);
+    for (const Plugin::UsedConfigKey &key : crossing->get_used_config_keys()) {
+        INFO("crossing used setting: " << key.key);
         REQUIRE(domains.count(key.key) == 1);
     }
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
@@ -278,6 +293,38 @@ double check_output(const std::string &gcode, const DynamicPrintConfig &config, 
     return volume;
 }
 
+size_t crossing_travels(slic3r_api::MutableExtrusionEntity entity, const Printing::PrintingExtrusion &extrusion,
+    const slic3r_api::ConstPrintingPlan &plan, const extruder_index_t tool, const double nozzle)
+{
+    const auto key = slic3r_api::printing_extrusion_scope_property_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    if (entity.get(key) == nullptr) {
+        size_t count = 0;
+        for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
+            count += crossing_travels(entity.child_mutable(idx), extrusion, plan, tool, nozzle);
+        return count;
+    }
+    const OrderedExtrusionScope scope(entity, key);
+    if (!scope.has_incoming_transition() || scope.travel().segment_count() == 0 || extrusion.region_island == nullptr)
+        return 0;
+    const slic3r_api::LayerRegionIsland region(reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+    if (region.region_count() == 0)
+        return 0;
+    const Layer *layer = reinterpret_cast<const Layer *>(region.region(0).layer().handle());
+    AvoidCrossingPerimeters oracle;
+    oracle.init_layer(*layer);
+    const std::vector<const Layer *> printed{layer};
+    oracle.prepare_crossing_test({*layer, printed, extrusion.printing_catalog_id, tool,
+        std::max<coord_t>(1, scale_i(nozzle * 0.5)), []() {}});
+    const c_point shift = plan.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
+        reinterpret_cast<const printing_extrusion_handle *>(&extrusion)));
+    Polyline travel;
+    const c_point start = scope.travel().segment(0).point_a;
+    travel.points.emplace_back(start.x - shift.x, start.y - shift.y);
+    for (const c_extrusion_segment &segment : scope.travel().segments())
+        travel.points.emplace_back(segment.point_b.x - shift.x, segment.point_b.y - shift.y);
+    return oracle.can_cross_perimeter(travel, true) ? 1 : 0;
+}
+
 double run_case(const DynamicPrintConfig &config, const std::string &name, bool check_retraction,
                 double stationary, double inside_depth)
 {
@@ -302,12 +349,23 @@ double run_case(const DynamicPrintConfig &config, const std::string &name, bool 
     REQUIRE(Test::export_print_to(host, print, print.full_print_config(), path.string(), exported.string(), selection) == exported.string());
     REQUIRE(print.printing_plan() != nullptr);
     std::vector<Wipe> wipes;
+    size_t real_crossings = 0;
+    const slic3r_api::ConstPrintingPlan plan(reinterpret_cast<const printing_plan_handle *>(print.printing_plan()));
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers)
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
-                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
-                    collect_wipes(slic3r_api::MutableExtrusionEntity(reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())),
-                                  unscaled(layer.print_z), wipes);
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                     collect_wipes(slic3r_api::MutableExtrusionEntity(reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())),
+                                   unscaled(layer.print_z), wipes);
+                    if (config.opt_bool("wipe_only_crossing", 0))
+                        real_crossings += crossing_travels(slic3r_api::MutableExtrusionEntity(
+                            reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())), extrusion, plan,
+                            tool.extruder_id, config.opt_float("nozzle_diameter", tool.extruder_id));
+                }
+    if (config.opt_bool("wipe_only_crossing", 0)) {
+        REQUIRE(real_crossings > 0);
+        REQUIRE_FALSE(wipes.empty());
+    }
     if (check_retraction) REQUIRE_FALSE(wipes.empty());
     else CHECK(wipes.empty());
     const double volume = check_output(Test::GCode::read_text_file(exported), config, wipes, check_retraction, stationary, inside_depth);

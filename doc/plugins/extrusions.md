@@ -730,5 +730,23 @@ AvoidCrossingPerimetersTravel: choose a route for each eligible gap
 ```
 
 Retraction with `wipe_only_crossing` uses the same copied-input and crossing
-helpers as a gate for wiping, independently of travel-provider selection; it
-does not ask the router for a detour.
+helpers on the generated travel, independently of travel-provider selection.
+`layer_extrusion_edit.wipe.default` (-80) retains inside-start approaches and
+plain outgoing wipes when this setting is off. The independent
+`layer_extrusion_edit.wipe.crossing` (-45) depends on that first pass and runs
+after built-in travels (-50), before lift (-40). It adds a wipe only for a sole
+Travel leaf without Wipe, with a valid target region island and no departure
+geometry. A terminal stationary deposit prevents the wipe.
+
+The crossing wipe returns to its source start, which must agree with the unchanged
+travel start within `SCALED_EPSILON` in XY distance and absolute Z.
+Complete source loops no longer than the configured wipe use whole turns rounded
+up to the required length; longer loops and open paths go halfway out and return
+over the same path. `wipe_return` and inside-end settings do not apply. Wipe and
+retraction settings belong to the source tool; crossing preparation and nozzle
+diameter belong to the target tool. Support uses the same crossing test.
+
+Before editing, each target layer worker publishes its first travel's exact start
+and crossing result as plain values. Source workers can thus handle inter-layer
+gaps, skipping empty layer groups, without reading another worker's geometry.
+Retraction remains split into stationary, moving and residual absolute targets.

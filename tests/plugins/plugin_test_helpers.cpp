@@ -890,6 +890,8 @@ void ensure_plugin_test_runtime_initialized()
             register_create_retraction_lift_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin::
             register_create_retraction_wipe_plugin(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin::
+            register_create_crossing_wipe_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultLayerEntryStatePlugin::register_default_layer_entry_state_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultTravelPlugin::register_default_travel_plugin(

@@ -84,7 +84,8 @@ public:
 
     // FFF printer
     void    update_printer_fff_config(DynamicPrintConfig* config, const bool is_global_config = false);
-    void    toggle_printer_fff_options(DynamicPrintConfig* config, DynamicPrintConfig &full_config,
+    // Enable printer fields from the borrowed settings and plugin rules; visible_settings restricts the rule evaluation, and callbacks update the page.
+    void    toggle_printer_fff_options(DynamicPrintConfig* config,
                                        const std::vector<OptionKeyIdx>* visible_settings = nullptr);
 
     // SLA print

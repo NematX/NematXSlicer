@@ -9,8 +9,10 @@ CreateRetractionWipe tests
 
 These cases exercise the wipe through the real ordered plugin step. They use
 separate PrintingExtrusion owners and layer boundaries. Path checks cover
-source-owner boundaries, complete fragmented loops, and wipes across layer transitions; the crossing cases
-compare wipe presence only.
+source-owner boundaries, complete fragmented loops, and wipes across layer transitions.
+The crossing cases run both wipe passes around entry-state and travel generation.
+They check returning geometry, exact joins and stationary or residual retraction
+targets for open paths and loops, including an empty intermediate layer group.
 Percent cases check stationary and moving retraction targets and nozzle-relative
 inside depths through the same ordered step.
 
@@ -23,8 +25,10 @@ wipes. Twelve gaps cover interior and outgoing moves, two nozzle radii, a
 nonzero tool with distinct perimeter and fill ownership, a shifted second
 instance, and the global skirt layer. Several gaps in each plan reuse one
 worker's caches. The agreement between plugin and core covers these gaps only;
-it does not prove the core rule elsewhere. No case prepares a support target,
-so support preparation is not checked here.
+it does not prove the core rule elsewhere. A sliced roof on a narrow post also
+supplies a real support layer with its support property and region identity.
+Controlled deposits, occupied departures and non-crossing detours suppress the
+second wipe; tool-change, lift and missing-dependency cases check pass ordering.
 
     crossing cases: obtain sliced geometry and identities
     |-- Print::process and StepExtrusionOrdering: build masks and ordered owners
@@ -38,6 +42,7 @@ so support preparation is not checked here.
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <optional>
 #include <utility>
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
@@ -57,6 +62,7 @@ using namespace Slic3r::Test::TransitionPipeline;
 using slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope;
 
 constexpr const char *WIPE_PLUGIN = "layer_extrusion_edit.wipe.default";
+constexpr const char *CROSSING_WIPE_PLUGIN = "layer_extrusion_edit.wipe.crossing";
 constexpr const char *ENTRY_STATE_PLUGIN =
     "layer_extrusion_edit.entry_state.default";
 constexpr const char *TRAVEL_PLUGIN = "layer_extrusion_edit.travel.default";
@@ -126,7 +132,8 @@ void check_wipe_gaps(Print &print, const LayerRegionIsland *region, uint32_t cat
             tool.extrusions.push_back(std::move(extrusion));
         }
     }
-    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
+        ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, CROSSING_WIPE_PLUGIN});
     for (size_t idx = 0; idx < gaps.size(); ++idx) {
         CAPTURE(idx, extruder, nozzle);
         CHECK(find_role(entity_view(*tool.extrusions[2 * idx].root), RAW_EXTRUSION_ROLE_WIPE).valid() == expected[idx]);
@@ -359,6 +366,13 @@ TEST_CASE("CreateRetractionWipe is registered after retraction",
     CHECK(plugin->get_exclusive_group() == "layer_extrusion_edit.wipe");
     REQUIRE(plugin->get_dependencies().size() == 1);
     CHECK(plugin->get_dependencies().front() == TRANSITION_SCOPE_PLUGIN);
+    Plugin *crossing = Orchestrator::instance().get_plugin(CROSSING_WIPE_PLUGIN);
+    REQUIRE(crossing != nullptr);
+    CHECK(crossing->get_priority() == -45);
+    CHECK(crossing->get_exclusive_group().empty());
+    const std::vector<std::string> dependencies = crossing->get_dependencies();
+    REQUIRE(dependencies.size() == 2);
+    CHECK(std::find(dependencies.begin(), dependencies.end(), WIPE_PLUGIN) != dependencies.end());
 }
 
 TEST_CASE("Retraction wipe retraces connected source content across a layer boundary",
@@ -409,6 +423,338 @@ TEST_CASE("Retraction wipe retraces connected source content across a layer boun
           C_EXTRUSION_AXIS_OPERATION_RETRACT_TO);
     CHECK(leaves.front().extrusion_axis->value == Approx(2.0));
     CHECK_FALSE(leaves.back().extrusion_axis.has_value());
+}
+
+// Exercise returning geometry on controlled plans while retaining real sliced crossing masks.
+TEST_CASE("Crossing wipes preserve generated travel starts and absolute retraction targets",
+          "[plugins][layer-extrusion-edit][wipe][crossing]")
+{
+    enum class Shape { Open, LongLoop, EqualLoop, ShortLoop, Fragmented, Residual,
+        InterLayer, Deposit, OccupiedAfter, Detour, Blocked, Lift, Toolchange, Support,
+        RoutedDetour, LimitedDetour, Instances, ZOffsets, WrongZ, ExtraLoop };
+    const Shape shape = GENERATE(Shape::Open, Shape::LongLoop, Shape::EqualLoop, Shape::ShortLoop,
+        Shape::Fragmented, Shape::Residual, Shape::InterLayer, Shape::Deposit, Shape::OccupiedAfter,
+        Shape::Detour, Shape::Blocked, Shape::Lift, Shape::Toolchange, Shape::Support,
+        Shape::RoutedDetour, Shape::LimitedDetour, Shape::Instances, Shape::ZOffsets, Shape::WrongZ, Shape::ExtraLoop);
+    const char *before = GENERATE("0%", "20%", "100%");
+    CAPTURE(static_cast<int>(shape), before);
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const double wanted = shape == Shape::EqualLoop || shape == Shape::ExtraLoop ? 40. : shape == Shape::ShortLoop ? 45. :
+        shape == Shape::Residual ? 0.1 : 8.;
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"retract_before_travel", "0,0"},
+        {"retract_layer_change", "0,0"}, {"retract_length", "2,3"}, {"retract_length_toolchange", "2,3"},
+        {"retract_speed", "40,50"}, {"wipe", "1,0"}, {"wipe_only_crossing", "1,0"},
+        {"wipe_speed", "20,30"}, {"wipe_min", std::to_string(wanted) + ",1"},
+        {"wipe_return", "0,0"}, {"wipe_inside_start", "0,0"}, {"wipe_inside_end", "1,1"},
+        {"wipe_extra_perimeter", shape == Shape::ExtraLoop ? "1,0" : "0,0"},
+        {"retract_before_wipe", std::string(before) + ",100%"},
+        {"nozzle_diameter", "0.4,0.8"}, {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"},
+        {"retract_lift", shape == Shape::Lift ? "0.6,0" : "0,0"},
+        {"wipe_lift", "0,0"}, {"use_firmware_retraction", "0"}});
+    if (shape == Shape::Toolchange)
+        config.set_deserialize_strict({{"perimeter_extruder", "2"}, {"infill_extruder", "2"}, {"solid_infill_extruder", "2"}});
+    if (shape == Shape::Support)
+        config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "grid"},
+            {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
+            {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"}});
+    const bool routed = shape == Shape::RoutedDetour || shape == Shape::LimitedDetour;
+    if (routed)
+        config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
+            {"avoid_crossing_not_first_layer", "0"},
+            {"avoid_crossing_perimeters_max_detour", shape == Shape::LimitedDetour ? "0.001" : "0"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    TriangleMesh mesh = make_cube(20., 20., 1.2);
+    if (routed) {
+        mesh = make_cube(20., 4., 1.2);
+        TriangleMesh top = make_cube(20., 4., 1.2);
+        top.translate(Vec3f(0.f, 16.f, 0.f));
+        mesh.merge(top);
+        TriangleMesh left = make_cube(4., 12., 1.2);
+        left.translate(Vec3f(0.f, 4.f, 0.f));
+        mesh.merge(left);
+        TriangleMesh right = make_cube(4., 12., 1.2);
+        right.translate(Vec3f(16.f, 4.f, 0.f));
+        mesh.merge(right);
+    }
+    if (shape == Shape::Support) {
+        mesh = make_cube(4., 8., 2.);
+        TriangleMesh roof = make_cube(12., 8., 0.6);
+        roof.translate(Vec3f(0.f, 0.f, 2.f));
+        mesh.merge(roof);
+    }
+    object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    if (shape == Shape::Instances)
+        object->add_instance()->set_offset(Vec3d(40., 0., 0.));
+    Print print;
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    print.pipeline_progress().reset();
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+    PrintingPlan &plan = print.mutable_printing_plan();
+    const slic3r_api::ConstPrintingPlan original_plan(reinterpret_cast<const printing_plan_handle *>(&plan));
+    const LayerRegionIsland *region = nullptr;
+    uint32_t catalog = PRINTING_OBJECT_INSTANCE_ID_NONE;
+    uint32_t source_catalog = PRINTING_OBJECT_INSTANCE_ID_NONE;
+    const Layer *mask = nullptr;
+    for (const PrintingGroup &group : plan.groups)
+        for (const PrintingLayerGroup &layer : group.layers)
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions) {
+                    if (region != nullptr || extrusion.region_island == nullptr)
+                        continue;
+                    if (shape == Shape::Instances && extrusion.printing_catalog_id != PRINTING_OBJECT_INSTANCE_ID_NONE) {
+                        if (original_plan.object_instance(extrusion.printing_catalog_id).object_instance_idx() == 0) {
+                            source_catalog = extrusion.printing_catalog_id;
+                            continue;
+                        }
+                    }
+                    const slic3r_api::LayerRegionIsland view(reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+                    if (view.region_count() == 0)
+                        continue;
+                    const Layer *candidate = reinterpret_cast<const Layer *>(view.region(0).layer().handle());
+                    const bool support = candidate->get_property<LayerSupportProperty>() != nullptr;
+                    if (shape == Shape::Support ? support : !support && candidate->id() == 3) {
+                        region = extrusion.region_island;
+                        catalog = extrusion.printing_catalog_id;
+                        mask = reinterpret_cast<const Layer *>(view.region(0).layer().handle());
+                    }
+                }
+    REQUIRE(mask != nullptr);
+    CHECK((mask->get_property<LayerSupportProperty>() != nullptr) == (shape == Shape::Support));
+    const BoundingBox bounds = get_extents(mask->lslices());
+    Point start = bounds.center();
+    Point end(bounds.max.x() + scale_i(3.), start.y());
+    if (shape == Shape::Instances)
+        end = bounds.center();
+    if (routed) {
+        start.x() = bounds.min.x() + scale_i(2.);
+        end.x() = bounds.max.x() - scale_i(2.);
+    }
+    if (shape == Shape::Detour)
+        start.x() = bounds.min.x() - scale_i(3.);
+    const slic3r_api::ConstPrintingPlan plan_view(reinterpret_cast<const printing_plan_handle *>(&plan));
+    PrintingExtrusion identity;
+    identity.region_island = region;
+    identity.printing_catalog_id = catalog;
+    const c_point shift = plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
+        reinterpret_cast<const printing_extrusion_handle *>(&identity)));
+    if (shape == Shape::Instances) {
+        REQUIRE(source_catalog != PRINTING_OBJECT_INSTANCE_ID_NONE);
+        identity.printing_catalog_id = source_catalog;
+        const c_point source_shift = plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
+            reinterpret_cast<const printing_extrusion_handle *>(&identity)));
+        start += Point(source_shift.x, source_shift.y);
+    } else {
+        source_catalog = catalog;
+        start += Point(shift.x, shift.y);
+    }
+    const Point target_start = end + Point(shift.x, shift.y);
+    AvoidCrossingPerimeters oracle;
+    oracle.init_layer(*mask);
+    const std::vector<const Layer *> printed{mask};
+    oracle.prepare_crossing_test({*mask, printed, catalog,
+        static_cast<extruder_index_t>(shape == Shape::Toolchange ? 1 : 0),
+        scale_i(shape == Shape::Toolchange ? 0.4 : 0.2), []() {}});
+    Polyline direct;
+    direct.points = {start - Point(shift.x, shift.y), end};
+    REQUIRE(oracle.can_cross_perimeter(direct, true));
+    plan.groups.clear();
+    plan.groups.emplace_back();
+    plan.groups.back().printing_catalog_ids.push_back(catalog);
+    if (source_catalog != catalog)
+        plan.groups.back().printing_catalog_ids.push_back(source_catalog);
+    plan.groups.back().layers.emplace_back();
+    plan.groups.back().layers.back().print_z = mask->scaled_print_z();
+    plan.groups.back().layers.back().tool_groups.emplace_back();
+    PrintingToolGroup &source_tool = plan.groups.back().layers.back().tool_groups.back();
+    source_tool.extruder_id = 0;
+    const bool loop = shape == Shape::LongLoop || shape == Shape::EqualLoop ||
+        shape == Shape::ShortLoop || shape == Shape::Fragmented || shape == Shape::ExtraLoop;
+    std::unique_ptr<ExtrusionEntity> source;
+    if (loop) {
+        source = shape == Shape::Fragmented ? make_fragmented_loop(true) : make_external_loop(0.);
+        // Translate each fragment without changing the loop's inherited properties.
+        std::function<void(slic3r_api::MutableExtrusionEntity)> shift_loop =
+            [&shift_loop, &start](slic3r_api::MutableExtrusionEntity entity) {
+                if (entity.point_count() != 0)
+                    REQUIRE(entity.translate({start.x(), start.y()}));
+                for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
+                    shift_loop(entity.child_mutable(idx));
+            };
+        shift_loop(entity_view(*source));
+    } else {
+        ArcPolyline line;
+        line.append(start - Point(0, scale_i(5.)));
+        line.append(start);
+        source = std::make_unique<ExtrusionPath>(line,
+            ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true);
+    }
+    append_printing_extrusion(source_tool, std::move(source));
+    if (shape == Shape::ZOffsets)
+        entity_view(*source_tool.extrusions.back().root).get_or_add(slic3r_api::EPropertyZOffset::key).set(scale_i(0.03));
+    source_tool.extrusions.back().region_island = region;
+    source_tool.extrusions.back().printing_catalog_id = source_catalog;
+    if (shape == Shape::InterLayer) {
+        // An empty intermediate group must not hide the next printable scope.
+        plan.groups.front().layers.emplace_back();
+        plan.groups.front().layers.back().print_z = mask->scaled_print_z() + scale_i(0.1);
+        plan.groups.emplace_back();
+        plan.groups.back().printing_catalog_ids.push_back(catalog);
+        plan.groups.back().layers.emplace_back();
+        plan.groups.back().layers.back().print_z = mask->scaled_print_z() + scale_i(0.2);
+        plan.groups.back().layers.back().tool_groups.emplace_back();
+        plan.groups.back().layers.back().tool_groups.back().extruder_id = 0;
+    } else if (shape == Shape::Toolchange) {
+        plan.groups.back().layers.back().tool_groups.emplace_back();
+        plan.groups.back().layers.back().tool_groups.back().extruder_id = 1;
+    }
+    PrintingToolGroup &target_tool = plan.groups.back().layers.back().tool_groups.back();
+    ArcPolyline target_line;
+    target_line.append(target_start);
+    target_line.append(target_start + Point(0, scale_i(5.)));
+    append_printing_extrusion(target_tool, std::make_unique<ExtrusionPath>(target_line,
+        ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true));
+    target_tool.extrusions.back().region_island = region;
+    target_tool.extrusions.back().printing_catalog_id = catalog;
+    if (shape == Shape::ZOffsets)
+        entity_view(*target_tool.extrusions.back().root).get_or_add(slic3r_api::EPropertyZOffset::key).set(scale_i(0.07));
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
+        WIPE_PLUGIN, ENTRY_STATE_PLUGIN, routed ?
+            "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN});
+    const slic3r_api::MutableExtrusionEntity source_root = find_scope(entity_view(
+        *plan.groups.front().layers.front().tool_groups.front().extrusions.front().root));
+    const slic3r_api::MutableExtrusionEntity target_root = find_scope(entity_view(*target_tool.extrusions.back().root));
+    const OrderedExtrusionScope source_scope(source_root, scope_property_key());
+    const OrderedExtrusionScope target_scope(target_root, scope_property_key());
+    REQUIRE_FALSE(find_role(source_root, RAW_EXTRUSION_ROLE_WIPE).valid());
+    const c_extrusion_segment original = target_scope.travel().segment(0);
+    CHECK(original.point_a.x == start.x());
+    CHECK(original.point_a.y == start.y());
+    if (routed) {
+        Polyline generated;
+        generated.points.emplace_back(original.point_a.x - shift.x, original.point_a.y - shift.y);
+        for (const c_extrusion_segment &segment : target_scope.travel().segments())
+            generated.points.emplace_back(segment.point_b.x - shift.x, segment.point_b.y - shift.y);
+        CHECK(oracle.can_cross_perimeter(generated, true) == (shape == Shape::LimitedDetour));
+        CHECK((target_scope.travel().segment_count() == 1) == (shape == Shape::LimitedDetour));
+    }
+    if (shape == Shape::OccupiedAfter) {
+        slic3r_api::MutableExtrusionEntity occupied = slic3r_api::LayerExtrusionEdit::ExtrusionScope::append_phase_leaf(source_scope.after());
+        REQUIRE(occupied.set_segments({original}));
+    }
+    if (shape == Shape::Deposit) {
+        // A one-point deposit is added after the segmented source at the same nozzle position.
+        slic3r_api::MutableExtrusionEntity deposit = slic3r_api::LayerExtrusionEdit::ExtrusionScope::append_phase_leaf(source_scope.content());
+        deposit.get_or_add(slic3r_api::EPropertyAttributes::key).extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER);
+        REQUIRE(deposit.set_points({original.point_a}));
+        deposit.get_or_add(slic3r_api::EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT, 0.1);
+    }
+    if (shape == Shape::WrongZ) {
+        c_extrusion_segment moved = original;
+        moved.z_offset_a += scale_i(0.01);
+        REQUIRE(target_scope.travel().set_segments({moved}));
+    }
+    if (shape == Shape::Detour) {
+        const coord_t outside_y = bounds.max.y() + shift.y + scale_i(3.);
+        c_extrusion_segment a = original, b = original, c = original;
+        a.point_b = {original.point_a.x, outside_y};
+        b.point_a = a.point_b;
+        b.point_b = {original.point_b.x, outside_y};
+        c.point_a = b.point_b;
+        REQUIRE(target_scope.travel().set_segments({a, b, c}));
+        Polyline detour;
+        detour.points = {Point(a.point_a.x - shift.x, a.point_a.y - shift.y),
+            Point(a.point_b.x - shift.x, a.point_b.y - shift.y),
+            Point(b.point_b.x - shift.x, b.point_b.y - shift.y),
+            Point(c.point_b.x - shift.x, c.point_b.y - shift.y)};
+        CHECK_FALSE(oracle.can_cross_perimeter(detour, true));
+    }
+    if (shape == Shape::Blocked) {
+        ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, CROSSING_WIPE_PLUGIN});
+        Orchestrator &host = Orchestrator::instance();
+        host.block_unsatisfied_plugin_dependencies();
+        CHECK(host.blocked_plugin_activations().count(CROSSING_WIPE_PLUGIN) == 1);
+        CHECK_FALSE(host.is_plugin_active(CROSSING_WIPE_PLUGIN));
+        Steps::StepLayerExtrusionEdition::run_step(host, print);
+    } else
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, WIPE_PLUGIN, CROSSING_WIPE_PLUGIN});
+    const slic3r_api::MutableExtrusionEntity wipe = find_role(source_root, RAW_EXTRUSION_ROLE_WIPE);
+    if (shape == Shape::Deposit || shape == Shape::OccupiedAfter || shape == Shape::Detour ||
+        shape == Shape::RoutedDetour || shape == Shape::Blocked || shape == Shape::WrongZ) {
+        CHECK_FALSE(wipe.valid());
+        return;
+    }
+    REQUIRE(wipe.valid());
+    std::vector<GeometricLeaf> leaves;
+    collect_geometric_leaves(wipe, std::nullopt, leaves);
+    REQUIRE_FALSE(leaves.empty());
+    const c_extrusion_segment first = leaves.front().entity.segment(0);
+    const c_extrusion_segment last = leaves.back().entity.segment(leaves.back().entity.segment_count() - 1);
+    CHECK(first.point_a.x == original.point_a.x);
+    CHECK(first.point_a.y == original.point_a.y);
+    CHECK(last.point_b.x == original.point_a.x);
+    CHECK(last.point_b.y == original.point_a.y);
+    CHECK(last.z_offset_b == first.z_offset_a);
+    const slic3r_api::EPropertyZOffset *source_z = source_root.get(slic3r_api::EPropertyZOffset::key);
+    const slic3r_api::EPropertyZOffset *target_z = target_root.get(slic3r_api::EPropertyZOffset::key);
+    const coord_t source_base_z = mask->scaled_print_z() + (source_z == nullptr ? 0 : source_z->get());
+    const coord_t target_base_z = plan.groups.back().layers.back().print_z + (target_z == nullptr ? 0 : target_z->get());
+    CHECK(source_base_z + first.z_offset_a == target_base_z + original.z_offset_a);
+    CHECK(target_scope.travel().segment(0).point_a.x == original.point_a.x);
+    CHECK(target_scope.travel().segment(0).point_a.y == original.point_a.y);
+    double length = 0.;
+    for (size_t idx = 0; idx < leaves.size(); ++idx) {
+        length += unscaled(leaves[idx].entity.local_length());
+        if (idx > 0) {
+            const slic3r_api::ExtrusionEntity &previous = leaves[idx - 1].entity;
+            const c_extrusion_segment tail = previous.segment(previous.segment_count() - 1);
+            CHECK(c_point_distance_to(tail.point_b, leaves[idx].entity.segment(0).point_a) == Approx(0.));
+        }
+    }
+    const double expected_length = shape == Shape::ShortLoop || shape == Shape::ExtraLoop ? 80. :
+        shape == Shape::EqualLoop ? 40. : wanted;
+    CHECK(length == Approx(expected_length).margin(0.00001));
+    if (shape == Shape::EqualLoop || shape == Shape::ExtraLoop) {
+        // A whole counter-clockwise turn encloses the square; an out-and-back path has zero signed area.
+        double twice_area = 0.;
+        for (const GeometricLeaf &leaf : leaves)
+            for (const c_extrusion_segment &segment : leaf.entity.segments()) {
+                const double ax = unscaled(segment.point_a.x - original.point_a.x);
+                const double ay = unscaled(segment.point_a.y - original.point_a.y);
+                const double bx = unscaled(segment.point_b.x - original.point_a.x);
+                const double by = unscaled(segment.point_b.y - original.point_a.y);
+                twice_area += ax * by - bx * ay;
+            }
+        CHECK(twice_area == Approx(shape == Shape::EqualLoop ? 200. : 400.).margin(0.00001));
+    }
+    const double stationary = std::string(before) == "100%" ? 2. : std::string(before) == "20%" ? 0.4 : 0.;
+    CHECK(find_axis_target(source_scope.after(), C_EXTRUSION_AXIS_OPERATION_RETRACT_TO,
+        stationary, shape == Shape::Toolchange).valid());
+    if (shape == Shape::Residual && stationary < 2.)
+        CHECK(find_axis_target(source_scope.after(), C_EXTRUSION_AXIS_OPERATION_RETRACT_TO,
+            2., false).valid());
+    if (shape == Shape::Lift) {
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, WIPE_PLUGIN, CROSSING_WIPE_PLUGIN,
+            "layer_extrusion_edit.lift.default"});
+        CHECK(target_scope.travel().segment(0).point_a.x == original.point_a.x);
+        CHECK(target_scope.travel().segment(0).point_a.y == original.point_a.y);
+        std::vector<GeometricLeaf> lifted;
+        collect_geometric_leaves(target_scope.travel(), std::nullopt, lifted);
+        coord_t maximum_z = 0;
+        for (const GeometricLeaf &leaf : lifted)
+            for (const c_extrusion_segment &segment : leaf.entity.segments())
+                maximum_z = std::max(maximum_z, std::max(segment.z_offset_a, segment.z_offset_b));
+        CHECK(maximum_z == scale_i(0.6));
+    }
 }
 
 TEST_CASE("Wipe-only-crossing matches the core decision on sliced masks",

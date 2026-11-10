@@ -77,6 +77,9 @@ namespace Slic3r {
 // Populate borrowed preset/category key lists in the definition; copied lists remain definition-owned and allocation failures propagate.
 void init_categories(PrintConfigDef &definition);
 
+// Add FFF option descriptions and owned default values to the borrowed definition; allocation failures propagate.
+void init_fff_params(PrintConfigDef &definition);
+
 
 static t_config_enum_names enum_names_from_keys_map(const t_config_enum_values &enum_keys_map)
 {
@@ -7097,7 +7100,8 @@ void init_fff_params(PrintConfigDef &definition)
     def->invalidates_step = STEP_GCODE;
     def->tooltip = L("This flag will wipe the nozzle a bit inward after extruding an external perimeter."
         " The wipe_extra_perimeter is executed first, then this move inward before the retraction wipe."
-        " Note that the retraction wipe will follow the exact external perimeter (center) line if this parameter is disabled, and will follow the inner side of the external perimeter line if enabled");
+        " Note that the retraction wipe will follow the exact external perimeter (center) line if this parameter is disabled, and will follow the inner side of the external perimeter line if enabled."
+        " Does not apply to the crossing wipe, which returns to the generated travel start.");
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ true });
@@ -7153,7 +7157,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->label = L("Wipe only when crossing perimeters");
     def->category = OptionCategory::extruders;
     def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("Don't wipe when you don't cross a perimeter. Need 'avoid_crossing_perimeters' and 'wipe' enabled.");
+    def->tooltip = L("Wipe only when the generated travel crosses a perimeter. Requires 'wipe', but not 'avoid_crossing_perimeters'. The wipe returns to the travel start.");
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ true });
@@ -7163,7 +7167,8 @@ void init_fff_params(PrintConfigDef &definition)
     def->category = OptionCategory::extruders;
     def->invalidates_step = STEP_GCODE;
     def->tooltip = L("If true, it ensure the wipe ends at the seam. It can stop and return back at mid-distance."
-        " If it's a loop, it can continue a bit more or stop early to stop at the right point.");
+        " If it's a loop, it can continue a bit more or stop early to stop at the right point."
+        " Does not apply to the crossing wipe, which always returns to the generated travel start.");
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ false });

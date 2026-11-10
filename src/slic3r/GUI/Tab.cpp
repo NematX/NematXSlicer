@@ -4291,18 +4291,8 @@ void TabPrinter::toggle_options()
     if (m_presets->get_edited_preset().printer_technology() != ptFFF)
         return;
 
-    const DynamicPrintConfig& print_config = m_preset_bundle->fff_prints.get_edited_preset().config;
-    const DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
-    const DynamicPrintConfig& printer_config = m_preset_bundle->printers.get_edited_preset().config;
-
-    // Print config values
-    DynamicPrintConfig full_print_config;
-    full_print_config.apply(print_config);
-    full_print_config.apply(filament_config);
-    full_print_config.apply(printer_config);
-
     const std::vector<OptionKeyIdx> visible_settings = m_active_page->field_keys();
-    m_config_manipulation.toggle_printer_fff_options(m_config, full_print_config, &visible_settings);
+    m_config_manipulation.toggle_printer_fff_options(m_config, &visible_settings);
     
     if (m_last_gcode_flavor != uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value)) {
         m_last_gcode_flavor = uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value);
