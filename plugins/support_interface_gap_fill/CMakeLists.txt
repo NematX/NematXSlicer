@@ -58,4 +58,4 @@ add_test(NAME support_gap_fill_e2e
         --host "${SUPERSLICER_HOST_EXECUTABLE}" --host-source "${SUPERSLICER_SOURCE_DIR}"
         --prepared "${CMAKE_BINARY_DIR}/test-data/support_interface_gap_fill"
         --output "${CMAKE_BINARY_DIR}/temp/support-gap-fill-e2e" ${_gap_runtime_args})
-set_tests_properties(support_gap_fill_e2e PROPERTIES LABELS "support-interface-gap-fill;plugin-e2e" TIMEOUT 900)
+set_tests_properties(support_gap_fill_e2e PROPERTIES LABELS "support-interface-gap-fill;plugin-e2e" TIMEOUT 540)

@@ -1,13 +1,17 @@
 """Bounded standalone STL-to-G-code gate for support interface gap fill.
 
-Reuse the perimeter fixture and reader without changing that package.
+Reuse the perimeter fixture and reader without changing that package. Each host
+export is independent, so exports run in parallel; only the reloaded and legacy
+cases wait for the saved settings of the enabled export.
 
-    main -> export: private profile, staged package, roof fixture, host CLI
-         -> compare disabled / enabled / reloaded and linear setting variations
+    main -> run_all(export...): first wave, comparisons and linear setting variations
+         -> run_all(export...): second wave, saved-settings cases
+         export: private profile, staged package, roof fixture, host CLI
 """
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import importlib.util
 import json
@@ -23,6 +27,8 @@ spec = importlib.util.spec_from_file_location("perimeter_fixture", HERE.parents[
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 OPTION = "support_material_interface_gap_fill"
+# Host startup, single-threaded, dominates a debug export: one worker per logical processor.
+WORKERS = os.cpu_count() or 2
 
 
 def main() -> None:
@@ -35,7 +41,7 @@ def main() -> None:
     parser.add_argument("--embedded-defaults", type=Path)
     parser.add_argument("--compare-report", type=Path)
     parser.add_argument("--runtime-path", action="append", default=[])
-    parser.add_argument("--budget", type=float, default=840.)
+    parser.add_argument("--budget", type=float, default=480.)
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
     root = args.output.resolve() / str(time.time_ns())
@@ -89,39 +95,14 @@ def main() -> None:
                         "seconds": time.monotonic() - case_started})
         return moves
 
+    def run_all(cases):
+        """Export {name: (changes, source, plugin)} in parallel; return the moves by name."""
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {name: pool.submit(export, name, *case) for name, case in cases.items()}
+            return {name: future.result() for name, future in futures.items()}
+
     try:
-        disabled = export("disabled", {OPTION: "0"})
-        if export("provider-disabled", {}, plugin=False) != disabled:
-            raise AssertionError("Disabled option differs from disabled provider")
-        enabled = export("enabled", {})
-        enabled_digest = hashlib.sha256(json.dumps(enabled, separators=(",", ":")).encode()).hexdigest()
-        if args.compare_report:
-            reference = json.loads(args.compare_report.read_text(encoding="utf-8"))
-            if reference.get("status") != "passed" or reference.get("enabled_sha256") != enabled_digest:
-                raise AssertionError("Embedded and standalone deposited paths differ")
-        if enabled == disabled:
-            raise AssertionError("Fixture did not produce a gap-fill effect")
-        if fixture.sparse_geometry(disabled) != fixture.sparse_geometry(enabled):
-            raise AssertionError("Gap fill changed sparse deposition")
-        saved = root / "enabled/saved.ini"
-        if f"{OPTION} = 1" not in saved.read_text(encoding="utf-8"):
-            raise AssertionError("Gap-fill option was not retained")
-        if export("reloaded", {}, saved) != enabled:
-            raise AssertionError("Reloaded export differs")
-        defaults = dict(line.split(" = ", 1) for line in saved.read_text(encoding="utf-8").splitlines() if " = " in line)
-        selectors = {role: next(key for key in defaults if key.startswith("exclusive_group_") and role in key)
-                     for role in fixture.ROLES}
-        legacy = {selectors[role]: provider for role, provider in zip(fixture.ROLES, fixture.LEGACY)}
-        if export("legacy", legacy) != enabled:
-            raise AssertionError("Legacy and zero-perimeter composition differ")
-        for perimeter_count in (1, 3):
-            on = export(f"perimeters-{perimeter_count}-on", {fixture.COUNT: str(perimeter_count)})
-            off = export(f"perimeters-{perimeter_count}-off", {fixture.COUNT: str(perimeter_count), OPTION: "0"})
-            if fixture.sparse_geometry(on) != fixture.sparse_geometry(off):
-                raise AssertionError("Gap fill with perimeters changed sparse deposition")
-        if export("spaced-enabled", {"support_material_interface_spacing": "0.2"}) != export(
-                "spaced-disabled", {OPTION: "0", "support_material_interface_spacing": "0.2"}):
-            raise AssertionError("Spaced interface was modified")
+        catalogue = {}
         if not args.smoke:
             domains = dict(line.strip().split(" = ", 1) for line in fixture.DOMAIN_TEXT.strip().splitlines())
             domains.pop(fixture.COUNT)
@@ -135,8 +116,49 @@ def main() -> None:
                 raise AssertionError(f"Input domains differ: {set(domains) ^ expected}")
             for key, values in domains.items():
                 for index, value in enumerate(values.split("|")):
-                    coupled = fixture.COUPLED_DOMAINS.get((key, value), {})
-                    export(f"{key}-{index}", {key: value} | coupled)
+                    catalogue[f"{key}-{index}"] = ({key: value} | fixture.COUPLED_DOMAINS.get((key, value), {}),)
+        first = run_all({
+            "disabled": ({OPTION: "0"},),
+            "provider-disabled": ({}, None, False),
+            "enabled": ({},),
+            "perimeters-1-on": ({fixture.COUNT: "1"},),
+            "perimeters-1-off": ({fixture.COUNT: "1", OPTION: "0"},),
+            "perimeters-3-on": ({fixture.COUNT: "3"},),
+            "perimeters-3-off": ({fixture.COUNT: "3", OPTION: "0"},),
+            "spaced-enabled": ({"support_material_interface_spacing": "0.2"},),
+            "spaced-disabled": ({OPTION: "0", "support_material_interface_spacing": "0.2"},),
+        } | catalogue)
+        disabled = first["disabled"]
+        if first["provider-disabled"] != disabled:
+            raise AssertionError("Disabled option differs from disabled provider")
+        enabled = first["enabled"]
+        enabled_digest = hashlib.sha256(json.dumps(enabled, separators=(",", ":")).encode()).hexdigest()
+        if args.compare_report:
+            reference = json.loads(args.compare_report.read_text(encoding="utf-8"))
+            if reference.get("status") != "passed" or reference.get("enabled_sha256") != enabled_digest:
+                raise AssertionError("Embedded and standalone deposited paths differ")
+        if enabled == disabled:
+            raise AssertionError("Fixture did not produce a gap-fill effect")
+        if fixture.sparse_geometry(disabled) != fixture.sparse_geometry(enabled):
+            raise AssertionError("Gap fill changed sparse deposition")
+        for perimeter_count in (1, 3):
+            if fixture.sparse_geometry(first[f"perimeters-{perimeter_count}-on"]) != \
+                    fixture.sparse_geometry(first[f"perimeters-{perimeter_count}-off"]):
+                raise AssertionError("Gap fill with perimeters changed sparse deposition")
+        if first["spaced-enabled"] != first["spaced-disabled"]:
+            raise AssertionError("Spaced interface was modified")
+        saved = root / "enabled/saved.ini"
+        if f"{OPTION} = 1" not in saved.read_text(encoding="utf-8"):
+            raise AssertionError("Gap-fill option was not retained")
+        defaults = dict(line.split(" = ", 1) for line in saved.read_text(encoding="utf-8").splitlines() if " = " in line)
+        selectors = {role: next(key for key in defaults if key.startswith("exclusive_group_") and role in key)
+                     for role in fixture.ROLES}
+        legacy = {selectors[role]: provider for role, provider in zip(fixture.ROLES, fixture.LEGACY)}
+        second = run_all({"reloaded": ({}, saved), "legacy": (legacy,)})
+        if second["reloaded"] != enabled:
+            raise AssertionError("Reloaded export differs")
+        if second["legacy"] != enabled:
+            raise AssertionError("Legacy and zero-perimeter composition differ")
         passed = True
     finally:
         (root / "report.json").write_text(json.dumps({"status": "passed" if passed else "failed",
