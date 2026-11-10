@@ -41,11 +41,17 @@ pass contract and the prerequisites on transition scopes.
 Compact-scope retraction-lift implementation
 ============================================
 
-The plugin has two parallel passes. setup_run() applies progressive lift to
-retracting wipes and publishes one scalar description of the layer's final
+The plugin has two parallel passes. setup_run() applies one progressive lift to
+all outgoing wipe leaves and publishes one scalar description of the layer's final
 scope. After the host barrier, run() streams local scope pairs and shapes each
 target travel. Only the first scope of a layer may consume the preceding
 layer's scalar summary.
+
+    setup_run_impl: raise each scope's outgoing wipe and publish its final Z
+        prepare_scope_wipe_lift: measure all wipe leaves before computing the ramp
+            prepare_wipe_lifts: collect Wipe leaves in execution order
+            lift_wipe: insert the ramp start and keep a running maximum of path Z plus ramp across leaves
+    run_impl: shape incoming travel using the preceding scope's final Z
 
 Owner views supplied by PrintingEntityPropertyTraversal provide the tool,
 region and object instance. Printable endpoint state is recovered directly
@@ -275,21 +281,23 @@ void lift_travel(MutableExtrusionEntity travel,
                  double slope_degrees,
                  const plugin_run_context *run_ctx);
 
-/* Apply a progressive Z increase over one retracting Wipe leaf. */
+/* Insert the ramp start without changing leaf properties, then clamp path Z plus ramp to the preceding wipe Z.
+   traversed is the shared planar distance in/out and is advanced here; previous carries the last Z across leaves. Failed edits or overflow throw. */
 void lift_wipe(MutableExtrusionEntity entity,
                coord_t lift,
                distf_t lift_length,
+               distf_t total,
+               distf_t &traversed,
+               std::optional<coord_t> &previous,
                const plugin_run_context *run_ctx);
 
-/* Raise only Wipe plus Retract leaves in one outgoing phase. */
+/* Append borrowed Wipe leaves in execution order, resolving inherited roles without changing geometry. */
 void prepare_wipe_lifts(MutableExtrusionEntity entity,
-                        extruder_index_t extruder_id,
-                        coord_t layer_height,
-                        const Config &print_config,
+                        std::vector<MutableExtrusionEntity> &wipes,
                         std::optional<EPropertyAttributes> inherited_attributes,
                         const plugin_run_context *run_ctx);
 
-/* Apply wipe lift to the outgoing phase of one prepared scope. */
+/* Measure the outgoing wipe and apply a capped shared ramp with a running maximum that keeps Z non-decreasing across leaves; invalid settings or failed edits throw. */
 void prepare_scope_wipe_lift(
     const ScopeEntity &scope,
     const Config &print_config,
@@ -338,7 +346,7 @@ distf_t segment_planar_length(const c_extrusion_segment &segment)
         return chord;
     const double radius = std::abs(double(segment.radius));
     if (!(radius > 0.0) || chord > 2.0 * radius + double(SCALED_EPSILON))
-        throw std::invalid_argument("A lifted travel contains an invalid arc radius.");
+        throw std::invalid_argument("A lifted path contains an invalid arc radius.");
     double angle = 2.0 * std::asin(std::clamp(
         double(chord) / (2.0 * radius), 0.0, 1.0));
     if (segment.radius < 0.f)
@@ -718,14 +726,29 @@ void lift_travel(
 void lift_wipe(MutableExtrusionEntity entity,
                const coord_t lift,
                const distf_t lift_length,
+               const distf_t total,
+               distf_t &traversed,
+               std::optional<coord_t> &previous,
                const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
     if (lift <= 0 || lift_length <= 0.0 || entity.point_count() < 2)
         return;
-    const distf_t total = entity.local_length();
     const distf_t start = std::max<distf_t>(0.0, total - lift_length);
-    distf_t traversed = 0.0;
+    if (start - traversed > distf_t(SCALED_EPSILON) &&
+        traversed + entity.local_length() - start > distf_t(SCALED_EPSILON)) {
+        // Rejoin the split polylines on the same leaf so its retraction target still covers the entire motion.
+        StoredExtrusionEntity before(run_ctx->plugin_storage);
+        StoredExtrusionEntity after(run_ctx->plugin_storage);
+        if (extrusion_polyline_split_at_distance(entity.handle(), start - traversed,
+                before.mutable_handle(), after.mutable_handle()) == 0)
+            throw std::runtime_error("Unable to insert the wipe lift ramp start.");
+        std::vector<c_extrusion_segment> segments = before.segments();
+        const std::vector<c_extrusion_segment> tail = after.segments();
+        segments.insert(segments.end(), tail.begin(), tail.end());
+        if (!entity.set_segments(segments))
+            throw std::runtime_error("Unable to preserve the split wipe geometry.");
+    }
     for (uint32_t point_idx = 0; point_idx < entity.point_count(); ++point_idx) {
         throw_if_cancelled(run_ctx);
         if (point_idx > 0)
@@ -735,18 +758,19 @@ void lift_wipe(MutableExtrusionEntity entity,
                               std::max<distf_t>(lift_length, 1.0)),
                        0.0, 1.0);
         const coord_t added = coord_t(std::llround(double(lift) * factor));
+        coord_t raised = checked_add_z(entity.z_offset(point_idx), added);
+        if (previous)
+            raised = std::max(*previous, raised);
         throw_if_cancelled(run_ctx);
-        if (!entity.set_z_offset(
-                point_idx, checked_add_z(entity.z_offset(point_idx), added)))
+        if (!entity.set_z_offset(point_idx, raised))
             throw std::runtime_error("Unable to apply progressive wipe lift.");
+        previous = raised;
     }
 }
 
 void prepare_wipe_lifts(
     MutableExtrusionEntity entity,
-    const extruder_index_t extruder_id,
-    const coord_t layer_height,
-    const Config &print_config,
+    std::vector<MutableExtrusionEntity> &wipes,
     std::optional<EPropertyAttributes> inherited_attributes,
     const plugin_run_context *run_ctx)
 {
@@ -756,29 +780,13 @@ void prepare_wipe_lifts(
     if (const EPropertyAttributes *direct = entity.get(EPropertyAttributes::key))
         inherited_attributes = *direct;
 
-    const EPropertyExtrusionAxis *axis = entity.get(EPropertyExtrusionAxis::key);
-    if (entity.segment_count() != 0 && inherited_attributes && axis != nullptr &&
-        RAW_EXTRUSION_ROLE_IS_WIPE(inherited_attributes->extrusion_role()) &&
-        RAW_EXTRUSION_ROLE_IS_RETRACT(inherited_attributes->extrusion_role()) &&
-        axis->operation == C_EXTRUSION_AXIS_OPERATION_RETRACT_TO) {
-        const double lift_mm =
-            print_config.vector_effective_float_or_percent_or_default(
-                "wipe_lift", extruder_id, unscaled(layer_height), 0.0);
-        const double length_mm =
-            print_config.vector_effective_float_or_percent_or_default(
-                "wipe_lift_length", extruder_id,
-                unscaled(entity.local_length()), 0.0);
-        if (!std::isfinite(lift_mm) || lift_mm < 0.0 ||
-            !std::isfinite(length_mm) || length_mm < 0.0)
-            throw std::runtime_error("Wipe lift settings produced an invalid value.");
-        throw_if_cancelled(run_ctx);
-        lift_wipe(entity, scale_i(lift_mm), scale_d(length_mm), run_ctx);
-    }
+    if (entity.segment_count() != 0 && inherited_attributes &&
+        RAW_EXTRUSION_ROLE_IS_WIPE(inherited_attributes->extrusion_role()))
+        wipes.push_back(entity);
 
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
         throw_if_cancelled(run_ctx);
-        prepare_wipe_lifts(entity.child_mutable(child_idx), extruder_id,
-                           layer_height, print_config, inherited_attributes,
+        prepare_wipe_lifts(entity.child_mutable(child_idx), wipes, inherited_attributes,
                            run_ctx);
     }
 }
@@ -798,8 +806,26 @@ void prepare_scope_wipe_lift(
         scope_entity.printing_extrusion.region_island();
     if (region_island.valid() && region_island.region_count() != 0)
         layer_height = region_island.region(0).layer().height();
-    prepare_wipe_lifts(scope.after(), scope_entity.tool_group.extruder_id(),
-                       layer_height, print_config, std::nullopt, run_ctx);
+    std::vector<MutableExtrusionEntity> wipes;
+    prepare_wipe_lifts(scope.after(), wipes, std::nullopt, run_ctx);
+    if (wipes.empty())
+        return;
+    distf_t total = 0.0;
+    for (const MutableExtrusionEntity &wipe : wipes)
+        total += wipe.local_length();
+    const extruder_index_t extruder_id = scope_entity.tool_group.extruder_id();
+    const double lift_mm = print_config.vector_effective_float_or_percent_or_default(
+        "wipe_lift", extruder_id, unscaled(layer_height), 0.0);
+    const double length_mm = print_config.vector_effective_float_or_percent_or_default(
+        "wipe_lift_length", extruder_id, unscaled(total), 0.0);
+    if (!std::isfinite(lift_mm) || lift_mm < 0.0 ||
+        !std::isfinite(length_mm) || length_mm < 0.0)
+        throw std::runtime_error("Wipe lift settings produced an invalid value.");
+    const distf_t lift_length = std::min(total, scale_d(length_mm));
+    distf_t traversed = 0.0;
+    std::optional<coord_t> previous;
+    for (MutableExtrusionEntity &wipe : wipes)
+        lift_wipe(wipe, scale_i(lift_mm), lift_length, total, traversed, previous, run_ctx);
 }
 
 coord_t travel_start_z(
@@ -1077,7 +1103,7 @@ void CreateRetractionLift::setup_run_impl(
         (ScopeEntity *previous, ScopeEntity *next) {
             throw_if_cancelled(run_ctx);
             // Every matching scope appears exactly once as `next`. Prepare its
-            // outgoing retracting wipe here so a following travel observes the
+            // outgoing wipe here so a following travel observes the
             // final Z left by that wipe.
             if (next != nullptr)
                 prepare_scope_wipe_lift(

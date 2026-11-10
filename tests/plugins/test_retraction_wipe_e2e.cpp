@@ -31,6 +31,8 @@ key of the first pass and every used key of the crossing pass.
 Catalogue variations change one setting at a time, except the dedicated depth
 and inside-end variants, which also enable inside-end and disable return.
 Only those variants measure inside-end depth.
+Additional lift cases use explicit groups of lift, retraction,
+crossing-only and inside-end/return settings.
 
 An ordered scope groups printable content and its surrounding transition phases.
 collect_wipes copies geometric leaves marked Wipe from each scope's after phase.
@@ -39,7 +41,8 @@ checks their joins and measures E deltas, including stationary commands at the
 source endpoint. These checks use output rounding tolerances, not G-code comments.
 Only complete two-millimetre retractions immediately following deposited material
 are measured; initial/final machine events are not mistaken for source wipes.
-The scene has straight paths, one tool, no lift and no custom scripts.
+The scene has straight paths, one tool and no custom scripts. Lift variations
+check that the whole wipe rises continuously and joins the following travel.
 
     TEST_CASE: validate catalogue and compare linear setting variations
     `-- run_case: slice the islands and publish using the production exporter
@@ -59,13 +62,14 @@ struct Activation {
     Orchestrator &host;
     std::vector<Plugin *> previous;
     bool success = true;
-    // Retain unrelated providers and enable the wipe, straight travel and text exporter.
+    // Retain unrelated providers and enable wipe, straight travel, lift and text export.
     explicit Activation(Orchestrator &value) : host(value)
     {
         for (Plugin *plugin : host.active_plugins()) previous.push_back(plugin);
         success &= host.set_plugin_active(wipe_id, true);
         success &= host.set_plugin_active("layer_extrusion_edit.wipe.crossing", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.lift.default", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
     }
     // Restore the captured active set without retaining any case-local plan views.
@@ -82,7 +86,7 @@ void append_wipe(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role r
 void collect_wipes(slic3r_api::MutableExtrusionEntity entity, double z, std::vector<Wipe> &wipes);
 // Read the last geometric endpoint of printable content in child order; return false for empty content.
 bool content_end(const slic3r_api::ExtrusionEntity &entity, double z, Vec3d &point);
-// Copy the first geometric connector from a borrowed travel phase, returning false if it is empty.
+// Copy the first moving connector from a borrowed travel phase, skipping points that emit no machine move.
 bool first_travel(const slic3r_api::ExtrusionEntity &entity, double z, Move &move);
 // Compare XYZ within the text exporter's millimetre rounding tolerance.
 bool near(const Vec3d &a, const Vec3d &b);
@@ -135,6 +139,7 @@ TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][lay
         {"wipe_inside_start", "0"}, {"wipe_inside_end", "0"}, {"wipe_inside_depth", "50%"},
         {"wipe_extra_perimeter", "0"}, {"retract_before_wipe", "20%"}, {"retract_length", "2"},
         {"retract_before_travel", "0"}, {"retract_layer_change", "0"}, {"retract_lift", "0"},
+        {"wipe_lift", "0"}, {"wipe_lift_length", "0"},
         {"retract_restart_extra", "0"}, {"retract_speed", "40"}, {"use_firmware_retraction", "0"},
         {"nozzle_diameter", "0.4"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"perimeters", "2"}, {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
@@ -156,7 +161,18 @@ TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][lay
             const double stationary = domain.first == "retract_before_wipe" ? (value == "100%" ? 2. : 0.) : 0.4;
             const double actual = run_case(config, domain.first + "-" + value, domain.first != "wipe", stationary, depth);
             if (domain.first != "nozzle_diameter") CHECK(actual == Approx(volume).margin(0.01));
-        }
+         }
+    for (const char *before : {"20%", "100%"}) {
+        DynamicPrintConfig config = baseline;
+        config.set_deserialize_strict({{"wipe_lift", "1"}, {"wipe_lift_length", "100%"},
+            {"retract_before_wipe", before}, {"wipe_only_crossing", "1"}});
+        CHECK(run_case(config, std::string("lift-") + before, true,
+                       std::string(before) == "100%" ? 2. : 0.4, -1.) == Approx(volume).margin(0.01));
+    }
+    DynamicPrintConfig inside_lift = baseline;
+    inside_lift.set_deserialize_strict({{"wipe_lift", "1"}, {"wipe_lift_length", "100%"},
+        {"wipe_inside_end", "1"}, {"wipe_return", "0"}});
+    CHECK(run_case(inside_lift, "lift-inside-end", true, 0.4, 0.2) == Approx(volume).margin(0.01));
 }
 
 void append_wipe(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role, Wipe &wipe)
@@ -204,11 +220,15 @@ bool first_travel(const slic3r_api::ExtrusionEntity &entity, double z, Move &mov
 {
     for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
         if (first_travel(entity.child(idx), z, move)) return true;
-    if (entity.segment_count() == 0) return false;
-    const c_extrusion_segment segment = entity.segment(0);
-    move = {{unscaled(segment.point_a.x), unscaled(segment.point_a.y), z + unscaled(segment.z_offset_a)},
-            {unscaled(segment.point_b.x), unscaled(segment.point_b.y), z + unscaled(segment.z_offset_b)}, 0.};
-    return true;
+    for (const c_extrusion_segment &segment : entity.segments()) {
+        if (segment.point_a.x == segment.point_b.x && segment.point_a.y == segment.point_b.y &&
+            segment.z_offset_a == segment.z_offset_b)
+            continue;
+        move = {{unscaled(segment.point_a.x), unscaled(segment.point_a.y), z + unscaled(segment.z_offset_a)},
+                {unscaled(segment.point_b.x), unscaled(segment.point_b.y), z + unscaled(segment.z_offset_b)}, 0.};
+        return true;
+    }
+    return false;
 }
 
 bool near(const Vec3d &a, const Vec3d &b) { return (a - b).cwiseAbs().maxCoeff() <= 0.0011; }
@@ -242,6 +262,7 @@ double check_output(const std::string &gcode, const DynamicPrintConfig &config, 
             const c_extrusion_segment &segment = wipe.segments[idx];
             const Vec3d a(unscaled(segment.point_a.x), unscaled(segment.point_a.y), wipe.z + unscaled(segment.z_offset_a));
             const Vec3d b(unscaled(segment.point_b.x), unscaled(segment.point_b.y), wipe.z + unscaled(segment.z_offset_b));
+            if (config.option("wipe_lift")->serialize() == "1") CHECK(b.z() >= a.z());
             if (idx == 0) CHECK(near(wipe.source, a));
             while (cursor < moves.size() && !(near(moves[cursor].a, a) && near(moves[cursor].b, b))) ++cursor;
             REQUIRE(cursor < moves.size());
@@ -255,6 +276,8 @@ double check_output(const std::string &gcode, const DynamicPrintConfig &config, 
             if (stationary == 2.) CHECK(moves[cursor].e >= -0.0001);
             last = cursor++;
         }
+        if (config.option("wipe_lift")->serialize() == "1")
+            CHECK(unscaled(wipe.segments.back().z_offset_b) == Approx(1.).margin(0.000002));
         if (first > 0) CHECK(near(moves[first - 1].b, moves[first].a));
         if (last + 1 < moves.size()) CHECK(near(moves[last].b, moves[last + 1].a));
         if (wipe.travel) {

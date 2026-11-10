@@ -15,6 +15,7 @@ and the rule that a layer worker never has to rebuild printable scope content.
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <vector>
@@ -42,14 +43,18 @@ struct LiftLeaf
     raw_extrusion_role role = RAW_EXTRUSION_ROLE_NONE;
 };
 
-/* Build the two-path fixture with all lift settings applied before Print::apply. */
+/* Build canonical print paths with lift settings, wipe retraction share and outgoing return/inside-end options applied before Print::apply. */
 void prepare_lift_print(Print &print,
                         Model &model,
                         const char *lift,
                         const char *ramping,
                         const char *slope,
                         const char *minimum_travel = "0",
-                        bool wipe_lift = false);
+                         bool wipe_lift = false,
+                         const char *wipe_length = "100%",
+                         const char *before_wipe = "20%",
+                         bool returning = false,
+                         bool inside_end = false);
 
 /* Collect geometric leaves while resolving inherited process attributes. */
 void collect_lift_leaves(
@@ -64,7 +69,11 @@ void prepare_lift_print(
     const char *ramping,
     const char *slope,
     const char *minimum_travel,
-    const bool wipe_lift)
+    const bool wipe_lift,
+    const char *wipe_length,
+    const char *before_wipe,
+    const bool returning,
+    const bool inside_end)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
@@ -85,16 +94,16 @@ void prepare_lift_print(
         {"wipe", wipe_lift ? "1" : "0"},
         {"wipe_speed", "20"},
         {"wipe_min", "8"},
-        {"wipe_return", "0"},
+        {"wipe_return", returning ? "1" : "0"},
         {"wipe_only_crossing", "0"},
-        {"retract_before_wipe", "20%"},
+        {"retract_before_wipe", before_wipe},
         {"retract_speed", "40"},
         {"travel_speed", "120"},
         {"wipe_inside_start", "0"},
-        {"wipe_inside_end", "0"},
+        {"wipe_inside_end", inside_end ? "1" : "0"},
         {"wipe_extra_perimeter", "0"},
         {"wipe_lift", wipe_lift ? "1" : "0"},
-        {"wipe_lift_length", wipe_lift ? "100%" : "0"}
+        {"wipe_lift_length", wipe_lift ? wipe_length : "0"}
     });
     Slic3r::Test::init_print(
         {Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
@@ -110,6 +119,18 @@ void prepare_lift_print(
     tool.extruder_id = 0;
     append_printing_extrusion(tool, make_print_path(0.0, 10.0));
     append_printing_extrusion(tool, make_print_path(20.0, 30.0));
+    if (inside_end) {
+        std::unique_ptr<ExtrusionPath> path = make_print_path(0.0, 10.0);
+        path->polyline().append(Point(scale_i(10.), scale_i(10.)));
+        path->polyline().append(Point(0, scale_i(10.)));
+        path->polyline().append(Point(0, 0));
+        ExtrusionEntity::Children children;
+        children.push_back(std::move(path));
+        std::unique_ptr<ExtrusionEntity> loop = std::make_unique<ExtrusionEntity>(
+            std::move(children), false, false, false);
+        loop->get_or_add_property<ExtrusionPropertyLoopRole>().set_perimeter_role(elrDefault);
+        tool.extrusions.front().root = CanonicalExtrusion::acquire(*loop);
+    }
 }
 
 void collect_lift_leaves(
@@ -401,13 +422,20 @@ TEST_CASE("CreateRetractionLift materializes vertical lift and respects its thre
     }
 }
 
-TEST_CASE("CreateRetractionLift raises only the retracting wipe prefix",
+// Check shared ramp values and joins across outgoing wipe leaves, then verify the next travel inherits the final Z.
+TEST_CASE("CreateRetractionLift raises the whole outgoing wipe continuously",
           "[plugins][layer-extrusion-edit][lift][wipe]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
-    prepare_lift_print(print, model, "0", "0", "0", "0", true);
+    const char *length = GENERATE("4", "8", "16", "50%", "100%", "200%");
+    const char *before = GENERATE("20%", "100%");
+    const int outgoing = GENERATE(0, 1, 2);
+    const bool returning = outgoing == 1;
+    const bool inside_end = outgoing == 2;
+    CAPTURE(length, before, returning, inside_end);
+    prepare_lift_print(print, model, "0", "0", "0", "0", true, length, before, returning, inside_end);
 
     run_layer_plugins(print, {
         TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
@@ -422,23 +450,161 @@ TEST_CASE("CreateRetractionLift raises only the retracting wipe prefix",
     std::vector<LiftLeaf> leaves;
     collect_lift_leaves(source.after().readonly(), std::nullopt, leaves);
 
-    const std::vector<LiftLeaf>::const_iterator retracting = std::find_if(
-        leaves.begin(), leaves.end(), [](const LiftLeaf &leaf) {
-            return RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role) &&
-                RAW_EXTRUSION_ROLE_IS_RETRACT(leaf.role);
-        });
-    const std::vector<LiftLeaf>::const_iterator mechanical = std::find_if(
-        leaves.begin(), leaves.end(), [](const LiftLeaf &leaf) {
-            return RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role) &&
-                !RAW_EXTRUSION_ROLE_IS_RETRACT(leaf.role);
-        });
-    REQUIRE(retracting != leaves.end());
-    REQUIRE(mechanical != leaves.end());
-    CHECK(retracting->entity.z_offset(0) == 0);
-    CHECK(retracting->entity.z_offset(retracting->entity.point_count() - 1) ==
-          scale_i(1.0));
-    CHECK(mechanical->entity.z_offset(0) == 0);
-    CHECK(mechanical->entity.z_offset(mechanical->entity.point_count() - 1) == 0);
+    std::vector<LiftLeaf> wipes;
+    double total = 0.;
+    for (const LiftLeaf &leaf : leaves)
+        if (RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role)) {
+            wipes.push_back(leaf);
+            total += leaf.entity.local_length();
+        }
+    REQUIRE_FALSE(wipes.empty());
+    if (inside_end && !returning) {
+        REQUIRE(wipes.back().entity.segment_count() > 0);
+        const c_extrusion_segment segment = wipes.back().entity.segment(wipes.back().entity.segment_count() - 1);
+        CHECK(segment.point_a.x == segment.point_b.x);
+        CHECK(segment.point_a.y != segment.point_b.y);
+        CHECK(std::abs(segment.point_b.y - segment.point_a.y) == scale_i(0.2));
+    }
+    if (std::string(before) == "20%" && !returning && !inside_end) REQUIRE(wipes.size() == 2);
+    const std::string setting(length);
+    const double ramp = std::min(total, setting.back() == '%' ?
+        total * std::stod(setting) / 100. : scale_d(std::stod(setting)));
+    double traversed = 0.;
+    coord_t previous = 0;
+    for (const LiftLeaf &leaf : wipes) {
+        CHECK(leaf.entity.z_offset(0) == previous);
+        for (uint32_t idx = 0; idx < leaf.entity.point_count(); ++idx) {
+            if (idx > 0) {
+                const c_extrusion_segment segment = leaf.entity.segment(idx - 1);
+                traversed += std::hypot(double(segment.point_b.x - segment.point_a.x),
+                                        double(segment.point_b.y - segment.point_a.y));
+            }
+            const coord_t actual = leaf.entity.z_offset(idx);
+            const double factor = std::clamp((traversed - (total - ramp)) / ramp, 0., 1.);
+            CHECK(actual == Approx(double(scale_i(1.0)) * factor).margin(1.));
+            CHECK(actual >= previous);
+            previous = actual;
+        }
+    }
+    CHECK(previous == scale_i(1.0));
+    OrderedExtrusionScope target(
+        find_scope(entity_view(*tool.extrusions[1].root)), scope_property_key());
+    CHECK(target.travel().segment(0).z_offset_a == previous);
+}
+
+// Check the running maximum of original path Z plus ramp on a reversed, descending arc without moving retraction.
+TEST_CASE("CreateRetractionLift never lowers a non-planar wipe", "[plugins][layer-extrusion-edit][lift][wipe]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double height = GENERATE(0.4, 2.);
+    const char *before = GENERATE("100%", "20%");
+    CAPTURE(height, before);
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "0", "0", "0", "0", true, "50%", before);
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front().layers.front().tool_groups.front();
+    slic3r_api::MutableExtrusionEntity path(reinterpret_cast<extrusion_entity_handle *>(tool.extrusions[0].root.get()));
+    c_extrusion_segment segment = path.segment(0);
+    segment.radius = float(scale_i(10.));
+    segment.orientation = RAW_EXTRUSION_ARC_ORIENTATION_CCW;
+    segment.z_offset_b = scale_i(height);
+    REQUIRE(path.set_segments({segment}));
+    const double source_length = path.local_length();
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
+        ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, LIFT_PLUGIN});
+    OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions[0].root)), scope_property_key());
+    std::vector<LiftLeaf> leaves;
+    collect_lift_leaves(source.after().readonly(), std::nullopt, leaves);
+    double total = 0.;
+    for (const LiftLeaf &leaf : leaves)
+        if (RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role)) total += leaf.entity.local_length();
+    REQUIRE(total > 0.);
+    double distance = 0.;
+    double expected = scale_i(height);
+    coord_t previous = scale_i(height);
+    size_t wipe_count = 0;
+    for (const LiftLeaf &leaf : leaves) {
+        if (!RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role)) continue;
+        ++wipe_count;
+        if (std::string(before) == "100%") CHECK_FALSE(RAW_EXTRUSION_ROLE_IS_RETRACT(leaf.role));
+        for (uint32_t idx = 0; idx < leaf.entity.point_count(); ++idx) {
+            if (idx > 0) {
+                const c_extrusion_segment s = leaf.entity.segment(idx - 1);
+                REQUIRE(s.radius != 0.f);
+                const double chord = std::hypot(double(s.point_b.x - s.point_a.x), double(s.point_b.y - s.point_a.y));
+                distance += 2. * std::abs(double(s.radius)) * std::asin(chord / (2. * std::abs(double(s.radius))));
+            }
+            const double ramp = scale_i(1.) * std::clamp((distance - total * 0.5) / (total * 0.5), 0., 1.);
+            expected = std::max(expected, scale_i(height) * (1. - distance / source_length) + ramp);
+            CHECK(leaf.entity.z_offset(idx) == Approx(expected).margin(3.));
+            CHECK(leaf.entity.z_offset(idx) >= previous);
+            previous = leaf.entity.z_offset(idx);
+        }
+    }
+    CHECK(wipe_count == (std::string(before) == "100%" ? 1 : 2));
+    CHECK(previous == Approx(expected).margin(3.));
+    OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions[1].root)), scope_property_key());
+    CHECK(target.travel().segment(0).z_offset_a == previous);
+}
+
+// Verify an explicit zero-lift vertex inside either wipe leaf, including true arcs, without changing the retraction target.
+TEST_CASE("CreateRetractionLift inserts the exact ramp start", "[plugins][layer-extrusion-edit][lift][wipe]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool arc = GENERATE(false, true);
+    const char *length = GENERATE("4", "7.8");
+    CAPTURE(arc, length);
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "0", "0", "0", "0", true, length);
+    const double ramp_length = scale_d(std::stod(length));
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front().layers.front().tool_groups.front();
+    if (arc) {
+        slic3r_api::MutableExtrusionEntity path(reinterpret_cast<extrusion_entity_handle *>(tool.extrusions[0].root.get()));
+        c_extrusion_segment segment = path.segment(0);
+        segment.radius = float(scale_i(10.));
+        segment.orientation = RAW_EXTRUSION_ARC_ORIENTATION_CCW;
+        REQUIRE(path.set_segments({segment}));
+    }
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
+        ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, LIFT_PLUGIN});
+    OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions[0].root)), scope_property_key());
+    std::vector<LiftLeaf> leaves;
+    collect_lift_leaves(source.after().readonly(), std::nullopt, leaves);
+    double total = 0.;
+    for (const LiftLeaf &leaf : leaves)
+        if (RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role)) total += leaf.entity.local_length();
+    double distance = 0.;
+    bool found = false;
+    size_t wipe_count = 0;
+    for (const LiftLeaf &leaf : leaves) {
+        if (!RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role)) continue;
+        ++wipe_count;
+        if (RAW_EXTRUSION_ROLE_IS_RETRACT(leaf.role)) {
+            const slic3r_api::EPropertyExtrusionAxis *axis = leaf.entity.get(slic3r_api::EPropertyExtrusionAxis::key);
+            REQUIRE(axis != nullptr);
+            CHECK(axis->operation == C_EXTRUSION_AXIS_OPERATION_RETRACT_TO);
+            CHECK(axis->value == Approx(2.));
+        }
+        for (uint32_t idx = 0; idx < leaf.entity.point_count(); ++idx) {
+            if (idx > 0) {
+                const c_extrusion_segment segment = leaf.entity.segment(idx - 1);
+                const double chord = std::hypot(double(segment.point_b.x - segment.point_a.x),
+                                                double(segment.point_b.y - segment.point_a.y));
+                distance += segment.radius == 0.f ? chord :
+                    2. * std::abs(double(segment.radius)) * std::asin(chord / (2. * std::abs(double(segment.radius))));
+                if (arc) CHECK(segment.radius != 0.f);
+            }
+            if (std::abs(distance - (total - ramp_length)) < 3.) {
+                CHECK(leaf.entity.z_offset(idx) == 0);
+                found = true;
+            }
+            const double factor = std::clamp((distance - (total - ramp_length)) / ramp_length, 0., 1.);
+            CHECK(leaf.entity.z_offset(idx) == Approx(scale_i(1.) * factor).margin(2.));
+        }
+    }
+    CHECK(found);
+    CHECK(wipe_count == 2);
 }
 
 } // namespace

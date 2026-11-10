@@ -746,7 +746,16 @@ Travel leaf without Wipe, with a valid target region island and no departure
 geometry. A terminal stationary deposit prevents the wipe.
 
 The crossing wipe returns to its source start, which must agree with the unchanged
-travel start within `SCALED_EPSILON` in XY distance and absolute Z.
+travel start within `SCALED_EPSILON` in XY distance and absolute Z before lift.
+The lift provider then applies one ramp over every outgoing Wipe
+leaf, including motion-only leaves, returning wipes and inside-end segments.
+`wipe_lift_length` is relative to the total wipe length when expressed as a
+percentage and is capped to that length. The final wipe point reaches
+`wipe_lift` above its original Z on planar wipes when both settings are positive.
+For non-planar wipes, the first point keeps its original Z and each following
+point takes the maximum of the preceding wipe Z and its original path Z plus
+the ramp. The final Z is therefore the running maximum of these values across
+all wipe leaves. The following travel starts at this lifted Z.
 Complete source loops no longer than the configured wipe use whole turns rounded
 up to the required length; longer loops and open paths go halfway out and return
 over the same path. `wipe_return` and inside-end settings do not apply. Wipe and
