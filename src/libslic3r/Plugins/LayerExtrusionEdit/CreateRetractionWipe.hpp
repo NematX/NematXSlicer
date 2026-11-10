@@ -34,7 +34,13 @@ target.before. It never changes the marked scope root, the phase order, or the
 printable content.
 
 CreateCrossingWipe runs after travel generation and before lift. When
-wipe_only_crossing is enabled, the first pass leaves outgoing retractions alone.
+wipe_only_crossing is enabled, the first pass wipes within a layer when exactly
+one side is outside object material, or when both sides are object material on
+different instances or slice islands. Object material excludes global,
+regionless and auxiliary-layer geometry.
+These normal wipes retain wipe_return and inside-end behavior. Other local gaps
+and inter-layer gaps leave outgoing retractions for the second pass, whose
+decision depends on the generated travel.
 The second pass tests a generated travel against target perimeter boundaries only
 when its phase contains a single segmented Travel leaf, not a composite tree.
 It adds a returning wipe only when its source start agrees with the travel start

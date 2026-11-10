@@ -7157,7 +7157,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->label = L("Wipe only when crossing perimeters");
     def->category = OptionCategory::extruders;
     def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("Wipe only when the generated travel crosses a perimeter. Requires 'wipe', but not 'avoid_crossing_perimeters'. The wipe returns to the travel start.");
+    def->tooltip = L("Within a layer, wipe when exactly one side is outside object material, or both sides are object material on different instances or slice islands. Object material excludes global paths, regionless paths and paths on auxiliary layers such as support, brim or skirt. All other transitions wipe only when the generated travel crosses a perimeter, returning to its start. Requires 'wipe', but not 'avoid_crossing_perimeters'.");
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ true });

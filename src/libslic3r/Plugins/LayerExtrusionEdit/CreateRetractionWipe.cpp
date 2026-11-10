@@ -61,8 +61,11 @@ External loop prefixes retain the extra perimeter wipe distance, but only a
 complete turn supplies the orientation needed for an inside-end movement.
 No source geometry or neighbour pointer is retained after the callback.
 
-When wipe_only_crossing is enabled, CreateRetractionWipe leaves outgoing
-retractions intact. CreateCrossingWipe runs after travel generation and tests
+When wipe_only_crossing is enabled, CreateRetractionWipe wipes within a layer
+when exactly one side is outside object material, or when both sides are object
+material on different instances or slice islands. Object material excludes
+global, regionless and auxiliary-layer geometry. All other transitions depend
+on the generated travel. CreateCrossingWipe runs after travel generation and tests
 the actual travel vertices. The target's region identifies the layer and its
 tool group selects the nozzle radius and material areas. All travel vertices
 have the target instance's XY shift removed before testing.
@@ -97,6 +100,7 @@ Existing departure geometry or a terminal deposit prevents a second-pass wipe.
     CreateRetractionWipe::run_impl: visit adjacent printable scopes in output order
     |-- add_inside_start: move an eligible unretract into an approach to the seam
     `-- add_outgoing_wipe: distribute the source retract over its printed tail
+        |-- material_island: distinguish object slice islands from global, regionless and auxiliary geometry
         |-- source_wipe_path: collect the reversed connected tail, or a forward final loop
         |   `-- append_forward_loop: join ordered fragments and sum one complete turn
         `-- fit_wipe_length: repeat loops before clipping and assigning wipe motion
@@ -232,7 +236,7 @@ private:
     const char *progress_message_format_impl() const noexcept override;
     // Count a layer job without retaining its geometry.
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
-    // Apply incoming approaches and non-crossing-only outgoing wipes to this layer.
+    // Apply incoming approaches, ordinary outgoing wipes and wipes for certain local crossings to this layer.
     void run_impl(const plugin_run_context *run_ctx) const override;
 
 };
@@ -373,15 +377,20 @@ void set_wipe_attributes(MutableExtrusionEntity entity,
 /* Return the configured wipe speed or its travel-speed fallback. */
 double wipe_speed(const Config &print_config, extruder_index_t extruder_id);
 
+// Borrow the slice island of object material; global, regionless or auxiliary-layer geometry returns an invalid view. Missing region ownership throws.
+LayerIsland material_island(const ScopeEntity &scope);
+
 /* Convert an eligible source Retract into initial E motion, a wipe and residual E.
    Crossing mode returns to its source start, accepted within SCALED_EPSILON of the
-   supplied travel start in XY distance and absolute Z. Ineligible transitions return unchanged; failed
+   supplied travel start in XY distance and absolute Z. Certain local crossings
+   use normal wipe geometry. Ineligible transitions return unchanged; failed
    geometry edits or a lost Retract throw. */
 void add_outgoing_wipe(
     const ScopeEntity &source,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const FirstTravelSummary *return_start = nullptr);
+    const FirstTravelSummary *return_start = nullptr,
+    const ScopeEntity *target = nullptr);
 
 // Find materialized leaves, including stationary deposits, without treating E-only events as geometry.
 bool phase_holds_geometry(const ExtrusionEntity &entity);
@@ -970,7 +979,8 @@ void add_outgoing_wipe(
     const ScopeEntity &source,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const FirstTravelSummary *return_start)
+    const FirstTravelSummary *return_start,
+    const ScopeEntity *target)
 {
     const ExtrusionScope::OrderedExtrusionScope scope(source.entity, key);
     if (!scope.has_outgoing_transition())
@@ -980,8 +990,21 @@ void add_outgoing_wipe(
         return;
     const bool only_crossing = print_config.vector_bool_or_default(
         "wipe_only_crossing", extruder_id, false);
-    if (return_start == nullptr ? only_crossing : !only_crossing)
+    if (return_start != nullptr && !only_crossing)
         return;
+    if (return_start == nullptr && only_crossing) {
+        // Only local changes between object material and outside it, or between two object-material paths on different instances or islands, establish a crossing before travel generation.
+        if (target == nullptr)
+            return;
+        const LayerIsland source_island = material_island(source);
+        const LayerIsland target_island = material_island(*target);
+        const bool certain = source_island.valid() != target_island.valid() ||
+            (source_island.valid() && target_island.valid() &&
+             (source.printing_extrusion.printing_catalog_id() != target->printing_extrusion.printing_catalog_id() ||
+              source_island.handle() != target_island.handle()));
+        if (!certain)
+            return;
+    }
     if (return_start != nullptr) {
         if (phase_holds_geometry(scope.after().readonly()))
             return;
@@ -1236,11 +1259,32 @@ void CreateRetractionWipe::run_impl(const plugin_run_context *run_ctx) const
                 add_inside_start(*next, print_config, m_scope_property);
             if (previous != nullptr)
                 add_outgoing_wipe(
-                    *previous, print_config, m_scope_property);
+                    *previous, print_config, m_scope_property, nullptr, next);
         },
         MatchingEntityDescendants::Skip);
     traversal.process(layer);
     progress().increment();
+}
+
+LayerIsland material_island(const ScopeEntity &scope)
+{
+    if (scope.printing_extrusion.printing_catalog_id() == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE)
+        return LayerIsland();
+    const LayerRegionIsland region = scope.printing_extrusion.region_island();
+    if (!region.valid() || region.region_count() == 0)
+        return LayerIsland();
+    const Layer layer = region.region(0).layer();
+    const Object object = layer.object();
+    for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx)
+        if (object.auxiliary_layer(idx).handle() == layer.handle())
+            return LayerIsland();
+    for (uint32_t idx = 0; idx < layer.island_count(); ++idx) {
+        const LayerIsland island = layer.island(idx);
+        for (uint32_t part = 0; part < island.region_island_count(); ++part)
+            if (island.region_island(part).handle() == region.handle())
+                return island;
+    }
+    throw std::runtime_error("Printing extrusion LayerRegionIsland has no owning LayerIsland.");
 }
 
 bool phase_holds_geometry(const ExtrusionEntity &entity)

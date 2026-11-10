@@ -29,6 +29,13 @@ it does not prove the core rule elsewhere. A sliced roof on a narrow post also
 supplies a real support layer with its support property and region identity.
 Controlled deposits, occupied departures and non-crossing detours suppress the
 second wipe; tool-change, lift and missing-dependency cases check pass ordering.
+Certain local crossings use sliced instance and island identities, support in
+both directions, per-object brim published as Perimeter, and global skirt.
+Both passes run together: departure lengths and leaf counts exclude a second
+wipe, while the travel starts at the normal non-returning wipe's endpoint.
+Pairs of support or brim paths on different instances remain for the returning
+pass. A global path carrying an object region paired with support distinguishes
+global ownership from that region; a regionless departure checks absent ownership.
 
     crossing cases: obtain sliced geometry and identities
     |-- Print::process and StepExtrusionOrdering: build masks and ordered owners
@@ -425,17 +432,25 @@ TEST_CASE("Retraction wipe retraces connected source content across a layer boun
     CHECK_FALSE(leaves.back().extrusion_axis.has_value());
 }
 
-// Exercise returning geometry on controlled plans while retaining real sliced crossing masks.
+// Exercise both wipe passes on controlled plans with sliced identities and masks, checking normal departures for certain crossings and returning departures otherwise.
 TEST_CASE("Crossing wipes preserve generated travel starts and absolute retraction targets",
           "[plugins][layer-extrusion-edit][wipe][crossing]")
 {
     enum class Shape { Open, LongLoop, EqualLoop, ShortLoop, Fragmented, Residual,
         InterLayer, Deposit, OccupiedAfter, Detour, Blocked, Lift, Toolchange, Support,
-        RoutedDetour, LimitedDetour, Instances, ZOffsets, WrongZ, ExtraLoop };
+        RoutedDetour, LimitedDetour, Instances, ZOffsets, WrongZ, ExtraLoop,
+        Islands, SupportToObject, ObjectToSupport, BrimToObject, SkirtToObject,
+        OutsideSupports, OutsideBrims, GlobalToSupport, RegionlessToObject };
     const Shape shape = GENERATE(Shape::Open, Shape::LongLoop, Shape::EqualLoop, Shape::ShortLoop,
         Shape::Fragmented, Shape::Residual, Shape::InterLayer, Shape::Deposit, Shape::OccupiedAfter,
         Shape::Detour, Shape::Blocked, Shape::Lift, Shape::Toolchange, Shape::Support,
-        Shape::RoutedDetour, Shape::LimitedDetour, Shape::Instances, Shape::ZOffsets, Shape::WrongZ, Shape::ExtraLoop);
+        Shape::RoutedDetour, Shape::LimitedDetour, Shape::Instances, Shape::ZOffsets, Shape::WrongZ, Shape::ExtraLoop,
+        Shape::Islands, Shape::SupportToObject, Shape::ObjectToSupport, Shape::BrimToObject, Shape::SkirtToObject,
+        Shape::OutsideSupports, Shape::OutsideBrims, Shape::GlobalToSupport, Shape::RegionlessToObject);
+    const bool outside_pair = shape == Shape::OutsideSupports || shape == Shape::OutsideBrims || shape == Shape::GlobalToSupport;
+    const bool certain = shape == Shape::Instances || shape == Shape::Islands ||
+        shape == Shape::SupportToObject || shape == Shape::ObjectToSupport ||
+        shape == Shape::BrimToObject || shape == Shape::SkirtToObject || shape == Shape::RegionlessToObject;
     const char *before = GENERATE("0%", "20%", "100%");
     CAPTURE(static_cast<int>(shape), before);
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -456,7 +471,11 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         {"wipe_lift", "0,0"}, {"use_firmware_retraction", "0"}});
     if (shape == Shape::Toolchange)
         config.set_deserialize_strict({{"perimeter_extruder", "2"}, {"infill_extruder", "2"}, {"solid_infill_extruder", "2"}});
-    if (shape == Shape::Support)
+    if (shape == Shape::BrimToObject || shape == Shape::OutsideBrims)
+        config.set_deserialize_strict({{"brim_width", "2"}});
+    if (shape == Shape::SkirtToObject)
+        config.set_deserialize_strict({{"skirts", "1"}});
+    if (shape == Shape::Support || shape == Shape::SupportToObject || shape == Shape::ObjectToSupport || shape == Shape::OutsideSupports || shape == Shape::GlobalToSupport)
         config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "grid"},
             {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
             {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"}});
@@ -480,15 +499,20 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         right.translate(Vec3f(16.f, 4.f, 0.f));
         mesh.merge(right);
     }
-    if (shape == Shape::Support) {
+    if (shape == Shape::Support || shape == Shape::SupportToObject || shape == Shape::ObjectToSupport || shape == Shape::OutsideSupports || shape == Shape::GlobalToSupport) {
         mesh = make_cube(4., 8., 2.);
         TriangleMesh roof = make_cube(12., 8., 0.6);
         roof.translate(Vec3f(0.f, 0.f, 2.f));
         mesh.merge(roof);
     }
+    if (shape == Shape::Islands) {
+        TriangleMesh other = make_cube(20., 20., 1.2);
+        other.translate(Vec3f(30.f, 0.f, 0.f));
+        mesh.merge(other);
+    }
     object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
     object->add_instance();
-    if (shape == Shape::Instances)
+    if (shape == Shape::Instances || shape == Shape::OutsideSupports || shape == Shape::OutsideBrims)
         object->add_instance()->set_offset(Vec3d(40., 0., 0.));
     Print print;
     print.auto_assign_extruders(object);
@@ -529,7 +553,61 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
                     }
                 }
     REQUIRE(mask != nullptr);
-    CHECK((mask->get_property<LayerSupportProperty>() != nullptr) == (shape == Shape::Support));
+    const LayerRegionIsland *source_region = region;
+    const LayerRegionIsland *target_region = region;
+    if (shape == Shape::Islands) {
+        REQUIRE(mask->islands().size() == 2);
+        source_region = &mask->islands().front().regions_islands().front();
+        target_region = &mask->islands().back().regions_islands().front();
+    }
+    if (shape == Shape::SupportToObject || shape == Shape::ObjectToSupport ||
+        shape == Shape::BrimToObject || shape == Shape::SkirtToObject || outside_pair) {
+        const LayerRegionIsland *auxiliary_region = nullptr;
+        uint32_t auxiliary_catalog = catalog;
+        for (const PrintingGroup &group : plan.groups)
+            for (const PrintingLayerGroup &layer : group.layers)
+                for (const PrintingToolGroup &tool : layer.tool_groups)
+                    for (const PrintingExtrusion &extrusion : tool.extrusions) {
+                        if (extrusion.region_island == nullptr)
+                            continue;
+                        const slic3r_api::LayerRegionIsland view(reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+                        if (view.region_count() == 0)
+                            continue;
+                        const slic3r_api::Layer owner = view.region(0).layer();
+                        const bool selected = shape == Shape::BrimToObject || shape == Shape::OutsideBrims ? slic3r_api::layer_is_brim(owner) :
+                            shape == Shape::SkirtToObject ? extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE :
+                            owner.properties().get(slic3r_api::LayerSupportProperty::key) != nullptr;
+                        if (selected) {
+                            auxiliary_region = extrusion.region_island;
+                            auxiliary_catalog = extrusion.printing_catalog_id;
+                        }
+                    }
+        REQUIRE(auxiliary_region != nullptr);
+        if (outside_pair) {
+            target_region = auxiliary_region;
+            mask = reinterpret_cast<const Layer *>(slic3r_api::LayerRegionIsland(reinterpret_cast<const layer_region_island_handle *>(auxiliary_region)).region(0).layer().handle());
+            catalog = auxiliary_catalog;
+            if (shape != Shape::GlobalToSupport)
+                source_region = auxiliary_region;
+            source_catalog = shape == Shape::GlobalToSupport ? PRINTING_OBJECT_INSTANCE_ID_NONE :
+                (catalog == 0 ? 1 : 0);
+            if (shape != Shape::GlobalToSupport) {
+                REQUIRE(original_plan.object_instance_count() == 2);
+                REQUIRE(source_catalog != catalog);
+                CHECK(slic3r_api::LayerRegionIsland(reinterpret_cast<const layer_region_island_handle *>(source_region)).region(0).layer().print_z() ==
+                    slic3r_api::LayerRegionIsland(reinterpret_cast<const layer_region_island_handle *>(target_region)).region(0).layer().print_z());
+            }
+        } else if (shape == Shape::ObjectToSupport)
+            target_region = auxiliary_region;
+        else {
+            source_region = auxiliary_region;
+            source_catalog = auxiliary_catalog;
+        }
+    }
+    if (shape == Shape::RegionlessToObject)
+        source_region = nullptr;
+    CHECK((mask->get_property<LayerSupportProperty>() != nullptr) ==
+        (shape == Shape::Support || shape == Shape::OutsideSupports || shape == Shape::GlobalToSupport));
     const BoundingBox bounds = get_extents(mask->lslices());
     Point start = bounds.center();
     Point end(bounds.max.x() + scale_i(3.), start.y());
@@ -547,14 +625,15 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     identity.printing_catalog_id = catalog;
     const c_point shift = plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
         reinterpret_cast<const printing_extrusion_handle *>(&identity)));
-    if (shape == Shape::Instances) {
+    if (shape == Shape::Instances || shape == Shape::OutsideSupports || shape == Shape::OutsideBrims) {
         REQUIRE(source_catalog != PRINTING_OBJECT_INSTANCE_ID_NONE);
         identity.printing_catalog_id = source_catalog;
         const c_point source_shift = plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
             reinterpret_cast<const printing_extrusion_handle *>(&identity)));
         start += Point(source_shift.x, source_shift.y);
     } else {
-        source_catalog = catalog;
+        if (shape != Shape::SkirtToObject && !outside_pair)
+            source_catalog = catalog;
         start += Point(shift.x, shift.y);
     }
     const Point target_start = end + Point(shift.x, shift.y);
@@ -601,7 +680,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     append_printing_extrusion(source_tool, std::move(source));
     if (shape == Shape::ZOffsets)
         entity_view(*source_tool.extrusions.back().root).get_or_add(slic3r_api::EPropertyZOffset::key).set(scale_i(0.03));
-    source_tool.extrusions.back().region_island = region;
+    source_tool.extrusions.back().region_island = source_region;
     source_tool.extrusions.back().printing_catalog_id = source_catalog;
     if (shape == Shape::InterLayer) {
         // An empty intermediate group must not hide the next printable scope.
@@ -623,19 +702,37 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     target_line.append(target_start + Point(0, scale_i(5.)));
     append_printing_extrusion(target_tool, std::make_unique<ExtrusionPath>(target_line,
         ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true));
-    target_tool.extrusions.back().region_island = region;
+    target_tool.extrusions.back().region_island = target_region;
     target_tool.extrusions.back().printing_catalog_id = catalog;
     if (shape == Shape::ZOffsets)
         entity_view(*target_tool.extrusions.back().root).get_or_add(slic3r_api::EPropertyZOffset::key).set(scale_i(0.07));
-    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
-        WIPE_PLUGIN, ENTRY_STATE_PLUGIN, routed ?
-            "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN});
+    if (certain)
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
+            WIPE_PLUGIN, CROSSING_WIPE_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
+    else
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
+            WIPE_PLUGIN, ENTRY_STATE_PLUGIN, routed ?
+                "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN});
     const slic3r_api::MutableExtrusionEntity source_root = find_scope(entity_view(
         *plan.groups.front().layers.front().tool_groups.front().extrusions.front().root));
     const slic3r_api::MutableExtrusionEntity target_root = find_scope(entity_view(*target_tool.extrusions.back().root));
     const OrderedExtrusionScope source_scope(source_root, scope_property_key());
     const OrderedExtrusionScope target_scope(target_root, scope_property_key());
-    REQUIRE_FALSE(find_role(source_root, RAW_EXTRUSION_ROLE_WIPE).valid());
+    const slic3r_api::MutableExtrusionEntity first_wipe = find_role(source_root, RAW_EXTRUSION_ROLE_WIPE);
+    REQUIRE(first_wipe.valid() == certain);
+    if (certain) {
+        std::vector<GeometricLeaf> before_leaves;
+        collect_geometric_leaves(source_scope.after(), std::nullopt, before_leaves);
+        REQUIRE(before_leaves.size() == (std::string(before) == "100%" ? 1 : 2));
+        const c_extrusion_segment tail = before_leaves.back().entity.segment(before_leaves.back().entity.segment_count() - 1);
+        CHECK(c_point_distance_to(tail.point_b, target_scope.travel().segment(0).point_a) == Approx(0.));
+        CHECK(c_point_distance_to(tail.point_b, {start.x(), start.y()}) > SCALED_EPSILON);
+        double length = 0.;
+        for (const GeometricLeaf &leaf : before_leaves)
+            length += unscaled(leaf.entity.local_length());
+        CHECK(length == Approx(5.));
+        return;
+    }
     const c_extrusion_segment original = target_scope.travel().segment(0);
     CHECK(original.point_a.x == start.x());
     CHECK(original.point_a.y == start.y());

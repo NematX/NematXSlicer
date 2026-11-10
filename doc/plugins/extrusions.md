@@ -732,7 +732,14 @@ AvoidCrossingPerimetersTravel: choose a route for each eligible gap
 Retraction with `wipe_only_crossing` uses the same copied-input and crossing
 helpers on the generated travel, independently of travel-provider selection.
 `layer_extrusion_edit.wipe.default` (-80) retains inside-start approaches and
-plain outgoing wipes when this setting is off. The independent
+plain outgoing wipes when this setting is off. With it on, gaps within a layer
+where exactly one side is outside object material, or both sides are object
+material on different instances or slice islands, use the normal outgoing
+wipe with `wipe_return` and inside-end settings. Regions and tools sharing one
+slice island do not establish a certain crossing. Object material excludes
+global, regionless and auxiliary-layer geometry, including support, brim and
+skirt. All other transitions, including those between two auxiliary paths and
+inter-layer gaps, depend on the generated travel in the second pass. The independent
 `layer_extrusion_edit.wipe.crossing` (-45) depends on that first pass and runs
 after built-in travels (-50), before lift (-40). It adds a wipe only for a sole
 Travel leaf without Wipe, with a valid target region island and no departure
