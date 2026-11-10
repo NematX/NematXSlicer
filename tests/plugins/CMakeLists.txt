@@ -309,6 +309,30 @@ foreach(_variant IN ITEMS abi3 legacy_abi unknown_api zero_api_table missing_vta
 endforeach()
 
 target_link_libraries(${_TEST_NAME}_tests test_common test_common_data libslic3r)
+
+# Use a separate production plugin runtime for the independently maintained module's replay checks.
+if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/support_interface_perimeters/tests/host_tests.cpp")
+    add_executable(nematx_support_interface_host_tests
+        "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/support_interface_perimeters/tests/host_tests.cpp")
+    target_link_libraries(nematx_support_interface_host_tests PRIVATE libslic3r)
+    set_target_properties(nematx_support_interface_host_tests PROPERTIES FOLDER "tests")
+    if(WIN32)
+        prusaslicer_copy_dlls(nematx_support_interface_host_tests)
+        set_target_properties(nematx_support_interface_host_tests PROPERTIES ENABLE_EXPORTS ON)
+    endif()
+    add_test(NAME nematx_support_interface_host
+        COMMAND nematx_support_interface_host_tests
+            "${CMAKE_BINARY_DIR}/temp/support-interface-host-data"
+            "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+            "${CMAKE_SOURCE_DIR}/resources")
+    set_tests_properties(nematx_support_interface_host PROPERTIES LABELS "support-interface" TIMEOUT 180)
+    add_test(NAME nematx_support_interface_export
+        COMMAND nematx_support_interface_host_tests
+            "${CMAKE_BINARY_DIR}/temp/support-interface-export-data"
+            "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+            "${CMAKE_SOURCE_DIR}/resources" --export-only)
+    set_tests_properties(nematx_support_interface_export PROPERTIES LABELS "support-interface;plugin-e2e" TIMEOUT 120)
+endif()
 # Scoped to the strict-freeze tests so toggling the option rebuilds only them.
 if (SLIC3R_STRICT_FREEZE)
     set_source_files_properties(test_plugin_property.cpp test_python_plugin_clear.cpp

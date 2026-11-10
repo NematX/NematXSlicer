@@ -93,6 +93,11 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
     # The module derives from the host's LayerTemperature, already in libslic3r.
     nematx_add_builtin_module(smooth_temperature
         SOURCES plugins/smooth_temperature/src/SmoothTemperature.cpp PLUGIN_IDS nematx_smooth_temperature)
+    nematx_add_builtin_module(support_interface_perimeters
+        SOURCES plugins/support_interface_perimeters/src/SupportInterfacePerimeters.cpp
+            plugins/support_interface_perimeters/src/InterfacePerimeters.cpp
+        PLUGIN_IDS nematx.support.bottom_contact nematx.support.bottom_interface
+            nematx.support.top_contact nematx.support.top_interface)
     message(STATUS "NematX plugins embedded from ${NEMATX_PLUGINS_SOURCE_DIR}")
 elseif(SLIC3R_APP_KEY STREQUAL "NematXSlicer")
     message(STATUS "NematX built-in plugins disabled; standalone packages remain supported")
