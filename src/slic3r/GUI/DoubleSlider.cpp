@@ -69,8 +69,8 @@ static std::string gcode(Type type)
     const Print& print = GUI::wxGetApp().plater()->fff_print();
     const PrintConfig &config = print.config();
     switch (type) {
-    case ColorChange: return Slic3r::GCodeWriter::get_default_color_change_gcode(config);
-    case PausePrint: return Slic3r::GCodeWriter::get_default_pause_gcode(config);
+    case ColorChange: return Slic3r::GCodeWriter::get_default_color_change_gcode(config, gcode_flavor(print.full_print_config()));
+    case PausePrint: return Slic3r::GCodeWriter::get_default_pause_gcode(config, gcode_flavor(print.full_print_config()));
     case Template: {
         const ConfigOptionString *templ = config.option<ConfigOptionString>("template_custom_gcode");
         return templ != nullptr ? templ->value : std::string();

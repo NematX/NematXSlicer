@@ -1758,8 +1758,7 @@ TEST_CASE("Former skirt catch-all options resume at their verified first consume
     CHECK(Steps::checkpoint_before_step(definition->invalidates_step) == routing.checkpoint);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    config.set_deserialize_strict("gcode_flavor", "marlin2");
     Model model;
     Print print;
     Test::init_print({make_cube(5., 5., 1.)}, print, model, config);
@@ -1930,17 +1929,17 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
 {
     using namespace Slic3r;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const Plugin *marlin = Orchestrator::instance().get_plugin("gcode.firmware.marlin2");
+    const Plugin *marlin = Orchestrator::instance().get_plugin("marlin2");
     REQUIRE(marlin != nullptr);
     const Orchestrator::ExclusiveGroupDefinition *firmware_definition = Orchestrator::instance().exclusive_group_definition(
-        GCODE_FIRMWARE, "gcode_firmware_plugin");
+        GCODE_FIRMWARE, "gcode_flavor");
     REQUIRE(firmware_definition != nullptr);
     REQUIRE_FALSE(firmware_definition->label.empty());
     PluginWithoutSettingSupport unsupported(*marlin);
     ConfigDef definitions;
     ConfigOptionDef *definition = definitions.add("single_extruder_multi_material", coBool);
     definition->label = "Material multiplexing";
-    definition->required_plugin_group = "gcode_firmware_plugin";
+    definition->required_plugin_group = "gcode_flavor";
     definition->set_default_value(new ConfigOptionBool(false));
     DynamicConfig config;
     config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(true));
@@ -1948,7 +1947,7 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
     size_t resolutions = 0;
     const std::function<const Plugin *(const std::string &)> resolver =
         [&selected, &resolutions](const std::string &group_id) -> const Plugin * {
-            CHECK(group_id == "gcode_firmware_plugin");
+            CHECK(group_id == "gcode_flavor");
             ++resolutions;
             return selected;
         };
@@ -1989,7 +1988,7 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
         REQUIRE(error);
         CHECK(error->find("single_extruder_multi_material") != std::string::npos);
         CHECK(error->find("Material multiplexing") != std::string::npos);
-        CHECK(error->find("gcode_firmware_plugin") != std::string::npos);
+        CHECK(error->find("gcode_flavor") != std::string::npos);
         CHECK(error->find("no plugin is selected") != std::string::npos);
         CHECK(resolutions == 1);
     }
@@ -2011,17 +2010,17 @@ TEST_CASE("Print validation accepts active SEMM with a supporting built-in firmw
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const ConfigOptionDef *definition = PrintConfigDef::instance().get("single_extruder_multi_material");
     REQUIRE(definition != nullptr);
-    CHECK(definition->required_plugin_group == "gcode_firmware_plugin");
+    CHECK(definition->required_plugin_group == "gcode_flavor");
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("single_extruder_multi_material", "1");
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.klipper");
+    config.set_deserialize_strict("gcode_flavor", "klipper");
     Model model;
     Print print;
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
     const Plugin *selected = Steps::selected_active_plugin_from_group(
-        Orchestrator::instance(), GCODE_FIRMWARE, "gcode_firmware_plugin", &print.full_print_config());
+        Orchestrator::instance(), GCODE_FIRMWARE, "gcode_flavor", &print.full_print_config());
     REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "gcode.firmware.klipper");
+    CHECK(selected->get_id() == "klipper");
     const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
     INFO(validation.second);
     CHECK(validation.first == PrintBase::PrintValidationError::pveNone);

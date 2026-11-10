@@ -1852,8 +1852,7 @@ TEST_CASE("Apply destroys invalidated outputs and the next run restores saved ch
     using Steps::Checkpoint;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    config.set_deserialize_strict("gcode_flavor", "marlin2");
     LifecyclePrint print;
     Model model;
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);

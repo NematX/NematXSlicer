@@ -350,7 +350,7 @@ TEST_CASE("Custom G-code model updates replay Ordering without reslicing and pre
     Print print;
     Model model;
     DynamicPrintConfig config = Test::PerimeterPluginTests::perimeter_config({
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}
+        {"gcode_flavor", "marlin2"}
     });
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
     Orchestrator &orchestrator = Orchestrator::instance();

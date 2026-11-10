@@ -50,7 +50,7 @@ Polygon instance_outline(const PrintInstance* pi)
 void LabelObjects::init(const Print& print)
 {
     m_label_objects_style = print.config().gcode_label_objects;
-    m_flavor = print.config().gcode_flavor;
+    m_flavor = gcode_flavor(print.full_print_config());
 
     if (m_label_objects_style == LabelObjectsStyle::Disabled)
         return;

@@ -1691,7 +1691,7 @@ TEST_CASE("Tree and organic prints export support and interface paths", "[plugin
     DynamicPrintConfig config = Slic3r::Test::SupportGrid::config(style, false, interfaces, true);
     config.set_deserialize_strict({
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
         {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
         {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},
@@ -3085,7 +3085,7 @@ TEST_CASE("Tree and organic supports are generated and exported on a variable la
     DynamicPrintConfig config = SG::config(style, false, 3, true);
     config.set_deserialize_strict({
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"seam_visibility", "0"},
         {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
         {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
@@ -3938,7 +3938,7 @@ DynamicPrintConfig close_z_gcode_config(const char *style, int interfaces)
     config.set_deserialize_strict({
         {"z_step", "0"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
         {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
         {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},

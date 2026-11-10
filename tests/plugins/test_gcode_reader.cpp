@@ -3674,7 +3674,7 @@ TEST_CASE("G-code reader execution rejects inactive and wrong-step providers",
     REQUIRE(orchestrator.set_plugin_active("gcode.reader.test.a", true));
 
     CHECK_THROWS_WITH(read_gcode(orchestrator, nullptr,
-        "gcode.firmware.marlin1", initial, "G1 X1\n"),
+        "marlin", initial, "G1 X1\n"),
         Catch::Matchers::Contains("is not a G-code reader"));
 }
 

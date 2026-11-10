@@ -742,7 +742,7 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
-        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}},
+        {GCODE_FIRMWARE,      {"gcode_flavor",               "G-code flavor",          "G-code flavor"}},
         {STEP_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
     };
     return s_groups;

@@ -704,15 +704,15 @@ GCodeProcessor::GCodeProcessor()
     reset();
 }
 
-void GCodeProcessor::apply_config(const PrintConfig& config)
+void GCodeProcessor::apply_config(const PrintConfig& config, GCodeFlavor flavor)
 {
-    m_parser.apply_config(config);
+    m_parser.apply_config(config, flavor);
 
     m_binarizer.set_enabled(config.binary_gcode);
     m_result.is_binary_file = config.binary_gcode;
 
     m_producer = EProducer::PrusaSlicer;
-    m_flavor = config.gcode_flavor;
+    m_flavor = flavor;
 
     m_result.backtrace_enabled = is_XL_printer(config);
 
@@ -799,7 +799,7 @@ for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::
         m_time_processor.machines[i].retract_acceleration = (max_retract_acceleration > 0.0f) ? max_retract_acceleration : DEFAULT_RETRACT_ACCELERATION;
 
         float max_travel_acceleration = get_option_value(m_time_processor.machine_limits.machine_max_acceleration_travel, i);
-        if ( ! GCodeWriter::supports_separate_travel_acceleration(config.gcode_flavor.value) || config.machine_limits_usage.value != MachineLimitsUsage::EmitToGCode) {
+        if ( ! GCodeWriter::supports_separate_travel_acceleration(flavor) || config.machine_limits_usage.value != MachineLimitsUsage::EmitToGCode) {
             // Only clamp travel acceleration when it is accessible in machine limits.
             max_travel_acceleration = 0;
         }
@@ -849,9 +849,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig& config)
 {
     m_parser.apply_config(config);
 
-    const ConfigOptionEnum<GCodeFlavor>* gcode_flavor = config.option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor");
-    if (gcode_flavor != nullptr)
-        m_flavor = gcode_flavor->value;
+    if (config.has("gcode_flavor"))
+        m_flavor = gcode_flavor(config);
 
     const ConfigOptionPoints* bed_shape = config.option<ConfigOptionPoints>("bed_shape");
     if (bed_shape != nullptr)

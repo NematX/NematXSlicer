@@ -658,7 +658,7 @@ TEST_CASE("Seam consumers pass a declared linear STL export catalogue",
     baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "1"},
         {"seam_random_seed", "42"}, {"seam_random_vertices_only", "1"}, {"seam_random_align_inner_seams", "1"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     const std::vector<E2E::Domain> domains = {
         {{"seam_random_vertices_only"}, {{"projected-random", {{"seam_random_vertices_only", "0"}}}}},
         {{"seam_random_align_inner_seams"}, {{"independent-inner", {{"seam_random_align_inner_seams", "0"}}}}},

@@ -567,7 +567,7 @@ TEST_CASE("Filled print exports support interface extrusions", "[plugins][suppor
     const char *expansion = GENERATE("0", "3");
     DynamicPrintConfig config = filled_config(expansion);
     config.set_deserialize_strict({{"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"filament_diameter", "1.75,1.75"}});
+        {"gcode_flavor", "marlin2"}, {"filament_diameter", "1.75,1.75"}});
     Print print;
     Model model;
     Test::init_print({SG::slab()}, print, model, config);

@@ -216,7 +216,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
     print.set_status_silent();
     print.process();
     REQUIRE_FALSE(Orchestrator::instance().is_plugin_cancelled());
-    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "marlin2");
     const boost::filesystem::path temporary = Test::GCode::temporary_gcode_path();
     const boost::filesystem::path path = temporary.parent_path() / (name + "-" + temporary.filename().string());
     Orchestrator::instance().export_gcode(print, path.string(), nullptr);

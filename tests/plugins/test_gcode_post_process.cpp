@@ -210,7 +210,7 @@ public:
     {
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_deserialize_strict({
-            {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+            {"gcode_flavor", "marlin2"},
             {"seam_visibility", "0"}});
         config.set_deserialize_strict("post_process", post_process);
         for (const std::pair<std::string, std::string> &setting : settings)

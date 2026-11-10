@@ -36,8 +36,8 @@
     #include <boost/spirit/include/karma.hpp>
 #endif
 
-#define FLAVOR_IS(val) this->config.gcode_flavor.value == val
-#define FLAVOR_IS_NOT(val) this->config.gcode_flavor.value != val
+#define FLAVOR_IS(val) this->m_flavor == val
+#define FLAVOR_IS_NOT(val) this->m_flavor != val
 // TODO: switch to gcodeformatter classes
 #define COMMENT(comment) if (this->config.gcode_comments.value && !comment.empty()) gcode << " ; " << comment;
 #define PRECISION(val, precision) to_string_nozero(val, precision)
@@ -55,14 +55,14 @@ bool GCodeWriter::supports_separate_travel_acceleration(GCodeFlavor flavor)
     return (flavor == gcfRepetier || flavor == gcfMarlinFirmware ||  flavor == gcfRepRap);
 }
 
-std::string GCodeWriter::get_default_pause_gcode(const GCodeConfig &config)
+std::string GCodeWriter::get_default_pause_gcode(const GCodeConfig &config, GCodeFlavor flavor)
 {
     const ConfigOptionString *pause_script = config.opt<ConfigOptionString>("pause_print_gcode");
     const std::string pause_gcode = pause_script != nullptr ? pause_script->value : std::string();
     if (pause_gcode.empty()) {
-        if (config.gcode_flavor.value == GCodeFlavor::gcfKlipper) {
+        if (flavor == GCodeFlavor::gcfKlipper) {
             return "PAUSE";
-        } else if (config.gcode_flavor.value == GCodeFlavor::gcfRepRap || config.gcode_flavor.value == GCodeFlavor::gcfMarlinLegacy /*prusa only*/) {
+        } else if (flavor == GCodeFlavor::gcfRepRap || flavor == GCodeFlavor::gcfMarlinLegacy /*prusa only*/) {
             return "M601";
         } else {
             // no pause command for other firmware, for what i am aware. Please submit a pullrequest or issue if they change.
@@ -73,13 +73,13 @@ std::string GCodeWriter::get_default_pause_gcode(const GCodeConfig &config)
     }
 }
 
-std::string GCodeWriter::get_default_color_change_gcode(const GCodeConfig &config)
+std::string GCodeWriter::get_default_color_change_gcode(const GCodeConfig &config, GCodeFlavor flavor)
 {
     const ConfigOptionString *color_change_script = config.opt<ConfigOptionString>("color_change_gcode");
     const std::string color_change_gcode = color_change_script != nullptr ? color_change_script->value : std::string();
     if (color_change_gcode.empty()) {
-        if (config.gcode_flavor.value == GCodeFlavor::gcfRepRap || config.gcode_flavor.value == GCodeFlavor::gcfMarlinLegacy ||
-            config.gcode_flavor.value == GCodeFlavor::gcfMarlinFirmware || config.gcode_flavor.value == GCodeFlavor::gcfSmoothie) {
+        if (flavor == GCodeFlavor::gcfRepRap || flavor == GCodeFlavor::gcfMarlinLegacy ||
+            flavor == GCodeFlavor::gcfMarlinFirmware || flavor == GCodeFlavor::gcfSmoothie) {
             return "M600";
         } else {
             // no pause command for other firmware, for what i am aware. Please submit a pullrequest or issue if they change.
@@ -94,10 +94,11 @@ void GCodeWriter::reset() {
     *this = GCodeWriter{};
 }
 
-void GCodeWriter::apply_print_config(const PrintConfig &print_config)
+void GCodeWriter::apply_print_config(const PrintConfig &print_config, GCodeFlavor flavor)
 {
     this->config.apply(print_config, true);
-    m_extrusion_axis = get_extrusion_axis(this->config);
+    m_flavor = flavor;
+    m_extrusion_axis = get_extrusion_axis(this->config, m_flavor);
     m_single_extruder_multi_material = print_config.single_extruder_multi_material.value;
     m_formatter = GCodeFormatter(this->config.gcode_precision_xyz.value, this->config.gcode_precision_e.value);
 }
@@ -1320,7 +1321,7 @@ std::string GCodeWriter::set_fan(const uint8_t speed, uint16_t default_tool)
 {
     const Tool *tool = m_tool == nullptr ? get_tool(default_tool) : m_tool;
     m_last_fan_speed = speed;
-    return GCodeWriter::set_fan(this->config.gcode_flavor.value, this->config.gcode_comments.value, speed, tool ? tool->fan_offset() : 0, this->config.fan_percentage.value);
+    return GCodeWriter::set_fan(m_flavor, this->config.gcode_comments.value, speed, tool ? tool->fan_offset() : 0, this->config.fan_percentage.value);
 }
 
 } // namespace Slic3r

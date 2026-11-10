@@ -3976,7 +3976,7 @@ PageShp TabPrinter::build_kinematics_page()
     PageShp page = create_options_page(L("Machine limits"), "cog");
     ConfigOptionsGroupShp optgroup;
     Line line{ "", "" };
-    GCodeFlavor flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*m_config);
     optgroup = page->new_optgroup(_L("Time estimation compensation"));
     if (flavor != gcfMarlinLegacy && flavor != gcfMarlinFirmware) {
         optgroup->append_single_option_line("time_estimation_compensation");
@@ -4006,7 +4006,7 @@ PageShp TabPrinter::build_kinematics_page()
     {
         if (opt_key_idx.key == "machine_limits_usage" &&
             static_cast<MachineLimitsUsage>(boost::any_cast<int>(value)) == MachineLimitsUsage::EmitToGCode &&
-            m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value == gcfKlipper)
+            gcode_flavor(*m_config) == gcfKlipper)
         {
             assert(enabled);
             DynamicPrintConfig new_conf = *m_config;
@@ -4082,7 +4082,7 @@ void TabPrinter::build_unregular_pages(bool from_initial_build/* = false*/)
 {
     size_t		n_before_extruders = m_unregular_page_pos;			//	Count of pages before Extruder pages
     bool changed = false;
-    GCodeFlavor flavor = m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*m_config);
 
     /* ! Freeze/Thaw in this function is needed to avoid call OnPaint() for erased pages
      * and be cause of application crash, when try to change Preset in moment,
@@ -4294,8 +4294,8 @@ void TabPrinter::toggle_options()
     const std::vector<OptionKeyIdx> visible_settings = m_active_page->field_keys();
     m_config_manipulation.toggle_printer_fff_options(m_config, &visible_settings);
     
-    if (m_last_gcode_flavor != uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value)) {
-        m_last_gcode_flavor = uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value);
+    if (m_last_gcode_flavor != uint8_t(gcode_flavor(*m_config))) {
+        m_last_gcode_flavor = uint8_t(gcode_flavor(*m_config));
         m_rebuild_kinematics_page = true;
     }
 
@@ -6115,7 +6115,7 @@ bool TabPrinter::apply_extruder_cnt_from_cache()
 
 void TabPrinter::update_machine_limits_description(const MachineLimitsUsage usage)
 {
-    GCodeFlavor flavor = m_config_base->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*m_config_base);
     wxString text;
     switch (usage) {
     case MachineLimitsUsage::EmitToGCode:

@@ -360,7 +360,7 @@ CostSeamExportResult export_cost_seam_gcode(
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(extruder_count);
     config.set_deserialize_strict({
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"seam_visibility", "0"}});
     config.set_deserialize_strict(seam_selector, "seam_placer.cost");
     config.set_deserialize_strict(ordering_selector, "ordering.extrusion_tree.advanced");
@@ -419,18 +419,16 @@ TEST_CASE("STEP_GCODE is a normal step whose built-in writer is active by defaul
     CHECK(PrintConfigDef::instance().option_keys(RAW_PRESET_TYPE_FFF_PRINTER).count(
               "step_gcode_plugin") == 0);
 
-    // The firmware selector keeps its place before the flavor, and no layout
-    // file mentions a writer selector.
+    // The firmware selector appears once, at the place of the former option, and
+    // no layout file mentions a writer selector.
     const std::string merged_printer_layout = orchestrator.merged_ui_layout(
         "printer_fff.ui",
         "page:General:printer\n"
         "group:Firmware\n"
         "\tsetting:gcode_flavor\n");
-    const size_t flavor_pos = merged_printer_layout.find("setting:gcode_flavor");
-    const size_t firmware_pos = merged_printer_layout.find("setting:gcode_firmware_plugin");
-    REQUIRE(flavor_pos != std::string::npos);
+    const size_t firmware_pos = merged_printer_layout.find("setting:gcode_flavor");
     REQUIRE(firmware_pos != std::string::npos);
-    CHECK(firmware_pos < flavor_pos);
+    CHECK(merged_printer_layout.find("setting:gcode_flavor", firmware_pos + 1) == std::string::npos);
     CHECK(merged_printer_layout.find("step_gcode_plugin") == std::string::npos);
 
     for (const char *layout_file : {"printer_fff.ui", "print.ui"})
@@ -719,7 +717,7 @@ TEST_CASE("PrintingPlan markers survive generated file Reader integration",
 
     Print print;
     configure_standard_firmware(print);
-    select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    select_printing_plan_firmware(print, "marlin2");
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
 
@@ -1618,7 +1616,7 @@ TEST_CASE("A setting change that invalidates STEP_GCODE makes the export run it 
     REQUIRE(writer != nullptr);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"seam_visibility", "0"}});
+    config.set_deserialize_strict({{"gcode_flavor", "marlin2"}, {"seam_visibility", "0"}});
     Print print;
     Model model;
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
@@ -1743,7 +1741,7 @@ TEST_CASE("PrintingPlan writer exports a cube with composed brim and cost seams"
     const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"brim_width", "3.2"}, {"brim_per_object", "1"},
         {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"},
         {"brim_ears", "0"}, {"seam_visibility", "0"}, {"skirts", "0"}});
@@ -1823,7 +1821,7 @@ TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
     const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    config.set_deserialize_strict("gcode_flavor", "marlin2");
     // The Cost provider measures every candidate's visibility when seam_visibility
     // is enabled, which does not finish in test-scale time on this print, so the
     // export replays below keep that measurement disabled.

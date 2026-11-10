@@ -3653,7 +3653,7 @@ Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const P
         throw RuntimeError("The configured G-code exporter '" + plugin_id + "' cannot be selected.");
 
     Plugin *firmware = Steps::selected_active_plugin_from_group(
-        *this, GCODE_FIRMWARE, "gcode_firmware_plugin", &config);
+        *this, GCODE_FIRMWARE, "gcode_flavor", &config);
     if (firmware == nullptr)
         throw RuntimeError("No active G-code firmware provider is selected.");
 
@@ -3906,7 +3906,7 @@ void Orchestrator::initialize_plugins() {
                           k_gcode_exporter_option_key,
                           "page:General:printer\n"
                           "group:Firmware\n"
-                          "\tsetting:insert$aftersetting$gcode_firmware_plugin:gcode_exporter_plugin\n",
+                          "\tsetting:insert$aftersetting$gcode_flavor:gcode_exporter_plugin\n",
                           1);
 
     for (const std::unique_ptr<Plugin> &plugin_ptr : m_registered_plugins) {

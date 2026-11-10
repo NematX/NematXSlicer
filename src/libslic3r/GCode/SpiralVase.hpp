@@ -20,10 +20,10 @@ namespace Slic3r {
 
 class SpiralVase {
 public:
-    SpiralVase(const PrintConfig &config) : m_config(config)
+    SpiralVase(const PrintConfig &config, GCodeFlavor flavor) : m_config(config)
     {
         m_reader.z() = (float)m_config.z_offset;
-        m_reader.apply_config(m_config);
+        m_reader.apply_config(m_config, flavor);
     };
 
     void 		enable(bool en) {

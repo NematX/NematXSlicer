@@ -117,7 +117,7 @@ TEST_CASE("XY declared settings pass a linear STL slicing and export matrix",
         {"xy_size_compensation", "0.1"}, {"xy_inner_size_compensation", "0.05"},
         {"first_layer_size_compensation", "-0.05"}, {"hole_size_compensation", "-0.05"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(
         host, STEP_ORDERING, "ordering.extrusion_tree");
     REQUIRE_FALSE(ordering_key.empty());

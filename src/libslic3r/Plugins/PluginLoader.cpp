@@ -1222,11 +1222,6 @@ void load_plugins()
             "layer_extrusion_edit.speed_acceleration.default",
             {"layer_extrusion_edit.speed.default", "layer_extrusion_edit.acceleration.default"});
         activation_config_changed = (user_configuration_available && migrate_plugin_activation_id(
-            plugin_config,
-            "gcode.firmware.default",
-            {"gcode.firmware.marlin2"})) ||
-            activation_config_changed;
-        activation_config_changed = (user_configuration_available && migrate_plugin_activation_id(
             plugin_config, "layer_extrusion_edit.fan.default",
             {"layer_extrusion_edit.fan.default", "layer_extrusion_edit.fan.cooling",
              "layer_extrusion_edit.fan.first_layers", "layer_extrusion_edit.fan.dynamic"})) ||

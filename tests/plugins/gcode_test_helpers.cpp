@@ -359,7 +359,7 @@ void select_printing_plan_firmware(Print &print, const std::string &firmware_id)
     // The PrintingPlan writer is active by default; only the firmware, chosen
     // through the same printer option as in presets, needs to be selected.
     DynamicPrintConfig &config = const_cast<DynamicPrintConfig &>(print.full_print_config());
-    config.set_deserialize("gcode_firmware_plugin", firmware_id);
+    config.set_deserialize("gcode_flavor", firmware_id);
 }
 
 slic3r_api::PrintingPlan printing_plan_view(Print &print)

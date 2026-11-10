@@ -1059,7 +1059,7 @@ TEST_CASE("Parallel groups share one global tower with fused and stacked Z offse
         }
         CHECK(tool.extrusion(tool.extrusion_count() - 1).root().get(slic3r_api::EPropertyZOffset::key) == nullptr);
     }
-    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "marlin2");
     const boost::filesystem::path checkout = boost::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
     const std::string path = (checkout / "build" / "temp" / "wipe_tower_parallel.gcode").string();
     REQUIRE_NOTHROW(Steps::StepGenerateGcode::run_step(Orchestrator::instance(), print, path));

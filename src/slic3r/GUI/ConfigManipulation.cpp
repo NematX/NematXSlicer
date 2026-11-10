@@ -441,7 +441,7 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
     toggle_field("gcode_min_resolution", gcode_min_length || max_gcode_per_second);
     toggle_field("gcode_command_buffer", max_gcode_per_second);
 
-    auto flavor = config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    auto flavor = gcode_flavor(*config);
     bool is_marlin_flavor = flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware;
     // Disable silent mode for non-marlin firmwares.
     toggle_field("silent_mode", is_marlin_flavor);

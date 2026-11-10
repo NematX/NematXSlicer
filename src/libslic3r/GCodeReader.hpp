@@ -110,7 +110,7 @@ public:
     
     GCodeReader() : m_verbose(false), m_extrusion_axis('E') { this->reset(); }
     void reset() { memset(m_position, 0, sizeof(m_position)); }
-    void apply_config(const GCodeConfig &config);
+    void apply_config(const GCodeConfig &config, GCodeFlavor flavor);
     void apply_config(const DynamicPrintConfig &config);
 
     template<typename Callback>

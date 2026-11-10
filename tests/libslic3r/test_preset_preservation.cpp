@@ -198,7 +198,7 @@ nozzle_diameter = 0.6
 [printer:Future printer]
 printer_model = Test
 printer_variant = 0.4
-gcode_flavor = unrecognized_future_flavor
+machine_limits_usage = unrecognized_future_usage
 )ini";
     PresetBundle logged, silent;
     CHECK_FALSE(logged.load_configbundle(file.u8string(), PresetBundle::LoadSystem,

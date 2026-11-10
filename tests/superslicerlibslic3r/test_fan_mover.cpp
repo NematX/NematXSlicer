@@ -18,7 +18,6 @@ TEST_CASE("Simple gcode") {
 
     GCodeWriter writer;
     //what's used from the writer:
-    writer.config.gcode_flavor.value = gcfMarlinFirmware;
     writer.config.gcode_comments.value = false;
     writer.config.fan_percentage.value = false; //0 -> 255
     //writer.tool[0] = nullptr;
@@ -200,7 +199,6 @@ TEST_CASE("Simple gcode (absoute)")
 {
     GCodeWriter writer;
     // what's used from the writer:
-    writer.config.gcode_flavor.value   = gcfMarlinFirmware;
     writer.config.gcode_comments.value = false;
     writer.config.fan_percentage.value = false; // 0 -> 255
     // writer.tool[0] = nullptr;
@@ -558,7 +556,6 @@ TEST_CASE("G2/G3 gcode")
     //"M106 S25.5\n";
     GCodeWriter       writer;
     // what's used from the writer:
-    writer.config.gcode_flavor.value   = gcfMarlinFirmware;
     writer.config.gcode_comments.value = false;
     writer.config.fan_percentage.value = false; // 0 -> 255
     // writer.tool[0] = nullptr;
@@ -603,7 +600,6 @@ TEST_CASE("4113 bug (erase all fan command after a point)") {
     //"M106 S25.5\n";
     GCodeWriter       writer;
     // what's used from the writer:
-    writer.config.gcode_flavor.value   = gcfMarlinFirmware;
     writer.config.gcode_comments.value = false;
     writer.config.fan_percentage.value = false; // 0 -> 255
     // writer.tool[0] = nullptr;

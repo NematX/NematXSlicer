@@ -463,7 +463,7 @@ TEST_CASE("REST custom G-codes reach the G-code", "[rest_custom_gcode]")
     SECTION("Empty pause script uses the selected firmware") { firmware_default = true; }
     set_options(session, {{"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"color_change_gcode", "M600"},
         {"pause_print_gcode", firmware_default ? "" : "M117 {pause_message}\\nM601"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"seam_visibility", "0"}});
+        {"gcode_flavor", "marlin2"}, {"seam_visibility", "0"}});
     set_custom_gcodes(fixture, route, {
         {{"type", "color_change"}, {"z", 5.}},
         {{"type", "pause"}, {"z", 10.}, {"message", "REST pause"}},

@@ -385,9 +385,10 @@ SmoothingParams get_smoothing_params(
     const double slope_end,
     extruder_index_t extruder_id,
     const double travel_length,
-    const FullPrintConfig &config
+    const FullPrintConfig &config,
+    const GCodeFlavor flavor
 ) {
-    if (config.gcode_flavor != gcfMarlinFirmware)
+    if (flavor != gcfMarlinFirmware)
         // Smoothing is supported only on Marlin.
         return {0, 1};
 
@@ -478,7 +479,7 @@ ElevatedTravelParams get_elevated_traval_params(
 
     SmoothingParams smoothing_params{get_smoothing_params(
         elevation_params.lift_height, elevation_params.slope_end, extruder_id,
-        unscaled(xy_path.length()), config
+        unscaled(xy_path.length()), config, writer.flavor()
     )};
 
     elevation_params.blend_width = smoothing_params.blend_width;

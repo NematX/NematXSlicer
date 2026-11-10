@@ -238,7 +238,7 @@ void CalibrationPressureAdvDialog::create_geometry(wxCommandEvent& event_args) {
     full_print_config.apply(*printer_config);
     full_print_config.apply(*filament_config);
 
-    GCodeFlavor flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*printer_config);
     const ConfigOptionFloats* nozzle_diameter_config = printer_config->option<ConfigOptionFloats>("nozzle_diameter");
     assert(nozzle_diameter_config->size() > 0);
     double nozzle_diameter = nozzle_diameter_config->get_at(0);//get extruderID too?
@@ -1282,7 +1282,7 @@ double CalibrationPressureAdvDialog::magical_scaling(double nozzle_diameter, dou
 void CalibrationPressureAdvDialog::create_buttons(wxStdDialogButtonSizer* buttons) {
 
     const DynamicPrintConfig* printer_config = this->gui_app->get_tab(Preset::TYPE_PRINTER)->get_config();
-    GCodeFlavor flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*printer_config);
     const AppConfig* app_config = get_app_config();
 
     bool dark_mode = app_config->get_bool("dark_color_mode");// i guess these can be set as global variables?
@@ -1366,7 +1366,7 @@ void CalibrationPressureAdvDialog::create_row_controls(wxBoxSizer* parentSizer, 
         "SupportMaterialInterface", "ThinWall", "TopSolidInfill", "FirstLayer", "CheckAll"
     };
     const DynamicPrintConfig* printer_config = this->gui_app->get_tab(Preset::TYPE_PRINTER)->get_config();
-    GCodeFlavor flavor = printer_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value;
+    GCodeFlavor flavor = gcode_flavor(*printer_config);
     std::string prefix = (gcfMarlinFirmware == flavor) ? " LA " : ((gcfKlipper == flavor || gcfRepRap == flavor) ? " PA " : "unsupported firmware type");
     //improvements: pull retraction value and auto select a better suited start/end value?
 

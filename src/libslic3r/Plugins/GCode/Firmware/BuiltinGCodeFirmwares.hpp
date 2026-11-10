@@ -12,9 +12,10 @@ Built-in G-code firmware providers
 ==================================
 
 These registration functions expose the standard firmware session subclasses
-as exclusive GCODE_FIRMWARE plugins. The aggregate function is used by normal
-startup, while individual functions keep focused tests and future replacement
-experiments possible.
+as exclusive GCODE_FIRMWARE plugins. Their ids are the values of the
+`gcode_flavor` setting. The aggregate function is used by normal startup, while
+individual functions keep focused tests and future replacement experiments
+possible.
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Firmware {

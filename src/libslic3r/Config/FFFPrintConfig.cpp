@@ -55,6 +55,9 @@ print_custom_setting stores JSON groups named print and printer.
 filament_custom_setting stores one JSON string per filament position.
 These fields preserve imported data; they are not the custom-variable fields.
 
+gcode_flavor() converts the firmware plugin id chosen by the `gcode_flavor`
+selector into the GCodeFlavor value that the legacy G-code generator compares.
+
 Operation notes:
 - init_categories: assign keys to the profile types that own them
 - init_fff_params: define FFF options and their defaults
@@ -136,6 +139,16 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(GCodeFlavor, {
     {"machinekit",      gcfMachinekit},
     {"no-extrusion",    gcfNoExtrusion},
 })
+GCodeFlavor gcode_flavor(const ConfigBase &config)
+{
+    const ConfigOption *selected = config.option("gcode_flavor");
+    if (selected == nullptr)
+        return gcfMarlinFirmware;
+    const t_config_enum_values &flavors = ConfigOptionEnum<GCodeFlavor>::get_enum_values();
+    const t_config_enum_values::const_iterator found = flavors.find(selected->serialize());
+    return found == flavors.end() ? gcfMarlinFirmware : GCodeFlavor(found->second);
+}
+
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MachineLimitsUsage, {
     {"emit_to_gcode",       int(MachineLimitsUsage::EmitToGCode)},
     {"time_estimate_only",  int(MachineLimitsUsage::TimeEstimateOnly)},
@@ -469,25 +482,22 @@ std::string validate(const FullPrintConfig& cfg)
     if (cfg.bottom_solid_layers < 0)
         return "Invalid value for --bottom-solid-layers";
 
+    const GCodeFlavor flavor = gcode_flavor(cfg);
     if (cfg.use_firmware_retraction.value &&
-        cfg.gcode_flavor.value != gcfSmoothie &&
-        cfg.gcode_flavor.value != gcfSprinter &&
-        cfg.gcode_flavor.value != gcfRepRap &&
-        cfg.gcode_flavor.value != gcfMarlinLegacy &&
-        cfg.gcode_flavor.value != gcfMarlinFirmware &&
-        cfg.gcode_flavor.value != gcfMachinekit &&
-        cfg.gcode_flavor.value != gcfRepetier &&
-        cfg.gcode_flavor.value != gcfKlipper)
+        flavor != gcfSmoothie &&
+        flavor != gcfSprinter &&
+        flavor != gcfRepRap &&
+        flavor != gcfMarlinLegacy &&
+        flavor != gcfMarlinFirmware &&
+        flavor != gcfMachinekit &&
+        flavor != gcfRepetier &&
+        flavor != gcfKlipper)
         return "--use-firmware-retraction is only supported by Marlin 1&2, Smoothie, Sprinter, Reprap, Repetier, Machinekit, Repetier, Klipper? and Lerdge firmware";
 
     if (cfg.use_firmware_retraction.value)
         for (unsigned char wipe : cfg.wipe.get_values())
              if (wipe)
                 return "--use-firmware-retraction is not compatible with --wipe";
-
-    // --gcode-flavor
-    if (! PrintConfigDef::instance().get("gcode_flavor")->has_enum_value(cfg.gcode_flavor.serialize()))
-        return "Invalid value for --gcode-flavor";
 
     // --fill-pattern, --top-fill-pattern, --bottom-fill-pattern,
     // --solid-fill-pattern
@@ -3616,31 +3626,6 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionString("[<>:\"/\\\\|?*]"));
 
-    def = definition.add("gcode_flavor", coEnum, ptFFF);
-    def->label = L("G-code flavor");
-    def->category = OptionCategory::general;
-    def->invalidates_step = STEP_ORDERING;
-    def->tooltip = L("Some G/M-code commands, including temperature control and others, are not universal. "
-                   "Set this option to your printer's firmware to get a compatible output. "
-                   "The \"No extrusion\" flavor prevents Slic3r from exporting any extrusion value at all.");
-    def->set_enum<GCodeFlavor>({
-        { "sprinter",       "RepRap/Sprinter" },
-        { "reprapfirmware", "RepRapFirmware" },
-        { "repetier",       "Repetier" },
-        { "teacup",         "Teacup" },
-        { "makerware",      "MakerWare (MakerBot)" },
-        { "marlin",         "Marlin (legacy)" },
-        { "marlin2",        "Marlin 2" },
-        { "klipper",        "Klipper" },
-        { "sailfish",       "Sailfish (MakerBot)" },
-        { "mach3",          "Mach3/LinuxCNC" },
-        { "machinekit",     "Machinekit" },
-        { "smoothie",       "Smoothie" },
-        { "no-extrusion",   L("No extrusion") }
-    });
-    def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(new ConfigOptionEnum<GCodeFlavor>(gcfMarlinLegacy));
-
     def = definition.add("gcode_label_objects", coEnum, ptFFF);
     def->label = L("Label objects");
     def->invalidates_step = STEP_GCODE;
@@ -6226,7 +6211,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->label = L("Single Extruder Multi Material");
     def->category = OptionCategory::mmsetup;
     def->invalidates_step = STEP_SKIRT_BRIM;
-    def->required_plugin_group = "gcode_firmware_plugin";
+    def->required_plugin_group = "gcode_flavor";
     def->tooltip = L("The printer multiplexes filaments into a single hot end.");
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));

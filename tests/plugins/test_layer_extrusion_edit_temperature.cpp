@@ -381,7 +381,7 @@ std::string export_temperature_fixture(const DynamicPrintConfig &initial_config,
         config.option<ConfigOptionString>("start_gcode")->value =
             "M190 S65\nM191 S70\nM109 S215 T0";
     run_temperature_plugins(print);
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 // Export one startup plan whose first visit uses tool 1 and whose later tool usage is explicit.
@@ -403,7 +403,7 @@ std::string export_startup_fixture(const std::string &firmware_id,
     config.first_layer_temperature.set(std::vector<int>{205, 220});
     config.temperature.set(std::vector<int>{200, 210});
     config.first_layer_bed_temperature.set(std::vector<int>{60, 65});
-    config.chamber_temperature.set(firmware_id == "gcode.firmware.marlin2" ?
+    config.chamber_temperature.set(firmware_id == "marlin2" ?
         std::vector<int>{0, 70} : std::vector<int>{0, 0});
     config.option<ConfigOptionString>("start_gcode")->value = "; STARTUP_MARKER";
     config.option<ConfigOptionString>("end_gcode")->value.clear();
@@ -454,7 +454,7 @@ std::string export_tool_change_order_fixture(int idle_temperature = 150)
     append_temperature_visit(layer, 1, source, 0.0, 1.0);
     append_temperature_visit(layer, 0, source, 1.0, 2.0);
     run_temperature_plugins(print);
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 // Export two layers where the second layer has only the currently active tool and a bed override.
@@ -487,7 +487,7 @@ std::string export_second_layer_policy_fixture(bool semm, bool ooze_prevention)
         print, object.layer(1).scaled_print_z());
     append_temperature_visit(second_layer, 1, second_source, 2.0, 3.0);
     run_temperature_plugins(print);
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 // Export two tool changes where the returning tool is four or five degrees above its known value.
@@ -519,7 +519,7 @@ std::string export_wait_margin_fixture(int normal_tool_zero)
     append_temperature_visit(second_layer, 1, second_source, 2.0, 3.0);
     append_temperature_visit(second_layer, 0, second_source, 3.0, 4.0);
     run_temperature_plugins(print);
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 // Export a plan whose second tool first appears after the startup layer.
@@ -543,7 +543,7 @@ std::string export_late_tool_fixture(bool ooze_prevention)
         print, object.layer(1).scaled_print_z());
     append_temperature_visit(second_layer, 1, second_source, 1.0, 2.0);
     run_temperature_plugins(print);
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 } // namespace
@@ -651,7 +651,7 @@ TEST_CASE("Temperature providers export their declared linear STL catalogue", "[
         {"ooze_prevention", "0"}, {"single_extruder_multi_material", "0"}, {"standby_temperature_delta", "-5"},
         {"skirts", "0"}, {"brim_width", "0"}, {"start_gcode", ""}, {"end_gcode", ""},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     const std::vector<E2E::Domain> domains = {
         {{"autoemit_temperature_commands"}, {{"manual-heating", {{"autoemit_temperature_commands", "0"}}}}},
         {{"start_gcode_manual"}, {{"manual-start", {{"start_gcode_manual", "1"}}}}},
@@ -779,7 +779,7 @@ TEST_CASE("Temperature targets follow each regional extrusion in order",
     append_temperature_visit(second_layer, 0, second_source, 5.0, 6.0);
     run_temperature_plugins(print);
     const std::vector<std::string> lines = gcode_lines(
-        export_with_firmware(print, "gcode.firmware.marlin2"));
+        export_with_firmware(print, "marlin2"));
     const size_t first_layer_marker = first_exact_line(lines, ";LAYER_CHANGE");
     REQUIRE(first_layer_marker != std::string::npos);
     const size_t second_layer_marker = first_exact_line(lines, ";LAYER_CHANGE", first_layer_marker + 1);
@@ -849,7 +849,7 @@ TEST_CASE("Temperature uses each object's source first layer at different initia
         print, print.object(1).layer(1).scaled_print_z());
     append_temperature_visit(third, incoming, normal, 2., 3.);
     run_temperature_layer_plugin_only(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     const size_t first_marker = first_exact_line(lines, ";LAYER_CHANGE");
@@ -906,7 +906,7 @@ TEST_CASE("Temperature mixed visits derive standby from the last source extrusio
     const PrintingToolGroup &finished = print.printing_plan()->groups[0].layers[1].tool_groups[0];
     const int expected = absolute_idle ? 150 : (last_is_first ? 205 : 190);
     // Export includes the outgoing after-events and verifies standby precedes selection of the next tool.
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     const size_t standby = first_exact_line(lines, "M104 S" + std::to_string(expected) + " T0");
@@ -946,7 +946,7 @@ TEST_CASE("Temperature source-free visits retain group-layer filament fallback",
     append_temperature_tower_root(second.tool_groups.back());
     append_temperature_visit(second, 1, source, 3., 4.);
     run_temperature_layer_plugin_only(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     const size_t incoming = first_exact_line(lines, "M109 S200 T0");
@@ -1029,7 +1029,7 @@ TEST_CASE("Temperature zero targets do not create heater requests",
         print, object.layer(1).scaled_print_z());
     append_temperature_visit(second_layer, 0, second_source, 1.0, 2.0);
     run_temperature_plugins(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     size_t heater_commands = 0;
@@ -1061,7 +1061,7 @@ TEST_CASE("Temperature equal roots produce one request",
     append_temperature_visit(layer, 0, source, 0.0, 1.0);
     append_temperature_visit(layer, 0, source, 1.0, 2.0);
     run_temperature_plugins(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     CHECK(count_exact_lines(gcode_lines(output), "M104 S200 T0") == 1);
 }
@@ -1084,7 +1084,7 @@ TEST_CASE("Temperature startup is disabled by manual start mode",
     PrintingLayerGroup &layer = append_temperature_layer(print, object.layer(0).scaled_print_z());
     append_temperature_visit(layer, 0, source, 0.0, 1.0);
     run_temperature_plugins(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     for (const std::string &line : lines) {
@@ -1114,7 +1114,7 @@ TEST_CASE("Temperature layer plugin requests roots and waits without startup plu
     append_temperature_visit(layer, 1, source, 1.0, 2.0);
     run_temperature_plugins_without_startup(print);
     const std::vector<std::string> lines = gcode_lines(
-        export_with_firmware(print, "gcode.firmware.marlin2"));
+        export_with_firmware(print, "marlin2"));
     const size_t initial_target = first_exact_line(lines, "M104 S215 T0");
     const size_t first_change = first_exact_line(lines, "T1");
     const size_t first_wait = first_exact_line(lines, "M109 S218 T1");
@@ -1184,7 +1184,7 @@ TEST_CASE("Temperature startup follows start-script and heater order for both fi
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool semm = GENERATE(false, true);
     const std::string firmware = GENERATE(
-        "gcode.firmware.marlin2", "gcode.firmware.klipper");
+        "marlin2", "klipper");
     const std::string output = export_startup_fixture(firmware, semm, false, false, true);
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
@@ -1194,7 +1194,7 @@ TEST_CASE("Temperature startup follows start-script and heater order for both fi
     REQUIRE(marker != std::string::npos);
     REQUIRE(first_layer != std::string::npos);
     REQUIRE(first_move != std::string::npos);
-    if (firmware == "gcode.firmware.marlin2") {
+    if (firmware == "marlin2") {
         const size_t bed = first_exact_line(lines, "M190 S65", marker);
         const size_t chamber = first_exact_line(lines, "M191 S70", marker);
         const size_t initial = first_exact_line(lines, semm ? "M109 S220" : "M109 S220 T1", marker);
@@ -1254,7 +1254,7 @@ TEST_CASE("Temperature startup applies idle standby to later physical tools",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const std::string output = export_startup_fixture(
-        "gcode.firmware.marlin2", false, true, false, true);
+        "marlin2", false, true, false, true);
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     const size_t standby = first_exact_line(lines, "M104 S150 T0");
@@ -1270,9 +1270,9 @@ TEST_CASE("Temperature startup switches independently suppress automatic startup
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const std::string manual_output = export_startup_fixture(
-        "gcode.firmware.marlin2", false, false, true, true);
+        "marlin2", false, false, true, true);
     const std::string autoemit_output = export_startup_fixture(
-        "gcode.firmware.marlin2", false, false, false, false);
+        "marlin2", false, false, false, false);
     const std::vector<std::string> manual_lines = gcode_lines(manual_output);
     const std::vector<std::string> autoemit_lines = gcode_lines(autoemit_output);
     INFO(manual_output);
@@ -1314,7 +1314,7 @@ TEST_CASE("Temperature ooze prevention lowers the leaving tool before the change
         append_temperature_visit(second_layer, 1, second_source, 2.0, 3.0);
         append_temperature_visit(second_layer, 0, second_source, 3.0, 4.0);
         run_temperature_plugins(print);
-        return export_with_firmware(print, "gcode.firmware.marlin2");
+        return export_with_firmware(print, "marlin2");
     }();
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
@@ -1430,7 +1430,7 @@ TEST_CASE("Temperature plugin waits for SEMM changes without a tower",
     append_temperature_visit(layer, 0, source, 0.0, 1.0);
     append_temperature_visit(layer, 1, source, 1.0, 2.0);
     run_temperature_plugins(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     const size_t change = first_exact_line(lines, "T1");
@@ -1704,7 +1704,7 @@ TEST_CASE("Temperature sequential groups reuse first-layer targets",
         print, object.layer(1).scaled_print_z());
     append_temperature_visit(second_group_second_layer, 0, second_source, 3.0, 4.0);
     run_temperature_plugins(print);
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     const std::vector<std::string> lines = gcode_lines(output);
     CHECK(count_exact_lines(lines, "M104 S215 T0") == 2);

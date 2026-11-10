@@ -19,24 +19,24 @@
 
 namespace Slic3r {
 
-static inline char get_extrusion_axis_char(const GCodeConfig &config)
+static inline char get_extrusion_axis_char(const GCodeConfig &config, GCodeFlavor flavor)
 {
-    std::string axis = get_extrusion_axis(config);
+    std::string axis = get_extrusion_axis(config, flavor);
     assert(axis.size() <= 1);
     // Return 0 for gcfNoExtrusion
     return axis.empty() ? 0 : axis[0];
 }
 
-void GCodeReader::apply_config(const GCodeConfig &config)
+void GCodeReader::apply_config(const GCodeConfig &config, GCodeFlavor flavor)
 {
     m_config = config;
-    m_extrusion_axis = get_extrusion_axis_char(m_config);
+    m_extrusion_axis = get_extrusion_axis_char(m_config, flavor);
 }
 
 void GCodeReader::apply_config(const DynamicPrintConfig &config)
 {
     m_config.apply(config, true);
-    m_extrusion_axis = get_extrusion_axis_char(m_config);
+    m_extrusion_axis = get_extrusion_axis_char(m_config, gcode_flavor(config));
 }
 
 const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, GCodeLine &gline)

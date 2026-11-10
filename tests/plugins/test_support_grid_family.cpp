@@ -40,7 +40,7 @@ TEST_CASE("Grid variable height contacts slabs and export follow each roof", "[p
     config.set_deserialize_strict({{"support_material_synchronize_layers", sync ? "1" : "0"},
         {"support_material_contact_distance", "0.19"}, {"support_material_bottom_contact_distance", "0.23"},
         {"support_material_layer_height", "0.3"}, {"support_material_interface_layer_height", "0.3"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"},
         {"filament_diameter", "1.75,1.75"}});
     // XY bays isolate footprints for attribution; roof Z spacing avoids contact merges. The last bay has a thin-band shelf.
     const double roofs[] = {0.25, 0.45, 3., 6.};

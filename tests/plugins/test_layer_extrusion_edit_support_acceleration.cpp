@@ -182,7 +182,7 @@ TEST_CASE("A print with support exports support moves at the support acceleratio
     DynamicPrintConfig config = Test::SupportGrid::config("grid", false, 3, true);
     config.set_deserialize_strict({
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"default_acceleration", "1000"}, {"support_material_acceleration", "600"},
         {"support_material_interface_acceleration", "50%"}, {"first_layer_acceleration", "0"},
         {"machine_limits_usage", "ignore"}, {"use_relative_e_distances", "1"}, {"wipe", "0,0"},

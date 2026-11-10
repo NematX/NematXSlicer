@@ -45,7 +45,9 @@ public:
 
     // Returns empty string for gcfNoExtrusion.
     std::string         extrusion_axis() const { return m_extrusion_axis; }
-    void                apply_print_config(const PrintConfig &print_config);
+    void                apply_print_config(const PrintConfig &print_config, GCodeFlavor flavor);
+    // Flavor of the selected firmware, given by apply_print_config().
+    GCodeFlavor         flavor() const { return m_flavor; }
     void                apply_print_region_config(const PrintRegionConfig& print_region_config);
     // Extruders are expected to be sorted in an increasing order.
     void                set_extruders(std::vector<extruder_index_t> extruder_ids);
@@ -137,8 +139,8 @@ public:
 
     GCodeFormatter get_default_gcode_formatter() const { return GCodeFormatter(config.gcode_precision_xyz, config.gcode_precision_e); }
 
-    static std::string get_default_pause_gcode(const GCodeConfig &config);
-    static std::string get_default_color_change_gcode(const GCodeConfig &config);
+    static std::string get_default_pause_gcode(const GCodeConfig &config, GCodeFlavor flavor);
+    static std::string get_default_color_change_gcode(const GCodeConfig &config, GCodeFlavor flavor);
 
 protected:
     void _extrude_e(GCodeFormatter &w, double dE);
@@ -148,6 +150,7 @@ private:
     std::vector<Extruder> m_extruders;
     std::vector<Mill> m_millers;
     std::string     m_extrusion_axis = "E";
+    GCodeFlavor     m_flavor = gcfMarlinFirmware;
     bool            m_single_extruder_multi_material = false;
     Tool*           m_tool = nullptr;
     double          m_last_pressure_advance = 0;

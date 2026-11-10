@@ -323,7 +323,7 @@ orchestrator for fan encoding. Direct SDK callers must supply prevalidated modes
 Firmware applies minimum and per-tool offset once: absent emits nothing; zero
 stays zero; positive values encode as `clamp(max(percent, minimum)+offset,0,100)`, as in the legacy slicer.
 Each firmware alternative defines `fan_printer_min_speed` in the shared
-`gcode_firmware_plugin` exclusive group. SDK helper
+`gcode_flavor` exclusive group. SDK helper
 `GCodeGeneration::fan_minimum_option_definition()` in `gcode/FanConfig.hpp`
 provides identical metadata, including the `Slic3r` translation domain, for
 built-in and external providers. Do not depend on Marlin2 being active or

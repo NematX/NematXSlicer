@@ -181,7 +181,7 @@ TEST_CASE("A setting without an Orca equivalent is omitted and counted once",
     DynamicPrintConfig config = make_config({{"resolution_internal", "0.0125"}, {"avoid_crossing_not_first_layer", "1"}});
     const BambuConfigTranslation translation = translate_config_to_bambu(config);
     // None of them is an Orca setting, so none keeps its SuperSlicer name.
-    for (const char *ss_key : {"resolution_internal", "avoid_crossing_not_first_layer", "gcode_firmware_plugin", "platter_fan", "printer_model_id"})
+    for (const char *ss_key : {"resolution_internal", "avoid_crossing_not_first_layer", "gcode_flavor", "platter_fan", "printer_model_id"})
         CHECK(find_entry(translation, ss_key) == nullptr);
     const std::vector<std::string>::difference_type counts = std::count_if(translation.warnings.begin(), translation.warnings.end(),
         [](const std::string &warning) { return warning.find("have no Orca equivalent") != std::string::npos; });
@@ -405,7 +405,7 @@ TEST_CASE("The firmware settings are written whatever firmware is selected, and 
 {
     SECTION("another firmware selected")
     {
-        DynamicPrintConfig config = make_config({{"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"nozzle_type", "brass"}, {"platter_fan", "1"}});
+        DynamicPrintConfig config = make_config({{"gcode_flavor", "marlin2"}, {"nozzle_type", "brass"}, {"platter_fan", "1"}});
         const BambuConfigTranslation translation = translate_config_to_bambu(config);
         CHECK(values_of(translation, "nozzle_type") == strings({"brass"}));
         CHECK(values_of(translation, "auxiliary_fan") == strings({"1"}));
@@ -690,8 +690,8 @@ TEST_CASE("The Bambu firmware creates the printer identity, nozzle type and plat
 
     // They are read by the Bambu firmware only: the host greys them with the other firmware settings.
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    for (const char *firmware : {"gcode.firmware.bambu", "gcode.firmware.marlin2"}) {
-        config.set_deserialize_strict("gcode_firmware_plugin", firmware);
+    for (const char *firmware : {"bambu", "marlin2"}) {
+        config.set_deserialize_strict("gcode_flavor", firmware);
         for (const auto &[key, scope] : {std::pair<const char *, raw_option_preset_type>{"printer_model_id", RAW_PRESET_TYPE_FFF_PRINTER},
                                          {"nozzle_type", RAW_PRESET_TYPE_FFF_PRINTER},
                                          {"curr_bed_type", RAW_PRESET_TYPE_FFF_PRINT}}) {
@@ -700,7 +700,7 @@ TEST_CASE("The Bambu firmware creates the printer identity, nozzle type and plat
             for (const Orchestrator::GuiRuleApplication &rule : Orchestrator::instance().gui_rules().evaluate(config, scope, -1)) {
                 if (rule.target_key == key) {
                     found = true;
-                    CHECK(rule.enabled == (std::string(firmware) == "gcode.firmware.bambu"));
+                    CHECK(rule.enabled == (std::string(firmware) == "bambu"));
                 }
             }
             CHECK(found);

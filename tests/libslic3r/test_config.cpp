@@ -197,8 +197,8 @@ TEST_CASE("Dynamic config serialization - tests ConfigBase", "[Config]"){
     CHECK(config.opt_serialize("use_relative_e_distances") == "1");
 
     INFO("Serialize enum");
-    config.set_key_value("gcode_flavor", new ConfigOptionEnum<GCodeFlavor>(gcfTeacup));
-    CHECK(config.opt_serialize("gcode_flavor") == "teacup");
+    config.set_key_value("machine_limits_usage", new ConfigOptionEnum<MachineLimitsUsage>(MachineLimitsUsage::TimeEstimateOnly));
+    CHECK(config.opt_serialize("machine_limits_usage") == "time_estimate_only");
 
     INFO("Serialize string");
     config.set_key_value("extrusion_axis", new ConfigOptionString("A"));

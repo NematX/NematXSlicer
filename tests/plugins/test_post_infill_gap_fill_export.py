@@ -25,7 +25,7 @@ import time
 
 BASE = {
     "layer_height": "0.2", "first_layer_height": "0.2", "seam_visibility": "0",
-    "gcode_comments": "1", "gcode_firmware_plugin": "gcode.firmware.marlin2",
+    "gcode_comments": "1", "gcode_flavor": "marlin2",
     "skirts": "0", "brim_width": "0", "perimeters": "1", "fill_density": "20%",
     "top_solid_layers": "2", "bottom_solid_layers": "2", "support_material": "0",
     "fill_pattern": "rectilinear", "solid_fill_pattern": "concentric", "top_fill_pattern": "concentric",

@@ -878,14 +878,14 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
         CHECK(local.enum_values == entry.second);
         CHECK(std::string(local.option_def.default_serialized_value) == entry.second.front());
     }
-    REQUIRE(host.get_plugin("gcode.firmware.marlin2") != nullptr);
+    REQUIRE(host.get_plugin("marlin2") != nullptr);
     const Steps::StepExclusiveGroup firmware_group = Steps::plugin_exclusive_group_definition(host, GCODE_FIRMWARE,
-        "gcode_firmware_plugin", *host.get_plugin("gcode.firmware.marlin2"));
-    CHECK(firmware_group.option_key_storage == "exclusive_group_10300_gcode_firmware_plugin_plugin");
-    CHECK(firmware_group.ui_fragment.find("setting:exclusive_group_10300_gcode_firmware_plugin_plugin\n") != std::string::npos);
+        "gcode_flavor", *host.get_plugin("marlin2"));
+    CHECK(firmware_group.option_key_storage == "exclusive_group_10300_gcode_flavor_plugin");
+    CHECK(firmware_group.ui_fragment.find("setting:exclusive_group_10300_gcode_flavor_plugin\n") != std::string::npos);
     const Steps::StepExclusiveGroup firmware_whole = Steps::make_exclusive_step_group(host, GCODE_FIRMWARE,
         Steps::get_exclusive_steps().at(GCODE_FIRMWARE));
-    CHECK(firmware_whole.option_key_storage == "gcode_firmware_plugin");
+    CHECK(firmware_whole.option_key_storage == "gcode_flavor");
     CHECK(firmware_group.traits.option_key == firmware_whole.traits.option_key);
     CHECK(firmware_group.traits.invalidates_step == firmware_whole.traits.invalidates_step);
     CHECK(Steps::get_exclusive_steps().count(STEP_GCODE) == 0);
@@ -963,7 +963,7 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
     SelectorTraitsProbe probe(reinterpret_cast<orchestrator_handle *>(&host));
     Plugin provider(probe.c_instance(), "Slic3r", "");
     const std::pair<slicing_step_t, const char *> services[] = {
-        {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
+        {GCODE_FIRMWARE, "gcode_flavor"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
         {GCODE_READER, "reader_invalidation_probe"}, {STEP_EXPORT, "gcode_exporter_plugin"}
     };
     for (const std::pair<slicing_step_t, const char *> &service : services) {
@@ -1161,12 +1161,12 @@ TEST_CASE("Firmware group selection reads the stored whole-step selector",
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
-    const Plugin *firmware = host.get_plugin("gcode.firmware.klipper");
+    const Plugin *firmware = host.get_plugin("klipper");
     REQUIRE(firmware != nullptr);
     REQUIRE(host.is_plugin_active(firmware));
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict("gcode_firmware_plugin", firmware->get_id());
-    check_selection(host, GCODE_FIRMWARE, "gcode_firmware_plugin", &config, firmware);
+    config.set_deserialize_strict("gcode_flavor", firmware->get_id());
+    check_selection(host, GCODE_FIRMWARE, "gcode_flavor", &config, firmware);
 }
 
 // Restrict whole-step choices to a named group's two probes, restoring perimeter activations even when assertions fail.

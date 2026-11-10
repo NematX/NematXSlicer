@@ -210,7 +210,7 @@ void TemperatureMover::_process_T(const std::string_view command)
         if (!TemperatureMover_func::parse_number(command.substr(1), eid) ||
             eid == EXTRUDER_ID_UNKNOWN || eid < EXTRUDER_ID_UNKNOWN ||
             eid > (std::numeric_limits<extruder_index_t>::max)()) {
-            GCodeFlavor flavor = m_writer.config.gcode_flavor;
+            GCodeFlavor flavor = m_writer.flavor();
             // Specific to the MMU2 V2 (see https://www.help.prusa3d.com/en/article/prusa-specific-g-codes_112173):
             if ((flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware) && (command == "Tx" || command == "Tc" || command == "T?"))
                 return;
@@ -314,7 +314,7 @@ void TemperatureMover::_process_gcode_line(GCodeReader& reader, const GCodeReade
         case 'M':
         {
             std::tie(new_temperature, temperature_extruder_idx) =
-                this->_get_temperature_with_extruder_idx(line.raw(), m_writer.config.gcode_flavor);
+                this->_get_temperature_with_extruder_idx(line.raw(), m_writer.flavor());
             if (new_temperature >= 0) {
                 if (!m_is_custom_gcode) {
                     // if slow down => put in the queue. if not =>

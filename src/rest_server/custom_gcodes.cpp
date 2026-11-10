@@ -182,10 +182,10 @@ bool effective_gcode_empty(const DynamicPrintConfig &session, const char *key)
 {
     if (!printer_gcode_empty(session, key))
         return false;
-    GCodeConfig config;
-    config.apply_only(session, std::set<t_config_option_key>{"gcode_flavor"}, true);
-    return std::string(key) == "color_change_gcode" ? GCodeWriter::get_default_color_change_gcode(config).empty() :
-        GCodeWriter::get_default_pause_gcode(config).empty();
+    const GCodeConfig config;
+    const GCodeFlavor flavor = gcode_flavor(session);
+    return std::string(key) == "color_change_gcode" ? GCodeWriter::get_default_color_change_gcode(config, flavor).empty() :
+        GCodeWriter::get_default_pause_gcode(config, flavor).empty();
 }
 
 bool printer_gcode_empty(const DynamicPrintConfig &session, const char *key)

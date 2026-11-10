@@ -1854,8 +1854,7 @@ void PageFirmware::apply_custom_config(DynamicPrintConfig &config)
 {
     auto sel = gcode_picker->GetSelection();
     if (sel >= 0 && (size_t)sel < gcode_opt.enum_def->labels().size()) {
-        auto *opt = new ConfigOptionEnum<GCodeFlavor>(static_cast<GCodeFlavor>(sel));
-        config.set_key_value("gcode_flavor", opt);
+        config.set_deserialize_strict("gcode_flavor", gcode_opt.enum_def->values()[sel]);
     }
 }
 

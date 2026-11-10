@@ -32,7 +32,7 @@ IDS = (
     "nematx_second_layer_flow", "nematx_corner_stretch", "nematx_fan_first_layer_program",
     "nematx_fan_speedup", "nematx_hole_size_curve", "rectilineararoundholes",
     "gridvarspeed", "nematx_gridvarspeed_speed", "nematx_gridvarspeed_recipe",
-    "gcode.firmware.nematx", "gcode.reader.nematx", "nematx_regional_fan", "nematx_wipetower",
+    "nematx", "gcode.reader.nematx", "nematx_regional_fan", "nematx_wipetower",
     "nematx_smooth_temperature", "nematx.support.bottom_contact", "nematx.support.bottom_interface",
     "nematx.support.top_contact", "nematx.support.top_interface", "nematx_seam",
 )

@@ -932,7 +932,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
     std::vector<Event> events;
     const std::string gcode = Test::GCode::read_text_file(path);
     GCodeReader reader;
-    reader.apply_config(print.config());
+    reader.apply_config(print.config(), gcode_flavor(print.config()));
     bool tower = false;
     bool in_unload = false;
     int phase = 0;
@@ -1823,7 +1823,7 @@ TEST_CASE("SEMM swap disables the retraction around it",
     const double last_pull = -15.;
     const std::string gcode = Test::GCode::read_text_file(path);
     GCodeReader reader;
-    reader.apply_config(print.config());
+    reader.apply_config(print.config(), gcode_flavor(print.config()));
     double swap_e = 0.;
     size_t swap_moves = 0;
     int swap_state = 0;  // 0 before the first ramming end, 1 inside the first swap, 2 done
@@ -2244,7 +2244,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
         });
         return lines;
     };
-    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "marlin2");
     const std::string marlin_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, marlin_path, nullptr));
@@ -2287,7 +2287,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
     CHECK(open == 0);
     CHECK_FALSE(nested);
     CHECK(covered == changes);
-    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.klipper");
+    Test::GCode::select_printing_plan_firmware(print, "klipper");
     const std::string klipper_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override_klipper") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, klipper_path, nullptr));
@@ -2693,7 +2693,7 @@ TEST_CASE("Export statistics include the tower share for preview and explicit CL
         {"filament_density", tower ? "1.1,1.3" : "1.1"}, {"filament_cost", tower ? "20,30" : "20"}, {"time_cost", "2"},
         {"perimeter_extruder", "1"}, {"infill_extruder", "1"}, {"solid_infill_extruder", "1"},
         {"step_perimeter_plugin", "perimeter.generator.classic"}, {"step_surface_generation_plugin", "surface.initial_typed_surface_builder"},
-        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"gcode_flavor", "marlin2"},
         {"layer_height", "0.3"}, {"fill_density", "20%"}});
     if (tower)
         config.set_deserialize_strict({{"wiping_volumes_matrix", "0,140,140,0"}, {"filament_minimal_purge_on_wipe_tower", "15,15"}});
@@ -2973,8 +2973,7 @@ TEST_CASE("Tool change exports the requested pressure advance",
         {"filament_multitool_ramming", "1,1"},
         {"filament_multitool_ramming_volume", "10,10"}, {"filament_multitool_ramming_flow", "5,5"},
         {"filament_pressure_advance", "0.05,0.15"},
-        {"gcode_flavor", "marlin2"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     ConfigOptionFloats *pressure_advance = config.option<ConfigOptionFloats>("filament_pressure_advance");
     REQUIRE(pressure_advance != nullptr);
     pressure_advance->set_enabled(enabled_tool0, 0);
@@ -3092,8 +3091,7 @@ TEST_CASE("SEMM pressure advance carries no drive address",
         {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"layer_height", "0.3"}, {"fill_density", "10%"},
         {"single_extruder_multi_material", "1"},
         {"filament_pressure_advance", "0.05,0.15"},
-        {"gcode_flavor", "reprapfirmware"},
-        {"gcode_firmware_plugin", "gcode.firmware.reprap"}});
+        {"gcode_flavor", "reprapfirmware"}});
     ConfigOptionFloats *pressure_advance = config.option<ConfigOptionFloats>("filament_pressure_advance");
     REQUIRE(pressure_advance != nullptr);
     pressure_advance->set_enabled(true, 0);

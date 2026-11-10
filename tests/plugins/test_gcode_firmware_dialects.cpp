@@ -283,13 +283,13 @@ TEST_CASE("G-code firmware service exposes its printer selector and standard ses
     Print print;
 
     const std::set<std::string> expected_firmwares = {
-        "gcode.firmware.marlin1",
-        "gcode.firmware.marlin2",
-        "gcode.firmware.prusa",
-        "gcode.firmware.reprap",
-        "gcode.firmware.sprinter",
-        "gcode.firmware.klipper",
-        "gcode.firmware.bambu"
+        "marlin",
+        "marlin2",
+        "prusa",
+        "reprapfirmware",
+        "sprinter",
+        "klipper",
+        "bambu"
     };
     std::set<std::string> registered_firmwares;
     for (Plugin *plugin : orchestrator.get_active_plugins_for_step(GCODE_FIRMWARE))
@@ -300,7 +300,7 @@ TEST_CASE("G-code firmware service exposes its printer selector and standard ses
     Plugin *selected = Steps::selected_or_active_plugin_for_step(
         orchestrator, GCODE_FIRMWARE, &print.full_print_config());
     REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "gcode.firmware.marlin2");
+    CHECK(selected->get_id() == "marlin2");
 
     std::set<std::string> used_keys;
     for (const Plugin::UsedConfigKey &key : selected->get_used_config_keys())
@@ -315,43 +315,28 @@ TEST_CASE("G-code firmware service exposes its printer selector and standard ses
     CHECK(used_keys.count("travel_speed") == 1);
     CHECK(used_keys.count("z_offset") == 1);
 
-    const ConfigOptionDef *definition = PrintConfigDef::instance().get("gcode_firmware_plugin");
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get("gcode_flavor");
     REQUIRE(definition != nullptr);
     CHECK(definition->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
-    CHECK(definition->invalidates_step == STEP_GCODE);
+    CHECK(definition->invalidates_step == STEP_ORDERING);
 
+    // The selector keeps the place of the former option in the printer page.
     const std::string merged = orchestrator.merged_ui_layout(
         "printer_fff.ui",
         "page:General:printer\n"
         "group:Firmware\n"
         "\tsetting:gcode_flavor\n");
-    const size_t firmware_pos = merged.find("setting:gcode_firmware_plugin");
-    const size_t flavor_pos = merged.find("setting:gcode_flavor");
+    const size_t firmware_pos = merged.find("setting:gcode_flavor");
     REQUIRE(firmware_pos != std::string::npos);
-    REQUIRE(flavor_pos != std::string::npos);
-    CHECK(firmware_pos < flavor_pos);
+    CHECK(merged.find("setting:gcode_flavor", firmware_pos + 1) == std::string::npos);
     CHECK(merged.find("setting:step_gcode_plugin") == std::string::npos);
-    CHECK(std::string(slic3r_api::GCodeGeneration::Firmware::printer_ui_fragment())
-              .find("gcode_firmware_plugin") != std::string::npos);
+    // The firmware fragment marks that place, so the host adds no generic copy
+    // of the selector to the print settings.
+    CHECK(orchestrator.merged_ui_layout("print.ui", "").find("setting:gcode_flavor") == std::string::npos);
 
     STATIC_REQUIRE(std::is_base_of<
         slic3r_api::GCodeGeneration::Firmware::Marlin2GCodeFirmwareSession,
         slic3r_api::GCodeGeneration::Firmware::PrusaGCodeFirmwareSession>::value);
-
-    // Printer presets that still name the removed generic provider resolve to
-    // its concrete equivalent before the exclusive service is selected.
-    Print migrated_print;
-    DynamicPrintConfig &migrated_config =
-        const_cast<DynamicPrintConfig &>(migrated_print.full_print_config());
-    t_config_option_key migrated_key = "gcode_firmware_plugin";
-    std::string migrated_value = "gcode.firmware.default";
-    PrintConfigDef::handle_legacy_pair(migrated_key, migrated_value);
-    CHECK(migrated_value == "gcode.firmware.marlin2");
-    migrated_config.set_deserialize(migrated_key, migrated_value);
-    Plugin *migrated_selection = Steps::selected_or_active_plugin_for_step(
-        orchestrator, GCODE_FIRMWARE, &migrated_print.full_print_config());
-    REQUIRE(migrated_selection != nullptr);
-    CHECK(migrated_selection->get_id() == "gcode.firmware.marlin2");
 }
 
 TEST_CASE("Built-in firmware dialects select their matching G-code readers",
@@ -438,7 +423,7 @@ TEST_CASE("Built-in firmware dialects encode their machine envelope preamble",
     };
     const DialectEnvelopeExpectation expectations[] = {
         {
-            "gcode.firmware.marlin1",
+            "marlin",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X200 Y210 Z12 E25 ; sets maximum feedrates, mm/sec\n"
             "M204 S500 T800 ; sets print and retract acceleration, mm/sec^2\n"
@@ -446,7 +431,7 @@ TEST_CASE("Built-in firmware dialects encode their machine envelope preamble",
             "M205 S3 T4 ; sets the minimum extruding and travel feed rate, mm/sec\n"
         },
         {
-            "gcode.firmware.marlin2",
+            "marlin2",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X200 Y210 Z12 E25 ; sets maximum feedrates, mm/sec\n"
             "M204 P500 R800 T900 ; sets print, retract and travel acceleration, mm/sec^2\n"
@@ -454,7 +439,7 @@ TEST_CASE("Built-in firmware dialects encode their machine envelope preamble",
             "M205 S3 T4 ; sets the minimum extruding and travel feed rate, mm/sec\n"
         },
         {
-            "gcode.firmware.prusa",
+            "prusa",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X200 Y210 Z12 E25 ; sets maximum feedrates, mm/sec\n"
             "M204 P500 R800 T900 ; sets print, retract and travel acceleration, mm/sec^2\n"
@@ -462,24 +447,24 @@ TEST_CASE("Built-in firmware dialects encode their machine envelope preamble",
             "M205 S3 T4 ; sets the minimum extruding and travel feed rate, mm/sec\n"
         },
         {
-            "gcode.firmware.reprap",
+            "reprapfirmware",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X12000 Y12600 Z720 E1500 I180 ; sets maximum feedrates, mm/min\n"
             "M204 P500 T900 ; sets print and travel acceleration, mm/sec^2\n"
             "M566 X480.00 Y540.00 Z24.00 E150.00 ; sets the jerk limits, mm/min\n"
         },
         {
-            "gcode.firmware.sprinter",
+            "sprinter",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X12000 Y12600 Z720 E1500 ; sets maximum feedrates, mm/min\n"
             "M204 P500 T900 ; sets print and travel acceleration, mm/sec^2\n"
         },
         {
-            "gcode.firmware.klipper",
+            "klipper",
             "M204 P500 T900 ; sets the initial shared acceleration, mm/sec^2\n"
         },
         {
-            "gcode.firmware.bambu",
+            "bambu",
             "M201 X1000 Y1100 Z120 E1300 ; sets maximum accelerations, mm/sec^2\n"
             "M203 X200 Y210 Z12 E25 ; sets maximum feedrates, mm/sec\n"
             "M204 P500 R800 T900 ; sets print, retract and travel acceleration, mm/sec^2\n"
@@ -504,7 +489,7 @@ TEST_CASE("Built-in firmware dialects encode their machine envelope preamble",
     Print disabled_print;
     configure_standard_firmware(disabled_print);
     disabled_print.mutable_printing_plan();
-    CHECK(export_with_firmware(disabled_print, "gcode.firmware.marlin2") ==
+    CHECK(export_with_firmware(disabled_print, "marlin2") ==
           "G21\nG90\nM82\n");
 }
 TEST_CASE("Built-in firmware dialects encode their process commands",
@@ -523,20 +508,20 @@ TEST_CASE("Built-in firmware dialects encode their process commands",
         const char *acceleration;
     };
     const DialectExpectation expectations[] = {
-        {"gcode.firmware.marlin1", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
+        {"marlin", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
          "M106 S128\n", "M900 K0.04\n", "M204 S500\n"},
-        {"gcode.firmware.marlin2", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
+        {"marlin2", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
          "M106 S128\n", "M900 K0.04\n", "M204 P500\n"},
-        {"gcode.firmware.prusa", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
+        {"prusa", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
          "M106 S128\n", "M900 K0.04\n", "M204 P500\n"},
-        {"gcode.firmware.reprap", "T0\n", "G10 P0 S200\n", "M116 P0\n",
+        {"reprapfirmware", "T0\n", "G10 P0 S200\n", "M116 P0\n",
          "M106 P0 S0.5\n", "M572 D0 S0.04\n", "M204 P500\n"},
-        {"gcode.firmware.sprinter", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
+        {"sprinter", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
          "M106 S128\n", "M572 D0 S0.04\n", "M204 P500\n"},
-        {"gcode.firmware.klipper", "ACTIVATE_EXTRUDER EXTRUDER=extruder\n",
+        {"klipper", "ACTIVATE_EXTRUDER EXTRUDER=extruder\n",
          "M104 S200\n", "M109 S200\n", "M106 S128\n",
          "SET_PRESSURE_ADVANCE ADVANCE=0.04 EXTRUDER=extruder\n", "M204 S500\n"},
-        {"gcode.firmware.bambu", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
+        {"bambu", "T0\n", "M104 S200 T0\n", "M109 S200 T0\n",
          "M106 S128\n", "M900 K0.04 L1000 M10 ; Override pressure advance value\n", "M204 P500\n"}
     };
 
@@ -642,9 +627,9 @@ TEST_CASE("Built-in firmware dialects address one physical extruder in SEMM",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool semm = GENERATE(false, true);
-    const char *firmware_id = GENERATE("gcode.firmware.marlin1", "gcode.firmware.marlin2",
-        "gcode.firmware.prusa", "gcode.firmware.sprinter", "gcode.firmware.reprap", "gcode.firmware.klipper",
-        "gcode.firmware.bambu");
+    const char *firmware_id = GENERATE("marlin", "marlin2",
+        "prusa", "sprinter", "reprapfirmware", "klipper",
+        "bambu");
     CAPTURE(semm, firmware_id);
     Print print;
     configure_standard_firmware(print, 2);
@@ -677,9 +662,9 @@ TEST_CASE("Built-in firmware dialects address one physical extruder in SEMM",
     }
     const std::string output = export_with_firmware(print, firmware_id);
     INFO(output);
-    const bool reprap = std::string(firmware_id) == "gcode.firmware.reprap";
-    const bool klipper = std::string(firmware_id) == "gcode.firmware.klipper";
-    const bool sprinter = std::string(firmware_id) == "gcode.firmware.sprinter";
+    const bool reprap = std::string(firmware_id) == "reprapfirmware";
+    const bool klipper = std::string(firmware_id) == "klipper";
+    const bool sprinter = std::string(firmware_id) == "sprinter";
     const std::string first_heat = reprap ? "G10 P0 S200\n" :
         std::string("M104 S200") + (semm || klipper ? "\n" : " T0\n");
     const std::string second_heat = reprap ? "G10 P1 S230\n" :
@@ -732,9 +717,9 @@ TEST_CASE("Built-in firmware resets absolute E immediately after every emitted t
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool semm = GENERATE(false, true);
     const bool relative_e = GENERATE(false, true);
-    const char *firmware_id = GENERATE("gcode.firmware.marlin1", "gcode.firmware.marlin2",
-        "gcode.firmware.prusa", "gcode.firmware.sprinter", "gcode.firmware.reprap", "gcode.firmware.klipper",
-        "gcode.firmware.bambu");
+    const char *firmware_id = GENERATE("marlin", "marlin2",
+        "prusa", "sprinter", "reprapfirmware", "klipper",
+        "bambu");
     CAPTURE(semm, relative_e, firmware_id);
     Print print;
     configure_standard_firmware(print, 2);
@@ -791,9 +776,9 @@ TEST_CASE("Built-in firmware providers declare their SEMM dependency",
           "[plugins][gcode][firmware][semm]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    for (const char *id : {"gcode.firmware.marlin1", "gcode.firmware.marlin2", "gcode.firmware.prusa",
-                           "gcode.firmware.sprinter", "gcode.firmware.reprap", "gcode.firmware.klipper",
-                           "gcode.firmware.bambu"}) {
+    for (const char *id : {"marlin", "marlin2", "prusa",
+                           "sprinter", "reprapfirmware", "klipper",
+                           "bambu"}) {
         const Plugin *plugin = Orchestrator::instance().get_plugin(id);
         REQUIRE(plugin != nullptr);
         size_t declared = 0;
@@ -839,10 +824,10 @@ TEST_CASE("Built-in firmware acceleration acknowledgements match their physical 
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     const char *const independent_dialects[] = {
-        "gcode.firmware.marlin2",
-        "gcode.firmware.prusa",
-        "gcode.firmware.reprap",
-        "gcode.firmware.bambu"
+        "marlin2",
+        "prusa",
+        "reprapfirmware",
+        "bambu"
     };
     for (const char *firmware_id : independent_dialects) {
         INFO(firmware_id);
@@ -878,9 +863,9 @@ TEST_CASE("Built-in firmware acceleration acknowledgements match their physical 
         const char *travel_command;
     };
     const SharedAccelerationExpectation shared_dialects[] = {
-        {"gcode.firmware.marlin1", "M204 S500\n", "M204 S900\n"},
-        {"gcode.firmware.sprinter", "M204 P500\n", "M204 P900\n"},
-        {"gcode.firmware.klipper", "M204 S500\n", "M204 S900\n"}
+        {"marlin", "M204 S500\n", "M204 S900\n"},
+        {"sprinter", "M204 P500\n", "M204 P900\n"},
+        {"klipper", "M204 S500\n", "M204 S900\n"}
     };
     for (const SharedAccelerationExpectation &expectation : shared_dialects) {
         INFO(expectation.id);
@@ -948,9 +933,9 @@ TEST_CASE("Shared acceleration registers switch only when print acceleration can
         const char *travel_command;
     };
     const SharedAccelerationExpectation shared_dialects[] = {
-        {"gcode.firmware.marlin1", "M204 S500\n", "M204 S900\n"},
-        {"gcode.firmware.sprinter", "M204 P500\n", "M204 P900\n"},
-        {"gcode.firmware.klipper", "M204 S500\n", "M204 S900\n"}
+        {"marlin", "M204 S500\n", "M204 S900\n"},
+        {"sprinter", "M204 P500\n", "M204 P900\n"},
+        {"klipper", "M204 S500\n", "M204 S900\n"}
     };
 
     SECTION("the machine extrusion limit restores the shared register") {
@@ -998,7 +983,7 @@ TEST_CASE("Shared acceleration registers switch only when print acceleration can
         config.machine_limits_usage.value = MachineLimitsUsage::Ignore;
         append_optional_acceleration_sequence(print);
 
-        const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+        const std::string output = export_with_firmware(print, "marlin2");
         INFO(output);
         CHECK(count_occurrences(output, "M204 T900\n") == 1);
         CHECK(output.find("M204 P") == std::string::npos);
@@ -1012,7 +997,7 @@ TEST_CASE("Shared acceleration registers switch only when print acceleration can
         config.machine_max_acceleration_extruding.set(std::vector<double>{0.0});
         append_optional_acceleration_sequence(print, false);
 
-        const std::string output = export_with_firmware(print, "gcode.firmware.marlin1");
+        const std::string output = export_with_firmware(print, "marlin");
         INFO(output);
         CHECK(output.find("M204") == std::string::npos);
     }
@@ -1046,7 +1031,7 @@ TEST_CASE("Klipper uses configured extruder names and I J arc centers",
         tool_group,
         make_firmware_path(ArcPolyline(arc_path), 25.f, 600.f, 0.03f));
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.klipper");
+    const std::string output = export_with_firmware(print, "klipper");
     INFO(output);
     CHECK(output.find("ACTIVATE_EXTRUDER EXTRUDER=right_extruder\n") != std::string::npos);
     CHECK(output.find("SET_PRESSURE_ADVANCE ADVANCE=0.03 EXTRUDER=right_extruder\n") !=
@@ -1061,12 +1046,12 @@ TEST_CASE("Radius-arc firmware dialects preserve R-form movements",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     const char *const firmware_ids[] = {
-        "gcode.firmware.marlin1",
-        "gcode.firmware.marlin2",
-        "gcode.firmware.prusa",
-        "gcode.firmware.reprap",
-        "gcode.firmware.sprinter",
-        "gcode.firmware.bambu"
+        "marlin",
+        "marlin2",
+        "prusa",
+        "reprapfirmware",
+        "sprinter",
+        "bambu"
     };
     for (const char *firmware_id : firmware_ids) {
         INFO(firmware_id);
@@ -1168,7 +1153,7 @@ TEST_CASE("RepRapFirmware keeps addressed heaters and fans per extruder",
     plan.groups.front().layers.emplace_back();
     append_multi_tool_process_sequence(plan.groups.front().layers.front());
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.reprap");
+    const std::string output = export_with_firmware(print, "reprapfirmware");
     INFO(output);
     CHECK(count_occurrences(output, "G10 P0 S200\n") == 1);
     CHECK(count_occurrences(output, "G10 P1 S210\n") == 1);
@@ -2215,7 +2200,7 @@ std::string export_labelled_cubes(bool relative_e, uint16_t tools = 1,
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(tools);
     config.set_deserialize_strict({
-        {"gcode_firmware_plugin", "gcode.firmware.bambu"},
+        {"gcode_flavor", "bambu"},
         {"gcode_exporter_plugin", "gcode.exporter.simple"},
         {"binary_gcode", "1"},
         {"gcode_label_objects", "firmware"},
@@ -2257,7 +2242,7 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
           "[plugins][gcode][firmware][bambu][config]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Plugin *plugin = Orchestrator::instance().get_plugin("gcode.firmware.bambu");
+    Plugin *plugin = Orchestrator::instance().get_plugin("bambu");
     REQUIRE(plugin != nullptr);
     const char *const keys[] = {"platter_fan", "support_air_filtration", "platter_fan_speed",
         "activate_air_filtration", "during_print_exhaust_fan_speed", "complete_print_exhaust_fan_speed"};
@@ -2321,8 +2306,8 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
         CHECK(values->is_extruder_size());
         CHECK(values->size() == 3);
     }
-    for (const char *firmware : {"gcode.firmware.bambu", "gcode.firmware.marlin2"}) {
-        config.set_deserialize_strict("gcode_firmware_plugin", firmware);
+    for (const char *firmware : {"bambu", "marlin2"}) {
+        config.set_deserialize_strict("gcode_flavor", firmware);
         for (size_t idx = 0; idx < 6; ++idx) {
             INFO(keys[idx]);
             INFO(firmware);
@@ -2331,7 +2316,7 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
             for (const Orchestrator::GuiRuleApplication &rule : Orchestrator::instance().gui_rules().evaluate(config, scope, -1)) {
                 if (rule.target_key == keys[idx]) {
                     found = true;
-                    CHECK(rule.enabled == (std::string(firmware) == "gcode.firmware.bambu"));
+                    CHECK(rule.enabled == (std::string(firmware) == "bambu"));
                 }
             }
             CHECK(found);
@@ -3074,7 +3059,7 @@ TEST_CASE("Bambu firmware labels the real pipeline output without losing filamen
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_num_extruders(1);
         config.set_deserialize_strict({
-            {"gcode_firmware_plugin", "gcode.firmware.bambu"},
+            {"gcode_flavor", "bambu"},
             {"gcode_exporter_plugin", "gcode.exporter.simple"},
             {"binary_gcode", "1"},
             {"gcode_label_objects", "firmware"},
@@ -3582,7 +3567,7 @@ TEST_CASE("Bambu firmware opens and closes the spaghetti detector around the pri
         group_marker.add_property(ExtrusionPropertyCustomGcodeText("; LAST_GROUP_AFTER"));
         plan.groups.back().events.append_after(group_marker);
 
-        const std::string output = export_with_firmware(print, "gcode.firmware.bambu");
+        const std::string output = export_with_firmware(print, "bambu");
         INFO(output);
         const size_t start_mark = output.find("; START_MARK");
         const size_t open_detector = output.find("M981 S1 P20000 ;open spaghetti detector\n");
@@ -3615,7 +3600,7 @@ TEST_CASE("Bambu firmware opens and closes the spaghetti detector around the pri
         Print print;
         configure_standard_firmware(print);
         print.mutable_printing_plan();
-        const std::string output = export_with_firmware(print, "gcode.firmware.bambu");
+        const std::string output = export_with_firmware(print, "bambu");
         CHECK(count_occurrences(output, "M981 S1 P20000 ;open spaghetti detector\n") == 1);
         CHECK(output.find("M981 S0") == std::string::npos);
     }

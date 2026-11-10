@@ -79,7 +79,7 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
         SOURCES plugins/nematx_firmware/src/NematXFirmwarePlugin.cpp
             plugins/nematx_firmware/src/NematXFirmwareSession.cpp
             plugins/nematx_firmware/src/NematXGCodeReader.cpp
-        PLUGIN_IDS gcode.firmware.nematx gcode.reader.nematx)
+        PLUGIN_IDS nematx gcode.reader.nematx)
     nematx_add_builtin_module(regional_fan
         SOURCES plugins/regional_fan/src/RegionalFan.cpp PLUGIN_IDS nematx_regional_fan)
     # Constraint geometry is already provided by libslic3r; Cost remains a host service.

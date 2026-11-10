@@ -854,7 +854,7 @@ TEST_CASE("Before-layer scripts use the first source extrusion of the upcoming m
                     &mixed_layer->tool_groups.front()))) == scale_i(0.2));
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     const size_t layer_position = output.find(";LAYER_CHANGE\n;Z:0.8\n");
     REQUIRE(layer_position != std::string::npos);
     const std::string expected_script = "; UPCOMING H0.2\n";
@@ -905,7 +905,7 @@ TEST_CASE("Color-change producer uses its tool group's source height",
                 slic3r_api::ConstPrintingToolGroup(reinterpret_cast<const printing_tool_group_handle *>(
                     thick_tool))) == scale_i(0.3));
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     CHECK(output.find("; COLOR_TOOL H0.3\n") != std::string::npos);
 }
 
@@ -976,7 +976,7 @@ TEST_CASE("End-filament scripts at layer transitions describe the outgoing layer
         });
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     const std::string expected = "; BETWEEN L" + std::to_string(transition_layer) +
         " Z0.8 H0.2 T" + next_z_text.str() + "\n";
     const size_t script_position = output.find(expected);
@@ -1022,7 +1022,7 @@ TEST_CASE("Start-filament scripts use the source height of their mixed tool grou
         std::vector<std::string>{"", ""});
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     CHECK(output.find("; START L" + std::to_string(mixed_layer_idx) +
                        " Z0.8 H0.3\n") != std::string::npos);
 }
@@ -1078,7 +1078,7 @@ TEST_CASE("End G-code uses the last source extrusion of a final mixed layer",
         std::vector<std::string>{""});
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     CHECK(output.find("; LAST L" + std::to_string(mixed_layer_idx) +
                        " Z0.8 H0.3\n") != std::string::npos);
 }
@@ -1111,7 +1111,7 @@ TEST_CASE("Final end-filament scripts use the last layer Z for toolchange_z",
         std::vector<std::string>{"; FINAL_FILAMENT Z{toolchange_z}", ""});
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     const std::string marker = "; FINAL_FILAMENT Z";
     const size_t script_position = output.rfind(marker);
     REQUIRE(script_position != std::string::npos);
@@ -1195,7 +1195,7 @@ TEST_CASE("Inline extrusion scripts use source height rather than path attribute
         "; INLINE_SOURCE H{layer_current_height}",
         GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM));
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     const size_t script_position = output.find("; INLINE_SOURCE H0.3\n");
     REQUIRE(script_position != std::string::npos);
     const size_t attribute_position = output.find(";HEIGHT:0.17\n", script_position);
@@ -1233,7 +1233,7 @@ TEST_CASE("End-filament scripts inside a mixed layer retain their scope position
         });
     prepare_mixed_height_gcode_plan(print);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     const size_t end_position = output.find(
         "; INNER_END L" + std::to_string(mixed_layer_idx) + " Z0.8 H0.2\n");
     REQUIRE(end_position != std::string::npos);

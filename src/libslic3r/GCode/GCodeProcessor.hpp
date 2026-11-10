@@ -745,7 +745,7 @@ namespace Slic3r {
     public:
         GCodeProcessor();
 
-        void apply_config(const PrintConfig& config);
+        void apply_config(const PrintConfig& config, GCodeFlavor flavor);
         void set_status_monitor(Print::StatusMonitor* print) { m_status_monitor = print; }
         bgcode::binarize::BinaryData& get_binary_data() { return m_binarizer.get_binary_data(); }
         const bgcode::binarize::BinaryData& get_binary_data() const { return m_binarizer.get_binary_data(); }

@@ -113,9 +113,9 @@ void register_selector_traits(Orchestrator &orchestrator)
     (void)firmware_registered;
     Orchestrator::ExclusiveGroupDefinition firmware;
     firmware.traits = std::move(output);
-    firmware.traits.exclusive_group = "gcode_firmware_plugin";
-    firmware.traits.option_key = "gcode_firmware_plugin";
-    firmware.label = "G-code firmware";
+    firmware.traits.exclusive_group = "gcode_flavor";
+    firmware.traits.option_key = "gcode_flavor";
+    firmware.label = "G-code flavor";
     firmware.tooltip = "Selects the firmware session used by PrintingPlan output writers.";
     firmware.translation_domain = "Slic3r";
     const int32_t firmware_group_registered = orchestrator.register_builtin_exclusive_group(GCODE_FIRMWARE, std::move(firmware));

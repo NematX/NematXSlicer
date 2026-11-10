@@ -1455,8 +1455,8 @@ namespace DoExport {
                 check(_u8L("Tool change G-code"), toolchange_gcode_opt->value);
         }
         if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Between objects G-code (for sequential printing"), config_string(config, "between_objects_gcode"));
-        if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Color Change G-code"), GCodeWriter::get_default_color_change_gcode(config));
-        if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Pause Print G-code"), GCodeWriter::get_default_pause_gcode(config));
+        if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Color Change G-code"), GCodeWriter::get_default_color_change_gcode(config, gcode_flavor(print.full_print_config())));
+        if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Pause Print G-code"), GCodeWriter::get_default_pause_gcode(config, gcode_flavor(print.full_print_config())));
         if (ret.size() < MAX_TAGS_COUNT) check(_u8L("Template Custom G-code"), config_string(config, "template_custom_gcode"));
         if (ret.size() < MAX_TAGS_COUNT) {
             for (const std::string& value : config_string_list(config, "start_filament_gcode")) {
@@ -1620,7 +1620,7 @@ void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorRes
         throw Slic3r::RuntimeError(std::string("G-code export to ") + path + " failed.\nCannot open the file for writing.\n");
     
     if(print->config().remaining_times)
-        check_remaning_times(print->config().gcode_flavor, print->config().remaining_times_type, monitor);
+        check_remaning_times(gcode_flavor(print->full_print_config()), print->config().remaining_times_type, monitor);
 
     try {
         this->_do_export(*print, file, thumbnail_cb);
@@ -1751,13 +1751,13 @@ namespace DoExport {
         }
     };
 
-    static void init_gcode_processor(const PrintConfig& config, GCodeProcessor& processor, bool& silent_time_estimator_enabled)
+    static void init_gcode_processor(const PrintConfig& config, GCodeFlavor flavor, GCodeProcessor& processor, bool& silent_time_estimator_enabled)
     {
-        silent_time_estimator_enabled = (config.gcode_flavor.value == gcfMarlinLegacy || config.gcode_flavor.value == gcfMarlinFirmware)
+        silent_time_estimator_enabled = (flavor == gcfMarlinLegacy || flavor == gcfMarlinFirmware)
                                         && config.silent_mode;
         processor.reset();
         processor.initialize_result_moves();
-        processor.apply_config(config);
+        processor.apply_config(config, flavor);
         processor.enable_stealth_time_estimator(silent_time_estimator_enabled);
     }
 
@@ -1989,7 +1989,7 @@ void GCodeGenerator::_init_multiextruders(const Print &print,
                                           const std::string &custom_gcode) {
 
     //set standby temp for reprap
-    if (std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0) {
+    if (std::set<uint8_t>{gcfRepRap}.count(m_writer.flavor()) > 0) {
         std::set<extruder_index_t> extruders;
         for (const ToolOrdering &tool_ordering : tool_orderings) {
             for (extruder_index_t tool_id : tool_ordering.all_extruders()) {
@@ -2102,7 +2102,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     // this also reset the gcode writer
     this->apply_print_configs(print);
     // modifies m_silent_time_estimator_enabled
-    DoExport::init_gcode_processor(print.config(), *m_processor, m_silent_time_estimator_enabled);
+    DoExport::init_gcode_processor(print.config(), m_writer.flavor(), *m_processor, m_silent_time_estimator_enabled);
 
     //klipper can hide gcode into a macro, so add guessed init gcode to the processor.
     if (this->config().start_gcode_manual) {
@@ -2209,7 +2209,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     this->m_throw_if_canceled();
 
     if (print.config().spiral_vase.value)
-        m_spiral_vase = make_unique<SpiralVase>(print.config());
+        m_spiral_vase = make_unique<SpiralVase>(print.config(), m_writer.flavor());
 
     if (print.config().max_volumetric_extrusion_rate_slope_positive.value > 0 ||
         print.config().max_volumetric_extrusion_rate_slope_negative.value > 0)
@@ -2574,7 +2574,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
          this->_print_first_layer_chamber_temperature(preamble_to_put_start_layer, print, start_all_gcode, initial_extruder_id, false);
 
     // Set bed temperature if the start G-code does not contain any bed temp control G-codes.
-    if(initial_extruder_id != EXTRUDER_ID_UNKNOWN && !this->config().start_gcode_manual && this->config().gcode_flavor != gcfKlipper && print.config().first_layer_bed_temperature.get_at(initial_extruder_id) != 0)
+    if(initial_extruder_id != EXTRUDER_ID_UNKNOWN && !this->config().start_gcode_manual && m_writer.flavor() != gcfKlipper && print.config().first_layer_bed_temperature.get_at(initial_extruder_id) != 0)
          this->_print_first_layer_bed_temperature(preamble_to_put_start_layer, print, start_all_gcode, initial_extruder_id, false);
 
     //init extruders
@@ -2584,7 +2584,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     }
 
     // Set extruder(s) temperature before and after start G-code.
-    if (initial_extruder_id != EXTRUDER_ID_UNKNOWN && !this->config().start_gcode_manual && (this->config().gcode_flavor != gcfKlipper || config_string(print.config(), "start_gcode").empty()) && print.config().first_layer_temperature.get_at(initial_extruder_id) != 0)
+    if (initial_extruder_id != EXTRUDER_ID_UNKNOWN && !this->config().start_gcode_manual && (m_writer.flavor() != gcfKlipper || config_string(print.config(), "start_gcode").empty()) && print.config().first_layer_temperature.get_at(initial_extruder_id) != 0)
         this->_print_first_layer_extruder_temperatures(preamble_to_put_start_layer, print, start_all_gcode, initial_extruder_id, false);
 
     // adds tag for processor
@@ -2633,7 +2633,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                         // TX for most of the firmwares
                         find = true;
                         break;
-                    } else if (*ptr == 'A' && print.config().gcode_flavor.value == gcfKlipper) {
+                    } else if (*ptr == 'A' && m_writer.flavor() == gcfKlipper) {
                         // ACTIVATE_EXTRUDER for klipper (if used)
                         if (std::string::npos != start_gcode.find("ACTIVATE_EXTRUDER", size_t(ptr - start_gcode.data()))) {
                             find = true;
@@ -4037,25 +4037,25 @@ void GCodeGenerator::print_machine_envelope(GCodeOutputStream &file, const Print
    ///     gcfSmoothie, gcfNoExtrusion,
     if (print.config().machine_limits_usage.value == MachineLimitsUsage::EmitToGCode) {
         // some firmware are using mm/sec and some others mm/min for M203 and M566
-        int factor = (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfSmoothie}.count(print.config().gcode_flavor.value) > 0) ? 1 : 60;
-        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier, gcfRepRap,  gcfSprinter}.count(print.config().gcode_flavor.value) > 0)
+        int factor = (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfSmoothie}.count(m_writer.flavor()) > 0) ? 1 : 60;
+        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier, gcfRepRap,  gcfSprinter}.count(m_writer.flavor()) > 0)
             file.write_format("M201 X%d Y%d Z%d E%d ; sets maximum accelerations, mm/sec^2\n",
                 int(print.config().machine_max_acceleration_x.get_at(0) + 0.5),
                 int(print.config().machine_max_acceleration_y.get_at(0) + 0.5),
                 int(print.config().machine_max_acceleration_z.get_at(0) + 0.5),
                 int(print.config().machine_max_acceleration_e.get_at(0) + 0.5));
-        if (std::set<uint8_t>{gcfRepetier}.count(print.config().gcode_flavor.value) > 0)
+        if (std::set<uint8_t>{gcfRepetier}.count(m_writer.flavor()) > 0)
             file.write_format("M202 X%d Y%d ; sets maximum travel acceleration\n",
                 int(machine_limit_value(print.config(), "machine_max_acceleration_travel") + 0.5),
                 int(machine_limit_value(print.config(), "machine_max_acceleration_travel") + 0.5));
-        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier, gcfSmoothie, gcfSprinter}.count(print.config().gcode_flavor.value) > 0)
+        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier, gcfSmoothie, gcfSprinter}.count(m_writer.flavor()) > 0)
             file.write_format("M203 X%d Y%d Z%d E%d ; sets maximum feedrates, %s\n",
                 int(print.config().machine_max_feedrate_x.get_at(0) * factor + 0.5),
                 int(print.config().machine_max_feedrate_y.get_at(0) * factor + 0.5),
                 int(print.config().machine_max_feedrate_z.get_at(0) * factor + 0.5),
                 int(print.config().machine_max_feedrate_e.get_at(0) * factor + 0.5),
                 factor == 60 ? "mm / min" : "mm / sec");
-        if (print.config().gcode_flavor.value == gcfRepRap) {
+        if (m_writer.flavor() == gcfRepRap) {
             file.write_format("M203 X%d Y%d Z%d E%d I%d; sets maximum feedrates, mm/min\n",
                 int(print.config().machine_max_feedrate_x.get_at(0) * factor + 0.5),
                 int(print.config().machine_max_feedrate_y.get_at(0) * factor + 0.5),
@@ -4068,41 +4068,41 @@ void GCodeGenerator::print_machine_envelope(GCodeOutputStream &file, const Print
         // backwards compatibility: https://github.com/prusa3d/PrusaSlicer/issues/1089
         // Legacy Marlin should export travel acceleration the same as printing acceleration.
         // MarlinFirmware has the two separated.
-        if (gcfMarlinLegacy == print.config().gcode_flavor)
+        if (gcfMarlinLegacy == m_writer.flavor())
             // Legacy Marlin uses M204 S[print] T[retract]
             file.write_format("M204 S%d T%d ; sets acceleration (S) and retract acceleration (R), mm/sec^2\n",
                 int(machine_limit_value(print.config(), "machine_max_acceleration_extruding") + 0.5),
                 int(print.config().machine_max_acceleration_retracting.get_at(0) + 0.5));
-        else if (std::set<uint8_t>{gcfMarlinFirmware}.count(print.config().gcode_flavor.value) > 0)
+        else if (std::set<uint8_t>{gcfMarlinFirmware}.count(m_writer.flavor()) > 0)
             file.write_format("M204 P%d R%d T%d ; sets acceleration (P, T) and retract acceleration (R), mm/sec^2\n",
                 int(machine_limit_value(print.config(), "machine_max_acceleration_extruding") + 0.5),
                 int(print.config().machine_max_acceleration_retracting.get_at(0) + 0.5),
                 int(machine_limit_value(print.config(), "machine_max_acceleration_travel") + 0.5));
-        else if (std::set<uint8_t>{gcfRepRap, gcfKlipper, gcfSprinter}.count(print.config().gcode_flavor.value) > 0)
+        else if (std::set<uint8_t>{gcfRepRap, gcfKlipper, gcfSprinter}.count(m_writer.flavor()) > 0)
             // Uses M204 P[print] T[travel]
             file.write_format("M204 P%d T%d ; sets acceleration (P, T), mm/sec^2\n",
                 int(machine_limit_value(print.config(), "machine_max_acceleration_extruding") + 0.5),
                 int(machine_limit_value(print.config(), "machine_max_acceleration_travel") + 0.5));
         // jerk
-        if (std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0)
+        if (std::set<uint8_t>{gcfRepRap}.count(m_writer.flavor()) > 0)
             file.write_format("M566 X%.2lf Y%.2lf Z%.2lf E%.2lf ; sets the jerk limits, mm/min\n",
                 print.config().machine_max_jerk_x.get_at(0) * factor,
                 print.config().machine_max_jerk_y.get_at(0) * factor,
                 print.config().machine_max_jerk_z.get_at(0) * factor,
                 print.config().machine_max_jerk_e.get_at(0) * factor);
-        else if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier}.count(print.config().gcode_flavor.value) > 0)
+        else if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier}.count(m_writer.flavor()) > 0)
             file.write_format("M205 X%.2lf Y%.2lf Z%.2lf E%.2lf ; sets the jerk limits, mm/sec\n",
                 print.config().machine_max_jerk_x.get_at(0),
                 print.config().machine_max_jerk_y.get_at(0),
                 print.config().machine_max_jerk_z.get_at(0),
                 print.config().machine_max_jerk_e.get_at(0));
-        else if (std::set<uint8_t>{gcfSmoothie}.count(print.config().gcode_flavor.value) > 0)
+        else if (std::set<uint8_t>{gcfSmoothie}.count(m_writer.flavor()) > 0)
             file.write_format("M205 X%.2lf Z%.2lf ; sets the jerk limits, mm/sec\n",
                 std::min(print.config().machine_max_jerk_x.get_at(0),
                 print.config().machine_max_jerk_y.get_at(0)),
                 print.config().machine_max_jerk_z.get_at(0));
         // min feedrate
-        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier}.count(print.config().gcode_flavor.value) > 0)
+        if (std::set<uint8_t>{gcfMarlinLegacy, gcfMarlinFirmware, gcfRepetier}.count(m_writer.flavor()) > 0)
             file.write_format("M205 S%d T%d ; sets the minimum extruding and travel feed rate, mm/sec\n",
                 int(print.config().machine_min_extruding_rate.get_at(0) + 0.5),
                 int(print.config().machine_min_travel_rate.get_at(0) + 0.5));
@@ -4202,7 +4202,7 @@ void GCodeGenerator::_print_first_layer_extruder_temperatures(std::string &out, 
     bool autoemit = print.config().autoemit_temperature_commands;
     // Is the bed temperature set by the provided custom G-code?
     int  temp_by_gcode     = -1;
-    bool include_g10   = print.config().gcode_flavor.value == gcfRepRap;
+    bool include_g10   = m_writer.flavor() == gcfRepRap;
     if (!autoemit || custom_gcode_sets_temperature(gcode, 104, 109, include_g10, temp_by_gcode)) {
         // Set the extruder temperature at m_writer, but throw away the generated G-code as it will be written with the custom G-code.
         int temp = print.config().first_layer_temperature.get_at(first_printing_extruder_id);
@@ -4216,7 +4216,7 @@ void GCodeGenerator::_print_first_layer_extruder_temperatures(std::string &out, 
         // Custom G-code does not set the extruder temperature. Do it now.
         // it's useful to do it when there is really multiple extruder, or if reprap because of the G10
         if (!print.config().single_extruder_multi_material.value ||
-            std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0) {
+            std::set<uint8_t>{gcfRepRap}.count(m_writer.flavor()) > 0) {
             // Set temperatures of all the printing extruders.
             for (const Extruder& tool : m_writer.extruders()) {
                 int temp = print.config().first_layer_temperature.get_at(tool.id());
@@ -4329,14 +4329,14 @@ namespace ProcessLayer
             //! FIXME_in_fw show message during print pause
             // FIXME: Why is pause_print_gcode here? Why is it supplied "color_change_extruder"?
             gcode += gcodegen.placeholder_parser_process("pause_print_gcode",
-                                                         GCodeWriter::get_default_pause_gcode(print.config()),
+                                                         GCodeWriter::get_default_pause_gcode(print.config(), gcodegen.writer().flavor()),
                                                          current_extruder_id, &cfg);
             gcode += "\n";
-            if (auto flavor = print.config().gcode_flavor.value; 
+            if (auto flavor = gcodegen.writer().flavor(); 
                 flavor == gcfKlipper || flavor == gcfMarlinFirmware || flavor == gcfMarlinLegacy || flavor == gcfRepetier || flavor == gcfSmoothie || flavor == gcfRepRap)
                 gcode += "M117 Change filament for Extruder " + std::to_string(color_change_extruder) + "\n";
         } else {
-            if (GCodeWriter::get_default_color_change_gcode(print.config()).empty()) {
+            if (GCodeWriter::get_default_color_change_gcode(print.config(), gcodegen.writer().flavor()).empty()) {
                 status_emitter.active_step_add_warning(
                     PrintStateBase::WarningLevel::NON_CRITICAL,
                                                 _u8L("Using a color change gcode, but there isn't one for this printer."
@@ -4344,7 +4344,7 @@ namespace ProcessLayer
             }
             cfg.set_key_value("color_change_extruder", new ConfigOptionInt(int32_t(current_extruder_id))); // placeholder to avoid 'crashs'
             gcode += gcodegen.placeholder_parser_process("color_change_gcode",
-                                                         GCodeWriter::get_default_color_change_gcode(print.config()),
+                                                         GCodeWriter::get_default_color_change_gcode(print.config(), gcodegen.writer().flavor()),
                                                          current_extruder_id, &cfg);
             gcode += "\n";
             //FIXME Tell G-code writer that M600 filled the extruder, thus the G-code writer shall reset the extruder to unretracted state after
@@ -4384,7 +4384,7 @@ namespace ProcessLayer
             if (gcode_type == CustomGCode::PausePrint) { // Pause print
                 const std::string pause_print_msg = custom_gcode.extra;
 
-                if (GCodeWriter::get_default_pause_gcode(print.config()).empty()) {
+                if (GCodeWriter::get_default_pause_gcode(print.config(), gcodegen.writer().flavor()).empty()) {
                     status_emitter.active_step_add_warning(
                         PrintStateBase::WarningLevel::NON_CRITICAL,
                         _u8L("Using a pause gcode, but there isn't one for this printer."
@@ -4395,7 +4395,7 @@ namespace ProcessLayer
                 gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Pause_Print) + "\n";
                 //! FIXME_in_fw show message during print pause
                 if (!pause_print_msg.empty())
-                    if (auto flavor = print.config().gcode_flavor.value; 
+                    if (auto flavor = gcodegen.writer().flavor(); 
                         flavor == gcfKlipper ||
                         flavor == gcfMarlinFirmware || flavor == gcfMarlinLegacy || flavor == gcfRepetier ||
                         flavor == gcfSmoothie || flavor == gcfRepRap)
@@ -4404,7 +4404,7 @@ namespace ProcessLayer
                 DynamicConfig cfg;
                 cfg.set_key_value("color_change_extruder", new ConfigOptionInt(int(current_extruder_id)));
                 gcode += gcodegen.placeholder_parser_process("pause_print_gcode",
-                                                             GCodeWriter::get_default_pause_gcode(print.config()),
+                                                             GCodeWriter::get_default_pause_gcode(print.config(), gcodegen.writer().flavor()),
                                                              current_extruder_id, &cfg);
             } else {
                 // add tag for processor
@@ -5610,7 +5610,7 @@ bool GCodeGenerator::shall_print_this_extrusion_collection(const ExtrudeArgs &pr
 void GCodeGenerator::apply_print_configs(const Print &print)
 {
     //apply also default region & object, just in case, as they won't be applied since the first extrusion on a region / the first layer process on an object
-    m_writer.apply_print_config(print.config());
+    m_writer.apply_print_config(print.config(), gcode_flavor(print.full_print_config()));
     m_writer.apply_print_region_config(print.default_region_config());
     m_config.apply(print.config());
     m_config.apply(print.default_object_config());
@@ -7687,7 +7687,7 @@ void GCodeGenerator::apply_property(const ExtrusionPropertySpecialCommand& comma
                                                                             // (1 = 100%)
         // backup speed_override
         // This is only supported by Prusa at this point (https://github.com/prusa3d/PrusaSlicer/issues/3114)
-        if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware)
+        if (m_writer.flavor() == gcfMarlinLegacy || m_writer.flavor() == gcfMarlinFirmware)
             visitor_gcode += "M220 B\n";
         // set speed override
         {
@@ -7696,7 +7696,7 @@ void GCodeGenerator::apply_property(const ExtrusionPropertySpecialCommand& comma
         break;
     case ExtrusionPropertySpecialCommand::Code::RESTORE_SPEED_RATIO:
         // Let the firmware restore the active speed override value.
-        if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware) {
+        if (m_writer.flavor() == gcfMarlinLegacy || m_writer.flavor() == gcfMarlinFirmware) {
             visitor_gcode += "M220 R\n";
         } else {
             visitor_gcode += "M220 S100\n";
@@ -7739,7 +7739,7 @@ void GCodeGenerator::apply_property(const ExtrusionPropertySpecialCommand& comma
             DynamicConfig cfg;
             cfg.set_key_value("color_change_extruder", new ConfigOptionInt(int(current_extruder_id)));
             visitor_gcode += this->placeholder_parser_process("pause_print_gcode",
-                                                                   GCodeWriter::get_default_pause_gcode(config()),
+                                                                   GCodeWriter::get_default_pause_gcode(config(), m_writer.flavor()),
                                                                    current_extruder_id, &cfg);
         }
         visitor_gcode += "\n";
@@ -7753,8 +7753,8 @@ void GCodeGenerator::apply_property(const ExtrusionPropertySpecialCommand& comma
     case ExtrusionPropertySpecialCommand::Code::ENABLE_PREVIEW:
         m_no_gcodeviewer_tag = false; break;
     case ExtrusionPropertySpecialCommand::Code::EXTRUDER_CURRENT: // set extruder trimpot to extra_data
-        if (config().gcode_flavor.value != gcfKlipper) {
-            if (config().gcode_flavor.value == gcfRepRap || config().gcode_flavor.value == gcfSprinter) {
+        if (m_writer.flavor() != gcfKlipper) {
+            if (m_writer.flavor() == gcfRepRap || m_writer.flavor() == gcfSprinter) {
                 visitor_gcode += "M906 E";
             } else {
                 visitor_gcode += "M907 E";
@@ -10124,7 +10124,7 @@ std::string GCodeGenerator::generate_travel_gcode(
         previous_point = gcode_point;
     }
 
-    if (! GCodeWriter::supports_separate_travel_acceleration(config().gcode_flavor)) {
+    if (! GCodeWriter::supports_separate_travel_acceleration(m_writer.flavor())) {
         // In case that this flavor does not support separate print and travel acceleration,
         // reset acceleration to default.
         this->m_writer.set_travel_acceleration(acceleration);

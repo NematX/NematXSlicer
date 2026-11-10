@@ -1715,7 +1715,7 @@ TEST_CASE("Cost seam visibility phases reach production STL export",
         {"seam_travel_cost", "100%"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"skirts", "0"}, {"brim_width", "0"}, {"binary_gcode", "0"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     const std::vector<E2E::Domain> domains = {
         {{"seam_visibility"}, {{"visibility-off", {{"seam_visibility", "0"}}}}},
         {{"seam_angle_cost"}, {{"angle-off", {{"seam_angle_cost", "0%"}}}}},

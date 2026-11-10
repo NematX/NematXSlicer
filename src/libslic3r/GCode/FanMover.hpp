@@ -93,7 +93,7 @@ public:
         , kickstart(kickstart)
         , m_writer(writer)
     {
-        m_parser.apply_config(config);
+        m_parser.apply_config(config, writer.flavor());
     }
 
     // Adds the gcode contained in the given string to the analysis and returns it after removing the workcodes

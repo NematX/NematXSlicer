@@ -358,8 +358,8 @@ GCodeExportQuery BambuGCodeExporter::query_impl(const Print &print, const Config
 {
     GCodeExportQuery query;
     query.status = RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE;
-    if (firmware != "gcode.firmware.bambu") {
-        query.message = "Bambu sliced files require gcode.firmware.bambu.";
+    if (firmware != "bambu") {
+        query.message = "Bambu sliced files require the bambu firmware.";
         return query;
     }
     query.message = png_incompatibility(OrchestratorView(m_orchestrator), print, config);

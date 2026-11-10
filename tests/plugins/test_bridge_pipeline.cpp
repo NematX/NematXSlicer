@@ -196,7 +196,7 @@ DynamicPrintConfig bridge_config(bool supports, const char *ordering)
         {"bridged_infill_margin", "1"}, {"bridge_flow_ratio", "150%"}, {"fill_density", "30%"},
         {"support_material_contact_distance", "0.05"}, {"support_material_interface_spacing", "0"},
         {"perimeters", "2"}, {"seam_visibility", "0"}, {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"machine_limits_usage", "ignore"},
+        {"gcode_flavor", "marlin2"}, {"machine_limits_usage", "ignore"},
         {"use_relative_e_distances", "1"}, {"retract_length", "0,0"}, {"retract_restart_extra", "0,0"},
         {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1,1"},
          {"gcode_precision_e", "5"}, {"bridge_volume_compensation", "bridge.finalize_volume"}});

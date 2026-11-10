@@ -543,7 +543,7 @@ TEST_CASE("Layer height generators export a linear small-nozzle STL matrix", "[p
         baseline.set_deserialize_strict({{"skirts", "0"}, {"brim_width", "0"},
             {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
             {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-            {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+            {"gcode_flavor", "marlin2"}});
         const std::vector<E2E::Case> cases = E2E::linear_cases(host, {plugin_id}, baseline, domains);
         for (const E2E::Case &test : cases) {
             CAPTURE(plugin_id, test.name);

@@ -19,7 +19,7 @@ the exhaust fan. The last two are not tool fans, so the Bambu Reader never
 publishes them as RAW_GCODE_READER_ITEM_FAN_SPEED, whose target is a tool.
 
 This header is the contract between `gcode.reader.bambu` (it publishes the items)
-and `gcode.firmware.bambu` (its session exports and reads them around a custom
+and `bambu` (its session exports and reads them around a custom
 script). Each item has target 0 and holds a percentage in 0..100, like FAN_SPEED.
 
 The items are private to the Bambu schema: a state may carry them only when its

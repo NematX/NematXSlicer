@@ -830,7 +830,7 @@ TEST_CASE("Perimeter bridge removal exports a linear narrow-span STL matrix", "[
     DynamicPrintConfig baseline = Slic3r::Test::SupportGrid::config("grid", false, 3, true);
     baseline.set_deserialize_strict({{"dont_support_bridges", "1"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"use_relative_e_distances", "0"}, {"filament_diameter", "1.75,1.75"}});
     const std::vector<E2E::Domain> domains{
         {{"dont_support_bridges"}, {{"support retained", {{"dont_support_bridges", "0"}}}}},

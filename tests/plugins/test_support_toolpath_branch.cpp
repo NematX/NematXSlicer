@@ -953,7 +953,7 @@ TEST_CASE("Tree tips export deposits with conserved support volume", "[plugins][
     DynamicPrintConfig config = SG::config("organic", false, 0, true);
     config.set_deserialize_strict({{"support_tree_tip_diameter", "0.8"}, {"support_material_extrusion_width", "0.8"},
         {"seam_visibility", "0"}, {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"machine_limits_usage", "ignore"},
+        {"gcode_flavor", "marlin2"}, {"machine_limits_usage", "ignore"},
         {"use_relative_e_distances", "1"}, {"retract_length", "0,0"}, {"retract_restart_extra", "0,0"},
         {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1.3,1.3"}, {"gcode_precision_e", "5"}});
     Print print;

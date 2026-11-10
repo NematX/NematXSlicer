@@ -347,7 +347,7 @@ std::string export_marker_comment_fixture(bool gcode_comments)
     append_path_extrusion(
         layer.tool_groups.front(),
         marker_test_path(0.0, 1.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 std::unique_ptr<ExtrusionPath> marker_test_wipe(double start_x, double end_x)
@@ -419,7 +419,7 @@ std::string export_wipe_marker_fixture(bool gcode_comments, bool trailing_printa
             tool_group,
             marker_test_path(2.0, 3.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
     }
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 std::unique_ptr<ExtrusionEntity> marker_test_composed_arc_loop()
@@ -480,7 +480,7 @@ std::string export_composed_seam_fixture(bool gcode_comments,
                 20.f, 500.f, -1.f, -1.f, -1.f,
                 ExtrusionRole::ExternalPerimeter));
     }
-    return export_with_firmware(print, "gcode.firmware.marlin2");
+    return export_with_firmware(print, "marlin2");
 }
 
 /* Add the minimum plan hierarchy needed by STEP_GCODE validation tests. */
@@ -646,14 +646,14 @@ TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode d
     CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     // Standard firmware encodes plugin-owned percentages without rewriting
     // their mode; policy identity has no effect on firmware command syntax.
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     CHECK(output.find("M106 S89\n") != std::string::npos);
     CHECK(fan.mode == custom);
     // Forged or unregistered modes and malformed active C writes cannot export.
     fan.mode = 42;
     CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     CHECK(error.find("EPropertyFan") != std::string::npos);
-    CHECK_THROWS_AS(export_with_firmware(print, "gcode.firmware.marlin2"), RuntimeError);
+    CHECK_THROWS_AS(export_with_firmware(print, "marlin2"), RuntimeError);
     fan.mode = ORCHESTRATOR_RUNTIME_ID_INVALID;
     CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     fan.mode = FAN_REQUEST_MODE_AUTOMATIC;
@@ -1579,7 +1579,7 @@ TEST_CASE("Firmware prints global and instance wipe towers outside object labels
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.gcode_label_objects.value = style;
-    config.gcode_flavor.value = klipper ? gcfKlipper : gcfMarlinFirmware;
+    config.set_deserialize_strict("gcode_flavor", klipper ? "klipper" : "marlin2");
     PrintingPlan plan = build_printing_plan_by_object(print);
     PluginStorage storage;
     slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
@@ -1694,7 +1694,7 @@ TEST_CASE("Klipper object declarations use the PrintingPlan instance catalog",
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.gcode_label_objects.value = LabelObjectsStyle::Firmware;
-    config.gcode_flavor.value = gcfKlipper;
+    config.set_deserialize_strict("gcode_flavor", "klipper");
     PrintingPlan plan = build_printing_plan_by_object(print);
     PluginStorage storage;
     slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
@@ -1803,7 +1803,7 @@ TEST_CASE("Default firmware emits ordered semantic marker triplets for layers",
         marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.25f));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -1831,7 +1831,7 @@ TEST_CASE("Default firmware rewrites HEIGHT before same-height layer extrusions"
         second_layer.tool_groups.front(),
         marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     CHECK(semantic_marker_lines(output) == std::vector<std::string>{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -1886,7 +1886,7 @@ TEST_CASE("Default firmware uses the Z gap when a layer group has no source laye
         second_layer.tool_groups.front(),
         marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.3f));
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     CHECK(semantic_marker_lines(output) == std::vector<std::string>{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -1940,7 +1940,7 @@ TEST_CASE("Default firmware layer change describes mixed-height print Z groups",
         marker_test_path(2.0, 3.0, ExtrusionRole::SupportMaterial, 0.4f, 0.3f));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.4", ";MAX_LAYER_HEIGHT:0.2",
@@ -2121,7 +2121,7 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
 
     // Export resumes the slicing pipeline through production ordering and the
     // selected plugin writer. Always remove both output files, including on failure.
-    select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    select_printing_plan_firmware(print, "marlin2");
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
     std::string output;
@@ -2267,7 +2267,7 @@ TEST_CASE("Default firmware emits TYPE WIDTH and HEIGHT before printable geometr
         marker_test_path(0.0, 1.0, ExtrusionRole::Perimeter, 0.45f, 0.2f));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -2304,7 +2304,7 @@ TEST_CASE("Default firmware deduplicates identical consecutive printable markers
         marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -2369,7 +2369,7 @@ TEST_CASE("Default firmware emits only required intra-layer marker transitions",
         marker_test_path(3.0, 4.0, ExtrusionRole::InternalInfill, 0.45f, 0.25f));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -2414,7 +2414,7 @@ TEST_CASE("Default firmware retains printable markers across travel and E transi
         new ExtrusionEntity(std::move(children), false, true, true)));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     const std::vector<std::string> expected{
         ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
@@ -2533,7 +2533,7 @@ TEST_CASE("Default firmware seam_marks_loop_start using serialized coordinates",
     append_path_extrusion(layer.tool_groups.front(), std::move(path));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     CHECK(seam_marker_lines(output) ==
           std::vector<std::string>{";SEAM:4.322:5.432"});
@@ -2594,7 +2594,7 @@ TEST_CASE("Active writer preserves a finalized legal seam after rotation is cons
     path->set_can_rotate(false);
     append_path_extrusion(layer.tool_groups.front(), std::move(path));
     const ExtrusionEntity *root = layer.tool_groups.front().extrusions.back().root.get();
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:5"});
     bool checked_first_extrusion = false;
@@ -2633,7 +2633,7 @@ TEST_CASE("Active writer does not recut a closed fixed MultiPath or its canonica
         REQUIRE(root->child(0).can_rotate());
         append_path_extrusion(layer.tool_groups.front(), std::move(root));
         const ExtrusionEntity *before = layer.tool_groups.front().extrusions.back().root.get();
-        const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+        const std::string output = export_with_firmware(print, "marlin2");
         INFO(output);
         CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:9"});
         bool checked_first_extrusion = false;
@@ -2665,7 +2665,7 @@ TEST_CASE("Default firmware omits seam markers for ineligible roots",
             layer.tool_groups.front(),
             marker_test_path(0.0, 1.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
         CHECK(seam_marker_lines(export_with_firmware(
-                  print, "gcode.firmware.marlin2")).empty());
+                  print, "marlin2")).empty());
     }
 
     SECTION("empty root") {
@@ -2676,7 +2676,7 @@ TEST_CASE("Default firmware omits seam markers for ineligible roots",
             layer.tool_groups.front(),
             std::unique_ptr<ExtrusionEntity>(new ExtrusionEntity(true)));
         CHECK(seam_marker_lines(export_with_firmware(
-                  print, "gcode.firmware.marlin2")).empty());
+                  print, "marlin2")).empty());
     }
 
     SECTION("closed point without a segment") {
@@ -2689,7 +2689,7 @@ TEST_CASE("Default firmware omits seam markers for ineligible roots",
                 ArcPolyline(Points{Point::new_scale(1.0, 2.0)}),
                 20.f, 500.f));
         CHECK(seam_marker_lines(export_with_firmware(
-                  print, "gcode.firmware.marlin2")).empty());
+                  print, "marlin2")).empty());
     }
 
     SECTION("sortable non-loop collection") {
@@ -2706,7 +2706,7 @@ TEST_CASE("Default firmware omits seam markers for ineligible roots",
             std::unique_ptr<ExtrusionEntity>(
                 new ExtrusionEntity(std::move(children), true, true, false)));
         CHECK(seam_marker_lines(export_with_firmware(
-                  print, "gcode.firmware.marlin2")).empty());
+                  print, "marlin2")).empty());
     }
 }
 
@@ -4597,7 +4597,7 @@ TEST_CASE("Tool-group semantic selection suppresses the automatic firmware comma
     target.events.append_before(std::move(*command));
 
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
     INFO(output);
     CHECK(count_command_lines(output, "T0") == 1);
     CHECK(count_command_lines(output, "T1") == 1);
@@ -5349,7 +5349,7 @@ TEST_CASE("Preamble leaves automatic heating to the temperature plugin",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool mmu = GENERATE(false, true);
-    const char *firmware_id = GENERATE("gcode.firmware.marlin2", "gcode.firmware.klipper");
+    const char *firmware_id = GENERATE("marlin2", "klipper");
     Print print;
     select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
@@ -5369,11 +5369,11 @@ TEST_CASE("Preamble leaves automatic heating to the temperature plugin",
     CHECK(text.find("S205") == std::string::npos);
     CHECK(text.find("M109") == std::string::npos);
     CHECK(text.find("M190") == std::string::npos);
-    const std::string initial_selection = std::string(firmware_id) == "gcode.firmware.klipper" && !mmu ?
+    const std::string initial_selection = std::string(firmware_id) == "klipper" && !mmu ?
         "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n" : "T1\n";
     CHECK(preamble.find(initial_selection + "G92 E0\n") != std::string::npos);
     if (!mmu) {
-        if (std::string(firmware_id) == "gcode.firmware.marlin2")
+        if (std::string(firmware_id) == "marlin2")
             CHECK(preamble.find("T0\n") == std::string::npos);
         else
             CHECK(preamble.find("ACTIVATE_EXTRUDER EXTRUDER=extruder\n") == std::string::npos);
@@ -5666,7 +5666,7 @@ TEST_CASE("Text envelope owns mixed thumbnail requests and ignores camera geomet
 
     std::vector<slic3r_api::GCodeThumbnailRequest> unknown = {{render, "missing.encoder", RAW_GCODE_THUMBNAIL_FILE_PREFIX, true}};
     CHECK_THROWS(slic3r_api::build_gcode_text_envelope(orch, view, config_view, renderer.c_renderer(), unknown, &metadata));
-    unknown.front().provider_id = "gcode.firmware.marlin2";
+    unknown.front().provider_id = "marlin2";
     CHECK_THROWS(slic3r_api::build_gcode_text_envelope(orch, view, config_view, renderer.c_renderer(), unknown, &metadata));
 }
 TEST_CASE("Thumbnail configuration preserves serialized ids and binary codec limits",

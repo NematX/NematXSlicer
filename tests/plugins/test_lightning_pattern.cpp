@@ -960,7 +960,7 @@ TEST_CASE("Lightning exports through the existing G-code pipeline", "[plugins][l
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("fill_pattern", "lightning");
     config.set_deserialize_strict("fill_density", "20%");
-    config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    config.set_deserialize_strict("gcode_flavor", "marlin2");
     PreparedPerimeterPrint prepared;
     Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
     const boost::filesystem::path path = Slic3r::Test::GCode::temporary_gcode_path();

@@ -334,7 +334,7 @@ TEST_CASE("Custom height semantic tags precede exactly one script payload",
     const ExtrusionEntity &events = layer.tool_groups.front().events.before();
     REQUIRE(events.child_count() == 3);
     const std::string output = export_with_firmware(
-        print, "gcode.firmware.marlin2");
+        print, "marlin2");
 
     const std::string color = ";COLOR_CHANGE,T0,#112233\n";
     const std::string pause = ";PAUSE_PRINT\n";

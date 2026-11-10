@@ -42,7 +42,7 @@ convention as `PreparedMove`, and is also used by the built-in Klipper firmware.
 
 Publish a fresh session through `make_gcode_firmware_instance()` from a
 `GCODE_FIRMWARE` provider. The session owns export-local state. Select the provider
-through `gcode_firmware_plugin`; no `gcode_flavor` compatibility is introduced here.
+through `gcode_flavor`, whose values are the provider ids.
 
 The default session is a reusable policy, not a restriction of the firmware ABI:
 a provider may implement `GCodeFirmwareSession` directly when its state policy is

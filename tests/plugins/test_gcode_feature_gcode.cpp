@@ -262,7 +262,7 @@ TEST_CASE("Feature G-code follows explicit role transitions without duplicating 
     CHECK(travel_root.child(0).child_count() == 0);
     CHECK(travel_root.child(1).child_count() == 0);
 
-    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string output = export_with_firmware(print, "marlin2");
     INFO(output);
     CHECK(count_occurrences(output, "; FEATURE ") == 3);
     const size_t first_feature = output.find("; FEATURE Unknown>Perimeter\n");

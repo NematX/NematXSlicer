@@ -254,7 +254,7 @@ TEST_CASE("headless engine performs a real FFF export", "[rest_engine]")
         {"layer_height", "0.2"},
         {"first_layer_height", "0.2"},
         {"nozzle_diameter", "0.4"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"fill_density", "0%"},
         {"seam_visibility", "0"},
         {"skirts", "0"},

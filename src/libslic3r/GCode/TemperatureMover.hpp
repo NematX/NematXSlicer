@@ -95,7 +95,7 @@ public:
         , relative_e(relative_e)
         , m_writer(writer)
     {
-        m_parser.apply_config(config);
+        m_parser.apply_config(config, writer.flavor());
         m_max_seconds_delay = 0;
         for (double speed : heating_speed) {
             float delay = 300.f / float(speed);

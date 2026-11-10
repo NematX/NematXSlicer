@@ -110,7 +110,7 @@ public:
         Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
         m_config = DynamicPrintConfig::full_print_config();
         m_config.set_deserialize_strict({
-            {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+            {"gcode_flavor", "marlin2"},
             {"gcode_exporter_plugin", "gcode.exporter.simple"},
             {"seam_visibility", "0"},
             {"binary_gcode", "1"}});

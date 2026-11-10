@@ -1786,10 +1786,9 @@ stored list is sorted by `z`.
 `warnings`, each `{"item": i, "reason": r}` or a bare `{"reason": r}`:
 `empty_printer_gcode` (an advisory check: for `color_change` and `pause`, the
 `color_change_gcode` or `pause_print_gcode` option when set, otherwise the
-legacy `gcode_flavor` default; for `template`, the raw `template_custom_gcode`;
+legacy writer's default for `gcode_flavor`; for `template`, the raw `template_custom_gcode`;
 an empty value is accepted). This warning still uses the legacy writer's
-defaults, not `gcode_firmware_plugin`, so it can disagree with the selected
-firmware's actual fallback. It does not suppress an item or change the output.
+defaults, not the selected firmware's own fallback, so the two can disagree. It does not suppress an item or change the output.
 Other warnings are
 `above_objects` (the scene changed and now ends below the item),
 `sequential_print` (sequential printing was enabled after the list was set;
@@ -1812,8 +1811,8 @@ A `tool_change` is processed separately and applies in addition to these items.
 Layers are only known when slicing, so the API does not report this mapping.
 A non-empty `pause_print_gcode` supplies the whole pause script; use
 `M117 {pause_message}` followed by a pause command to display the supplied message.
-With an empty script, the selected `gcode_firmware_plugin` supplies its fallback.
-For `gcode.firmware.marlin2`, that is `M0` followed by the optional pause message;
+With an empty script, the firmware selected by `gcode_flavor` supplies its fallback.
+For `marlin2`, that is `M0` followed by the optional pause message;
 the color-change fallback is `M600`.
 
 ### 5.22. Variable layer height (1.1)

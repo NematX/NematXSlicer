@@ -2084,7 +2084,7 @@ TEST_CASE("A print with support exports support moves at the support speeds",
     DynamicPrintConfig config = Slic3r::Test::SupportGrid::config("grid", false, 3, true);
     config.set_deserialize_strict({
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
         {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
         {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},
@@ -2701,9 +2701,9 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
     CHECK(fan_def->invalidates_step == STEP_GCODE);
     CHECK(std::find(defined_keys.begin(), defined_keys.end(), "fan_printer_min_speed") == defined_keys.end());
     CHECK(fan_def->translation_domain == "Slic3r");
-    for (const char *id : {"gcode.firmware.marlin2", "gcode.firmware.marlin1",
-                           "gcode.firmware.klipper", "gcode.firmware.prusa",
-                           "gcode.firmware.reprap", "gcode.firmware.sprinter"}) {
+    for (const char *id : {"marlin2", "marlin",
+                           "klipper", "prusa",
+                           "reprapfirmware", "sprinter"}) {
         INFO(id);
         Plugin *firmware_plugin = Orchestrator::instance().get_plugin(id);
         REQUIRE(firmware_plugin != nullptr);
@@ -4187,7 +4187,7 @@ TEST_CASE("Composable fan stages pass their declared linear STL export catalogue
     baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"default_fan_speed", "20"}, {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
         {"fan_below_layer_time", "0"}, {"slowdown_below_layer_time", "0"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
     REQUIRE_FALSE(ordering_key.empty());
     baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
@@ -4255,7 +4255,7 @@ TEST_CASE("Short-layer slowdown and cooling pass their declared linear STL expor
         {"slowdown_below_layer_time", "5"}, {"min_print_speed", "10"}, {"max_speed_reduction", "90%"},
         {"travel_speed", "100"}, {"default_fan_speed", "20"}, {"max_fan_speed", "100"},
         {"fan_below_layer_time", "60"}, {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
     REQUIRE_FALSE(ordering_key.empty());
     baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
@@ -4348,7 +4348,7 @@ TEST_CASE("Default speed declared settings pass a linear STL export matrix",
     Orchestrator &host = Orchestrator::instance();
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
     REQUIRE_FALSE(ordering_key.empty());
     baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
@@ -4415,7 +4415,7 @@ TEST_CASE("First-layer flow declared settings pass a linear STL export matrix",
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"first_layer_flow_ratio", "125%"}, {"filament_first_layer_flow_ratio", "120%"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
     REQUIRE_FALSE(ordering_key.empty());
     baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");

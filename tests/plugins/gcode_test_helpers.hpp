@@ -140,7 +140,7 @@ std::unique_ptr<ExtrusionEntity> special_command_entity(
 // writer needs no selection: it is the active STEP_GCODE plugin by default.
 void select_printing_plan_firmware(
     Print &print,
-    const std::string &firmware_id = "gcode.firmware.marlin2");
+    const std::string &firmware_id = "marlin2");
 slic3r_api::PrintingPlan printing_plan_view(Print &print);
 std::string export_with_firmware(Print &print, const std::string &firmware_id);
 void run_file_writer_with_firmware(

@@ -75,7 +75,7 @@ TEST_CASE("Perimeter generators pass their linear STL export catalogues",
         DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
         baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
             {"step_perimeter_plugin", provider}, {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-            {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+            {"gcode_flavor", "marlin2"}});
         const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
         REQUIRE_FALSE(ordering_key.empty());
         baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");

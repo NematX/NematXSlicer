@@ -29,7 +29,7 @@ TEST_CASE("GCodeReader preserves its stateful callbacks after lexical extraction
     config.use_relative_e_distances.value = true;
 
     GCodeReader reader;
-    reader.apply_config(config);
+    reader.apply_config(config, gcfMarlinFirmware);
     uint32_t callback_count = 0;
     reader.parse_buffer(
         "G1 X1 A2\nG1 X3 A4\n",

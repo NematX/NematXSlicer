@@ -535,7 +535,7 @@ void initialize_fff_print(Print &print, Model &model, const std::string &exporte
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(1);
     config.set_deserialize_strict({
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"binary_gcode", "1"}});
     config.set_deserialize_strict("gcode_exporter_plugin", exporter_id);
     for (const std::pair<std::string, std::string> &setting : settings)
@@ -1270,7 +1270,7 @@ TEST_CASE("G-code exporter is the visible FFF profile service", "[plugins][gcode
     for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file("printer_fff.ui")) {
         if (fragment.fragment_id == "gcode_exporter_plugin") {
             found_selector_fragment = true;
-            CHECK(fragment.content.find("insert$aftersetting$gcode_firmware_plugin:gcode_exporter_plugin") !=
+            CHECK(fragment.content.find("insert$aftersetting$gcode_flavor:gcode_exporter_plugin") !=
                   std::string::npos);
         }
     }
@@ -1279,17 +1279,14 @@ TEST_CASE("G-code exporter is the visible FFF profile service", "[plugins][gcode
         "printer_fff.ui",
         "page:General:printer\n"
         "group:Firmware\n"
-        "\tsetting:gcode_firmware_plugin\n"
         "\tsetting:gcode_flavor\n");
-    const size_t firmware_position = merged_layout.find("setting:gcode_firmware_plugin");
+    const size_t firmware_position = merged_layout.find("setting:gcode_flavor");
     const size_t exporter_position = merged_layout.find("setting:gcode_exporter_plugin");
-    const size_t flavor_position = merged_layout.find("setting:gcode_flavor");
     CHECK(merged_layout.find("setting:step_gcode_plugin") == std::string::npos);
     REQUIRE(firmware_position != std::string::npos);
     REQUIRE(exporter_position != std::string::npos);
-    REQUIRE(flavor_position != std::string::npos);
     CHECK(firmware_position < exporter_position);
-    CHECK(exporter_position < flavor_position);
+    CHECK(merged_layout.find("setting:gcode_flavor", firmware_position + 1) == std::string::npos);
     for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file("print.ui"))
         CHECK(fragment.fragment_id != "gcode_exporter_plugin");
 }
@@ -1359,7 +1356,7 @@ TEST_CASE("G-code export copies the reference without rerunning slicing", "[plug
 
         DynamicPrintConfig firmware_config = print.full_print_config();
         firmware_config.set_deserialize_strict("gcode_exporter_plugin", "gcode.exporter.simple");
-        firmware_config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.prusa");
+        firmware_config.set_deserialize_strict("gcode_flavor", "prusa");
         CHECK(print.apply(model, firmware_config) == PrintBase::APPLY_STATUS_INVALIDATED);
         CHECK_FALSE(print.is_step_done(STEP_GCODE));
     }
@@ -1643,7 +1640,7 @@ TEST_CASE("Exporter QUERY borrows the Print only through its payload", "[plugins
         run_ctx_gcode_export context = {};
         context.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
         context.config = ApiHost::to_config_handle(&print.full_print_config());
-        context.firmware_plugin_id = "gcode.firmware.marlin2";
+        context.firmware_plugin_id = "marlin2";
         size_t answers = 0;
         context.query_callback_context = &answers;
         // Count accepted answers without retaining the borrowed result.
@@ -2853,7 +2850,7 @@ TEST_CASE("G-code export widths match legacy regions and first-layer options", "
         ScopedTestDirectory directory;
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_num_extruders(1);
-        config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        config.set_deserialize_strict({{"gcode_flavor", "marlin2"},
                                        {"gcode_exporter_plugin", "gcode.exporter.simple"},
                                        {"binary_gcode", "0"},
                                        {"layer_height", "0.20"},
@@ -2986,7 +2983,7 @@ TEST_CASE("BIQU thumbnails stay at byte zero with firmware object definitions",
     Print print;
     Model model;
     initialize_fff_print(print, model, "gcode.exporter.simple",
-                         {{"gcode_firmware_plugin", "gcode.firmware.klipper"}, {"gcode_label_objects", "firmware"},
+                         {{"gcode_flavor", "klipper"}, {"gcode_label_objects", "firmware"},
                           {"thumbnails", "4x4"}, {"thumbnails_format", "BIQU"}});
     print.process();
     uint32_t calls = 0;
@@ -3125,24 +3122,24 @@ TEST_CASE("Built-in selector groups resolve a firmware that is not the first", "
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &orchestrator = Orchestrator::instance();
     ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
-    const char *const firmware_id = "gcode.firmware.klipper";
+    const char *const firmware_id = "klipper";
     Print print;
     DynamicPrintConfig plain = DynamicPrintConfig::full_print_config();
-    REQUIRE(plain.opt_serialize("gcode_firmware_plugin") != firmware_id);
+    REQUIRE(plain.opt_serialize("gcode_flavor") != firmware_id);
     // The target must not be the first active firmware, or the test would pass without the group lookup.
     REQUIRE(orchestrator.get_active_plugins_for_step(GCODE_FIRMWARE).front()->get_id() != firmware_id);
     DynamicPrintConfig config = plain;
-    config.set_deserialize_strict("gcode_firmware_plugin", firmware_id);
+    config.set_deserialize_strict("gcode_flavor", firmware_id);
     config.set_deserialize_strict(k_gcode_exporter_option_key, k_probe_exporter_id);
 
     const Plugin *grouped = Steps::selected_active_plugin_from_group(
-        orchestrator, GCODE_FIRMWARE, "gcode_firmware_plugin", &config);
+        orchestrator, GCODE_FIRMWARE, "gcode_flavor", &config);
     REQUIRE(grouped != nullptr);
     CHECK(grouped->get_id() == firmware_id);
 
     orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&orchestrator);
     const orchestrator_plugin_handle *selected = orchestrator_select_plugin(
-        handle, ApiHost::to_config_handle(&config), GCODE_FIRMWARE, "gcode_firmware_plugin");
+        handle, ApiHost::to_config_handle(&config), GCODE_FIRMWARE, "gcode_flavor");
     REQUIRE(selected != nullptr);
     CHECK(std::string(orchestrator_plugin_id(selected)) == firmware_id);
 
@@ -3214,9 +3211,10 @@ TEST_CASE("G-code exporter selection is strict and its options do not invalidate
     // only by an export request, and naming it would replay STEP_GCODE through the full-configuration diff of Print::apply().
     REQUIRE(k_probe_option_declared_step == STEP_GCODE);
     CHECK(exporter_option->invalidates_step == STEP_NONE);
-    const ConfigOptionDef *firmware_option = PrintConfigDef::instance().get("gcode_firmware_plugin");
+    const ConfigOptionDef *firmware_option = PrintConfigDef::instance().get("gcode_flavor");
     REQUIRE(firmware_option != nullptr);
-    CHECK(firmware_option->invalidates_step == STEP_GCODE);
+    // The object catalogue reads the flavor for Klipper names, so a change replays ordering.
+    CHECK(firmware_option->invalidates_step == STEP_ORDERING);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     CHECK_THROWS(config.set_deserialize_strict("gcode_exporter_plugin", "test.gcode.exporter.missing"));
@@ -3513,7 +3511,7 @@ TEST_CASE("An exporter owns no invalidation step", "[plugins][gcode][exporter][e
     const Plugin *builtin = orchestrator.get_plugin(k_default_gcode_exporter_id);
     const Plugin *binary = orchestrator.get_plugin("gcode.exporter.bgcode");
     const Plugin *probe = orchestrator.get_plugin(k_probe_exporter_id);
-    const Plugin *firmware = orchestrator.get_plugin("gcode.firmware.marlin2");
+    const Plugin *firmware = orchestrator.get_plugin("marlin2");
     REQUIRE(builtin != nullptr);
     REQUIRE(binary != nullptr);
     REQUIRE(probe != nullptr);
@@ -3953,7 +3951,7 @@ void initialize_two_tool_print(Print &print, Model &model)
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
     config.set_deserialize_strict({
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_flavor", "marlin2"},
         {"gcode_exporter_plugin", "gcode.exporter.simple"},
         {"wipe_tower", "0"},
         {"single_extruder_multi_material", "0"},
@@ -5205,7 +5203,7 @@ TEST_CASE("Bambu plate JSON groups sliced objects and sparse instances", "[plugi
     Print print;
     Model model;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"brim_width", "0"},
+    config.set_deserialize_strict({{"gcode_flavor", "bambu"}, {"brim_width", "0"},
         {"skirts", "0"}, {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"},
         {"first_layer_size_compensation", "0"}, {"seam_visibility", "0"}});
     TriangleMesh ring = plate_test_box(0., 0., 2., 10.);
@@ -5289,7 +5287,7 @@ TEST_CASE("Bambu plate JSON reads attributed plan coverage and physical first la
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false, {{"seam_visibility", "0"},
-        {"brim_width", "0"}, {"skirts", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+        {"brim_width", "0"}, {"skirts", "0"}, {"gcode_flavor", "bambu"}});
     cube.model.objects().front().instances.front()->set_offset(Vec3d::Zero());
     const DynamicPrintConfig placed = cube.print.full_print_config();
     cube.print.apply(cube.model, placed);
@@ -5373,7 +5371,7 @@ TEST_CASE("Bambu plate JSON follows generated brim ownership", "[plugins][bambu3
         const bool global = mode == "global";
         const bool sequential = mode == "sequential" || mode == "patch-sequential";
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-        config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"seam_visibility", "0"},
+        config.set_deserialize_strict({{"gcode_flavor", "bambu"}, {"seam_visibility", "0"},
             {"brim_width", patch || raft || mode == "interior" ? "0" : "3"}, {"brim_width_interior", mode == "interior" ? "1" : "0"},
             {"brim_per_object", global ? "0" : "1"}, {"brim_ears", mode == "ears" ? "1" : "0"},
             {"complete_objects", sequential ? "1" : "0"}, {"parallel_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
@@ -5468,15 +5466,15 @@ TEST_CASE("Bambu archive QUERY and printer identity are explicit", "[plugins][gc
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
-    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_flavor", "bambu"}});
     Orchestrator &host = Orchestrator::instance();
     const Orchestrator::GCodeExporterSelection selected = host.select_gcode_exporter(print, print.full_print_config());
     CHECK(selected.extension == ".gcode.3mf");
     CHECK(selected.action_label == "Export Bambu sliced file");
     CHECK(selected.supports_removable_media);
     DynamicPrintConfig incompatible = print.full_print_config();
-    incompatible.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
-    CHECK_THROWS_WITH(host.select_gcode_exporter(print, incompatible), "Bambu sliced files require gcode.firmware.bambu.");
+    incompatible.set_deserialize_strict("gcode_flavor", "marlin2");
+    CHECK_THROWS_WITH(host.select_gcode_exporter(print, incompatible), "Bambu sliced files require the bambu firmware.");
     const ConfigOptionDef *identity = PrintConfigDef::instance().get("bambu_slicer_identity");
     REQUIRE(identity != nullptr);
     CHECK(identity->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
@@ -5490,7 +5488,7 @@ TEST_CASE("Bambu archives preserve wrapped reference bytes and fixed identity fo
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false,
-        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"gcode_label_objects", "firmware"}});
+        {{"seam_visibility", "0"}, {"gcode_flavor", "bambu"}, {"gcode_label_objects", "firmware"}});
     const std::string special = u8"<cube & \"quoted\" \\ café>";
     cube.print.mutable_printing_plan().object_instances.front().name = special;
     DynamicPrintConfig config = cube.print.full_print_config();
@@ -5628,7 +5626,7 @@ TEST_CASE("Bambu catalog export preserves holes and instance identities", "[plug
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false,
-        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"gcode_label_objects", "firmware"}});
+        {{"seam_visibility", "0"}, {"gcode_flavor", "bambu"}, {"gcode_label_objects", "firmware"}});
     ModelInstance *second = cube.model.objects().front().add_instance(*cube.model.objects().front().instances.front());
     second->set_offset(Vec3d(30., 0., 0.));
     const DynamicPrintConfig applied = cube.print.full_print_config();
@@ -5773,7 +5771,7 @@ TEST_CASE("Bambu failed publication and staged cancellation clean private resour
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false,
-        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+        {{"seam_visibility", "0"}, {"gcode_flavor", "bambu"}});
     const boost::filesystem::path destination = directory.path() / "existing.3mf";
     write_binary_file(destination, "keep destination");
     const std::map<std::string, std::string> before = snapshot_directory(directory.path());
@@ -5911,7 +5909,7 @@ TEST_CASE("Bambu QUERY reports an unavailable PNG encoder as incompatible", "[pl
     Orchestrator &host = Orchestrator::instance();
     Print print;
     Model model;
-    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_flavor", "bambu"}});
     ScopedPluginActivation inactive_png(host, "PNG", false);
     struct QueryResult {
         size_t calls = 0;
@@ -5922,7 +5920,7 @@ TEST_CASE("Bambu QUERY reports an unavailable PNG encoder as incompatible", "[pl
     query.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
     query.config = ApiHost::to_config_handle(&print.full_print_config());
     query.print = reinterpret_cast<const print_handle *>(&print);
-    query.firmware_plugin_id = "gcode.firmware.bambu";
+    query.firmware_plugin_id = "bambu";
     query.query_callback_context = &answer;
     query.emit_query_result = [](void *opaque, const raw_gcode_export_query_result *result) {
         QueryResult &copy = *static_cast<QueryResult *>(opaque);
@@ -5980,7 +5978,7 @@ TEST_CASE("Bambu exporter emits its actual save path definition", "[plugins][gco
     Orchestrator &host = Orchestrator::instance();
     Print print;
     Model model;
-    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_flavor", "bambu"}});
     struct Definition {
         size_t count = 0;
         std::string filter;
@@ -6018,7 +6016,7 @@ TEST_CASE("Bambu EXPORT rechecks PNG availability after selection", "[plugins][g
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false,
-        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+        {{"seam_visibility", "0"}, {"gcode_flavor", "bambu"}});
     Orchestrator &host = Orchestrator::instance();
     const Orchestrator::GCodeExporterSelection selected = host.select_gcode_exporter(cube.print, cube.print.full_print_config(), "gcode.exporter.bambu3mf");
     const boost::filesystem::path destination = directory.path() / "keep.3mf";
@@ -6122,7 +6120,7 @@ TEST_CASE("Bambu rejects an active PNG provider without image capability", "[plu
     REQUIRE(host.get_plugin("PNG")->get_name() == "Text-only PNG test encoder");
     ScopedTestDirectory directory;
     InputsPrint cube("gcode.exporter.simple", directory.path(), false,
-        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+        {{"seam_visibility", "0"}, {"gcode_flavor", "bambu"}});
     text_only.directory = directory.path();
     const std::string expected = "Thumbnail provider 'PNG' does not support raw images.";
     struct QueryAnswer {
@@ -6134,7 +6132,7 @@ TEST_CASE("Bambu rejects an active PNG provider without image capability", "[plu
     query.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
     query.config = ApiHost::to_config_handle(&cube.print.full_print_config());
     query.print = reinterpret_cast<const print_handle *>(&cube.print);
-    query.firmware_plugin_id = "gcode.firmware.bambu";
+    query.firmware_plugin_id = "bambu";
     query.query_callback_context = &answer;
     query.emit_query_result = [](void *opaque, const raw_gcode_export_query_result *result) {
         QueryAnswer &copy = *static_cast<QueryAnswer *>(opaque);

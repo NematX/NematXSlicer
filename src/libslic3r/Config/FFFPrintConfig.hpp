@@ -631,7 +631,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                 gcode_command_buffer))
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionString,              gcode_filename_illegal_char))
-    ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
     ((ConfigOptionEnum<LabelObjectsStyle>,  gcode_label_objects))
     ((ConfigOptionFloatOrPercent,      gcode_min_resolution))
     ((ConfigOptionInt,                 gcode_precision_xyz))
@@ -709,12 +708,17 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, max_volumetric_extrusion_rate_slope_negative))
 #endif
 
-static inline std::string get_extrusion_axis(const GCodeConfig& cfg)
+static inline std::string get_extrusion_axis(const GCodeConfig& cfg, GCodeFlavor flavor)
 {
     return
-        ((cfg.gcode_flavor.value == gcfMach3) || (cfg.gcode_flavor.value == gcfMachinekit)) ? "A" :
-        (cfg.gcode_flavor.value == gcfNoExtrusion) ? "" : cfg.extrusion_axis.value;
+        ((flavor == gcfMach3) || (flavor == gcfMachinekit)) ? "A" :
+        (flavor == gcfNoExtrusion) ? "" : cfg.extrusion_axis.value;
 }
+
+// Returns the flavor of the firmware chosen by the `gcode_flavor` selector.
+// The selector stores the id of a firmware plugin. An id that is not one of the
+// names of GCodeFlavor, or a missing selector, gives Marlin 2.
+GCodeFlavor gcode_flavor(const ConfigBase &config);
 
 PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     PrintConfig,

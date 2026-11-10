@@ -35,11 +35,12 @@ encoding.
 
 The normal execution flow is:
 
-All dialects share the common configuration keys. A dialect may add extra
-keys, such as Klipper's `tool_name`. Only the owner selected by
-`registers_ui` publishes the shared UI fragment, preventing duplicate
-selectors. The plugin instances remain registered even when inactive so the
-exclusive-group setting can list every available firmware.
+Each plugin id is a value of the `gcode_flavor` exclusive-group setting. All
+dialects share the common configuration keys. A dialect may add extra keys,
+such as Klipper's `tool_name`. Only the owner selected by `registers_ui`
+publishes the shared UI fragment. The plugin instances remain registered even
+when inactive so the exclusive-group setting can list every available
+firmware.
 Each definition may also create owned settings and UI fragments during plugin
 initialization, independently of the shared selector owner. Declared read keys
 let the host disable those controls when another firmware is selected.
@@ -54,7 +55,7 @@ Operation notes:
 - register_builtin_gcode_firmware_plugins()
 - define the available dialects and their priorities
 - register one BuiltinGCodeFirmwarePlugin per dialect
-- expose one shared firmware selector in the printer UI
+- mark the place of the firmware selector in the printer UI
 - read the selected G-code script processor, if present
 - call the definition's session factory
 - transfer the new GCodeFirmwareSession to the host context
@@ -287,7 +288,7 @@ void create_bambu_settings(orchestrator_handle *orchestrator)
 }
 
 const FirmwareDefinition k_marlin2_definition = {
-    "gcode.firmware.marlin2",
+    "marlin2",
     "Marlin 2",
     "G-code firmware session for Marlin 2.",
     0,
@@ -299,7 +300,7 @@ const FirmwareDefinition k_marlin2_definition = {
 };
 
 const FirmwareDefinition k_marlin1_definition = {
-    "gcode.firmware.marlin1",
+    "marlin",
     "Marlin 1",
     "G-code firmware session for Marlin 1.",
     10,
@@ -311,7 +312,7 @@ const FirmwareDefinition k_marlin1_definition = {
 };
 
 const FirmwareDefinition k_prusa_definition = {
-    "gcode.firmware.prusa",
+    "prusa",
     "Prusa firmware",
     "G-code firmware session for Prusa firmware.",
     20,
@@ -323,7 +324,7 @@ const FirmwareDefinition k_prusa_definition = {
 };
 
 const FirmwareDefinition k_reprap_definition = {
-    "gcode.firmware.reprap",
+    "reprapfirmware",
     "RepRapFirmware",
     "G-code firmware session for RepRapFirmware.",
     30,
@@ -335,7 +336,7 @@ const FirmwareDefinition k_reprap_definition = {
 };
 
 const FirmwareDefinition k_sprinter_definition = {
-    "gcode.firmware.sprinter",
+    "sprinter",
     "Sprinter",
     "G-code firmware session for Sprinter.",
     40,
@@ -347,7 +348,7 @@ const FirmwareDefinition k_sprinter_definition = {
 };
 
 const FirmwareDefinition k_klipper_definition = {
-    "gcode.firmware.klipper",
+    "klipper",
     "Klipper",
     "G-code firmware session for Klipper.",
     50,
@@ -359,7 +360,7 @@ const FirmwareDefinition k_klipper_definition = {
 };
 
 const FirmwareDefinition k_bambu_definition = {
-    "gcode.firmware.bambu",
+    "bambu",
     "Bambu Lab",
     "G-code firmware session for Bambu Lab printers.",
     60,
@@ -393,7 +394,7 @@ private:
     const char *id_impl() const noexcept override { return m_definition.id; }
     const char *name_impl() const noexcept override { return m_definition.name; }
     const char *description_impl() const noexcept override { return m_definition.description; }
-    const char *exclusive_group_impl() const noexcept override { return "gcode_firmware_plugin"; }
+    const char *exclusive_group_impl() const noexcept override { return "gcode_flavor"; }
     slicing_step_t step_impl() const noexcept override { return GCODE_FIRMWARE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     // Return the common firmware execution priority. Nothing is changed or transferred, and the call cannot fail.
@@ -449,12 +450,12 @@ void BuiltinGCodeFirmwarePlugin::inilialize_impl(storage_handle *) const
     if (!m_definition.registers_ui)
         return;
 
-    // One owner publishes the shared selector. Registering the same fragment
-    // from every dialect would create duplicate controls in the printer page.
+    // One owner publishes the shared fragment. Its id is the group id, so the
+    // host does not add a generic place for the selector in another page.
     orchestrator_add_ui_fragment(
         m_orchestrator,
         "printer_fff.ui",
-        "gcode_firmware_plugin",
+        "gcode_flavor",
         printer_ui_fragment(),
         1);
 }
@@ -493,9 +494,10 @@ void register_firmware(orchestrator_handle *orchestrator,
 
 const char *printer_ui_fragment() noexcept
 {
+    // printer_fff.ui already shows gcode_flavor in this group, so the fragment
+    // names the group without adding a second control.
     return "page:General:printer\n"
-           "group:Firmware\n"
-           "\tsetting:insert$beforesetting$gcode_flavor:gcode_firmware_plugin\n";
+           "group:Firmware\n";
 }
 
 void register_marlin1_gcode_firmware_plugin(orchestrator_handle *orchestrator)
