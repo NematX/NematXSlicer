@@ -134,6 +134,15 @@ void test_set_position_and_units()
     require(a[0].kind == Kind::Neutral, "G4 X is a dwell");
 }
 
+void test_subprogram_call()
+{
+    // The NEX01 toolchange_gcode calls the extruder switch subprogram.
+    std::vector<ReaderAction> a = translate("L C:\\NEX01_sys\\Standard\\switchToExtruder1AtSamePos-sub.nc");
+    require(a.size() == 1 && a[0].kind == Kind::Neutral, "a subprogram call keeps the tracked state");
+    a = translate("L C:\\NEX01_sys\\Standard\\switchToExtruder2AtSamePos-sub.nc ; switch");
+    require(a.size() == 1 && a[0].kind == Kind::Neutral, "a subprogram call followed by a comment");
+}
+
 void test_absolute_moves()
 {
     ReaderModes modes;
@@ -277,6 +286,7 @@ int main()
         test_standard_lines_are_left_to_the_base();
         test_heaters_and_fans();
         test_set_position_and_units();
+        test_subprogram_call();
         test_absolute_moves();
         test_relative_moves();
         test_object_metadata();

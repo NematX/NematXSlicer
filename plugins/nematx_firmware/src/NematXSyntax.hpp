@@ -16,6 +16,8 @@
 //   its own codes (M124, M126, M129);
 // - waiting is a separate bare command (M109, M129, M190);
 // - an axis position is set with "A[SET_POSITION POS=0]" instead of G92;
+// - "L <program>" calls a controller subprogram; the reader assumes that it
+//   changes no state the slicer tracks;
 // - with relative extrusion, G90/G91 appear inside each move:
 //   "G1 G90 X10 Y5 G91 A0.3": X/Y are absolute, the A distance is relative.
 
@@ -220,7 +222,7 @@ struct ReaderAction
         SetPosition, // "A[SET_POSITION POS=v]": E position of `tool`
         WaitTool,    // bare M109 / M129: wait for the current target of `tool`
         WaitBed,     // bare M190: wait for the current bed target
-        Neutral,     // understood, changes no tracked state (G4 X...)
+        Neutral,     // understood, changes no tracked state (G4 X..., L <program>)
         Unknown      // NematX-looking line that cannot be read
     };
     Kind kind = Kind::Unknown;
@@ -388,6 +390,11 @@ inline std::optional<std::vector<ReaderAction>> translate_line(std::string_view 
     if (command == "G70")
         return std::vector<ReaderAction>{ detail::standard("G20") };
     if (command == "G4")
+        return std::vector<ReaderAction>{ detail::make(Kind::Neutral) };
+    // "L <program>" runs a controller subprogram, such as the extruder switch
+    // called by the profile's toolchange_gcode. The slicer has already chosen
+    // the tool, so the reader keeps its state instead of forgetting it.
+    if (command == "L" && words.size() > 1)
         return std::vector<ReaderAction>{ detail::make(Kind::Neutral) };
 
     // Moves: translate the extruder axis letter to E and the inline G90/G91.

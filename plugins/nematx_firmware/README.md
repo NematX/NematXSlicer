@@ -20,6 +20,7 @@ It contains two plugins:
 | Bed | `M140=60`; off: `M140=0` then `M141`; wait: bare `M190` |
 | Fans | `M106=<v>` (first), `M126=<v>` (second); 0..255, or 0..100 with `fan_percentage`; off: `=0` |
 | Dwell | `G4 X<seconds>` |
+| Subprogram call | `L <program>`, for example in `toolchange_gcode`; the reader assumes it changes no tracked state |
 | Acceleration | comment only: `;M204 S<value>` |
 | Not supported | chamber heater and pressure advance (written as an "unsupported" comment); machine limits, speed ratio (`M220`), planner flush, extruder current, firmware retraction |
 
