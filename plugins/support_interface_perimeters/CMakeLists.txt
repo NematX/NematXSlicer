@@ -66,4 +66,4 @@ add_test(NAME support_interface_e2e
         --default-activated "${SUPERSLICER_DEFAULT_ACTIVATED_FILE}"
         ${_interface_runtime_args}
         --output "${CMAKE_BINARY_DIR}/temp/support-interface-e2e")
-set_tests_properties(support_interface_e2e PROPERTIES LABELS "support-interface;plugin-e2e" TIMEOUT 660)
+set_tests_properties(support_interface_e2e PROPERTIES LABELS "support-interface;plugin-e2e" TIMEOUT 540)

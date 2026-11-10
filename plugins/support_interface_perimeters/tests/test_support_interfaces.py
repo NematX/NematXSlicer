@@ -3,15 +3,19 @@
 Every declared input has a variation domain, checked against the C++ key lists.
 Cases change one input from an enabled baseline, not a Cartesian product. Other
 comparisons cover zero-count parity, explicit legacy selection, sparse paths and
-standalone versus built-in delivery. Each run owns its datadir and keeps logs.
+standalone versus built-in delivery. Each run owns its datadir and keeps logs,
+so exports run in parallel; only the legacy and reloaded cases wait for the
+settings saved by the first wave.
 
-    main -> Gate.export -> write_roof / host CLI -> read_moves
-         -> checked_domains -> linear cases -> report.json
+    main -> checked_domains
+         -> Gate.run_all -> Gate.export -> write_roof / host CLI -> read_moves
+         -> comparisons -> report.json
 """
 from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -274,9 +278,17 @@ class Gate:
                              "seconds": time.monotonic() - started, "deposited_moves": len(moves)})
         return moves
 
+    def run_all(self, cases: dict[str, tuple]) -> dict[str, list[tuple]]:
+        """Export {name: (changes, export options)} in parallel; return the moves by name."""
+        # Host startup, single-threaded, dominates a debug export: one worker per logical processor.
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 2) as pool:
+            futures = {name: pool.submit(self.export, name, changes, **options)
+                       for name, (changes, options) in cases.items()}
+            return {name: future.result() for name, future in futures.items()}
+
 
 def main() -> None:
-    """Run parity and delivery comparisons before spending the remaining budget on the linear catalogue."""
+    """Run parity, delivery and linear catalogue exports in parallel, then compare their paths."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--host-executable", type=Path, required=True)
     parser.add_argument("--host-source", type=Path, required=True)
@@ -284,21 +296,32 @@ def main() -> None:
     parser.add_argument("--default-activated", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--runtime-path", action="append", default=[])
-    parser.add_argument("--budget", type=float, default=600.)
+    parser.add_argument("--budget", type=float, default=480.)
     args = parser.parse_args()
     domains = checked_domains(args.host_source)
     gate = Gate(args)
     raft_contact = {}
     try:
-        zero = gate.export("zero", {COUNT: "0"}, save=True)
+        catalogue = {f"domain-{key}-{index}": ({key: value} | COUPLED_DOMAINS.get((key, value), {}), {})
+                     for key, values in domains.items() for index, value in enumerate(values)}
+        first = gate.run_all({
+            "zero": ({COUNT: "0"}, {"save": True}),
+            "enabled": ({}, {"save": True}),
+            "standalone": ({}, {"standalone": True}),
+            "raft-zero": ({"raft_layers": "3", COUNT: "0"}, {}),
+            "raft-enabled": ({"raft_layers": "3"}, {}),
+        } | catalogue)
+        zero, baseline = first["zero"], first["enabled"]
         defaults = dict(line.split(" = ", 1) for line in (gate.root / "zero/saved.ini").read_text(encoding="utf-8").splitlines() if " = " in line)
         if defaults.get(COUNT) != "0":
             raise AssertionError("perimeter option was not retained in the saved configuration")
         selectors = {role: next(key for key in defaults if key.startswith("exclusive_group_") and role in key) for role in ROLES}
-        legacy = gate.export("legacy", {COUNT: "3"} | {selectors[role]: provider for role, provider in zip(ROLES, LEGACY)})
-        if zero != legacy:
+        second = gate.run_all({
+            "legacy": ({COUNT: "3"} | {selectors[role]: provider for role, provider in zip(ROLES, LEGACY)}, {}),
+            "reloaded": ({}, {"source_profile": gate.root / "enabled/saved.ini"}),
+        })
+        if zero != second["legacy"]:
             raise AssertionError("zero-count paths differ from explicit legacy paths")
-        baseline = gate.export("enabled", {}, save=True)
         if baseline == zero:
             raise AssertionError("automatic providers did not apply the enabled feature")
         if not any("support" in move[0] and "interface" in move[0] for move in baseline):
@@ -311,14 +334,11 @@ def main() -> None:
         sparse_e = lambda moves: sum(move[-1] for move in moves if "support" in move[0] and "interface" not in move[0])
         if not math.isclose(sparse_e(baseline), sparse_e(zero), rel_tol=1e-7, abs_tol=1e-5):
             raise AssertionError("interface perimeters changed sparse support deposited volume")
-        packaged = gate.export("standalone", {}, standalone=True)
-        if packaged != baseline:
+        if first["standalone"] != baseline:
             raise AssertionError("standalone and built-in paths differ")
-        reloaded = gate.export("reloaded", {}, source_profile=gate.root / "enabled/saved.ini")
-        if reloaded != baseline:
+        if second["reloaded"] != baseline:
             raise AssertionError("repeated export is not deterministic")
-        raft_zero = gate.export("raft-zero", {"raft_layers": "3", COUNT: "0"})
-        raft_enabled = gate.export("raft-enabled", {"raft_layers": "3"})
+        raft_zero, raft_enabled = first["raft-zero"], first["raft-enabled"]
         model_first_z = min(move[5] for move in raft_enabled if "support" not in move[0])
         raft_interfaces = lambda moves: [move for move in moves if "support" in move[0] and "interface" in move[0]
                                         and move[5] < model_first_z - 1e-5]
@@ -330,10 +350,6 @@ def main() -> None:
                         "status": "verified" if contact_emitted else "not_emitted_by_host"}
         if contact_emitted and (not enabled_contact or enabled_contact == zero_contact):
             raise AssertionError("interface perimeters did not affect the emitted raft contact")
-        for key, values in domains.items():
-            for index, value in enumerate(values):
-                changes = {key: value} | COUPLED_DOMAINS.get((key, value), {})
-                gate.export(f"domain-{key}-{index}", changes)
     finally:
         (gate.root / "report.json").write_text(json.dumps({"tag": "plugin-e2e", "domains": domains,
             "raft_contact": raft_contact,
