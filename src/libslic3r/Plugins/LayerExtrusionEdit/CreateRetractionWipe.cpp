@@ -765,7 +765,7 @@ void add_inside_start(
     const double nozzle_diameter = print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const double configured_depth = print_config.vector_percent_or_default(
-        "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
+        "wipe_inside_depth", extruder_id, 0.5) * nozzle_diameter;
     const coord_t depth = scale_i(
         configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5);
     const std::optional<c_point> inside = loop_inside_point(target_leaf, loop_segments, depth);
@@ -965,7 +965,7 @@ void add_outgoing_wipe(
         const double nozzle_diameter = print_config.vector_float_or_default(
             "nozzle_diameter", extruder_id, 0.4);
         const double configured_depth = print_config.vector_percent_or_default(
-            "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
+            "wipe_inside_depth", extruder_id, 0.5) * nozzle_diameter;
         append_inside_end(wipe, path.source, path.segments, scale_i(
             configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5));
     }
@@ -987,7 +987,7 @@ void add_outgoing_wipe(
     if (mutable_axis == nullptr)
         throw std::runtime_error("The source Retract lost its E-axis request.");
     const double before_percent = print_config.vector_percent_or_default(
-        "retract_before_wipe", extruder_id, 0.0) * 0.01;
+        "retract_before_wipe", extruder_id, 0.0);
     const double initial_retraction = std::clamp(
         total_retraction * before_percent, 0.0, total_retraction);
     mutable_axis->value = initial_retraction;

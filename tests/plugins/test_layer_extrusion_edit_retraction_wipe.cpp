@@ -11,6 +11,8 @@ These cases exercise the wipe through the real ordered plugin step. They use
 separate PrintingExtrusion owners and layer boundaries. Path checks cover
 source-owner boundaries, complete fragmented loops, and wipes across layer transitions; the crossing cases
 compare wipe presence only.
+Percent cases check stationary and moving retraction targets and nozzle-relative
+inside depths through the same ordered step.
 
 The crossing cases slice cubes, obtain region and instance identities from the
 ordered result, then replace the printing plan with controlled printable paths.
@@ -37,6 +39,7 @@ so support preparation is not checked here.
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <utility>
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
 #include "libslic3r/GCode/AvoidCrossingPerimeters.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -811,8 +814,8 @@ TEST_CASE("Fragmented loop inside approaches use the complete turn",
         const slic3r_api::ExtrusionEntity last = leaves.back().entity;
         const c_point end = last.segment(last.segment_count() - 1).point_b;
         CHECK(end.x == scale_i(8.));
-        // The depth follows the percent read as 0.5, multiplied by the 0.4 mm nozzle and 0.01.
-        const coord_t depth = scale_i(0.002);
+        // Half the 0.4 mm nozzle gives a 0.2 mm inward end offset and a 0.2 mm start displacement along the corner bisector.
+        const coord_t depth = scale_i(0.2);
         CHECK(end.y == depth);
         OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions.back().root)),
                                      scope_property_key());
@@ -870,6 +873,39 @@ TEST_CASE("Fragmented loop wipes stop before an intermediate Bridge",
         const c_point end = last.segment(last.segment_count() - 1).point_b;
         CHECK(end.x == (returning ? 0 : scale_i(10.)));
         CHECK(end.y == 0);
+    }
+}
+
+// Percent settings divide the absolute retraction target between the stationary request and moving leaves.
+TEST_CASE("Before-wipe percent sets the stationary retraction target",
+          "[plugins][layer-extrusion-edit][retraction][wipe]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const std::pair<const char *, double> &setting : {std::pair<const char *, double>{"0%", 0.}, {"20%", 0.4}, {"100%", 2.}}) {
+        CAPTURE(setting.first);
+        Print print;
+        Model model;
+        prepare_wipe_print(print, model, "8", "0", "0", "0", "0", setting.first);
+        PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+            .layers.front().tool_groups.front();
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN});
+        OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)),
+                                     scope_property_key());
+        CHECK(find_axis_target(source.after(), C_EXTRUSION_AXIS_OPERATION_RETRACT_TO, setting.second, false).valid());
+        const slic3r_api::MutableExtrusionEntity wipe = find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE);
+        REQUIRE(wipe.valid());
+        std::vector<GeometricLeaf> leaves;
+        collect_geometric_leaves(wipe, std::nullopt, leaves);
+        REQUIRE(!leaves.empty());
+        size_t retracting_leaves = 0;
+        for (const GeometricLeaf &leaf : leaves) {
+            if (!leaf.extrusion_axis)
+                continue;
+            ++retracting_leaves;
+            CHECK(leaf.extrusion_axis->operation == C_EXTRUSION_AXIS_OPERATION_RETRACT_TO);
+            CHECK(leaf.extrusion_axis->value == Approx(2.));
+        }
+        CHECK(retracting_leaves == (setting.second == 2. ? 0 : 1));
     }
 }
 
@@ -951,7 +987,8 @@ TEST_CASE("Retraction wipe reverses arcs and interpolates their Z offsets",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
-    prepare_wipe_print(print, model, "10", "0", "0", "0", "0", "100%");
+    // A short motion-only wipe ends within the arc, so its final Z offset must be interpolated.
+    prepare_wipe_print(print, model, "0.5", "0", "0", "0", "0", "100%");
 
     PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
         .layers.front().tool_groups.front();
