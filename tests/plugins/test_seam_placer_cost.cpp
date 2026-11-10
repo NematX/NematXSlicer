@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <fstream>
@@ -17,6 +18,7 @@
 
 #include "gcode_test_helpers.hpp"
 #include "perimeter_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "test_data.hpp"
@@ -32,6 +34,7 @@
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/SeamPlacer.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -63,10 +66,18 @@ Dedicated visibility cases carry [seam-visibility], which authorizes the real
 ray model without changing its density. Hidden guard probes are run by
 test_seam_visibility_guard.py in child processes: rejection exits before rays,
 and empty native inputs check permission without doing expensive work.
+The progress probe keeps unrounded values and checks one start per object or
+perimeter label, including shared layers, instances and mixed regional settings.
+Cache construction and interpolation each run from zero to one; only the change
+between those phases resets progress. The STL export catalogue also checks both
+phases through the host's rounded secondary-status updates and emitted G-code.
+The process-wide model build counter independently verifies that scoring reuses
+the cached models instead of rebuilding them behind the perimeter callbacks.
 
     Visibility guard probes
     |-- create_cost_session(): enter through an enabled regional setting
     |-- SeamCostModel::calculate_cost_visibility(): enter from a worker
+    |-- VisibilityModel::build(): enter the reusable model directly
     `-- SeamPlacerImpl::raycast_visibility(): enter the native compatibility path
 */
 
@@ -98,7 +109,7 @@ struct CancellationProbe {
 };
 
 struct ProgressProbe {
-    std::vector<int> percentages;
+    std::vector<std::pair<std::string, double>> events;
 };
 
 int cancel_after_checks(plugin_host_context *host_context)
@@ -114,8 +125,73 @@ void capture_progress(plugin_host_context *host_context,
                       const char *message)
 {
     ProgressProbe &probe = *reinterpret_cast<ProgressProbe *>(host_context);
-    if (message != nullptr && std::string(message) == "Calculating seam visibility")
-        probe.percentages.push_back(int(progress * 100.0 + 0.5));
+    if (message != nullptr &&
+        (std::string(message).find("Building seam visibility cache") == 0 ||
+         std::string(message).find("Calculating seam visibility") == 0))
+        probe.events.emplace_back(message, progress);
+}
+
+// Check model reuse and exact starts, allowing a reset only between the two complete phases.
+void require_visibility_progress(const ProgressProbe &probe, size_t objects, size_t perimeters,
+                                 uint64_t builds_before)
+{
+    const uint64_t builds = Slic3r::SeamCostModel::visibility_model_build_count() - builds_before;
+    INFO("Model build delta=" << builds << "; interpolation via calculate_cost_visibility() "
+         "would increment once per loop.");
+    CHECK(builds == objects);
+    if (objects == 0) {
+        CHECK(probe.events.empty());
+        return;
+    }
+    REQUIRE_FALSE(probe.events.empty());
+    CHECK(probe.events.front().second == 0.0);
+    CHECK(probe.events.back().second == 1.0);
+    double previous[2] = {0.0, 0.0};
+    bool perimeters_started = false;
+    for (const std::pair<std::string, double> &event : probe.events) {
+        const size_t event_stage = event.first.find("Building seam visibility cache") == 0 ? 0 : 1;
+        if (event_stage == 0) {
+            CHECK_FALSE(perimeters_started);
+        } else if (!perimeters_started) {
+            CHECK(previous[0] == 1.0);
+            CHECK(event.second == 0.0);
+            perimeters_started = true;
+        }
+        CHECK(std::isfinite(event.second));
+        CHECK(event.second >= 0.0);
+        CHECK(event.second <= 1.0);
+        CHECK(event.second >= previous[event_stage]);
+        previous[event_stage] = event.second;
+        bool known = false;
+        for (size_t stage = 0; stage < 2; ++stage) {
+            const size_t total = stage == 0 ? objects : perimeters;
+            for (size_t i = 0; i < total; ++i) {
+                const std::string label = std::string(stage == 0 ?
+                    "Building seam visibility cache: object " : "Calculating seam visibility: perimeter ") +
+                    std::to_string(i + 1) + "/" + std::to_string(total);
+                if (event.first == label) known = true;
+            }
+        }
+        CHECK(known);
+    }
+    CHECK(perimeters_started);
+    CHECK(previous[0] == 1.0);
+    CHECK(previous[1] == 1.0);
+    for (size_t stage = 0; stage < 2; ++stage) {
+        const size_t total = stage == 0 ? objects : perimeters;
+        for (size_t i = 0; i < total; ++i) {
+            const std::string label = std::string(stage == 0 ?
+                "Building seam visibility cache: object " : "Calculating seam visibility: perimeter ") +
+                std::to_string(i + 1) + "/" + std::to_string(total);
+            const double start = double(i) / double(total);
+            const size_t count = std::count_if(probe.events.begin(), probe.events.end(),
+                [&](const std::pair<std::string, double> &event) {
+                    return event.first == label && std::abs(event.second - start) < 1e-9;
+                });
+            INFO(label << " start=" << start << " count=" << count);
+            CHECK(count == 1);
+        }
+    }
 }
 
 bool find_loop(const slic3r_api::ExtrusionEntity &entity,
@@ -842,6 +918,12 @@ TEST_CASE("Seam visibility authorized probe", "[.][seam-visibility]")
 // gate distinguishes that exit from crashes, timeouts and ordinary Catch errors.
 TEST_CASE("Seam visibility guard probe", "[.][seam-visibility-guard-probe]")
 {
+    SECTION("model") {
+        CostFixture fixture;
+        Slic3r::SeamCostModel::VisibilityModel model;
+        model.build(fixture.region_view().layer().object(), nullptr);
+        FAIL("Unmarked model visibility was not blocked");
+    }
     SECTION("plugin") {
         CostFixture fixture({{"seam_visibility", "1"}});
         fixture.add(rectangle_loop(-5, -5, 5, 5), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
@@ -1523,7 +1605,7 @@ TEST_CASE("Cost seam visibility switch changes the selected model-facing point",
     CHECK(with_visibility.y == scale_i(-10));
 }
 
-TEST_CASE("Cost seam visibility reports local progress",
+TEST_CASE("Cost seam visibility reports separate cache and perimeter progress",
           "[plugins][seam-placer][cost][progress][seam-visibility]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1536,13 +1618,170 @@ TEST_CASE("Cost seam visibility reports local progress",
 
     const ExtrusionEntity loop = rectangle_loop(-10, -10, 10, 10, true);
     fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+    const uint64_t builds_before = Slic3r::SeamCostModel::visibility_model_build_count();
     const slic3r_api::SeamPlacer placer = create_cost_session(
         fixture.prepared.print, &run_context);
     REQUIRE(placer.valid());
-    REQUIRE_FALSE(progress.percentages.empty());
-    CHECK(progress.percentages.front() == 0);
-    CHECK(progress.percentages.back() == 100);
-    CHECK(std::is_sorted(progress.percentages.begin(), progress.percentages.end()));
+    require_visibility_progress(progress, 1, 1, builds_before);
+}
+
+// Each section supplies a different sharing boundary to the same two-phase probe.
+TEST_CASE("Cost seam visibility caches models and bounds each progress phase",
+          "[plugins][seam-visibility][visibility-cache]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ProgressProbe progress;
+    plugin_run_context context = {};
+    context.host_context = reinterpret_cast<plugin_host_context *>(&progress);
+    context.report_progress = &capture_progress;
+    CostFixture fixture({{"seam_visibility", "1"}});
+    const ExtrusionEntity loop = rectangle_loop(-10, -10, 10, 10, true);
+    size_t objects = 1;
+    size_t perimeters = 2;
+    SECTION("two loops") {
+        fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+        fixture.add(rectangle_loop(-8, -8, 8, 8, true), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+    }
+    SECTION("two layers") {
+        REQUIRE(fixture.object->layer_count() >= 2);
+        for (size_t i = 0; i < 2; ++i) {
+            Layer &layer = fixture.object->layer(i);
+            append_aligned_loop(fixture.prepared.print, layer, *native_region_island(layer), loop, 0);
+        }
+    }
+    SECTION("translated instances") {
+        PrintInstances &instances = const_cast<PrintInstances &>(fixture.object->instances());
+        instances.push_back(instances.front());
+        instances.back().shift += Point::new_scale(40, 0);
+        fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0);
+        fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 1);
+    }
+    SECTION("two objects") {
+        PreparedPerimeterPrint prepared;
+        prepare_objects_print(prepared.print, prepared.model,
+            {make_cube(20, 20, 2), make_cube(18, 18, 2)}, perimeter_config({{"seam_visibility", "1"}}));
+        REQUIRE(prepared.print.objects().size() == 2);
+        prepared.print.mutable_printing_plan() = PrintingPlan();
+        for (PrintObject &object : prepared.print.objects()) {
+            Layer &layer = object.layer(0);
+            append_aligned_loop(prepared.print, layer, *native_region_island(layer), loop, 0);
+        }
+        const uint64_t builds_before = Slic3r::SeamCostModel::visibility_model_build_count();
+        REQUIRE(create_cost_session(prepared.print, &context).valid());
+        require_visibility_progress(progress, 2, 2, builds_before);
+        return;
+    }
+    SECTION("mixed regions") {
+        attach_native_source(fixture);
+        LayerRegion *neighbor = add_neighbor_region(fixture, rectangle_expolygon(-10, -10, 0, 10));
+        const_cast<PrintRegionConfig &>(fixture.region->region().config()).set_deserialize_strict("seam_visibility", "0");
+        fixture.source.reset(new LayerRegionIsland({fixture.region, neighbor}, 0));
+        fixture.source_ptr = fixture.source.get();
+        fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+        perimeters = 1;
+    }
+    SECTION("disabled regions") {
+        const_cast<PrintRegionConfig &>(fixture.region->region().config()).set_deserialize_strict("seam_visibility", "0");
+        fixture.add(loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+        objects = perimeters = 0;
+    }
+    SECTION("empty plan") {
+        objects = perimeters = 0;
+    }
+    const uint64_t builds_before = Slic3r::SeamCostModel::visibility_model_build_count();
+    REQUIRE(create_cost_session(fixture.prepared.print, &context).valid());
+    require_visibility_progress(progress, objects, perimeters, builds_before);
+}
+
+// Exercise every declared Cost setting independently through STL import, real
+// secondary-status delivery and production G-code publication.
+TEST_CASE("Cost seam visibility phases reach production STL export",
+          "[plugins][plugin-e2e][seam-visibility][visibility-progress-e2e]")
+{
+    namespace E2E = Slic3r::Test::PluginE2E;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    ScopedPluginActivation active(host, k_cost_plugin);
+    // The test runtime's fallback orderer does not consume seam providers.
+    ScopedPluginActivation advanced(host, "ordering.extrusion_tree.advanced");
+    ScopedPluginActivation fallback(host, "ordering.extrusion_tree.default", false);
+    ScopedPluginActivation serpentine(host, "ordering.extrusion_tree.xy_serpentine", false);
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    const std::string selector = Steps::plugin_exclusive_group_option_key(
+        host, SEAM_PLACER, "seam_placer_plugin");
+    REQUIRE_FALSE(selector.empty());
+    baseline.set_deserialize_strict(selector, k_cost_plugin);
+    baseline.set_deserialize_strict({{"seam_visibility", "1"}, {"seam_angle_cost", "100%"},
+        {"seam_travel_cost", "100%"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"binary_gcode", "0"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::vector<E2E::Domain> domains = {
+        {{"seam_visibility"}, {{"visibility-off", {{"seam_visibility", "0"}}}}},
+        {{"seam_angle_cost"}, {{"angle-off", {{"seam_angle_cost", "0%"}}}}},
+        {{"seam_travel_cost"}, {{"travel-off", {{"seam_travel_cost", "0%"}}}}}
+    };
+    const std::vector<E2E::Case> cases = E2E::linear_cases(host, {k_cost_plugin}, baseline, domains);
+    const TriangleMesh mesh = E2E::stl_fixture(false);
+    for (const E2E::Case &test : cases) {
+        INFO(test.name);
+        const DynamicPrintConfig config = E2E::apply_case(baseline, test);
+        const bool visibility = config.opt_bool("seam_visibility");
+        ProgressProbe progress;
+        Model model;
+        Print print;
+        Test::init_print({mesh}, print, model, config);
+        print.set_status_callback([&](const PrintBase::SlicingStatus &status) {
+            if ((status.flags & PrintBase::SlicingStatus::SECONDARY_STATE) != 0)
+                capture_progress(reinterpret_cast<plugin_host_context *>(&progress),
+                    double(status.percent) / 100.0, status.main_text.c_str());
+        });
+        const uint64_t builds_before = Slic3r::SeamCostModel::visibility_model_build_count();
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            code = Test::GCode::read_text_file(host.export_gcode_cli(print, path.string()));
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        CHECK(Slic3r::SeamCostModel::visibility_model_build_count() - builds_before ==
+              (visibility ? 1 : 0));
+        if (visibility) {
+            std::vector<double> cache_progress, perimeter_progress;
+            bool perimeters_started = false;
+            for (const std::pair<std::string, double> &event : progress.events) {
+                if (event.first.find("Building seam visibility cache: object ") == 0) {
+                    CHECK_FALSE(perimeters_started);
+                    cache_progress.push_back(event.second);
+                } else {
+                    REQUIRE(event.first.find("Calculating seam visibility: perimeter ") == 0);
+                    perimeters_started = true;
+                    perimeter_progress.push_back(event.second);
+                }
+            }
+            for (const std::vector<double> *phase : {&cache_progress, &perimeter_progress}) {
+                REQUIRE(phase->size() >= 2);
+                CHECK(phase->front() == 0.0);
+                CHECK(phase->back() == 1.0);
+                CHECK(std::is_sorted(phase->begin(), phase->end()));
+                CHECK(std::all_of(phase->begin(), phase->end(), [](double value) {
+                    return std::isfinite(value) && value >= 0.0 && value <= 1.0;
+                }));
+            }
+        } else {
+            CHECK(progress.events.empty());
+        }
+        CHECK(code.find(";SEAM:") != std::string::npos);
+        size_t deposited_moves = 0;
+        GCodeReader reader;
+        reader.parse_buffer(code, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (line.extruding(state) && line.dist_XY(state) > 0.0) ++deposited_moves;
+        });
+        CHECK(deposited_moves > 0);
+    }
 }
 
 TEST_CASE("Cost seam visibility samples at the legacy layer slice Z",
@@ -2607,7 +2846,7 @@ TEST_CASE("Cost seam completes a supported two-extruder print with a wipe tower"
     // Support interfaces print on extruder 2, so the plan changes tools and needs the wipe tower.
     // Contact loops are the closed support loops without a perimeter marker that the router must project.
     DynamicPrintConfig config = Slic3r::Test::SupportGrid::config("grid", false, 3, false);
-    // Seam visibility builds a ray-cast visibility model for every external loop; loop binding does not depend on it.
+    // Seam visibility builds a ray-cast model per object; loop binding does not depend on it.
     config.set_deserialize_strict({{"support_material_interface_contact_loops", "1"}, {"wipe_tower", "1"},
         {"wipe_tower_x", "40"}, {"wipe_tower_y", "60"}, {"single_extruder_multi_material", "0"},
         {"wiping_volumes_matrix", "0,140,140,0"}, {"filament_minimal_purge_on_wipe_tower", "15,15"},

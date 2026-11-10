@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <stdexcept>
 #include <vector>
 
 #include <array>
@@ -25,11 +26,13 @@
    Angle and travel costs use local geometry. Visibility builds an object-space
    mesh scene, samples its surface and casts rays before scoring candidates.
    The optional observer runs before this work and does not alter sample density.
+   A process-wide diagnostic counts permitted build calls independently of
+   progress callbacks, so tests can detect repeated construction during scoring.
 
        calculate_cost_visibility()
-       |-- check_visibility_calculation(): let the test runtime reject accidental work
-       |-- build_visibility_model(): own the scene, samples and search tree
-       `-- calculate_point_visibility(): interpolate costs for the requested points
+       |-- VisibilityModel::build(): check permission, sample the scene and cast rays
+       `-- VisibilityModel::calculate(): interpolate costs for each candidate set
+           `-- Impl::calculate_point_visibility(): query the stable sample tree
 */
 
 namespace Slic3r {
@@ -39,6 +42,15 @@ using namespace slic3r_api;
 
 namespace {
 std::atomic<VisibilityCalculationObserver> visibility_observer{nullptr};
+std::atomic<uint64_t> visibility_build_count{0};
+}
+
+// Return the diagnostic count without synchronizing model data between threads.
+uint64_t visibility_model_build_count();
+
+uint64_t visibility_model_build_count()
+{
+    return visibility_build_count.load(std::memory_order_relaxed);
 }
 
 void set_visibility_calculation_observer(VisibilityCalculationObserver observer)
@@ -111,29 +123,23 @@ struct CoordinateFunctor {
         return dimension == 0 ? p.x : dimension == 1 ? p.y : p.z;
     }
 };
-// The tree functor points at this object's vector: forbid moves as well as copies.
-struct VisibilityModel {
-    VisibilityModel() = default;
-    VisibilityModel(const VisibilityModel &) = delete;
-    VisibilityModel &operator=(const VisibilityModel &) = delete;
-    VisibilityModel(VisibilityModel &&) = delete;
-    VisibilityModel &operator=(VisibilityModel &&) = delete;
+} // namespace
+
+// The pimpl stays at one address because the tree functor borrows its samples.
+struct VisibilityModel::Impl {
     std::vector<mesh_query_sample> samples;
     std::vector<float> visibility;
     slic3r_api::KDTreeIndirect<3,float,CoordinateFunctor> tree{CoordinateFunctor{&samples}, size_t(0), double(EPSILON)};
     float radius = 0;
+    bool built = false;
+    // Interpolate the native plane/distance weights at one object-space point.
+    float calculate_point_visibility(c_vec3f point) const;
 };
+
+namespace {
 // Generate the native hemisphere grid in the local normal frame.
 c_vec3f hemisphere(float x,float y);
 c_vec3f normal_frame(c_vec3f normal,c_vec3f direction);
-// Compute sample costs from public intersection records, preserving signed
-// negative-volume handling. The host does not interpret geometry labels.
-void build_visibility_model(const Object &object,
-                            VisibilityModel &model,
-                            const mesh_query_cancel *cancel,
-                            const std::function<void(double)> &report_progress);
-// Interpolate exactly the same plane/distance weights as the native cost model.
-float calculate_point_visibility(const VisibilityModel &model,c_vec3f point);
 c_vec3f hemisphere(float x,float y)
 {
     const float a=2.f*float(PI)*x, r=2.f*std::sqrt(y-y*y);
@@ -146,15 +152,24 @@ c_vec3f normal_frame(c_vec3f normal,c_vec3f direction)
     const c_vec3f y=normalized(cross(z,seed)), x=cross(y,z);
     return add(add(mul(x,direction.x),mul(y,direction.y)),mul(z,direction.z));
 }
-void build_visibility_model(const Object &object,
-                            VisibilityModel &model,
+} // namespace
+
+VisibilityModel::VisibilityModel() : m_impl(std::make_unique<Impl>()) {}
+VisibilityModel::~VisibilityModel() = default;
+
+void VisibilityModel::build(const Object &object,
                             const mesh_query_cancel *cancel,
                             const std::function<void(double)> &report_progress)
 {
+    check_visibility_calculation("plugin");
+    visibility_build_count.fetch_add(1, std::memory_order_relaxed);
+    m_impl = std::make_unique<Impl>();
+    Impl &model = *m_impl;
     if (report_progress)
         report_progress(0.0);
-    // Work meshes die immediately after scene construction; the immutable scene
-    // owns transformed copies and outlives neither initialization nor sampling.
+    // Work meshes die after scene construction. The scene owns transformed copies
+    // through sampling and raycasting, then dies when build() returns; only the
+    // samples, visibility values and search tree remain in the reusable model.
     const MeshQueryScene scene = [&] {
         WorkingMesh positives, negatives;
         for (uint32_t i=0; i<object.volume_count(); ++i) {
@@ -168,15 +183,16 @@ void build_visibility_model(const Object &object,
                                {negatives.handle(),object.transform_centered(),1}},cancel);
     }();
     if (report_progress)
-        report_progress(0.1);
+        report_progress(0.1 / 0.9);
     const MeshSurfaceSamples sampled=scene.sample(kVisibilitySamplesCount,cancel);
     throw_if_mesh_cancelled(cancel);
     model.samples=sampled.values();
     if (report_progress)
-        report_progress(0.2);
+        report_progress(0.2 / 0.9);
     if (model.samples.empty()) {
+        model.built = true;
         if (report_progress)
-            report_progress(0.9);
+            report_progress(1.0);
         return;
     }
     model.tree.build(model.samples.size());
@@ -231,12 +247,16 @@ void build_visibility_model(const Object &object,
             if (occluded) model.visibility[begin+r/rays_per_sample]-=1.f/float(rays_per_sample);
         }
         if (report_progress)
-            report_progress(0.2 + 0.7 * double(batch_index + 1) /
-                                      double(std::max(size_t(1), ray_batch_count)));
+            report_progress((0.2 + 0.7 * double(batch_index + 1) /
+                                      double(std::max(size_t(1), ray_batch_count))) / 0.9);
     }
+    model.built = true;
+    if (report_progress)
+        report_progress(1.0);
 }
-float calculate_point_visibility(const VisibilityModel &model,c_vec3f point)
+float VisibilityModel::Impl::calculate_point_visibility(c_vec3f point) const
 {
+    const Impl &model = *this;
     if (model.samples.empty()) return 1.f;
     const std::array<float,3> query{point.x,point.y,point.z};
     const std::vector<size_t> nearby=slic3r_api::find_nearby_points(model.tree,query,model.radius);
@@ -250,6 +270,7 @@ float calculate_point_visibility(const VisibilityModel &model,c_vec3f point)
     return visibility/weights;
 }
 
+namespace {
 std::vector<float> calculate_polyline_angles_at_vertices(const std::vector<c_point> &polyline,
                                                          const std::vector<float> &lengths,
                                                          float min_arm_length)
@@ -352,17 +373,30 @@ std::vector<float> calculate_cost_visibility(const slic3r_api::Object &object,
                                              const mesh_query_cancel *cancel,
                                              const std::function<void(double)> &report_progress)
 {
-    check_visibility_calculation("plugin");
     VisibilityModel model;
-    build_visibility_model(object, model, cancel, report_progress);
+    model.build(object, cancel, [&](double fraction) {
+        if (report_progress) report_progress(0.9 * fraction);
+    });
+    return model.calculate(points, cancel, [&](double fraction) {
+        if (report_progress) report_progress(0.9 + 0.1 * fraction);
+    });
+}
+
+std::vector<float> VisibilityModel::calculate(const std::vector<c_vec3f> &points,
+                                             const mesh_query_cancel *cancel,
+                                             const std::function<void(double)> &report_progress) const
+{
+    if (!m_impl || !m_impl->built)
+        throw std::logic_error("Visibility model is not built.");
+    if (report_progress)
+        report_progress(0.0);
     std::vector<float> visibility;
     visibility.reserve(points.size());
     for (size_t index = 0; index < points.size(); ++index) {
         if (index % 64 == 0) throw_if_mesh_cancelled(cancel);
-        visibility.push_back(calculate_point_visibility(model, points[index]));
+        visibility.push_back(m_impl->calculate_point_visibility(points[index]));
         if (report_progress && (index % 64 == 0 || index + 1 == points.size()))
-            report_progress(0.9 + 0.1 * double(index + 1) /
-                                      double(std::max(size_t(1), points.size())));
+            report_progress(double(index + 1) / double(std::max(size_t(1), points.size())));
     }
     if (report_progress)
         report_progress(1.0);

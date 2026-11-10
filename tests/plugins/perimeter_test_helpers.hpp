@@ -28,6 +28,8 @@ Choose a generator and a small source polygon, then inspect the captured tree:
 Use a layer after the first to compare distinct external/internal widths. Run
 helpers restore plugin activation before returning and retain no borrowed paths
 in their captures. Geometry utilities preserve multiplicity unless named union.
+For several objects, call prepare_objects_print(print, model, {mesh_a, mesh_b},
+config); each object then has sliced layers ready for a test-owned printing plan.
 */
 
 namespace Slic3r::Test::PerimeterPluginTests {
@@ -128,6 +130,10 @@ ExPolygon rectangle_expolygon(double min_x, double min_y, double max_x, double m
 ExPolygon rectangle_with_hole_expolygon();
 DynamicPrintConfig perimeter_config(std::initializer_list<std::pair<std::string, std::string>> overrides);
 void prepare_cube_print(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config);
+// Apply distinct meshes as separate objects and generate their perimeter inputs.
+void prepare_objects_print(Print &print, Model &model,
+                           std::initializer_list<TriangleMesh> meshes,
+                           const DynamicPrintConfig &config);
 /* Prepare a 20 x 20 mm box of the given height in millimeters, sliced and
    ready for perimeters like prepare_cube_print(). Tests that only need a
    bottom, a middle and a top layer use it to avoid filling unchecked layers. */

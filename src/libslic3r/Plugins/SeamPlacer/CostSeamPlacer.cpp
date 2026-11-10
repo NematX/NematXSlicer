@@ -39,8 +39,18 @@ external-loop sets. A loop may have both roles. Painted constraints and
 neighboring-region boundaries add endpoints and analytically located transition
 points, rounded to scaled integer coordinates and reclassified there.
 
-Initialization filters and snapshots angle, visibility, overhang, and static
-costs independently for every external loop.
+Each initialize() call collects and validates loops, then builds one visibility
+model per object requiring visibility in this session. These local models are
+destroyed before initialize() returns: the frozen plan's object handles identify
+geometry shared by layers and translated instances. All models remain resident
+while each external loop is filtered and scored independently. Cache construction
+and perimeter interpolation each report their own 0..100% progress, aggregated
+over that phase's objects or loops, with a reset when interpolation begins.
+
+    CostSession::initialize()
+    |-- collect and validate external loops and regional visibility weights
+    |-- VisibilityModel::build(): cache samples and ray costs by object handle
+    `-- VisibilityModel::calculate(): interpolate filtered loop candidates
 Placement projects those candidates onto the requested loop and combines the
 snapshot with the current travel-cost setting. The orderer queries approach
 probes, then the actual approach position before rotating a loop to its seam.
@@ -79,6 +89,9 @@ public:
                        c_point start_position) const override;
 
 private:
+    // Aggregate one object's or perimeter's fraction within its named 0..100% phase.
+    void report_visibility(const char *stage, size_t completed, size_t total,
+                           double fraction) const;
     storage_handle *m_storage;
     const plugin_run_context *m_run_context;
     bool m_initialization_started = false;
@@ -110,8 +123,8 @@ constexpr int32_t k_defined_config_key_count = 3;
 
 /* Mutable preparation data: point is scaled object-local XY; width, overhang
    and embedded are millimetres. Filtering reduces these records to SeamCandidate. */
-/* Temporary work keeps each external loop's candidates separate and retains
-   only the island handle for shared internal-perimeter fallback assembly. */
+/* Temporary work keeps each external loop's candidates separate. Borrowed island
+   and object handles identify shared fallback inputs and visibility geometry. */
 using LoopKey = const extrusion_entity_handle *;
 
 struct ExternalLoopWork {
@@ -121,6 +134,8 @@ struct ExternalLoopWork {
 
 struct IslandWork {
     LayerRegionIsland island;
+    const object_handle *object = nullptr;
+    double visibility_weight = 0.0;
     bool has_perimeter_loop = false;
     bool requires_island_fallback = false;
     std::vector<ExternalLoopWork> external_loops;
@@ -250,7 +265,10 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
                     const RegionIslandKey key = island.handle();
                     const bool first = work.find(key) == work.end();
                     IslandWork &island_work = work[key];
-                    if (first) island_work.island = island;
+                    if (first) {
+                        island_work.island = island;
+                        island_work.object = island.region(0).layer().object().handle();
+                    }
                     for (const CandidatePreparation::CollectedLoop &loop : collected)
                         m_bindings.emplace(
                             loop.loop, LoopBinding{key, shift, loop.distance_only,
@@ -285,12 +303,64 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
         }
     }
 
+    size_t total_models = 0;
+    size_t total_visibility_loops = 0;
+    std::set<const object_handle *> model_objects;
+    // Validate known inputs before paying for any object's ray model.
+    for (auto &[key, island_work] : work) {
+        if (!island_work.has_perimeter_loop || island_work.external_loops.empty())
+            continue;
+        for (const ExternalLoopWork &loop : island_work.external_loops)
+            if (loop.candidates.empty())
+                throw std::runtime_error(
+                    "Cost-based seam placement found an external perimeter without candidates.");
+        for (const LayerRegion &region : island_work.island.regions())
+            if (region.print_region().config().bool_or_default(k_seam_visibility_key, false)) {
+                island_work.visibility_weight = 1.0;
+                break;
+            }
+        if (island_work.visibility_weight == 0.0) continue;
+        total_visibility_loops += island_work.external_loops.size();
+        if (model_objects.insert(island_work.object).second) ++total_models;
+    }
+    const mesh_query_cancel cancel{
+        // The C callback carries mutable void*, but only reads this run context.
+        const_cast<plugin_run_context *>(m_run_context),
+        [](void *opaque) -> int32_t {
+            return is_cancelled(static_cast<const plugin_run_context *>(opaque)) ? 1 : 0;
+        }};
+    // Object handles stay valid while the plan and geometry are frozen here.
+    // The cache never survives initialize(), so no invalidation is needed.
+    std::map<const object_handle *, std::unique_ptr<Slic3r::SeamCostModel::VisibilityModel>> models;
+    size_t completed_models = 0;
+    for (auto &[key, island_work] : work) {
+        if (island_work.visibility_weight == 0.0 || island_work.external_loops.empty() ||
+            models.count(island_work.object) != 0)
+            continue;
+        const Object object = island_work.island.region(0).layer().object();
+        std::unique_ptr<Slic3r::SeamCostModel::VisibilityModel> model(
+            new Slic3r::SeamCostModel::VisibilityModel());
+        try {
+            model->build(object, m_run_context == nullptr ? nullptr : &cancel,
+                [&](double fraction) {
+                    report_visibility("Building seam visibility cache: object",
+                        completed_models, total_models, fraction);
+                });
+        } catch (const MeshQueryError &error) {
+            if (error.status == MESH_QUERY_CANCELLED) throw PluginCancelled();
+            throw;
+        }
+        models.emplace(island_work.object, std::move(model));
+        ++completed_models;
+    }
+
     /*
     Finalize each external loop independently: enrich and filter its records,
     snapshot static costs, then deduplicate equal integer points. Equal points
     retain discovery position and the lowest static cost within that loop. An
     internal perimeter receives a simple concatenation of the finalized vectors.
     */
+    size_t completed_loops = 0;
     for (auto &[key, island_work] : work) {
         InitializationCancellation::check(m_run_context);
         if (!island_work.has_perimeter_loop) continue;
@@ -301,26 +371,19 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
             continue;
         }
         const Layer layer = island_work.island.region(0).layer();
-        const Object object = layer.object();
         // Compute shared regional weights once; candidate enrichment and scoring
         // below still run independently for every external loop.
         double angle_weight = 0.0;
-        double visibility_weight = 0.0;
+        const double visibility_weight = island_work.visibility_weight;
         for (const LayerRegion &lr : island_work.island.regions()) {
             const Config &region_config = lr.print_region().config();
             angle_weight += region_config.effective_float_or_percent_or_default(
                 k_seam_angle_cost_key, 1.0, 0.0);
-            if (visibility_weight == 0.0)
-                visibility_weight = region_config.bool_or_default(
-                    "seam_visibility", false) ? 1.0 : 0.0;
         }
         angle_weight = angle_weight / island_work.island.region_count();
         std::vector<SeamCandidate> fallback;
         for (ExternalLoopWork &external_loop : island_work.external_loops) {
             InitializationCancellation::check(m_run_context);
-            if (external_loop.candidates.empty())
-                throw std::runtime_error(
-                    "Cost-based seam placement found an external perimeter without candidates.");
             CandidatePreparation::calculate_layer_attributes(
                 island_work.island, external_loop.candidates, m_run_context);
             CandidatePreparation::filter_candidates(
@@ -328,9 +391,9 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
             if (external_loop.candidates.empty())
                 throw std::runtime_error(
                     "Cost-based seam placement found an external perimeter without candidates.");
-            // Visibility samples use object-local XY and the legacy slice-Z
-            // convention in millimetres; calculate them per loop so each loop's
-            // scores retain the same order as its own candidate records.
+            // Interpolation queries use object-local XY and the legacy slice-Z
+            // convention in millimetres. Query the shared model per loop to keep
+            // visibility scores in the same order as that loop's candidate records.
             std::vector<float> visibility;
             if (visibility_weight != 0) {
                 std::vector<c_vec3f> points;
@@ -340,27 +403,19 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
                     points.push_back({float(unscaled(candidate.point.x)),
                                       float(unscaled(candidate.point.y)),
                                       float(unscaled(layer.slice_z()))});
-                const mesh_query_cancel cancel{
-                    const_cast<plugin_run_context *>(m_run_context),
-                    [](void *opaque) -> int32_t {
-                        const plugin_run_context *context =
-                            static_cast<const plugin_run_context *>(opaque);
-                        return is_cancelled(context) ? 1 : 0;
-                    }};
                 try {
-                    const std::function<void(double)> report_visibility =
-                        [this](const double progress) {
-                            slic3r_api::report_progress(
-                                m_run_context, progress, "Calculating seam visibility");
-                        };
-                    visibility = Slic3r::SeamCostModel::calculate_cost_visibility(
-                        object, points, m_run_context == nullptr ? nullptr : &cancel,
-                        report_visibility);
+                    visibility = models.at(island_work.object)->calculate(
+                        points, m_run_context == nullptr ? nullptr : &cancel,
+                        [&](double fraction) {
+                            report_visibility("Calculating seam visibility: perimeter",
+                                completed_loops, total_visibility_loops, fraction);
+                        });
                 } catch (const MeshQueryError &error) {
                     if (error.status == MESH_QUERY_CANCELLED)
                         throw PluginCancelled();
                     throw;
                 }
+                ++completed_loops;
             }
             std::vector<SeamCandidate> prepared;
             prepared.reserve(external_loop.candidates.size());
@@ -403,6 +458,16 @@ void CostSession::initialize(const PrintingPlan &plan, const std::vector<PrintRe
     }
     m_storage = nullptr;
     m_run_context = nullptr;
+}
+
+void CostSession::report_visibility(const char *stage, size_t completed, size_t total,
+                                    double fraction) const
+{
+    if (m_run_context == nullptr || total == 0) return;
+    const double percent = (double(completed) + fraction) / double(total);
+    const std::string message = std::string(stage) +
+        " " + std::to_string(completed + 1) + "/" + std::to_string(total);
+    slic3r_api::report_progress(m_run_context, percent, message.c_str());
 }
 
 c_point CostSession::place_seam(const ExtrusionEntity &loop, const LayerRegion &region,

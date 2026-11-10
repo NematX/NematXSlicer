@@ -4,6 +4,13 @@
 ///|/
 // Public/native comparisons cover ABI ownership, immutable snapshots, geometry,
 // cancellation and the numerical visibility policy used by CostSeamPlacer.
+// A reusable visibility model owns its samples across calculate() calls. The
+// interpolation test arms cancellation after point zero and checks the next
+// periodic poll at point 64, before any final progress notification.
+//
+//     Visibility model cancels during interpolation
+//     |-- VisibilityModel::build(): prepare a real object's ray model
+//     `-- VisibilityModel::calculate(): cancel between interpolation batches
 #include <catch2/catch.hpp>
 #include <algorithm>
 #include <future>
@@ -24,6 +31,37 @@ namespace Slic3r { namespace MeshQueryVisibilityReference {
 std::vector<float> calculate_cost_visibility(const slic3r_api::Object &, const std::vector<c_vec3f> &);
 }} // namespace Slic3r::MeshQueryVisibilityReference
 using namespace slic3r_api;
+
+// Cancel after the first interpolated point, before the next periodic check.
+TEST_CASE("Visibility model cancels during interpolation", "[plugins][mesh-queries][seam-visibility]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::Model source;
+    Slic3r::Print print;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, source);
+    const Object object(reinterpret_cast<const object_handle *>(&print.object(0)));
+    Slic3r::SeamCostModel::VisibilityModel model;
+    model.build(object, nullptr);
+    bool cancelled = false;
+    const mesh_query_cancel cancel{&cancelled, [](void *context) -> int32_t {
+        return *static_cast<bool *>(context) ? 1 : 0;
+    }};
+    size_t callbacks = 0;
+    double last_progress = 0.0;
+    try {
+        model.calculate(std::vector<c_vec3f>(65, {0, 0, 1}), &cancel,
+            [&](double fraction) {
+                ++callbacks;
+                last_progress = fraction;
+                if (fraction > 0.0) cancelled = true;
+            });
+        FAIL("Interpolation ignored cancellation");
+    } catch (const MeshQueryError &error) {
+        CHECK(error.status == MESH_QUERY_CANCELLED);
+    }
+    CHECK(callbacks == 2);
+    CHECK(last_progress == Approx(1.0 / 65.0));
+}
 
 static c_matrix4d identity() {
     c_matrix4d m{};

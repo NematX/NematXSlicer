@@ -34,10 +34,15 @@
 These helpers drive perimeter providers on small explicit layer polygons. The
 fixture owns its Print, source geometry and plugin activation scope; captures
 copy the generated trees and areas so assertions outlive the run safely.
+prepare_objects_print() applies separate meshes and generates each object's
+layers before seam tests attach their own loop extrusions.
 
     run_perimeter_case() / run_perimeter_and_post_case_with_lower_area()
     |-- create source layers and run the selected generator/modules
     `-- capture_perimeter_outputs(): copy trees, areas and external/internal flows
+    prepare_objects_print()
+    |-- init_print(): apply distinct objects and settings
+    `-- run_until_perimeter_input(): generate sliced layers for all objects
     require_loop_role_and_flow_per_shell()
     `-- perimeter_loop_payloads(): inspect each loop wrapper once, without mutation
 
@@ -46,6 +51,10 @@ inheritance. Geometry comparisons retain area, union and shell-domain checks.
 */
 
 namespace Slic3r::Test::PerimeterPluginTests {
+// Prepare every object's sliced layers before callers build a printing plan.
+void prepare_objects_print(Print &print, Model &model,
+                           std::initializer_list<TriangleMesh> meshes,
+                           const DynamicPrintConfig &config);
 // Copy one path payload per loop wrapper without descending into that wrapper twice.
 std::vector<PerimeterLoopPayload> perimeter_loop_payloads(const ExtrusionEntity &root);
 // Return distinct external/internal widths for tests on layers after the first.
@@ -589,6 +598,14 @@ DynamicPrintConfig perimeter_config(std::initializer_list<std::pair<std::string,
     for (const std::pair<std::string, std::string> &entry : overrides)
         config.set_deserialize_strict(entry.first, entry.second);
     return config;
+}
+
+void prepare_objects_print(Print &print, Model &model,
+                           std::initializer_list<TriangleMesh> meshes,
+                           const DynamicPrintConfig &config)
+{
+    Slic3r::Test::init_print(meshes, print, model, config);
+    run_until_perimeter_input(Orchestrator::instance(), print);
 }
 
 void prepare_cube_print(PreparedPerimeterPrint &prepared, const DynamicPrintConfig &config)

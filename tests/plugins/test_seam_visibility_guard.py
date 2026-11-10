@@ -51,6 +51,10 @@ class VisibilityGuardTests(unittest.TestCase):
         """Enter the retained native raycasting routine with empty input, before any rays."""
         self.assert_blocked(self.run_probe("Seam visibility guard probe", "native"), "native")
 
+    def test_model_path_rejects_unmarked_visibility(self):
+        """Direct model construction checks permission before preparing geometry."""
+        self.assert_blocked(self.run_probe("Seam visibility guard probe", "model"), "plugin")
+
     def test_worker_cannot_bypass_permission(self):
         """The policy belongs to the process, not just Catch2's main thread."""
         self.assert_blocked(self.run_probe("Seam visibility guard probe", "worker"), "plugin")
