@@ -174,7 +174,8 @@ Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &p
 TriangleMesh ring_mesh();
 // Slice and compare one scene, including paired settings or repeated ordering where requested; failed checks stay visible to Catch.
 void check_scene(Scene scenario);
-// Slice and order a ring, returning core routes and copied diagnostics without running travel editing or making Catch assertions.
+// Slice and order a ring with Simple perimeters so top avoidance changes its connectors;
+// return core routes and copied diagnostics without travel editing or Catch assertions.
 TopRoutes top_oracle_routes(bool avoid_top);
 
 // Global adhesion paths have regions but no instance; only object-to-object gaps may route.
@@ -937,6 +938,8 @@ TopRoutes top_oracle_routes(const bool avoid_top)
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
+        // Simple produces the connectors that make this scene discriminate top avoidance.
+        {"step_perimeter_plugin", "perimeter.generator.simple"},
         {"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_top", avoid_top ? "1" : "0"},
         {"avoid_crossing_perimeters_max_detour", "0"}, {"nozzle_diameter", "0.4"},

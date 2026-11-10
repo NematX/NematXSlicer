@@ -663,10 +663,10 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
         REQUIRE(arachne != nullptr);
         CHECK(simple->get_step() == STEP_PERIMETER);
         CHECK(simple->get_priority() == 0);
-        CHECK(simple->get_exclusive_group_priority() == 0);
+        CHECK(simple->get_exclusive_group_priority() == 20);
         CHECK(classic->get_step() == STEP_PERIMETER);
         CHECK(classic->get_priority() == 0);
-        CHECK(classic->get_exclusive_group_priority() == 5);
+        CHECK(classic->get_exclusive_group_priority() == 0);
         CHECK(arachne->get_step() == STEP_PERIMETER);
         CHECK(arachne->get_priority() == 0);
         CHECK(arachne->get_exclusive_group_priority() == 10);

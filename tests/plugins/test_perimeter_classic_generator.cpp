@@ -17,7 +17,7 @@
 
 /*
 These tests check the classic provider's registration, per-shell role/flow and
-unchanged preference relative to simple. Focused fixtures include contours and
+the default preference Classic, Arachne, then Simple. Focused fixtures include contours and
 holes with distinct external/internal widths. The export matrix selects classic
 and both simple providers explicitly, using only small STL fixtures.
 
@@ -144,7 +144,7 @@ TEST_CASE("Classic perimeter loops use the role and flow of their shell",
     }
 }
 
-TEST_CASE("The default perimeter generator remains simple", "[plugins][perimeter][classic-generator]")
+TEST_CASE("Perimeter defaults prefer Classic then Arachne then Simple", "[plugins][perimeter][classic-generator]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &orchestrator = Orchestrator::instance();
@@ -165,8 +165,8 @@ TEST_CASE("The default perimeter generator remains simple", "[plugins][perimeter
     };
     const ConfigOptionDef *def = PrintConfigDef::instance().get("step_perimeter_plugin");
     REQUIRE(def != nullptr);
-    CHECK(def->default_value->serialize() == SIMPLE_PERIMETER_GENERATOR);
-    CHECK(resolved() == SIMPLE_PERIMETER_GENERATOR);
+    CHECK(def->default_value->serialize() == CLASSIC_PERIMETER_GENERATOR);
+    CHECK(resolved() == CLASSIC_PERIMETER_GENERATOR);
 
     // Profiles that choose another generator keep it.
     config.set_deserialize("step_perimeter_plugin", SIMPLE_PERIMETER_GENERATOR);
@@ -176,7 +176,15 @@ TEST_CASE("The default perimeter generator remains simple", "[plugins][perimeter
     config.set_deserialize("step_perimeter_plugin", CLASSIC_PERIMETER_GENERATOR);
     CHECK(resolved() == CLASSIC_PERIMETER_GENERATOR);
     config.erase("step_perimeter_plugin");
-    CHECK(resolved() == SIMPLE_PERIMETER_GENERATOR);
+    CHECK(resolved() == CLASSIC_PERIMETER_GENERATOR);
+
+    // Available alternatives follow their rank, not the vector's input order.
+    Plugin *classic = orchestrator.get_plugin(CLASSIC_PERIMETER_GENERATOR);
+    Plugin *arachne = orchestrator.get_plugin(ARACHNE_PERIMETER_GENERATOR);
+    Plugin *simple = orchestrator.get_plugin(SIMPLE_PERIMETER_GENERATOR);
+    CHECK(Steps::default_provider_from_group({simple, arachne, classic}) == classic);
+    CHECK(Steps::default_provider_from_group({simple, arachne}) == arachne);
+    CHECK(Steps::default_provider_from_group({simple}) == simple);
 }
 
 // Read registered perimeter descriptions without mutation and check execution priority separately from the classic algorithm's preference.
@@ -194,7 +202,7 @@ TEST_CASE("ClassicPerimeterGenerator is registered and selectable skeleton", "[p
     CHECK(plugin->get_name() == "Classic perimeter generator");
     CHECK(plugin->get_step() == STEP_PERIMETER);
     CHECK(plugin->get_priority() == 0);
-    CHECK(plugin->get_exclusive_group_priority() == 5);
+    CHECK(plugin->get_exclusive_group_priority() == 0);
 
     const DynamicPrintConfig config = perimeter_config({{"perimeters", "1"}});
     const ExPolygon surface = rectangle_expolygon(-10., -10., 10., 10.);
