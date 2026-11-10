@@ -38,7 +38,7 @@ BASE = {"layer_height": "0.3", "first_layer_height": "0.3", "perimeters": "2", "
         "top_solid_layers": "0", "bottom_solid_layers": "0", "skirts": "0", "brim_width": "0",
         "seam_visibility": "0", "seam_angle_cost": "0", "seam_travel_cost": "0",
         "seam_gap": "0", "seam_gap_external": "0", "gcode_label_objects": "octoprint", "gcode_comments": "1",
-        "gcode_firmware_plugin": "gcode.firmware.marlin2", "only_one_perimeter_first_layer": "0", "only_one_perimeter_top": "0"}
+        "gcode_flavor": "marlin2", "only_one_perimeter_first_layer": "0", "only_one_perimeter_top": "0"}
 
 
 def read_starts(lines: list[str]) -> dict[tuple[str, int, int, str], list[tuple[float, float]]]:
@@ -233,7 +233,7 @@ def main() -> int:
         assert process.returncode == 0, f'Host failed: {case / "host.log"}'
         log = (case / 'host.log').read_text(encoding='utf-8', errors='replace').lower()
         checked = '\n'.join(line for line in log.splitlines()
-                            if "exclusive group 'gcode_firmware_plugin' has incompatible execution priorities" not in line)
+                            if "exclusive group 'gcode_flavor' has incompatible execution priorities" not in line)
         assert not any(word in checked for word in ('[error]', 'will be disabled', 'unknown option')), case / 'host.log'
         lines = (case / 'result.gcode').read_text(encoding='utf-8').splitlines()
         return lines, read_starts(lines)

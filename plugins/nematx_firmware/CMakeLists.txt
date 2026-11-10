@@ -1,4 +1,4 @@
-# NematX firmware package: G-code firmware gcode.firmware.nematx and reader
+# NematX firmware package: G-code firmware nematx and reader
 # gcode.reader.nematx. Every file of this package lives in this directory.
 
 # The firmware session and reader derive from SDK classes compiled into the
@@ -28,7 +28,7 @@ endif()
 set(NEMATX_FIRMWARE_DATADIR "${CMAKE_BINARY_DIR}/test-data/nematx_firmware")
 nematx_package_plugin(
     TARGET nematx_firmware
-    PLUGIN_ID gcode.firmware.nematx
+    PLUGIN_ID nematx
     EXTRA_PLUGIN_IDS gcode.reader.nematx
     PACKAGE_ID nematx-firmware
     PACKAGE_VERSION 0.1.0

@@ -95,7 +95,7 @@ void initialize(const std::filesystem::path &data, const std::filesystem::path &
     PrintConfigDef::instance_mutable().finalize();
     require(PrintConfigDef::instance().get(k_count) != nullptr, "perimeter setting not registered");
     require(PrintConfigDef::instance().get(k_count)->default_value->serialize() == "0", "perimeter default is not zero");
-    require(DynamicPrintConfig::full_print_config().option("gcode_firmware_plugin")->serialize() == "gcode.firmware.marlin2",
+    require(DynamicPrintConfig::full_print_config().option("gcode_flavor")->serialize() == "marlin2",
         "the NematX firmware metadata changed the default firmware");
     const std::string layout = Orchestrator::instance().merged_ui_layout("print.ui",
         "page:Support material\ngroup:Options for support material and raft\nsetting:support_material_interface_contact_loops\n");
@@ -129,7 +129,7 @@ DynamicPrintConfig configuration(int count)
         {"support_material_bottom_interface_layers", "3"}, {"support_material_interface_spacing", "0"},
         {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
         {"support_material_top_interface_pattern", "concentric"}, {"dont_support_bridges", "0"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     return config;
 }
 

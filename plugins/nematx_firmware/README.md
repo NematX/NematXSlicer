@@ -1,10 +1,10 @@
 # NematX firmware
 
-The **nematx-firmware** package writes and reads G-code in the NematX dialect. It replaces the legacy `gcode_flavor = nematx` setting; there is no conversion from that setting.
+The **nematx-firmware** package writes and reads G-code in the NematX dialect. It takes over the legacy `gcode_flavor = nematx` value.
 
 It contains two plugins:
 
-- **gcode.firmware.nematx**: the G-code firmware. Select it with the printer setting `gcode_firmware_plugin = gcode.firmware.nematx`.
+- **nematx**: the G-code firmware. Select it with the printer setting `gcode_flavor = nematx`.
 - **gcode.reader.nematx**: the reader. The host uses it for the preview and statistics; the firmware uses it to follow the machine state through custom G-code scripts. It also recognizes NematX files opened on their own.
 
 ## Dialect

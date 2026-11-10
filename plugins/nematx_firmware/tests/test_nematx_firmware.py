@@ -1,7 +1,7 @@
 """End-to-end checks for the NematX firmware package.
 
 Each case exports a model through the host executable with
-gcode_firmware_plugin = gcode.firmware.nematx, then checks the G-code text.
+gcode_flavor = nematx, then checks the G-code text.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ LEGACY_EXECUTABLE: Path | None = None
 
 # Settings common to every case: NematX firmware, simple and fast prints.
 BASE_PROFILE = (
-    "gcode_firmware_plugin = gcode.firmware.nematx",
+    "gcode_flavor = nematx",
     # Seam visibility is very slow with a Debug host and irrelevant here.
     "seam_visibility = 0",
     "layer_height = 0.2",
@@ -257,9 +257,8 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
             "bridge_fan_speed", "internal_bridge_fan_speed", "overhangs_fan_speed",
             "support_material_fan_speed", "support_material_interface_fan_speed",
         )
-        builtins = tuple("gcode.firmware." + name for name in
-                         ("marlin1", "marlin2", "prusa", "reprap", "sprinter", "klipper"))
-        nematx = "gcode.firmware.nematx"
+        builtins = ("marlin", "marlin2", "prusa", "reprapfirmware", "sprinter", "klipper")
+        nematx = "nematx"
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         # Each run gets a new datadir: an earlier successful process must not
         # leave a saved activation/configuration that conceals missing ownership.
@@ -281,7 +280,7 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
 
                 for request in (20, 0):
                     options = (
-                        f"gcode_firmware_plugin = {firmware}", "fan_printer_min_speed = 35",
+                        f"gcode_flavor = {firmware}", "fan_printer_min_speed = 35",
                         "extruder_fan_offset = 0%", "disable_fan_first_layers = 0",
                         "full_fan_speed_layer = 0", "fan_below_layer_time = 0",
                         "slowdown_below_layer_time = 0", "fan_speedup_time = 0", "fan_kickstart = 0",
@@ -292,7 +291,8 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
                     self.assertEqual(code, 0, f"{name}: see host.log")
                     self.assertTrue(output.is_file(), name)
                     self.assertNotIn("no active plugin", log.lower(), name)
-                    self.assertNotIn("Disabled plugin 'gcode.firmware.", log, name)
+                    for provider in builtins + (nematx,):
+                        self.assertNotIn(f"Disabled plugin '{provider}'", log, name)
                     fans = [line for line in code_lines(output) if re.match(r"M(?:106|107|126)\b", line)]
                     expected = ("M106=89.25" if request else "M106=0") if firmware == nematx else (
                         "M106 S89" if request else "M107")
@@ -314,7 +314,7 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
                     values = dict(line.split(" = ", 1) for line in
                                   saved.read_text(encoding="utf-8").splitlines() if " = " in line)
                     self.assertEqual(values["fan_printer_min_speed"], "35")
-                    self.assertEqual(values["gcode_firmware_plugin"], firmware)
+                    self.assertEqual(values["gcode_flavor"], firmware)
 
 
 class NematXFirmwareIntegration(unittest.TestCase):

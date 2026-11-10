@@ -2,10 +2,10 @@
 ///|/
 ///|/ NematXSlicer is released under the terms of the AGPLv3 or higher
 
-// NematX firmware package: the G-code firmware gcode.firmware.nematx and its
+// NematX firmware package: the G-code firmware nematx and its
 // reader gcode.reader.nematx.
 //
-// The firmware is selected by the printer setting gcode_firmware_plugin. For
+// The firmware is selected by the printer setting gcode_flavor = nematx. For
 // each export, the host runs this provider, which creates a new
 // NematXGCodeFirmwareSession; the PrintingPlan writer then asks the session for
 // the G-code of every part of the plan. The session names its reader, used by
@@ -116,8 +116,8 @@ private:
     const char *id_impl() const noexcept override { return k_firmware_plugin_id; }
     const char *name_impl() const noexcept override { return "NematX"; }
     const char *description_impl() const noexcept override { return "G-code firmware session for NematX printers."; }
-    // The host describes this group; its gcode_firmware_plugin setting lists all firmware providers.
-    const char *exclusive_group_impl() const noexcept override { return "gcode_firmware_plugin"; }
+    // The host describes this group; its gcode_flavor setting lists all firmware providers.
+    const char *exclusive_group_impl() const noexcept override { return "gcode_flavor"; }
     slicing_step_t step_impl() const noexcept override { return GCODE_FIRMWARE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     // The host requires one execution priority in an exclusive group: the built-in firmwares use 0.

@@ -16,7 +16,7 @@
 namespace nematx_firmware {
 
 // Plugin ids, shared by the firmware provider, the reader and the session.
-constexpr char k_firmware_plugin_id[] = "gcode.firmware.nematx";
+constexpr char k_firmware_plugin_id[] = "nematx";
 constexpr char k_reader_plugin_id[] = "gcode.reader.nematx";
 
 // Settings defined by this package.

@@ -34,7 +34,7 @@ LEGACY = ("support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_bot
           "support.toolpath.legacy_top_contact", "support.toolpath.legacy_top")
 BASE = {
     "seam_visibility": "0", "layer_height": "0.2", "first_layer_height": "0.2",
-    "gcode_comments": "1", "gcode_firmware_plugin": "gcode.firmware.marlin2",
+    "gcode_comments": "1", "gcode_flavor": "marlin2",
     "skirts": "0", "brim_width": "0", "perimeters": "1", "fill_density": "15%",
     "top_solid_layers": "1", "bottom_solid_layers": "1", "support_material": "1",
     "support_material_style": "grid", "support_material_buildplate_only": "0",

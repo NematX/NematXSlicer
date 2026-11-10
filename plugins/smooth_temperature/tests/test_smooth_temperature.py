@@ -46,7 +46,7 @@ BASE_PROFILE = (
     "layer_height = 0.3", "first_layer_height = 0.3", "gcode_comments = 1",
     "gcode_label_objects = octoprint", "skirts = 0", "brim_width = 0", "perimeters = 1",
     "fill_density = 0%", "top_solid_layers = 0", "bottom_solid_layers = 0", "wipe_tower = 0",
-    "temperature = 220", "first_layer_temperature = 220", "gcode_firmware_plugin = gcode.firmware.marlin2",
+    "temperature = 220", "first_layer_temperature = 220", "gcode_flavor = marlin2",
 )
 # The CLI does not resize per-extruder printer vectors. Repeat the actual defaults,
 # not a second hard-coded printer profile that would drift from the host.
@@ -191,7 +191,7 @@ def export(name: str, options: tuple[str, ...], objects: list[Object], save_defa
     # This known firmware-group diagnostic is unrelated to the temperature provider.
     # Keep the complete log, and do not ignore any other error or disabled plugin.
     checked = "\n".join(line for line in log.lower().splitlines()
-                        if "exclusive group 'gcode_firmware_plugin' has incompatible execution priorities" not in line)
+                        if "exclusive group 'gcode_flavor' has incompatible execution priorities" not in line)
     for message in ("will be disabled", "unknown option", "[error]"):
         if message in checked:
             raise AssertionError(f"{name}: {message!r}; see {case / 'host.log'}")

@@ -124,7 +124,7 @@ DynamicPrintConfig configuration(bool enabled)
         {"support_material_bottom_interface_layers", "3"}, {"support_material_interface_spacing", "0"},
         {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
         {"support_material_top_interface_pattern", "concentric"}, {"dont_support_bridges", "0"},
-        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+        {"gcode_flavor", "marlin2"}});
     return config;
 }
 
