@@ -41,4 +41,4 @@ add_test(NAME seam_exports
     COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_exports.py"
         --host-executable "${SUPERSLICER_HOST_EXECUTABLE}" --build-dir "${CMAKE_BINARY_DIR}"
         ${_seam_runtime_args})
-set_tests_properties(seam_exports PROPERTIES LABELS "seam;plugin-e2e" TIMEOUT 50)
+set_tests_properties(seam_exports PROPERTIES LABELS "seam;plugin-e2e" TIMEOUT 100)

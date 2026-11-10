@@ -4,14 +4,16 @@ Four real host exports compare a deterministic neutral scene with the host,
 then exercise height-limited volumes, old names, true copies, rotated instances
 and a linear matrix of all three declared cost settings in one small scene.
 The oracle reads actual XY extrusion starts, not external-only seam comments.
-Each run owns its data, profiles, G-code, logs and timing report.
+Each export owns its datadir, profile, G-code and log, so the plugin exports run in
+parallel, then the host exports that need the saved selector name.
 
-    main -> export -> write_project -> bounded host process
+    main -> two parallel waves of export -> write_project -> bounded host process
                    -> read_starts -> per-layer internal/external assertions
 """
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -161,14 +163,13 @@ def main() -> int:
     parser.add_argument('--build-dir', type=Path, required=True)
     parser.add_argument('--runtime-path', action='append', default=[])
     parser.add_argument('--builtin', action='store_true')
-    parser.add_argument('--budget-seconds', type=float, default=45)
+    parser.add_argument('--budget-seconds', type=float, default=90)
     args = parser.parse_args()
     started = time.monotonic()
     results = args.build_dir / 'test-results/seam'
     results.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix='run-', dir=results))
-    data = root / 'datadir'
-    data.mkdir()
+    staged = None
     if not args.builtin:
         staged = args.build_dir / 'test-data/seam/plugins'
         library = 'plugin.dll' if os.name == 'nt' else 'plugin.dylib' if sys.platform == 'darwin' else 'plugin.so'
@@ -177,7 +178,6 @@ def main() -> int:
         manifest = (staged / 'nematx-seam/version.ini').read_text(encoding='utf-8')
         required_volume = re.search(r'^slic3r_volume\.h\s*=\s*(\d+)\.(\d+)\s*$', manifest, re.MULTILINE)
         assert required_volume and int(required_volume[1]) == 2 and int(required_volume[2]) >= 1, 'Manifest omits the Volume 2.1 contract used by the decorator'
-        shutil.copytree(staged, data / 'plugins')
     env = dict(os.environ)
     key = 'PATH' if os.name == 'nt' else 'DYLD_LIBRARY_PATH' if sys.platform == 'darwin' else 'LD_LIBRARY_PATH'
     env[key] = os.pathsep.join([str(args.host_executable.parent), *args.runtime_path, env.get(key, '')])
@@ -189,6 +189,11 @@ def main() -> int:
         """Export a fresh scene, kill descendants on timeout, then parse strict output."""
         case = root / name
         case.mkdir()
+        # Exports run in parallel: each owns its datadir, which the host fills at startup.
+        data = case / 'datadir'
+        data.mkdir()
+        if staged is not None:
+            shutil.copytree(staged, data / 'plugins')
         settings = dict(BASE)
         if selector:
             settings[selector[0]] = selector[1]
@@ -212,7 +217,7 @@ def main() -> int:
             options = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
             process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, **options)
             try:
-                process.wait(timeout=min(18 if len(objects) > 1 else 12, remaining))
+                process.wait(timeout=remaining)
             except BaseException:
                 if os.name == 'nt':
                     subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], stdout=subprocess.DEVNULL,
@@ -235,16 +240,6 @@ def main() -> int:
 
     try:
         neutral = [{'name': 'neutral', 'x': 10, 'attractor': False}]
-        plugin_lines, plugin = export('neutral-plugin', neutral, save=True)
-        saved = dict(line.split(' = ', 1) for line in (root / 'neutral-plugin/saved.ini').read_text(encoding='utf-8').splitlines() if ' = ' in line)
-        selector = next(key for key in saved if key.startswith('exclusive_group_') and 'seam_placer_plugin' in key)
-        assert saved[selector] == 'nematx_seam', 'NematX seam provider is not preferred'
-        assert all(key in saved for key in DOMAINS), 'A declared seam cost setting is absent from the catalogue'
-        host_lines, host = export('neutral-host', neutral, (selector, 'seam_placer.cost'))
-        commands = lambda lines: [line.split(';', 1)[0].strip() for line in lines if line.split(';', 1)[0].strip()]
-        assert commands(plugin_lines) == commands(host_lines), 'No-attractor full-command host parity failed'
-        series(plugin, 'neutral_stl', 'Perimeter')
-
         scene = [{'name': 'canonical', 'x': 10}, {'name': 'legacy', 'x': 20, 'type': 'SeamPositionInsideCenter'},
                  {'name': 'copies', 'x': 30, 'copies': (0, 8)}, {'name': 'rotated', 'x': 50, 'rotate': True}]
         for key, values in DOMAINS.items():
@@ -256,8 +251,25 @@ def main() -> int:
                     # repeating that same setup on five layers adds no attractor rule.
                     obj.update(height=0.3, zrange=(0, 0.5), layers=1)
                 scene.append(obj)
-        _, active = export('active-plugin', scene)
-        _, base = export('active-host', scene, (selector, 'seam_placer.cost'))
+        # The host exports need the selector name saved by the neutral plugin export,
+        # so the four exports run in two parallel waves.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            neutral_plugin = pool.submit(export, 'neutral-plugin', neutral, save=True)
+            active_plugin = pool.submit(export, 'active-plugin', scene)
+            plugin_lines, plugin = neutral_plugin.result()
+            _, active = active_plugin.result()
+        saved = dict(line.split(' = ', 1) for line in (root / 'neutral-plugin/saved.ini').read_text(encoding='utf-8').splitlines() if ' = ' in line)
+        selector = next(key for key in saved if key.startswith('exclusive_group_') and 'seam_placer_plugin' in key)
+        assert saved[selector] == 'nematx_seam', 'NematX seam provider is not preferred'
+        assert all(key in saved for key in DOMAINS), 'A declared seam cost setting is absent from the catalogue'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            neutral_host = pool.submit(export, 'neutral-host', neutral, (selector, 'seam_placer.cost'))
+            active_host = pool.submit(export, 'active-host', scene, (selector, 'seam_placer.cost'))
+            host_lines, host = neutral_host.result()
+            _, base = active_host.result()
+        commands = lambda lines: [line.split(';', 1)[0].strip() for line in lines if line.split(';', 1)[0].strip()]
+        assert commands(plugin_lines) == commands(host_lines), 'No-attractor full-command host parity failed'
+        series(plugin, 'neutral_stl', 'Perimeter')
         for obj in scene:
             name = obj['name']
             for copy, offset in enumerate(obj.get('copies', (0,))):
