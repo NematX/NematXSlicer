@@ -1,10 +1,17 @@
-"""End-to-end checks for the external second-layer flow plugin."""
+"""End-to-end checks for the external second-layer flow plugin.
+
+setUpClass exports every scene once, in parallel, each with its own copy of the
+host-only or plugin datadir; the tests then compare the resulting G-code.
+"""
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
 import unittest
@@ -315,11 +322,17 @@ def run_export(
     log_path = case_dir / "host.log"
     profile.write_text(profile_text(ratio, max_volumetric_speed, extra_options), encoding="utf-8")
     output.unlink(missing_ok=True)
+    # Exports run in parallel: each owns a copy of its prepared datadir. The host fills
+    # the top-level cache at startup, so earlier runs' cache is not copied.
+    datadir = case_dir / "data"
+    shutil.rmtree(datadir, ignore_errors=True)
+    source = SECOND_LAYER_FLOW_DATADIR if plugin_enabled else HOST_DATADIR
+    shutil.copytree(source, datadir, ignore=lambda folder, names: ["cache"] if Path(folder) == source else [])
 
     command = [
         str(HOST_EXECUTABLE),
         "--datadir",
-        str(SECOND_LAYER_FLOW_DATADIR if plugin_enabled else HOST_DATADIR),
+        str(datadir),
         "--export-gcode",
         "--load",
         str(profile),
@@ -346,6 +359,8 @@ class SecondLayerFlowIntegration(unittest.TestCase):
 
         cls.outputs: dict[str, Path] = {}
         cls.logs: dict[str, str] = {}
+        # name: run_export keyword arguments. Every export is independent.
+        cases: dict[str, dict] = {}
         for name, ratio, enabled in (
             ("baseline", None, False),
             ("neutral-100", "100%", True),
@@ -353,11 +368,7 @@ class SecondLayerFlowIntegration(unittest.TestCase):
             ("reduced-80", "80%", True),
             ("raised-125", "125%", True),
         ):
-            output, log, return_code = run_export(name, ratio, enabled)
-            if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
-                raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
-            cls.outputs[name] = output
-            cls.logs[name] = log
+            cases[name] = {"ratio": ratio, "plugin_enabled": enabled}
 
         regional_profile = ("bottom_solid_layers = 0", "top_solid_layers = 0", "fill_density = 20%")
         for name, with_plugin, separated in (
@@ -372,28 +383,15 @@ class SecondLayerFlowIntegration(unittest.TestCase):
                 with_region_config=with_plugin,
                 separated_islands=separated,
             )
-            output, log, return_code = run_export(
-                name,
-                None,
-                with_plugin,
-                model=regional_model,
-                extra_options=regional_profile,
-            )
-            if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
-                raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
-            cls.outputs[name] = output
-            cls.logs[name] = log
+            cases[name] = {"ratio": None, "plugin_enabled": with_plugin, "model": regional_model,
+                           "extra_options": regional_profile}
 
         for name, ratio, enabled in (
             ("global-cap-baseline", None, False),
             ("global-cap-80", "80%", True),
             ("global-cap-125", "125%", True),
         ):
-            output, log, return_code = run_export(name, ratio, enabled, max_volumetric_speed=2.0)
-            if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
-                raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
-            cls.outputs[name] = output
-            cls.logs[name] = log
+            cases[name] = {"ratio": ratio, "plugin_enabled": enabled, "max_volumetric_speed": 2.0}
 
         # Support layers are auxiliary layers without a lower layer. These exports used to stop
         # on an assertion in debug builds, even at the neutral 100% ratio.
@@ -405,11 +403,18 @@ class SecondLayerFlowIntegration(unittest.TestCase):
             ("supported-100", "100%", True),
             ("supported-80", "80%", True),
         ):
-            output, log, return_code = run_export(name, ratio, enabled, model=supported_model, extra_options=support)
-            if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
-                raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
-            cls.outputs[name] = output
-            cls.logs[name] = log
+            cases[name] = {"ratio": ratio, "plugin_enabled": enabled, "model": supported_model,
+                           "extra_options": support}
+
+        # Host startup, single-threaded, dominates a debug export: one worker per logical processor.
+        with ThreadPoolExecutor(max_workers=os.cpu_count() or 2) as pool:
+            futures = {name: pool.submit(run_export, name, **options) for name, options in cases.items()}
+            for name, future in futures.items():
+                output, log, return_code = future.result()
+                if return_code != 0 or not output.is_file() or output.stat().st_size == 0:
+                    raise AssertionError(f"{name} export failed (exit {return_code}); see {OUTPUT_ROOT / name / 'host.log'}")
+                cls.outputs[name] = output
+                cls.logs[name] = log
 
         cls.metrics = {name: analyze_gcode(path) for name, path in cls.outputs.items()}
 
