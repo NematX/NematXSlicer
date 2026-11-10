@@ -5,18 +5,26 @@ with the host's default manager and with the NematX manager. Without a NematX
 setting, both must write the same G-code, apart from the line that names the
 selected manager and the generation date. The cases vary one tower setting at a
 time from a working two-tool profile.
+
+Every export owns its datadir copy and output directory, so the test methods, the
+parity cases and both managers of a case all run at once; run_in_parallel starts
+them after the shared class setup.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import difflib
+import io
 import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -27,6 +35,8 @@ BUILD_DIR: Path
 PLUGIN_DATADIR: Path
 OUTPUT_ROOT: Path
 RUNTIME_PATH: list[str] = []
+# Host startup, single-threaded, dominates a debug export: run at most one host per logical processor.
+HOST_SLOTS = threading.Semaphore(os.cpu_count() or 2)
 
 DEFAULT_MANAGER = "wipe_tower.manager.default"
 NEMATX_MANAGER = "nematx_wipetower"
@@ -159,10 +169,18 @@ def run_export(name: str, options: tuple[str, ...], model: Path, datadir: Path |
     merged = {option.split("=", 1)[0].strip(): option for option in BASE_PROFILE + options}
     profile.write_text("\n".join(merged.values()) + "\n", encoding="utf-8")
     output.unlink(missing_ok=True)
+    if datadir is None:
+        # Exports run in parallel: each owns a copy of the prepared datadir. The host fills
+        # the top-level cache at startup, so earlier runs' cache is not copied.
+        datadir = case_dir / "data"
+        shutil.rmtree(datadir, ignore_errors=True)
+        shutil.copytree(PLUGIN_DATADIR, datadir,
+                        ignore=lambda folder, names: ["cache"] if Path(folder) == PLUGIN_DATADIR else [])
     # The datadir must be a native absolute path: the Debug host checks it.
-    result = subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(datadir or PLUGIN_DATADIR), "--export-gcode", "--load",
-                             str(profile), "--output", str(output), str(model)],
-                            capture_output=True, timeout=1800, env=host_environment())
+    with HOST_SLOTS:
+        result = subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(datadir), "--export-gcode", "--load",
+                                 str(profile), "--output", str(output), str(model)],
+                                capture_output=True, timeout=1800, env=host_environment())
     log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
     (case_dir / "host.log").write_text(log, encoding="utf-8")
     if result.returncode != 0 or not output.is_file():
@@ -259,15 +277,21 @@ class WipeTowerParity(unittest.TestCase):
 
     def export_both(self, name: str, options: tuple[str, ...]) -> tuple[str, str]:
         options = self.extruders + options
-        default, _ = run_export(f"{name}-default", options + (f"step_wipetower_plugin = {DEFAULT_MANAGER}",), self.model)
-        nematx, log = run_export(f"{name}-nematx", options + (f"step_wipetower_plugin = {NEMATX_MANAGER}",), self.model)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            default = pool.submit(run_export, f"{name}-default", options + (f"step_wipetower_plugin = {DEFAULT_MANAGER}",),
+                                  self.model)
+            nematx = pool.submit(run_export, f"{name}-nematx", options + (f"step_wipetower_plugin = {NEMATX_MANAGER}",),
+                                 self.model)
+            (default_gcode, _), (nematx_gcode, log) = default.result(), nematx.result()
         self.assertNotIn(REFUSED_SELECTION, log, f"{name}: the NematX manager was not selected")
-        return default, nematx
+        return default_gcode, nematx_gcode
 
     def test_parity_with_the_default_manager(self) -> None:
-        for name, options in PARITY_CASES.items():
+        with ThreadPoolExecutor(max_workers=len(PARITY_CASES)) as pool:
+            pairs = {name: pool.submit(self.export_both, name, options) for name, options in PARITY_CASES.items()}
+        for name, pair in pairs.items():
             with self.subTest(case=name):
-                default, nematx = self.export_both(name, options)
+                default, nematx = pair.result()
                 # The tower must exist, otherwise the comparison proves nothing.
                 self.assertIn(";TYPE:Wipe tower", default)
                 expected, actual = comparable_lines(default), comparable_lines(nematx)
@@ -278,11 +302,12 @@ class WipeTowerParity(unittest.TestCase):
     def test_perimeters_add_or_remove_loops(self) -> None:
         # Compare one layer above the first one, which has no brim: three perimeters keep every default
         # segment and add two loops outside; zero perimeters remove the band rectangle and nothing else.
-        default, _ = run_export("perimeters-default", self.extruders + (f"step_wipetower_plugin = {DEFAULT_MANAGER}",), self.model)
-        three, _ = run_export("perimeters-three", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",
-                                                                   "wipe_tower_perimeters = 3"), self.model)
-        none, _ = run_export("perimeters-zero", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",
-                                                                 "wipe_tower_perimeters = 0"), self.model)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            exports = [pool.submit(run_export, name, self.extruders + options, self.model) for name, options in (
+                ("perimeters-default", (f"step_wipetower_plugin = {DEFAULT_MANAGER}",)),
+                ("perimeters-three", (f"step_wipetower_plugin = {NEMATX_MANAGER}", "wipe_tower_perimeters = 3")),
+                ("perimeters-zero", (f"step_wipetower_plugin = {NEMATX_MANAGER}", "wipe_tower_perimeters = 0")))]
+            (default, _), (three, _), (none, _) = (export.result() for export in exports)
         default_layers, three_layers, none_layers = tower_segments(default), tower_segments(three), tower_segments(none)
         z = sorted(default_layers)[2]
         reference, wider, bare = default_layers[z], three_layers[z], none_layers[z]
@@ -362,11 +387,15 @@ class WipeTowerParity(unittest.TestCase):
         stacked = OUTPUT_ROOT / "stacked-solid.3mf"
         write_boxes(stacked, [(0, 0, 0, 10, 10, 1, 1), (0, 0, 1, 10, 10, 2, 2), (0, 0, 2, 10, 10, 3, 1)])
         nematx = (f"step_wipetower_plugin = {NEMATX_MANAGER}",)
-        for name, options in (("shared", ()), ("separate", ("wipe_tower_separate_filament = 1",))):
+        modes = (("shared", ()), ("separate", ("wipe_tower_separate_filament = 1",)))
+        with ThreadPoolExecutor(max_workers=2 * len(modes)) as pool:
+            exports = {(name, dense): pool.submit(run_export, f"only-solid-{name}-{'on' if dense else 'off'}",
+                                                  self.extruders + nematx + options +
+                                                  (("wipe_tower_only_solid = 1",) if dense else ()), stacked)
+                       for name, options in modes for dense in (False, True)}
+        for name, options in modes:
             with self.subTest(mode=name):
-                sparse, _ = run_export(f"only-solid-{name}-off", self.extruders + nematx + options, stacked)
-                dense, _ = run_export(f"only-solid-{name}-on", self.extruders + nematx + options +
-                                      ("wipe_tower_only_solid = 1",), stacked)
+                (sparse, _), (dense, _) = exports[(name, False)].result(), exports[(name, True)].result()
                 self.check_dense_fill(sparse, dense)
                 if options:
                     self.check_separate_sections(dense, {0, 1})
@@ -385,9 +414,37 @@ class WipeTowerParity(unittest.TestCase):
         self.assertIn(REFUSED_SELECTION, log)
 
     def test_export_is_deterministic(self) -> None:
-        first, _ = run_export("deterministic-1", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",), self.model)
-        second, _ = run_export("deterministic-2", self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",), self.model)
+        options = self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            exports = [pool.submit(run_export, f"deterministic-{index}", options, self.model) for index in (1, 2)]
+            (first, _), (second, _) = (export.result() for export in exports)
         self.assertEqual(comparable_lines(first), comparable_lines(second))
+
+
+def run_in_parallel() -> bool:
+    """Run every test method at once after the shared class setup; print each result in order.
+
+    The tests share only the class setup and write their exports under their own names.
+    HOST_SLOTS bounds the hosts they start together.
+    """
+    tests = list(unittest.defaultTestLoader.loadTestsFromTestCase(WipeTowerParity))
+    WipeTowerParity.setUpClass()
+    started = time.monotonic()
+
+    def run_one(test: unittest.TestCase) -> tuple[unittest.TestResult, str]:
+        # A test passed alone to a runner does not repeat the class setup.
+        stream = io.StringIO()
+        result = unittest.TextTestRunner(stream=stream, verbosity=2).run(test)
+        return result, stream.getvalue()
+
+    with ThreadPoolExecutor(max_workers=len(tests)) as pool:
+        outcomes = list(pool.map(run_one, tests))
+    successful = True
+    for result, text in outcomes:
+        print(text, end="")
+        successful = successful and result.wasSuccessful()
+    print(f"Ran {len(tests)} tests in {time.monotonic() - started:.3f}s\n{'OK' if successful else 'FAILED'}")
+    return successful
 
 
 if __name__ == "__main__":
@@ -402,4 +459,7 @@ if __name__ == "__main__":
     PLUGIN_DATADIR = BUILD_DIR / "test-data" / "wipetower"
     OUTPUT_ROOT = BUILD_DIR / "test-results" / "wipetower"
     RUNTIME_PATH = [str(Path(path).resolve()) for path in args.runtime_path]
-    unittest.main(argv=[sys.argv[0], *unittest_args], verbosity=2)
+    if unittest_args:
+        # Named tests or unittest options: keep the standard sequential runner.
+        unittest.main(argv=[sys.argv[0], *unittest_args], verbosity=2)
+    sys.exit(0 if run_in_parallel() else 1)
