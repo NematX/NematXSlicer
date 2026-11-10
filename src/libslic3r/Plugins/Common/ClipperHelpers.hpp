@@ -42,8 +42,9 @@ simplify leaves its input unchanged and reduces copied closed rings,
 reverses those whose orientation changed, and only then unions them to rebuild
 topology if a reversal occurred. Variable inner offsets inset the filled area:
 the contour shrinks and holes grow, and the result may split or disappear.
-diff_pl requires a nonempty mask: with an empty mask the host copies subject
-paths directly, whereas the core Clipper operation may reorder them.
+diff_pl copies subject paths unchanged with an empty mask, without calling the
+host. Exact core path order is guaranteed only with a nonempty mask, because
+the core Clipper operation may reorder paths even with an empty mask.
 */
 
 #include <algorithm>
@@ -209,9 +210,10 @@ inline ExPolygons diff_ex(storage_handle *storage, const ExPolygons &subject, co
     return from_expolygon_collection_view(result.readonly());
 }
 
-// Subtract a nonempty collection of filled areas in one native batch, retaining native path and point order.
+// Subtract filled areas in one native batch, retaining native order; an empty mask returns an unchanged subject copy without calling the host.
 inline Polylines diff_pl(storage_handle *storage, const Polylines &subject, const ExPolygons &clip) {
-    assert(!clip.empty());
+    if (clip.empty())
+        return subject;
     StoredPolylineCollection stored_subject(storage);
     for (const Polyline &path : subject) {
         StoredPolyline stored_path(storage);

@@ -26,9 +26,9 @@ The adapters returning geometry in core order are instead compared directly to
 core results, ring by ring, including orientation, starting vertices, holes and
 collection order. Variable-offset checks supply contour deltas before hole
 deltas; expansion includes clockwise rings. Open-path subtraction compares every
-path and vertex in batch order with a nonempty mask. Empty masks are excluded
-because the host copies the subject paths without the core Clipper operation,
-which may reorder those paths.
+path and vertex in batch order with a nonempty mask. Empty-mask checks compare
+directly to the subjects: they are copied unchanged without the core Clipper
+operation, which may reorder those paths.
 API collections borrow stored geometry; work polygons own their point arrays.
 Conversion checks compare every coordinate in stored ring and point order, then
 verify that output survives explicit freeing and destruction of the storage.
@@ -44,11 +44,36 @@ Tests
 |   |-- to_polygons: copy contours and holes from live API views
 |   |-- check_exact_view: ensure the source has not changed
 |   `-- check_exact_polygons: compare owned output before and after freeing
-`-- diff_pl: compare ordered paths for crossing, contained and outside inputs
+`-- diff_pl: compare ordered paths for crossing, contained and outside inputs,
+    and unchanged subject copies with an empty mask
 */
 
 namespace rect_work = slic3r_api::PluginCommon::polygon_work;
 namespace rect_clipper = slic3r_api::PluginCommon::clipper;
+
+// Subtract an empty mask from several owned paths or none; every path and point must remain in input order.
+TEST_CASE("Plugin common open path subtraction copies subjects with an empty mask", "[plugin-common]")
+{
+    Slic3r::PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const rect_work::Polylines paths{
+        rect_work::Polyline({900000, 700000}, {100000, 300000}),
+        rect_work::Polyline({-500000, 100000}, {200000, -400000}),
+        rect_work::Polyline({300000, 900000}, {-200000, 800000})};
+    for (bool empty_subject : {false, true}) {
+        INFO("empty subject " << empty_subject);
+        const rect_work::Polylines subject = empty_subject ? rect_work::Polylines{} : paths;
+        const rect_work::Polylines actual = rect_clipper::diff_pl(storage, subject, {});
+        REQUIRE(actual.size() == subject.size());
+        for (size_t i = 0; i < subject.size(); ++i) {
+            REQUIRE(actual[i].size() == subject[i].size());
+            for (size_t j = 0; j < subject[i].size(); ++j) {
+                CHECK(actual[i].points[j].x() == subject[i].points[j].x());
+                CHECK(actual[i].points[j].y() == subject[i].points[j].y());
+            }
+        }
+    }
+}
 
 TEST_CASE("Plugin common open path subtraction preserves exact native paths", "[plugin-common]")
 {
