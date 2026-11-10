@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1] / "src" / "rectilinear"
 HASHES = {
     "RectilinearFills.cpp": "b6c79befd2038a7e715711a2903d8ebacadd3fd3d7a900a46425169276501f52",
     "RectilinearWorkBuffers.hpp": "2c95791504285392aeb3cb3915f037fb4b3c2e4a54436e13e9ab7d0f413c9f26",
-    "RectilinearClipper.hpp": "06a480f92dfd5ac34dd24ba5fa05f0b6b8b901a8fa31f34ffa66ba45f823127a",
+    "RectilinearClipper.hpp": "8c53e36f3825044c609132c5bcfa7d4c47d5390107b56788a7b32f858c9446e3",
     "InfillWorkBuffers.hpp": "48df7ecf5d6b7d826c1bb1bcbd58b2060db174be555e891abf8c16ea1a439763",
 }
 

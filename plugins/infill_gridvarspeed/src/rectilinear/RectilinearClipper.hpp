@@ -79,6 +79,7 @@ inline StoredPolygonCollection to_stored_polygons(storage_handle *storage, const
     return out;
 }
 
+// Copy a live borrowed collection to owned contours and holes in stored order, retaining each element view during traversal.
 inline Polygons to_polygons(const slic3r_api::ExPolygonCollection &collection)
 {
     // Flatten the result directly from the API view instead of first creating
@@ -87,7 +88,8 @@ inline Polygons to_polygons(const slic3r_api::ExPolygonCollection &collection)
     size_t polygon_count = 0;
     for (uint32_t idx = 0; idx < collection.size(); ++idx) {
         ++polygon_count;
-        for (const slic3r_api::Polygon hole : collection.at(idx).holes()) {
+        const slic3r_api::ExPolygon expolygon = collection.at(idx);
+        for (const slic3r_api::Polygon hole : expolygon.holes()) {
             (void)hole;
             ++polygon_count;
         }
