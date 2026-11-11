@@ -8,6 +8,8 @@
 #include "gcode_test_helpers.hpp"
 #include "gcode_export_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
+#include "libslic3r/Api/host/Plugin.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Model.hpp"
@@ -18,7 +20,7 @@
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 
 /*
-This end-to-end gate checks that the avoid-crossing travel plugin's settings
+This end-to-end gate checks that both compatible travel providers' settings
 affect a processed printing plan and the text G-code published by the production
 exporter. The scene is a 0.6 mm-high square ring with a separate central island,
 so travels can stay on one island or cross between the two.
@@ -29,7 +31,8 @@ by the plugin must have either a variation or an explicit exclusion; every
 setting defined by it must have a variation. This makes missing table entries
 fail rather than silently leaving a newly declared setting unchecked.
 
-Each case builds and processes its own Print, then publishes and reads text
+Each case round-trips the scene through the E2E STL helper, builds and processes
+its own Print, verifies the selected provider, then publishes and reads text
 G-code. An ordered extrusion scope groups the motions around one extrusion into
 named phases; its reserved travel phase holds the connector travel. A leaf here
 is an extrusion entity with a polyline and no children. collect_travels walks the
@@ -40,7 +43,9 @@ Routes with fewer than two vertices are ignored. The Print owns the plan; the
 routes copied into Result outlive it. A route is counted as deviated when it has more
 than two vertices; this is not a geometric test of departure from a straight line.
 
-The gate compares disabled avoidance with the straight-travel provider, checks
+For the avoid-crossing baseline, the gate compares disabled avoidance with the
+straight-travel provider; the advanced baseline instead varies the selector toward
+the avoid-crossing provider. For both baselines, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change routes while keeping their endpoints.
 It compares deposited volume except for settings that change extrusion geometry.
@@ -84,6 +89,7 @@ struct TravelActivation {
             previous.push_back(plugin);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
     }
     // Clear the test activation and reactivate the saved plugins after all case-local Prints are destroyed.
@@ -110,6 +116,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
+    const char *provider = GENERATE("layer_extrusion_edit.travel.avoid_crossing_perimeters",
+                                    "layer_extrusion_edit.travel.advanced");
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const std::map<std::string, std::vector<std::string>> domains{
@@ -122,7 +130,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"avoid_travel_island", {"0"}},
         {"avoid_travel_island_weight", {"0", "2"}},
         {"nozzle_diameter", {"0.6"}},
-        {selector, {"layer_extrusion_edit.travel.default"}}
+        {selector, {std::string(provider) == "layer_extrusion_edit.travel.advanced" ?
+            "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default"}}
     };
     // Tool-dependent boundary partitioning is covered by the crossing and boundary tests.
     const std::map<std::string, std::string> exclusions{
@@ -130,7 +139,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"infill_extruder", "Partitions boundaries by infill tool; covered by crossing/boundary tests."},
         {"solid_infill_extruder", "Partitions boundaries by solid tool; covered by crossing/boundary tests."}
     };
-    const Plugin *plugin = host.get_plugin("layer_extrusion_edit.travel.avoid_crossing_perimeters");
+    const Plugin *plugin = host.get_plugin(provider);
     REQUIRE(plugin != nullptr);
     for (const Plugin::UsedConfigKey &key : plugin->get_used_config_keys()) {
         INFO("used setting: " << key.key);
@@ -141,6 +150,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         REQUIRE(domains.count(key.key) == 1);
     }
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict(selector, provider);
     baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"avoid_travel_island", "1"}, {"avoid_travel_island_weight", "1"},
@@ -182,7 +192,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
             std::cout << domain_name << "=" << value << ": travels=" << result.travels.size()
                       << " deviated=" << result.deviated << " volume=" << result.volume << '\n';
         }
-    CHECK(disabled.travels == straight.travels);
+    if (std::string(provider) != "layer_extrusion_edit.travel.advanced")
+        CHECK(disabled.travels == straight.travels);
     REQUIRE_FALSE(weight_zero.inter_island.empty());
     REQUIRE(weight_zero.inter_island.size() == weight_two.inter_island.size());
     // Fixed endpoints distinguish a changed detour from a change in which extrusions the travel connects.
@@ -210,9 +221,17 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
         mesh.merge(bar);
     }
     CHECK(mesh.volume() == Approx(163.2).margin(0.001));
+    mesh = Test::PluginE2E::stl_fixture(mesh);
     Model model;
     Print print;
     Test::init_print({mesh}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const std::string selector = Steps::plugin_exclusive_group_option_key(
+        orchestrator, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
+    Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
+        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &print.config());
+    REQUIRE(selected != nullptr);
+    REQUIRE(selected->get_id() == config.opt_serialize(selector));
     print.set_status_silent();
     print.process();
     REQUIRE_FALSE(Orchestrator::instance().is_plugin_cancelled());

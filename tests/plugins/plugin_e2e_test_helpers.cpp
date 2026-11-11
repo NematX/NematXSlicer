@@ -19,9 +19,10 @@
 
        stl_fixture()
            |-- make_cube(), merge() [cube or notched frame assembly]
-           |-- write_binary() [uniquely named temporary STL]
-           |-- ReadSTLFile() [exercise the actual import path]
-           `-- remove() [cleanup on success, attempted again on failure]
+           `-- stl_fixture(mesh) [also accepts a caller-supplied scene]
+               |-- write_binary() [uniquely named temporary STL]
+               |-- ReadSTLFile() [exercise the actual import path]
+               `-- remove() [cleanup on success, attempted again on failure]
 
    Configurations and meshes are returned as owned values. Registry/config inputs
    are borrowed only for the call; activation and production objects are unchanged.
@@ -37,6 +38,11 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 
 namespace Slic3r::Test::PluginE2E {
+// Build a cube or notched frame, then return its STL round trip; write, import and cleanup errors propagate.
+TriangleMesh stl_fixture(bool bridge_frame);
+// Write an owned mesh copy and read it back; remove the file on success and attempt cleanup before propagating failures.
+TriangleMesh stl_fixture(TriangleMesh mesh);
+
 std::vector<Case> linear_cases(const Orchestrator &host, const std::vector<std::string> &plugins,
     const DynamicPrintConfig &baseline, const std::vector<Domain> &domains)
 {
@@ -126,6 +132,11 @@ TriangleMesh stl_fixture(bool bridge_frame)
         roof.translate(0.f, 0.f, .6f);ledge.translate(0.f, 8.f, .6f);pad.translate(0.f, 0.f, 1.f);
         mesh.merge(roof);mesh.merge(ledge);mesh.merge(pad);
     }
+    return stl_fixture(mesh);
+}
+
+TriangleMesh stl_fixture(TriangleMesh mesh)
+{
     boost::filesystem::path path = GCode::temporary_gcode_path();
     path.replace_extension(".stl");
     // Import the file, not the in-memory source mesh, so every suite exercises

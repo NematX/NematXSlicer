@@ -292,6 +292,32 @@ TEST_CASE("Avoid-crossing travel is the default provider in the travel group",
     }));
 }
 
+// Compare the advanced provider's public scheduling and setting descriptions with its compatibility provider.
+TEST_CASE("Advanced travel exposes the compatibility routing settings",
+          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Plugin *advanced = Orchestrator::instance().get_plugin("layer_extrusion_edit.travel.advanced");
+    Plugin *avoidance = Orchestrator::instance().get_plugin(AVOID_CROSSING_TRAVEL_PLUGIN);
+    REQUIRE(advanced != nullptr);
+    REQUIRE(avoidance != nullptr);
+    CHECK(advanced->get_id() == "layer_extrusion_edit.travel.advanced");
+    CHECK(advanced->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+    CHECK(advanced->get_priority() == -50);
+    CHECK(advanced->get_exclusive_group_priority() == 1);
+    CHECK(advanced->get_exclusive_group() == "layer_extrusion_edit.travel");
+    CHECK(advanced->get_dependencies() == avoidance->get_dependencies());
+    const std::vector<Plugin::UsedConfigKey> actual = advanced->get_used_config_keys();
+    const std::vector<Plugin::UsedConfigKey> expected = avoidance->get_used_config_keys();
+    REQUIRE(actual.size() == expected.size());
+    for (size_t idx = 0; idx < actual.size(); ++idx) {
+        CHECK(actual[idx].key == expected[idx].key);
+        CHECK(actual[idx].type == expected[idx].type);
+        CHECK(actual[idx].container_type == expected[idx].container_type);
+        CHECK(actual[idx].option_preset_type == expected[idx].option_preset_type);
+    }
+}
+
 TEST_CASE("AvoidCrossingPerimeters crossing test rejects contained travels",
           "[AvoidCrossingPerimeters][plugins][layer-extrusion-edit][travel]")
 {

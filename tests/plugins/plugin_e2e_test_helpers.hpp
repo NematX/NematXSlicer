@@ -58,5 +58,7 @@ Domain enum_domain(const std::string &key);
 // Both use a binary STL round trip. Remove its temporary file on success and try
 // cleanup on failure; filesystem and import failures propagate.
 TriangleMesh stl_fixture(bool bridge_frame);
+// Return a copy of the supplied scene after a binary STL round trip; remove the file and propagate write, read or cleanup errors.
+TriangleMesh stl_fixture(TriangleMesh mesh);
 }
 #endif

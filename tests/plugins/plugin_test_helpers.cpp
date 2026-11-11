@@ -12,7 +12,7 @@ before the exclusive selectors are built, so a selector can choose them.
 The configuration/activation helpers run inside the function-local static
 initializer lambda, once per process. The startup query only ensures that
 initialization has finished before returning the copied sets.
-Both travel providers remain active while the travel selector is created and
+All three travel providers remain active while the travel selector is created and
 option definitions are finalized, preserving its avoidance-provider default.
 They are then deactivated before FFF/SLA configuration caches are created, so
 unrelated tests can choose editor chains without inserting travel geometry.
@@ -103,6 +103,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/Rectilinear/RectilinearPatterns.hpp"
 #include "libslic3r/Plugins/Infill/SimpleInfillPatterns.hpp"
 #include "libslic3r/Plugins/Infill/SmoothPattern.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetraction.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionLift.hpp"
@@ -192,7 +193,7 @@ const std::string &python_metadata_warnings();
 // The manager owns wrappers borrowing static providers; call before Print or full_print_config().
 // Disable regional seam/storage probes and aligned, contiguous, cost and random seam placers; the failed selector probe is disabled during initialization,
 // its expected diagnostic is filtered, and the valid selector probe is disabled after finalization.
-// Disable layer_extrusion_edit.travel.default and layer_extrusion_edit.travel.avoid_crossing_perimeters after registering their selector.
+// Disable all three travel providers after registering their shared selector.
 // Missing expected plugins log and assert; registration, Python loading and allocation failures propagate.
 void ensure_plugin_test_runtime_initialized();
 
@@ -910,6 +911,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin::
             register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
+            register_advanced_travel_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultSpeedPlugin::register_default_speed_plugin(
@@ -1099,6 +1102,7 @@ void ensure_plugin_test_runtime_initialized()
         // Register the travel selector before typed configs cache its default; individual tests choose their editor chain.
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
@@ -1243,6 +1247,7 @@ void ensure_plugin_test_runtime_initialized()
         register_exclusive_step_group_ui_fragments(orchestrator);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.default", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false);
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);
         orchestrator.set_plugin_active("test.plugin_storage.support", false);
         orchestrator.set_plugin_active(Test::ProbePatternPlugin::probe_pattern_id, false);
