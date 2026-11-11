@@ -12,7 +12,9 @@ a travel phase before each real incoming transition. prepare() streams those
 roots and records real gaps without calling a planner. It snaps nearby seams
 immediately because a closed seam can also be the next pair's source. apply()
 plans the recorded paths, fills reserved phases and publishes materialized flags.
-The chronology owns vectors of plan views, not geometry, property pointers or
+Each traversed pair also records its target PrintingExtrusion and tool, including
+continuous pairs and materialized travels, so summaries need not infer printed
+owners from gaps alone. The chronology owns vectors of plan views, not geometry, property pointers or
 traversal contexts. Use the same connector to apply it before structural plan
 mutation, layer destruction or connector reset()/setup(). apply() reads the
 connector's next-layer summaries. Leaf geometry edits do not change child lists.
@@ -659,6 +661,8 @@ LayerTravelChronology ScopeTravelConnector::prepare(PrintingLayerGroup &layer,
                     previous, *next, entry, contexts, m_scope_property,
                     chronology.roots.size(), chronology.travels, chronology.target_z);
                 chronology.roots.push_back(next->entity);
+                chronology.pair_extrusions.push_back(
+                    {next->printing_extrusion, next->tool_group.extruder_id()});
                 chronology.materialized.push_back(materialized);
                 return;
             }

@@ -211,6 +211,7 @@ test_support_tree_family.cpp
     test_surface_solid_shells.cpp
     test_surface_top_surface_expansion.cpp
     test_tool_change_wipe.cpp
+    test_travel_zones.cpp
     test_tree_geometry.cpp
     test_vase_multi_island_connector.cpp
     test_vendor_config.cpp

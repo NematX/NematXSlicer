@@ -30,6 +30,8 @@ writes travels and updates flags.
 A LayerTravelChronology owns its bookkeeping and borrowed plan views, not the
 plan geometry. Apply it with the same connector before any structural plan
 mutation or layer destruction.
+pair_extrusions retains the target owner and tool of every traversed pair,
+including pairs that are continuous or already have a materialized travel.
 Calling reset() or setup() on that connector also invalidates the chronology,
 because apply() reads the connector's next-layer summaries.
 No property pointer or traversal context is retained. Typical use after setup_run
@@ -102,6 +104,13 @@ struct PendingTravel
 struct LayerTravelChronology
 {
     std::vector<PendingTravel> travels;
+    // Target owner and tool for every traversed pair, including continuous and already materialized transitions.
+    struct PairExtrusion
+    {
+        PrintingExtrusion target{nullptr};
+        extruder_index_t extruder_id = EXTRUDER_ID_UNKNOWN;
+    };
+    std::vector<PairExtrusion> pair_extrusions;
 
 private:
     friend class ScopeTravelConnector;
@@ -141,8 +150,8 @@ public:
                    uint32_t layer_idx,
                    PluginProgress &progress);
 
-    /* Copy ordered plan views and endpoints while snapping seams in traversal order, without planning paths, writing travels or updating flags.
-       Invalid indexes, unprepared summaries or invalid pairs throw. */
+    /* Copy every pair's owner and tool plus ordered gap endpoints while snapping seams, without planning paths, writing travels or updating flags.
+       Views borrow the stable plan; invalid indexes, unprepared summaries or invalid pairs throw. */
     LayerTravelChronology prepare(PrintingLayerGroup &layer,
                                   uint32_t group_idx, uint32_t layer_idx) const;
 
