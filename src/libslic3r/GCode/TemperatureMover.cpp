@@ -5,6 +5,7 @@
 
 #include "TemperatureMover.hpp"
 
+#include <cctype>
 #include <iomanip>
 
 #include <boost/log/trivial.hpp>
@@ -60,25 +61,31 @@ float get_axis_value(const std::string &line, char axis)
     }
     return NAN;
 }
-float get_nematx_axis_value(const std::string &line)
+std::tuple<int16_t, extruder_index_t> parse_nozzle_temperature(const std::string &line, extruder_index_t current_tool)
 {
-
-    size_t pos = line.find('=');
-    if (pos == std::string::npos) {
-        return -1.f;
+    const bool wait = line.compare(0, 4, "M109") == 0;
+    if ((!wait && line.compare(0, 4, "M104") != 0) || (line.size() > 4 && !is_end_of_word(line[4])))
+        return {int16_t(-1), current_tool};
+    // Parameters are the words between the command and an optional comment.
+    const std::string_view words(line.data(), std::min(line.find(';'), line.size()));
+    int16_t temperature = -1;
+    for (size_t pos = 4; pos < words.size();) {
+        while (pos < words.size() && is_end_of_word(words[pos]))
+            ++pos;
+        size_t end = pos;
+        while (end < words.size() && !is_end_of_word(words[end]))
+            ++end;
+        const char letter = pos < end ? char(std::toupper(static_cast<unsigned char>(words[pos]))) : 0;
+        if (end > pos + 1 && (letter == 'S' || (wait && letter == 'R'))) {
+            const std::string value(words.substr(pos + 1, end - pos - 1));
+            char *parsed_end = nullptr;
+            const double number = std::strtod(value.c_str(), &parsed_end);
+            temperature = parsed_end == value.c_str() + value.size() && number >= 0. && number <= 32767. ?
+                              int16_t(std::lround(number)) : int16_t(-1);
+        }
+        pos = end;
     }
-    pos++;
-    // size_t end = std::min(line.find(' ', pos + 1), line.find(';', pos + 1));
-    // Try to parse the numeric value.
-    const char *c    = line.c_str();
-    char *      pend = nullptr;
-    errno            = 0;
-    double v         = strtod(c + pos, &pend);
-    if (pend != nullptr && errno == 0 && pend != c) {
-        // The axis value has been parsed correctly.
-        return float(v);
-    }
-    return NAN;
+    return {temperature, current_tool};
 }
 
 void change_axis_value(std::string &line, char axis, const float new_value, const int decimal_digits)
@@ -109,12 +116,8 @@ bool parse_number(const std::string_view sv, int& out)
 } // namespace TemperatureMover_func
 
 std::tuple<int16_t, extruder_index_t> TemperatureMover::_get_temperature_with_extruder_idx(const std::string &line,
-                                                                                             GCodeFlavor flavor) {
-    if (line.compare(0, 4, "M104") == 0 || line.compare(0, 4, "M109") == 0) {
-        return std::tuple<int16_t, extruder_index_t>((int16_t) TemperatureMover_func::get_nematx_axis_value(line),
-                                                     m_current_extruder);
-    }
-    return std::tuple<int16_t, extruder_index_t>(int16_t(-1), 0);
+                                                                                             GCodeFlavor /*flavor*/) {
+    return TemperatureMover_func::parse_nozzle_temperature(line, m_current_extruder);
 }
 
 void TemperatureMover::_put_in_middle_G1(std::list<BufferData>::reverse_iterator item_to_split, float nb_sec_since_itemtosplit_start, BufferData &&line_to_write, float max_time) {

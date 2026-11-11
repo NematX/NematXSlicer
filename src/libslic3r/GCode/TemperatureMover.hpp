@@ -25,6 +25,13 @@
 
 namespace Slic3r {
 
+namespace TemperatureMover_func {
+// Read the target of a nozzle temperature command: S for M104 or M109, or R for M109.
+// The command applies to current_tool. Any other line, or a command without a valid
+// target, gives -1.
+std::tuple<int16_t, extruder_index_t> parse_nozzle_temperature(const std::string &line, extruder_index_t current_tool);
+} // namespace TemperatureMover_func
+
 
 class TemperatureMover
 {

@@ -192,6 +192,7 @@ test_support_tree_family.cpp
     test_support_pattern_service.cpp
     ../libslic3r/test_support_spots_generator.cpp
     test_support_tool_ordering.cpp
+    test_temperature_mover.cpp
     test_surface_clean_infill_surfaces.cpp
     test_surface_initial_typed_surface_builder.cpp
     test_surface_infill_region_compatibility_splitter.cpp
