@@ -10,11 +10,19 @@ The layer_extrusion_edit.travel selector can choose it explicitly. It uses
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
 gaps, then fills them with XY routes from the selected advanced planner.
 Compatibility is the default and the fallback for absent or unknown choices.
-The opt-in zones planner collects default island attractors and forbidden tops
-only when the chronology contains an eligible travel after layer entry. The
+The opt-in zones planner collects active island attractors and forbidden tops.
+Active means present in the host activation set, configured by activated.ini.
+Collection occurs only when the chronology contains an eligible travel after layer entry. The
 layer-entry travel stays straight. Compatibility owns its worker-local input
 cache; the default contributors share a second cache owned by advanced travel,
 so layer geometry may be copied twice.
+The permanent contributor plugins are non-exclusive no-op members, dependent on
+advanced travel. Its private implementation checks each ID with
+orchestrator_find_plugin before passing its borrowed worker-local computation.
+Disabling a member
+removes only its zones; same-attractor compatibility routing retains its own top
+avoidance. An inactive advanced provider blocks its dependent members even when
+their IDs are enabled in the profile.
 The connector owns insertion, Z interpolation and materialized travel flags.
 Avoid-crossing remains the default when active; straight travel is next.
 */
@@ -27,6 +35,8 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register the two no-op planner choices and declare their exclusive selection group.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
+// Register the two independently activated no-op contributor plugins.
+void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 }}}
 #endif

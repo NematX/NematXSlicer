@@ -22,10 +22,13 @@ layer group before the host's worker barrier. Each run first prepares a chronolo
 an ordered record of borrowed extrusion gaps with their seams already snapped.
 It selects a planner through the advanced planner group, falling back to
 compatibility for absent or unknown selections. Compatibility preserves perimeter
-routing. The opt-in zones planner summarizes eligible gaps, collects default
+routing. The opt-in zones planner summarizes eligible gaps, collects active
 attractors and forbidden tops, and routes in chronology order. Layers without
-eligible gaps bypass zone construction. Both planners and the contributors are
-worker-local; compatibility owns its input cache. The default contributors share
+eligible gaps bypass zone construction. Permanent no-op plugins expose planner
+selection and global contributor activation. Active means present in the host
+activation set, configured by activated.ini. Computation objects are worker-local;
+compatibility owns its input cache. The private implementation checks each ID
+with orchestrator_find_plugin. Active contributors share
 a second input cache owned by advanced travel, so a layer can be copied twice.
 The incoming layer-entry travel has no source extrusion and remains straight.
 The connector inserts travels, interpolates Z and updates flags and progress.
@@ -34,13 +37,14 @@ planner survives the callback. Cancellation and routing errors propagate.
 
     register_advanced_travel_plugin: register the permanent provider
     register_advanced_travel_planners: register two no-op selection members and their group
+    register_advanced_travel_contributors: register two non-exclusive no-op zone members
     setup_impl: reset and allocate connector summaries
     setup_run_impl: publish this layer group's summary
     run_impl: own the chronology and planner for one worker callback
         |-- ScopeTravelConnector::prepare: record ordered gaps and snap seams
         |-- orchestrator_select_plugin: resolve the selected planner
         |-- summarize: evaluate ZonePlanner::eligible without building zones
-        |-- TravelZoneView: collect default attractors and forbidden tops when eligible
+        |-- TravelZoneView: collect active attractors and forbidden tops when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
             `-- ZonePlanner::path: query dated zones and avoid forbidden tops
@@ -51,6 +55,8 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register permanent no-op planner choices and their selector; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
+// Register permanent no-op zone contributors; allocation errors propagate and host rejections are logged.
+void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 namespace {
 using namespace TravelConnection;
@@ -59,7 +65,36 @@ namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
 const char *const k_planner_group = "layer_extrusion_edit.travel.advanced.planner";
 const char *const k_compatibility_id = "layer_extrusion_edit.travel.advanced.planner.compatibility";
 const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.zones";
+const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
+const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_planner_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
+
+class ContributorChoice : public PluginBase
+{
+public:
+    // Borrow the orchestrator and retain static identity strings for this permanent activation member.
+    ContributorChoice(orchestrator_handle *orchestrator, const char *id, const char *name) :
+        PluginBase(orchestrator), m_id(id), m_name(name) {}
+private:
+    // Return the static contributor identity.
+    const char *id_impl() const noexcept override { return m_id; }
+    // Return the static display name.
+    const char *name_impl() const noexcept override { return m_name; }
+    // Describe the computation controlled by this otherwise inert member.
+    const char *description_impl() const noexcept override { return "Enables zones collected by Advanced travel."; }
+    // Allow independent activation without a selector.
+    const char *exclusive_group_impl() const noexcept override { return ""; }
+    // Participate in layer editing alongside the provider.
+    slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
+    // Require the provider that collects these zones.
+    const char *const *dependencies_impl() const noexcept override { return k_planner_dependencies; }
+    // Keep the provider's step priority.
+    int32_t priority_impl() const noexcept override { return -50; }
+    // Leave geometry unchanged; only AdvancedTravel calls the contributor computation.
+    void run_impl(const plugin_run_context *) const override {}
+    const char *m_id;
+    const char *m_name;
+};
 
 class PlannerChoice : public PluginBase
 {
@@ -266,7 +301,12 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
                                           inputs, chronology.travels, summary};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
-    zones::TravelZoneView view({std::cref(attractors), std::cref(tops)}, input);
+    std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
+    if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
+        active.push_back(std::cref(attractors));
+    if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
+        active.push_back(std::cref(tops));
+    zones::TravelZoneView view(active, input);
     zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx);
     size_t t = 0;
     // apply calls this exactly once per PendingTravel, in chronology order.
@@ -301,5 +341,13 @@ void register_advanced_travel_planners(orchestrator_handle *orchestrator)
     definition.label = "Advanced travel planner";
     definition.tooltip = "Selects perimeter compatibility routing or forbidden-zone routing for Advanced travel.";
     compatibility.register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
+}
+
+void register_advanced_travel_contributors(orchestrator_handle *orchestrator)
+{
+    static ContributorChoice attractors(orchestrator, k_attractors_id, "Island attractor zones");
+    static ContributorChoice tops(orchestrator, k_tops_id, "Forbidden top zones");
+    orchestrator_register_plugin(orchestrator, attractors.c_instance());
+    orchestrator_register_plugin(orchestrator, tops.c_instance());
 }
 }}} // namespace slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin

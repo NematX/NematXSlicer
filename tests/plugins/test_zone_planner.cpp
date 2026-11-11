@@ -24,7 +24,8 @@ active while slicing, but invokes ZonePlanner directly without production wiring
     rectangle / pending: construct millimeter geometry in platter coordinates
     check_clear: compare each route segment with original filled areas
     tests: exercise eligibility, cached margins, routing, limits and delegation;
-        real default contributors retain disjoint tops when an endpoint occupies another top
+        real default contributors retain disjoint tops when an endpoint occupies another top;
+        activation checks inspect collected zones and same-island compatibility delegation
 */
 namespace {
 namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
@@ -348,6 +349,8 @@ TEST_CASE("Zone planner applies auxiliary eligibility detour budgets and cancell
 TEST_CASE("Default top contributors retain other tops when an endpoint occupies one", "[plugins][zone-planner][travel-zones]")
 {
     Owner owner;
+    const bool use_attractors = GENERATE(false, true);
+    const bool use_tops = GENERATE(false, true);
     owner.model.clear_objects();
     Slic3r::TriangleMesh mesh = Slic3r::make_cube(4., 4., 0.6);
     Slic3r::TriangleMesh middle = Slic3r::make_cube(4., 4., 0.6);
@@ -383,9 +386,22 @@ TEST_CASE("Default top contributors retain other tops when an endpoint occupies 
     owner.chronology.travels = {gap};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
-    zones::TravelZoneView view({std::cref(attractors), std::cref(tops)}, owner.input());
+    Slic3r::Test::TransitionPipeline::ScopedActivePlugins activation({
+        "layer_extrusion_edit.travel.advanced",
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors",
+        "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", use_attractors));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", use_tops));
+    std::vector<std::reference_wrapper<const zones::ZoneContributor>> contributors;
+    if (orchestrator_find_plugin(reinterpret_cast<orchestrator_handle *>(&host),
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors")) contributors.push_back(std::cref(attractors));
+    if (orchestrator_find_plugin(reinterpret_cast<orchestrator_handle *>(&host),
+        "layer_extrusion_edit.travel.advanced.zones.forbidden_tops")) contributors.push_back(std::cref(tops));
+    zones::TravelZoneView view(contributors, owner.input());
     const zones::ActiveZones &active = view.query(0, gap);
-    REQUIRE(active.forbidden_indexes.size() == 2);
+    CHECK(active.attractors.empty() == !use_attractors);
+    REQUIRE(active.forbidden_indexes.size() == (use_tops ? 2 : 0));
     work::ExPolygons other_tops;
     size_t containing_source = 0;
     for (size_t index : active.forbidden_indexes) {
@@ -394,14 +410,52 @@ TEST_CASE("Default top contributors retain other tops when an endpoint occupies 
         if (area.front().contains({gap.source.position.x, gap.source.position.y})) ++containing_source;
         else other_tops.insert(other_tops.end(), area.begin(), area.end());
     }
-    REQUIRE(containing_source == 1);
-    REQUIRE(other_tops.size() == 1);
+    REQUIRE(containing_source == size_t(use_tops));
+    REQUIRE(other_tops.size() == size_t(use_tops));
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context);
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context);
     const std::vector<c_point> result = planner.path(0, gap);
-    REQUIRE(planner.detours() == 1);
-    REQUIRE(result.size() > 2);
-    check_clear(result, other_tops, owner.storage);
+    REQUIRE(planner.detours() == size_t(use_tops));
+    CHECK(planner.same_attractor_delegations() == 0);
+    REQUIRE((result.size() > 2) == use_tops);
+    if (use_tops) check_clear(result, other_tops, owner.storage);
+}
+
+// Removing forbidden zones does not remove the compatibility router's own regional top avoidance.
+TEST_CASE("Same attractor keeps compatibility top avoidance without forbidden contributor", "[plugins][zone-planner][travel-zones]")
+{
+    Owner owner;
+    owner.config.set_deserialize_strict("avoid_crossing_top", "1");
+    owner.print.apply(owner.model, owner.config);
+    owner.print.process();
+    owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
+    Slic3r::Layer &layer = owner.print.object(0).layers().back();
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+    const uint32_t catalog = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), 0);
+    const c_point shift = owner.print_view.object(0).instance_shift(0);
+    const Slic3r::Point minimum = layer.lslices().front().contour.bounding_box().min;
+    // Keep endpoints in the perimeter band so the chord, not its endpoints, crosses the top.
+    travel::PendingTravel gap = pending(0.2, 10., 19.8, 10.);
+    gap.source.position.x += shift.x + minimum.x(); gap.source.position.y += shift.y + minimum.y();
+    gap.target.position.x += shift.x + minimum.x(); gap.target.position.y += shift.y + minimum.y();
+    gap.source.printing_catalog_id = gap.target.printing_catalog_id = catalog;
+    gap.source.region_island = gap.target.region_island = layer_view.island(0).get_or_create_full_region_island(0);
+    owner.chronology.travels = {gap};
+    const zones::DefaultAttractorContributor attractors;
+    zones::TravelZoneView view({std::cref(attractors)}, owner.input());
+    CHECK(view.query(0, gap).forbidden_indexes.empty());
+    REQUIRE_FALSE(view.query(0, gap).attractors.empty());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context);
+    const std::vector<c_point> expected = compatibility.path(gap.source, gap.target, 0);
+    const std::vector<c_point> result = planner.path(0, gap);
+    REQUIRE(expected.size() > 2);
+    REQUIRE(result.size() == expected.size());
+    for (size_t i = 0; i < result.size(); ++i) {
+        CHECK(result[i].x == expected[i].x);
+        CHECK(result[i].y == expected[i].y);
+    }
+    CHECK(planner.same_attractor_delegations() == 1);
 }
 
 TEST_CASE("Zone planner delegates shifted attractors but forbidden material wins", "[plugins][zone-planner]")

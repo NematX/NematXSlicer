@@ -49,6 +49,14 @@ prepare's ordered gaps and seam edits before apply writes paths and flags.
 All borrowed views remain within the lifetime of their unchanged plan structure.
 Eligibility checks slice a cube and attach controlled paths to its real region
 island, then summarize prepared gaps with the compatibility planner's predicate.
+The controlled three-island scene toggles contributor activation with either
+advanced or straight travel selected. Only advanced travel with forbidden tops
+active may detour its inter-island gap; layer entry stays straight in every case.
+With both endpoints on one island and forbidden tops disabled, the attractor
+member alone enables delegation to the compatibility top detour.
+
+    controlled scene: slice region masks, attach ordered paths, select active members
+        `-- StepLayerExtrusionEdition::run_step: insert travels for point-count checks
 */
 
 namespace {
@@ -853,15 +861,18 @@ TEST_CASE("Semantic continuous transitions keep the travel slot empty",
         slic3r_api::PRINTING_EXTRUSION_SCOPE_INCOMING_TRAVEL_MATERIALIZED));
 }
 
-// Exercise the production zones branch with an incoming layer travel across two tops and an optional eligible gap after it.
+// Check layer entry and optional same-island or inter-island gaps with contributor sets and straight or advanced travel.
 TEST_CASE("Advanced zones keep layer entry straight while later travels avoid tops", "[plugins][travel][travel-zones]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool following_gap = GENERATE(false, true);
+    const int contributors = GENERATE(0, 1, 2, 3);
+    const bool advanced = GENERATE(false, true);
+    const bool same_attractor = GENERATE(false, true);
     Orchestrator &host = Orchestrator::instance();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+        "layer_extrusion_edit.travel"), advanced ? "layer_extrusion_edit.travel.advanced" : TRAVEL_PLUGIN);
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
@@ -909,21 +920,31 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     current.tool_groups.resize(1);
     PrintingToolGroup &tool = current.tool_groups[0];
     tool.extruder_id = 0;
-    const Point target = right + Point(shift.x, shift.y);
-    append_extrusion(tool, make_path(target, target + Point(scale_i(1.), 0)), right_region, catalog);
+    const Point target = same_attractor ? left + Point(shift.x + scale_i(1.8), shift.y) : right + Point(shift.x, shift.y);
+    append_extrusion(tool, make_path(target, target + (same_attractor ? Point(0, scale_i(0.1)) : Point(scale_i(1.), 0))),
+        same_attractor ? left_region : right_region, catalog);
     if (following_gap)
-        append_extrusion(tool, make_path(left + Point(shift.x, shift.y),
+        append_extrusion(tool, make_path(left + Point(shift.x - (same_attractor ? scale_i(1.8) : 0), shift.y),
             left + Point(shift.x + scale_i(1.), shift.y)), left_region, catalog);
     // This hand-built plan is a separate layer-edit run, not another unit of the completed slicing run.
     print.pipeline_progress().reset();
-    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones"});
+    ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
+        TRAVEL_PLUGIN,
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones",
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors",
+        "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", (contributors & 1) != 0));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", !same_attractor && (contributors & 2) != 0));
+    host.reset_plugin_cancel();
+    Steps::StepLayerExtrusionEdition::run_step(host, print);
+    REQUIRE_FALSE(host.is_plugin_cancelled());
     const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope first = ordered_scope(*tool.extrusions[0].root);
     REQUIRE(first.travel().point_count() == 2);
     CHECK(first.travel().point(0).x == entry.x());
     CHECK(first.travel().point(1).x == target.x());
     if (following_gap)
-        CHECK(ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2);
+        CHECK((ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2) ==
+            (advanced && (contributors & (same_attractor ? 1 : 2)) != 0));
 }
 
 TEST_CASE("Prepared travel chronology records snapped sources and layer entry provenance",

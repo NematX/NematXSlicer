@@ -843,6 +843,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.advanced.planner",
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_planners);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.advanced.zones",
+        slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_contributors);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.first_layer_flow",
         slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.speed.default",

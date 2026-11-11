@@ -59,6 +59,8 @@ integration, not general routing correctness.
 The activation guard saves and restores the active plugin set, including the
 exporter, after the case-local Prints are destroyed. Output removal is attempted
 only on the normal return path, and removal errors are ignored.
+Contributor activation cases keep the zones planner selected and round-trip a
+reference with both members and each member disabled independently.
 
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
@@ -96,6 +98,8 @@ struct TravelActivation {
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.compatibility", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.zones", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
     }
     // Clear the test activation and reactivate the saved plugins after all case-local Prints are destroyed.
@@ -174,6 +178,69 @@ TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[
         CHECK(result.travels != baseline.travels);
     else
         CHECK(result.travels == baseline.travels);
+}
+
+// Check non-exclusive declarations and dependency blocking when the advanced provider is inactive.
+TEST_CASE("Advanced zone contributors expose independent activation", "[plugins][travel-zones]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced", false));
+    for (const char *id : {"layer_extrusion_edit.travel.advanced.zones.island_attractors",
+                           "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"}) {
+        const Plugin *plugin = host.get_plugin(id);
+        REQUIRE(plugin != nullptr);
+        CHECK(plugin->get_id() == id);
+        CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+        CHECK(plugin->get_priority() == -50);
+        CHECK(plugin->get_exclusive_group().empty());
+        CHECK(plugin->get_used_config_keys().empty());
+        CHECK(plugin->get_defined_config_keys().empty());
+        CHECK(plugin->get_dependencies() == std::vector<std::string>{"layer_extrusion_edit.travel.advanced"});
+        CHECK(host.is_plugin_active(id));
+    }
+    host.block_unsatisfied_plugin_dependencies();
+    for (const char *id : {"layer_extrusion_edit.travel.advanced.zones.island_attractors",
+                           "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"}) {
+        CHECK_FALSE(host.is_plugin_active(id));
+        REQUIRE(host.blocked_plugin_activations().count(id) == 1);
+        CHECK(host.blocked_plugin_activations().at(id).find("layer_extrusion_edit.travel.advanced") != std::string::npos);
+    }
+}
+
+// Process the reference and one contributor toggle at a time through STL and text export without changing deposited volume.
+TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins][plugin-e2e][travel-zones]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"}, {"ironing", "0"},
+        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
+        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const Result reference = run_case(config, "contributors-reference");
+    REQUIRE(reference.deviated > 0);
+    for (const char *id : {"layer_extrusion_edit.travel.advanced.zones.island_attractors",
+                           "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"}) {
+        INFO(id);
+        REQUIRE(host.set_plugin_active(id, false));
+        const Result result = run_case(config, "contributor-disabled");
+        CHECK(result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+        CHECK(result.volume == Approx(reference.volume).margin(0.01));
+        CHECK_FALSE(result.travels.empty());
+        REQUIRE(host.set_plugin_active(id, true));
+    }
 }
 
 // Validate setting coverage and compare an enabled baseline with variations; ironing is coupled with top avoidance.

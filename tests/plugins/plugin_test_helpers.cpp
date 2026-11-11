@@ -915,6 +915,8 @@ void ensure_plugin_test_runtime_initialized()
             register_advanced_travel_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
             register_advanced_travel_planners(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
+            register_advanced_travel_contributors(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultSpeedPlugin::register_default_speed_plugin(
@@ -1107,6 +1109,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.compatibility");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.zones");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.island_attractors");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.forbidden_tops");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
@@ -1254,6 +1258,8 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.compatibility", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.zones", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false);
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);
         orchestrator.set_plugin_active("test.plugin_storage.support", false);
         orchestrator.set_plugin_active(Test::ProbePatternPlugin::probe_pattern_id, false);
