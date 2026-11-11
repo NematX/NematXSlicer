@@ -183,6 +183,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Support/Tree/SupportFamilyTree.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/SupportToolpathBranch.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/SupportToolpathLegacy.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportInterfaceGapFill.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBuildplateOnly.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandOverhangs.hpp"
@@ -1045,6 +1046,8 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::Toolpath::register_support_toolpath_top_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.legacy_top_contact",
         slic3r_api::Support::Toolpath::register_support_toolpath_top_contact_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.interface_gap_fill",
+        slic3r_api::Support::Toolpath::register_support_interface_gap_fill_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.branch_sheath",
         slic3r_api::Support::Toolpath::register_support_toolpath_branch_plugin);
 }

@@ -706,13 +706,13 @@ TEST_CASE("Support toolpath selectors default to auto and follow the support sty
     model.objects()[1].config.set_deserialize_strict("support_material_style", "grid");
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 6);
+    REQUIRE(selected.size() == 7);
     for (size_t index = 0; index < selected.size(); ++index) {
         CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
             index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));
         CHECK(selected[index].plugin->get_id() == std::vector<std::string>{Common::k_legacy_sparse_id,
             Common::k_branch_sheath_id, Common::k_legacy_bottom_contact_id, Common::k_legacy_bottom_id,
-            Common::k_legacy_top_contact_id, Common::k_legacy_top_id}[index]);
+            Common::k_legacy_top_contact_id, Common::k_legacy_top_id, "support.toolpath.interface_gap_fill"}[index]);
     }
     model.objects()[0].config.set_deserialize_strict(key, Common::k_legacy_sparse_id);
     print.apply(model, config);
@@ -747,7 +747,7 @@ TEST_CASE("Organic objects print their sparse support with the branch sheath thr
     model.objects()[0].config.set_deserialize_strict("support_material_style", "organic");
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 6);
+    REQUIRE(selected.size() == 7);
     for (const Steps::ObjectStepPlugin &entry : selected) {
         if (entry.plugin->get_id() == Common::k_branch_sheath_id)
             CHECK(entry.object_indices == std::vector<size_t>{0});
@@ -755,7 +755,8 @@ TEST_CASE("Organic objects print their sparse support with the branch sheath thr
             CHECK(entry.object_indices == std::vector<size_t>{1});
         else {
             CHECK((entry.plugin->get_id() == Common::k_legacy_bottom_id || entry.plugin->get_id() == Common::k_legacy_top_id ||
-                   entry.plugin->get_id() == Common::k_legacy_bottom_contact_id || entry.plugin->get_id() == Common::k_legacy_top_contact_id));
+                   entry.plugin->get_id() == Common::k_legacy_bottom_contact_id || entry.plugin->get_id() == Common::k_legacy_top_contact_id ||
+                   entry.plugin->get_id() == "support.toolpath.interface_gap_fill"));
             CHECK(entry.object_indices == std::vector<size_t>{0, 1});
         }
     }
@@ -848,7 +849,7 @@ TEST_CASE("Auto support toolpath selectors resolve before slicing and complete t
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(
         Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 6);
+    REQUIRE(selected.size() == 7);
     for (size_t index = 0; index < selected.size(); ++index)
         CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
             index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));

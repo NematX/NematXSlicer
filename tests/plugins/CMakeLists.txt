@@ -127,6 +127,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_filled_family.cpp
     test_support_grid_family.cpp
     test_support_grid_legacy_compare.cpp
+    test_support_interface_gap_fill.cpp
     test_support_tree_dump.cpp
     test_support_tree_routing.cpp
     test_support_tree_settings.cpp
@@ -459,6 +460,8 @@ set_tests_properties(plugins_exporter_child_timings PROPERTIES TIMEOUT 780 LABEL
 # Keep the residual pass and its volume composition available as a focused gate.
 add_test(NAME infill_gap_fill COMMAND ${_TEST_NAME}_tests "[plugins][infill][gap-fill]")
 set_tests_properties(infill_gap_fill PROPERTIES LABELS "infill;gap-fill" TIMEOUT 180)
+add_test(NAME support_interface_gap_fill COMMAND ${_TEST_NAME}_tests "[support-gap-fill]")
+set_tests_properties(support_interface_gap_fill PROPERTIES LABELS "support;gap-fill" TIMEOUT 900)
 
 # The export gate uses the production registry and the host's default plugins.
 if(TARGET Slic3r_app_console)
