@@ -36,6 +36,9 @@ wipe, while the travel starts at the normal non-returning wipe's endpoint.
 Pairs of support or brim paths on different instances remain for the returning
 pass. A global path carrying an object region paired with support distinguishes
 global ownership from that region; a regionless departure checks absent ownership.
+Seam-gap cases retain the LOOP marker on an open path and require an explicit
+non-extruding wipe from its printed endpoint to the seam before each forward pass.
+Closed paths and return-to-seam settings share the same continuity and phase checks.
 
     crossing cases: obtain sliced geometry and identities
     |-- Print::process and StepExtrusionOrdering: build masks and ordered owners
@@ -1383,6 +1386,111 @@ TEST_CASE("Wipe return retraces half the configured distance back to the seam",
     for (const GeometricLeaf &leaf : leaves)
         total_length += leaf.entity.local_length();
     CHECK(unscaled(total_length) == Approx(8.0));
+}
+
+TEST_CASE("Retraction wipe joins an open seam gap before repeating a marked loop",
+          "[plugins][layer-extrusion-edit][retraction][wipe][wipe-seam-gap]")
+{
+    const bool closed = GENERATE(false, true);
+    const bool return_to_seam = GENERATE(false, true);
+    const bool fragmented = GENERATE(false, true);
+    CAPTURE(closed, return_to_seam, fragmented);
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_wipe_print(print, model, "0.75", "0", "0", "0", return_to_seam ? "1" : "0");
+    PrintingLayerGroup &layer = print.mutable_printing_plan().groups.front().layers.front();
+    layer.print_z = 4800000;
+    PrintingToolGroup &tool = layer.tool_groups.front();
+    tool.extrusions.clear();
+    Points points{Point(-17824989, 2135139), Point(-17824989, 2209927), Point(-17824989, 2284716)};
+    if (closed) {
+        points.push_back(points.back() + Point(100000, 0));
+        points.push_back(points.front() + Point(100000, 0));
+        points.push_back(points.front());
+    }
+    const Point tip = points.back();
+    std::unique_ptr<ExtrusionEntity> perimeter = std::make_unique<ExtrusionEntity>(true, ArcPolyline(points));
+    if (fragmented) {
+        ExtrusionEntity::Children children;
+        for (size_t idx = 1; idx < points.size(); ++idx)
+            children.push_back(std::make_unique<ExtrusionEntity>(true,
+                ArcPolyline(Points{points[idx - 1], points[idx]})));
+        perimeter = std::make_unique<ExtrusionEntity>(std::move(children), false, false, false);
+    }
+    perimeter->add_property(ExtrusionAttributes(ExtrusionRole::ExternalPerimeter, ExtrusionFlow(.08, .4f, .2f)));
+    entity_view(*perimeter).get_or_add(slic3r_api::EPropertyPerimeter::key)
+        .perimeter_flags(C_EXTRUSION_PERIMETER_FLAG_LOOP);
+    append_printing_extrusion(tool, std::move(perimeter));
+    append_printing_extrusion(tool, make_print_path(20., 30.));
+
+    // The legacy iterates stored points from the current tip, making the gap move explicit before the first point.
+    ArcPolyline turn;
+    turn.append(tip);
+    for (const Point &point : points)
+        if (turn.back() != point) turn.append(point);
+    const double turn_mm = unscaled(turn.length());
+    const double requested_mm = return_to_seam ? std::ceil(.75 / turn_mm) * turn_mm : .75;
+    ArcPolyline expected;
+    expected.append(tip);
+    while (unscaled(expected.length()) < requested_mm)
+        for (const Point &point : points)
+            if (expected.back() != point) expected.append(point);
+    expected.clip_end(expected.length() - scale_d(requested_mm));
+
+    REQUIRE_NOTHROW(run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN}));
+    OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)), scope_property_key());
+    const slic3r_api::MutableExtrusionEntity wipe = find_role(source.after(), RAW_EXTRUSION_ROLE_WIPE);
+    REQUIRE(wipe.valid());
+    std::vector<GeometricLeaf> leaves;
+    collect_geometric_leaves(wipe, std::nullopt, leaves);
+    REQUIRE_FALSE(leaves.empty());
+    c_point previous{tip.x(), tip.y()};
+    coord_t previous_z = 0;
+    double length_mm = 0.;
+    size_t segments = 0;
+    for (const GeometricLeaf &leaf : leaves) {
+        REQUIRE(leaf.attributes.has_value());
+        CHECK(leaf.attributes->mm3_per_mm() == 0.);
+        CHECK(RAW_EXTRUSION_ROLE_IS_WIPE(leaf.attributes->extrusion_role()));
+        CHECK(RAW_EXTRUSION_ROLE_IS_TRAVEL(leaf.attributes->extrusion_role()));
+        for (const c_extrusion_segment &segment : leaf.entity.segments()) {
+            CHECK(segment.point_a.x == previous.x);
+            CHECK(segment.point_a.y == previous.y);
+            CHECK(segment.z_offset_a == previous_z);
+            CHECK(segment.radius == 0.f);
+            CHECK(segment.z_offset_b == 0);
+            previous = segment.point_b;
+            previous_z = segment.z_offset_b;
+            ++segments;
+        }
+        length_mm += unscaled(leaf.entity.local_length());
+    }
+    CHECK(segments > points.size() - 1);
+    CHECK(length_mm == Approx(requested_mm).margin(0.000002));
+    CHECK(previous.x == expected.back().x());
+    CHECK(previous.y == expected.back().y());
+    const c_extrusion_segment first = leaves.front().entity.segment(0);
+    CHECK(first.point_b.x == points[closed ? 1 : 0].x());
+    CHECK(first.point_b.y == points[closed ? 1 : 0].y());
+    const slic3r_api::MutableExtrusionEntity initial = find_role(source.after(), RAW_EXTRUSION_ROLE_RETRACT);
+    REQUIRE(initial.valid());
+    REQUIRE(initial.get(slic3r_api::EPropertyExtrusionAxis::key) != nullptr);
+    CHECK(initial.get(slic3r_api::EPropertyExtrusionAxis::key)->value == Approx(.4));
+    double retracted = .4;
+    for (const GeometricLeaf &leaf : leaves) {
+        if (!leaf.extrusion_axis)
+            continue;
+        CHECK(leaf.extrusion_axis->operation == C_EXTRUSION_AXIS_OPERATION_RETRACT_TO);
+        CHECK_FALSE(leaf.extrusion_axis->toolchange);
+        CHECK(leaf.extrusion_axis->value >= retracted);
+        CHECK(leaf.extrusion_axis->value <= 2.);
+        retracted = leaf.extrusion_axis->value;
+    }
+    if (find_axis_target(source.after(), C_EXTRUSION_AXIS_OPERATION_RETRACT_TO, 2., false).valid())
+        retracted = 2.;
+    CHECK(retracted == Approx(2.));
+    CHECK_FALSE(source.before().valid());
 }
 
 TEST_CASE("Retraction wipe preserves the semantic tool-change request",

@@ -48,8 +48,9 @@ and distribute the rest over a wipe, with a final stationary request if the
 wipe is too short. When the last printed leaf is not a loop, the wipe walks
 source content backwards and stops before a bridge, a discontinuity or a leaf
 without role attributes; only that connected tail is kept.
-A final loop instead continues forward
-from its seam without visiting older leaves. A loop parent retains its ordered
+A final loop first joins its seam from the printed tip if a gap remains, then
+continues forward without visiting older leaves. The gap is a non-extruding
+wipe and counts in each repeated turn and its return length. A loop parent retains its ordered
 fragments, whose lengths together define one turn. Segment vectors preserve lines,
 arcs and endpoint Z offsets while the wipe is assembled and clipped.
 Inside-start and inside-end movements use the complete loop's orientation and
@@ -625,6 +626,19 @@ WipePath source_wipe_path(
     append_reverse_wipe_path(content, scope.layer_group.print_z(), phase_base_z,
                              scope_state, path,
                              content.handle() == ordered.root().handle());
+    // Join the printed tip only after collecting the whole loop, so fragmented and single-leaf loops share a continuous cycle.
+    if (path.complete_turn && !path.segments.empty()) {
+        const c_extrusion_segment &first = path.segments.front();
+        const c_extrusion_segment &last = path.segments.back();
+        if (last.point_b.x != first.point_a.x || last.point_b.y != first.point_a.y ||
+            last.z_offset_b != first.z_offset_a) {
+            const c_extrusion_segment gap{
+                last.point_b, first.point_a, 0.f, RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN,
+                last.z_offset_b, first.z_offset_a};
+            path.loop_length += c_point_distance_to(gap.point_a, gap.point_b);
+            path.segments.insert(path.segments.begin(), gap);
+        }
+    }
     return path;
 }
 
