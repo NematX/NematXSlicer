@@ -3378,8 +3378,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
         file.write_format("; total layers count = %i\n", layer_count());
         file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Estimated_Printing_Time_Placeholder).c_str());
 
-        //nematx web fields
-        // has support
+        // Record whether any support layer has extrusions.
         bool has_support = false;
         for (const PrintObject &object : print.objects()) {
             for (const Layer &supp_layer : object.auxiliary_layers()) {

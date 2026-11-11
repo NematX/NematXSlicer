@@ -346,7 +346,7 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
         }
         gcode << "\n";
     }
-    // emit wait (for  gcfTeacup, gcfRepRap, gcfNematX)
+    // emit wait (for gcfTeacup, gcfRepRap)
     if (wait && !can_M109) {
         if ((FLAVOR_IS(gcfTeacup) || FLAVOR_IS(gcfRepRap))) {
             gcode << "M116";
