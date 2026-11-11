@@ -15,6 +15,7 @@
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
@@ -54,6 +55,9 @@ advanced or straight travel selected. Only advanced travel with forbidden tops
 active may detour its inter-island gap; layer entry stays straight in every case.
 With both endpoints on one island and forbidden tops disabled, the attractor
 member alone enables delegation to the compatibility top detour.
+The dated-top scene crosses a third island between two distinct attractors
+before and after that island's last arrival, in two shifted instances. Every
+segment of the later detour is checked against the third island's core top.
 
     controlled scene: slice region masks, attach ordered paths, select active members
         `-- StepLayerExtrusionEdition::run_step: insert travels for point-count checks
@@ -945,6 +949,97 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     if (following_gap)
         CHECK((ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2) ==
             (advanced && (contributors & (same_attractor ? 1 : 2)) != 0));
+}
+
+// Compare inter-island crossings before and after the middle island's arrival, with both static-top activation states.
+TEST_CASE("Printed tops start avoiding a third island only after its last arrival", "[plugins][travel][travel-zones]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool static_tops = GENERATE(false, true);
+    const bool printed_tops = GENERATE(false, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}});
+    TriangleMesh mesh = make_cube(4., 4., 0.6);
+    for (double x : {8., 16.}) {
+        TriangleMesh cube = make_cube(4., 4., 0.6);
+        cube.translate(x, 0., 0.); mesh.merge(cube);
+    }
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->add_instance()->set_offset(Vec3d(60., 30., 0.));
+    object->ensure_on_bed();
+    Print print;
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Layer &layer = print.object(0).layers().back();
+    const Point minimum = get_extents(layer.lslices()).min;
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    Point centers[3];
+    const LayerRegionIsland *regions[3] = {nullptr, nullptr, nullptr};
+    for (size_t i = 0; i < 3; ++i) {
+        centers[i] = minimum + Point(scale_i(2. + 8. * i), scale_i(2.));
+        for (size_t j = 0; j < layer.lslices().size(); ++j)
+            if (layer.lslices()[j].contains(centers[i]))
+                regions[i] = reinterpret_cast<const LayerRegionIsland *>(
+                    layer_view.island(j).get_or_create_full_region_island(0).handle());
+        REQUIRE(regions[i] != nullptr);
+    }
+    AvoidCrossingPerimeters oracle;
+    oracle.init_layer(layer);
+    oracle.travel_to({layer, centers[0], Point::Zero(), extruder_index_t(0), 0., false}, centers[2]);
+    ExPolygons middle_tops;
+    for (const ExPolygon &top : oracle.internal_boundary().to_avoid)
+        if (top.contains(centers[1])) middle_tops.push_back(top);
+    REQUIRE_FALSE(middle_tops.empty());
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.clear(); plan.groups.resize(1); plan.groups[0].layers.resize(1);
+    PrintingLayerGroup &current = plan.groups[0].layers[0];
+    current.print_z = layer.scaled_print_z(); current.tool_groups.resize(1);
+    PrintingToolGroup &tool = current.tool_groups[0]; tool.extruder_id = 0;
+    for (size_t instance = 0; instance < 2; ++instance) {
+        const uint32_t id = plan.find_or_add_object_instance(print.object(0), instance);
+        const c_point shift = print_view.object(0).instance_shift(instance);
+        for (size_t island : {size_t(0), size_t(2), size_t(1), size_t(0), size_t(2)}) {
+            const Point start = centers[island] + Point(shift.x, shift.y);
+            append_extrusion(tool, make_path(start, start + Point(scale_i(0.1), 0)), regions[island], id);
+        }
+    }
+    print.pipeline_progress().reset();
+    ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones",
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", static_tops));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", printed_tops));
+    host.reset_plugin_cancel();
+    Steps::StepLayerExtrusionEdition::run_step(host, print);
+    REQUIRE_FALSE(host.is_plugin_cancelled());
+    for (size_t instance = 0; instance < 2; ++instance) {
+        const c_point shift = print_view.object(0).instance_shift(instance);
+        for (size_t index : {size_t(1), size_t(4)}) {
+            const slic3r_api::ExtrusionEntity route = ordered_scope(*tool.extrusions[instance * 5 + index].root).travel();
+            const bool detour = printed_tops ? index == 4 : static_tops;
+            CHECK((route.point_count() > 2) == detour);
+            bool crosses = false;
+            for (size_t p = 1; p < route.point_count(); ++p) {
+                const c_point a = route.point(p - 1), b = route.point(p);
+                const Polyline segment(Points{Point(a.x - shift.x, a.y - shift.y), Point(b.x - shift.x, b.y - shift.y)});
+                crosses |= !intersection_pl(Polylines{segment}, middle_tops).empty();
+            }
+            CHECK(crosses == !detour);
+        }
+    }
 }
 
 TEST_CASE("Prepared travel chronology records snapped sources and layer entry provenance",

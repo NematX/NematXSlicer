@@ -19,6 +19,9 @@ so layer geometry may be copied twice.
 The permanent contributor plugins are non-exclusive no-op members, dependent on
 advanced travel. Its private implementation checks each ID with
 orchestrator_find_plugin before passing its borrowed worker-local computation.
+The members are island_attractors, forbidden_tops and printed_tops. When active,
+printed_tops replaces forbidden_tops, starting each top after the last arrival
+in its original island rather than at the beginning of the layer.
 Disabling a member
 removes only its zones; same-attractor compatibility routing retains its own top
 avoidance. An inactive advanced provider blocks its dependent members even when
@@ -35,7 +38,7 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register the two no-op planner choices and declare their exclusive selection group.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
-// Register the two independently activated no-op contributor plugins.
+// Register the three independently activated no-op contributors: island_attractors, forbidden_tops and printed_tops.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 }}}

@@ -23,7 +23,10 @@ an ordered record of borrowed extrusion gaps with their seams already snapped.
 It selects a planner through the advanced planner group, falling back to
 compatibility for absent or unknown selections. Compatibility preserves perimeter
 routing. The opt-in zones planner summarizes eligible gaps, collects active
-attractors and forbidden tops, and routes in chronology order. Layers without
+attractors and forbidden tops, and routes in chronology order. Printed tops are
+opt-in and replace static forbidden tops when active; their dates start after
+the last arrival in each original island. Same-attractor compatibility routing
+retains its own top avoidance. Layers without
 eligible gaps bypass zone construction. Permanent no-op plugins expose planner
 selection and global contributor activation. Active means present in the host
 activation set, configured by activated.ini. Computation objects are worker-local;
@@ -37,7 +40,7 @@ planner survives the callback. Cancellation and routing errors propagate.
 
     register_advanced_travel_plugin: register the permanent provider
     register_advanced_travel_planners: register two no-op selection members and their group
-    register_advanced_travel_contributors: register two non-exclusive no-op zone members
+    register_advanced_travel_contributors: register three non-exclusive no-op zone members
     setup_impl: reset and allocate connector summaries
     setup_run_impl: publish this layer group's summary
     run_impl: own the chronology and planner for one worker callback
@@ -67,21 +70,23 @@ const char *const k_compatibility_id = "layer_extrusion_edit.travel.advanced.pla
 const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.zones";
 const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
+const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
 const char *const k_planner_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
 
 class ContributorChoice : public PluginBase
 {
 public:
-    // Borrow the orchestrator and retain static identity strings for this permanent activation member.
-    ContributorChoice(orchestrator_handle *orchestrator, const char *id, const char *name) :
-        PluginBase(orchestrator), m_id(id), m_name(name) {}
+    // Borrow the orchestrator and retain static identity and description strings for this permanent activation member.
+    ContributorChoice(orchestrator_handle *orchestrator, const char *id, const char *name,
+                      const char *description = "Enables zones collected by Advanced travel.") :
+        PluginBase(orchestrator), m_id(id), m_name(name), m_description(description) {}
 private:
     // Return the static contributor identity.
     const char *id_impl() const noexcept override { return m_id; }
     // Return the static display name.
     const char *name_impl() const noexcept override { return m_name; }
     // Describe the computation controlled by this otherwise inert member.
-    const char *description_impl() const noexcept override { return "Enables zones collected by Advanced travel."; }
+    const char *description_impl() const noexcept override { return m_description; }
     // Allow independent activation without a selector.
     const char *exclusive_group_impl() const noexcept override { return ""; }
     // Participate in layer editing alongside the provider.
@@ -94,6 +99,7 @@ private:
     void run_impl(const plugin_run_context *) const override {}
     const char *m_id;
     const char *m_name;
+    const char *m_description;
 };
 
 class PlannerChoice : public PluginBase
@@ -301,10 +307,13 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
                                           inputs, chronology.travels, summary};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
+    const zones::PrintedTopsContributor printed_tops;
     std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
     if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
         active.push_back(std::cref(attractors));
-    if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
+    if (orchestrator_find_plugin(m_orchestrator, k_printed_tops_id) != nullptr)
+        active.push_back(std::cref(printed_tops));
+    else if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
         active.push_back(std::cref(tops));
     zones::TravelZoneView view(active, input);
     zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx);
@@ -347,7 +356,10 @@ void register_advanced_travel_contributors(orchestrator_handle *orchestrator)
 {
     static ContributorChoice attractors(orchestrator, k_attractors_id, "Island attractor zones");
     static ContributorChoice tops(orchestrator, k_tops_id, "Forbidden top zones");
+    static ContributorChoice printed_tops(orchestrator, k_printed_tops_id, "Printed top zones (replace static tops)",
+        "Replaces static forbidden tops with tops avoided after the last arrival in their island by the zones planner.");
     orchestrator_register_plugin(orchestrator, attractors.c_instance());
     orchestrator_register_plugin(orchestrator, tops.c_instance());
+    orchestrator_register_plugin(orchestrator, printed_tops.c_instance());
 }
 }}} // namespace slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin

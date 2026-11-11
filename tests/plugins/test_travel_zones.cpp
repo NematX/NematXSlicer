@@ -16,6 +16,8 @@ uses the shared transition helpers to publish real scopes and entry state, then
 checks pair owners before apply. All views borrow locally owned prints or PEs.
 Sliced frames and separate islands compare default zones with the core boundary
 cache, including shifted instances, dated membership and excluded support tops.
+Printed tops are compared with that same core geometry and dated by the last
+arrival in each containing original island; removing all such arrivals omits it.
 The tools are simulated by alternating tool ids on a single-extruder slice;
 the support target is simulated by marking a sliced top layer as support.
 
@@ -186,6 +188,41 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
     std::vector<zones::TravelZone> masks, excluded;
     attractors.contribute(owner.input(), masks);
     forbidden.contribute(owner.input(), excluded);
+    zones::PrintedTopsContributor printed;
+    std::vector<zones::TravelZone> dated;
+    printed.contribute(owner.input(), dated);
+    REQUIRE(dated.size() == excluded.size());
+    for (size_t z = 0; z < dated.size(); ++z) {
+        const zones::TravelZone &zone = dated[z];
+        const size_t instance = z / expected.to_avoid.size();
+        const Slic3r::ExPolygon &top = expected.to_avoid[z % expected.to_avoid.size()];
+        size_t last = SIZE_MAX;
+        for (const std::pair<Slic3r::ExPolygon, Slic3r::ExPolygon> &growth : expected.boundary_growth) {
+            if (!growth.first.contains(top.contour.points.front())) continue;
+            for (size_t t = 0; t < owner.chronology.travels.size(); ++t) {
+                const travel::TravelEndpoint &target = owner.chronology.travels[t].target;
+                if (target.printing_catalog_id == zone.scope.printing_catalog_id && target.region_island.valid() &&
+                    growth.first.contains(Slic3r::Point(target.position.x - shifts[instance].x,
+                                                      target.position.y - shifts[instance].y))) last = t;
+            }
+            break;
+        }
+        REQUIRE(last != SIZE_MAX);
+        CHECK(zone.begin == last + 1);
+        CHECK(zone.end == SIZE_MAX);
+        CHECK(zone.role == zones::ZoneRole::Forbidden);
+        CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
+        CHECK_FALSE(zone.scope.support_travels_only);
+        check_shifted_area(zone.area, {top}, shifts[instance]);
+    }
+    // Keep valid layer/instance targets but move them outside every original island.
+    const std::vector<travel::PendingTravel> saved = owner.chronology.travels;
+    for (travel::PendingTravel &pending : owner.chronology.travels)
+        pending.target.position.x += Slic3r::scale_i(1000.);
+    std::vector<zones::TravelZone> absent;
+    printed.contribute(owner.input(), absent);
+    CHECK(absent.empty());
+    owner.chronology.travels = saved;
     REQUIRE(masks.size() == (support ? 12 : 6));
     REQUIRE(excluded.size() == 2 * expected.to_avoid.size());
     for (const zones::TravelZone &zone : masks) {

@@ -61,6 +61,8 @@ exporter, after the case-local Prints are destroyed. Output removal is attempted
 only on the normal return path, and removal errors are ignored.
 Contributor activation cases keep the zones planner selected and round-trip a
 reference with both members and each member disabled independently.
+The printed-top case activates its opt-in member separately, checks its plugin
+declaration, and compares both static-top activation states through STL export.
 
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
@@ -241,6 +243,62 @@ TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins
         CHECK_FALSE(result.travels.empty());
         REQUIRE(host.set_plugin_active(id, true));
     }
+}
+
+// Check the opt-in declaration and dated-top replacement through STL, slicing and text export.
+TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[plugins][plugin-e2e][travel-zones]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    const char *id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
+    const Plugin *plugin = host.get_plugin(id);
+    REQUIRE(plugin != nullptr);
+    CHECK(plugin->get_id() == id);
+    CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+    CHECK(plugin->get_priority() == -50);
+    CHECK(plugin->get_exclusive_group().empty());
+    CHECK(plugin->get_used_config_keys().empty());
+    CHECK(plugin->get_defined_config_keys().empty());
+    CHECK(plugin->get_dependencies() == std::vector<std::string>{"layer_extrusion_edit.travel.advanced"});
+    CHECK_FALSE(host.is_plugin_active(id));
+    REQUIRE(host.set_plugin_active(id, true));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"}, {"ironing", "0"},
+        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
+        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const Result both = run_case(config, "printed-tops-both");
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
+    const Result dated = run_case(config, "printed-tops-only");
+    CHECK(dated.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+    CHECK(dated.travels == both.travels);
+    CHECK(dated.volume == Approx(both.volume).margin(0.01));
+    CHECK(dated.volume > 0.);
+    REQUIRE_FALSE(dated.travels.empty());
+    REQUIRE(host.set_plugin_active(id, false));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", true));
+    const Result static_only = run_case(config, "printed-tops-static-reference");
+    CHECK(dated.travels != static_only.travels);
+    CHECK(dated.volume == Approx(static_only.volume).margin(0.01));
+    REQUIRE(host.set_plugin_active(id, true));
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+    const Result legacy = run_case(config, "printed-tops-legacy-provider");
+    CHECK(legacy.volume == Approx(dated.volume).margin(0.01));
+    REQUIRE_FALSE(legacy.travels.empty());
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced", false));
+    host.block_unsatisfied_plugin_dependencies();
+    CHECK_FALSE(host.is_plugin_active(id));
+    CHECK(host.blocked_plugin_activations().count(id) == 1);
 }
 
 // Validate setting coverage and compare an enabled baseline with variations; ironing is coupled with top avoidance.

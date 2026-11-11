@@ -24,12 +24,16 @@ mask is an area used to decide island membership, not a routing ring.
 The attractor contributor appends Attractor zones from these original islands,
 before inset, top removal and tool clipping. Support masks include the lower
 object layer and have no forbidden tops. The tops contributor appends Forbidden
-zones. Neither contributor replaces out. Each mask is dated by consecutive target membership, whereas
-excluded tops apply throughout the layer, one zone per connected ExPolygon so
+zones. No contributor replaces out. Each mask is dated by consecutive target membership, whereas
+static excluded tops apply throughout the layer, one zone per connected ExPolygon so
 endpoint membership ignores only that top. Scope is per instance, not per object.
+Printed tops use the same components, but start after the last target in the
+original island containing the component. Target positions are unshifted before
+membership testing, with the same border-inclusive rule as attractors. A top
+whose island has no target is omitted.
 Cancellation and geometry failures propagate; output may already contain zones.
 
-    DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute
+    DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute / PrintedTopsContributor::contribute
     `-- contribute_zones: select target layer/instance pairs and copy areas
         |-- LayerInputCache::get: borrow immutable worker-local layer input
         |-- TravelBoundary::init_layer / build_internal: build temporary geometry
@@ -42,10 +46,10 @@ namespace AC = AvoidCrossing;
 
 // Copy local contours and holes with the instance shift; the source geometry remains unchanged.
 polygon_work::ExPolygons shifted_area(polygon_work::ExPolygons area, c_point shift);
-// Append dated masks or one whole-layer zone per top component for valid target pairs; cancellation and geometry errors propagate.
-void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, ZoneRole role);
+// Append masks or tops for valid target pairs, optionally dating tops after their island's last arrival; cancellation and geometry errors propagate.
+void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, ZoneRole role, bool printed = false);
 
-void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, const ZoneRole role)
+void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, const ZoneRole role, const bool printed)
 {
     std::set<std::pair<const layer_handle *, uint32_t>> visited;
     std::map<const layer_handle *, std::unique_ptr<AC::TravelBoundary>> boundaries;
@@ -75,7 +79,26 @@ void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone>
         if (role == ZoneRole::Forbidden) {
             for (const polygon_work::ExPolygon &top : boundary->internal_boundary().to_avoid) {
                 throw_if_cancelled(&input.run_context);
-                out.push_back({role, shifted_area({top}, shift), 0, SIZE_MAX, scope});
+                size_t begin = printed ? SIZE_MAX : 0;
+                if (printed) {
+                    // Each inset top belongs to the original island containing its contour.
+                    for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygon> &growth : boundary->internal_boundary().boundary_growth) {
+                        if (!growth.first.contains(top.contour.points.front()))
+                            continue;
+                        for (size_t t = 0; t < input.travels.size(); ++t) {
+                            throw_if_cancelled(&input.run_context);
+                            const TravelConnection::TravelEndpoint &endpoint = input.travels[t].target;
+                            if (endpoint.printing_catalog_id == target.printing_catalog_id &&
+                                endpoint.region_island.valid() && endpoint.region_island.region_count() != 0 &&
+                                endpoint.region_island.region(0).layer().handle() == layer.handle() &&
+                                growth.first.contains({endpoint.position.x - shift.x, endpoint.position.y - shift.y}))
+                                begin = t + 1;
+                        }
+                        break;
+                    }
+                }
+                if (begin != SIZE_MAX)
+                    out.push_back({role, shifted_area({top}, shift), begin, SIZE_MAX, scope});
             }
             continue;
         }
@@ -121,6 +144,11 @@ void DefaultAttractorContributor::contribute(const ZoneContributorInput &input, 
 void DefaultForbiddenTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
     contribute_zones(input, out, ZoneRole::Forbidden);
+}
+
+void PrintedTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
+{
+    contribute_zones(input, out, ZoneRole::Forbidden, true);
 }
 
 }}}
