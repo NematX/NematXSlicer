@@ -26,6 +26,8 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/TravelConnectionHelpers.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/CompatibilityPlanner.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp"
 #include "libslic3r/Plugins/PrintingPlan/PrintingExtrusionScopeProperty.h"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
@@ -44,6 +46,8 @@ Fixture trees acquire canonical storage on entry to the plan, before validation.
 Direct connector checks stop after scope and entry publication, then inspect
 prepare's ordered gaps and seam edits before apply writes paths and flags.
 All borrowed views remain within the lifetime of their unchanged plan structure.
+Eligibility checks slice a cube and attach controlled paths to its real region
+island, then summarize prepared gaps with the compatibility planner's predicate.
 */
 
 namespace {
@@ -961,6 +965,72 @@ TEST_CASE("Prepared travel chronology records snapped sources and layer entry pr
         connector.apply(none, straight_path, progress);
         CHECK(progress.done() == 5);
     }
+}
+
+// Check activation and summary flags on controlled gaps with real sliced regional provenance.
+TEST_CASE("Compatibility eligibility supplies dated travel activation",
+          "[plugins][layer-extrusion-edit][travel][travel-zones][avoid-crossing-perimeters]")
+{
+    using namespace slic3r_api::LayerExtrusionEdit;
+    using namespace TravelConnection;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool enabled = GENERATE(false, true);
+    const bool exclude_first = GENERATE(false, true);
+    const size_t layer_index = GENERATE(size_t(0), size_t(1));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", enabled ? "1" : "0"},
+        {"avoid_crossing_not_first_layer", exclude_first ? "1" : "0"}});
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    Steps::StepPostSlicing::run_step(orchestrator, print);
+    slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::Layer layer = print_view.object(0).layer(layer_index);
+    REQUIRE(layer.island_count() > 0);
+    const slic3r_api::LayerRegionIsland region = layer.island(0).get_or_create_full_region_island(0);
+    REQUIRE(region.region_count() > 0);
+    const Point center = get_extents(print.object(0).layer(layer_index).lslices()).center();
+    const c_point shift = print_view.object(0).instance_shift(0);
+    const Point start = center + Point(shift.x, shift.y);
+    PrintingPlan &plan = print.mutable_printing_plan();
+    const uint32_t catalog = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.resize(1);
+    plan.groups[0].layers.resize(1);
+    PrintingLayerGroup &group = plan.groups[0].layers[0];
+    group.print_z = print.object(0).layer(layer_index).scaled_print_z();
+    group.tool_groups.resize(1);
+    PrintingToolGroup &tool = group.tool_groups[0];
+    tool.extruder_id = 0;
+    const LayerRegionIsland *core_region = reinterpret_cast<const LayerRegionIsland *>(region.handle());
+    append_extrusion(tool, make_path(start, start + Point(scale_i(1.), 0)), core_region, catalog);
+    append_extrusion(tool, make_path(start + Point(scale_i(2.), 0), start + Point(scale_i(3.), 0)), core_region, catalog);
+    append_extrusion(tool, make_path(start + Point(scale_i(4.), 0), start + Point(scale_i(5.), 0)));
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN});
+    ScopeTravelConnector connector(reinterpret_cast<orchestrator_handle *>(&orchestrator));
+    slic3r_api::PluginProgress progress;
+    setup_connector(print, connector, progress);
+    slic3r_api::PrintingLayerGroup group_view(reinterpret_cast<printing_layer_group_handle *>(&group));
+    const LayerTravelChronology chronology = connector.prepare(group_view, 0, 0);
+    REQUIRE(chronology.travels.size() == 2);
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    plugin_run_context context{};
+    AvoidCrossing::CompatibilityPlanner planner(print_view, plan_view, &context);
+    const bool expected = enabled && !(exclude_first && layer_index == 0);
+    CHECK(planner.avoidance_enabled(chronology.travels[0].source, chronology.travels[0].target) == expected);
+    CHECK_FALSE(planner.avoidance_enabled(chronology.travels[1].source, chronology.travels[1].target));
+    CHECK_FALSE(planner.avoidance_enabled(chronology.travels[1].target, chronology.travels[1].source));
+    TravelEndpoint invalid_instance = chronology.travels[0].target;
+    invalid_instance.printing_catalog_id = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
+    CHECK_FALSE(planner.avoidance_enabled(chronology.travels[0].source, invalid_instance));
+    const AdvancedTravel::ChronologySummary summary = AdvancedTravel::summarize(chronology,
+        [&planner](const PendingTravel &travel) {
+            return planner.avoidance_enabled(travel.source, travel.target);
+        });
+    CHECK(summary.avoidance_active == std::vector<bool>{expected, false});
+    CHECK(summary.any_avoidance_active == expected);
 }
 
 TEST_CASE("Connector preparation snaps a stationary deposit",

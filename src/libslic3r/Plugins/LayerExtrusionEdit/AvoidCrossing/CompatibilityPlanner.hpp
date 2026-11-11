@@ -7,8 +7,10 @@ Construct one planner per worker callback with the unchanged print, plan and a
 non-null run context with valid plugin storage, then call path() for each gap.
 The borrowed plan and run context must outlive the planner. Copied inputs outlive
 the routers borrowing them; mutable routing and crossing caches are worker-local.
-Travel providers need only the constructor and path(); retraction planning also asks
-crosses() whether a route crosses a perimeter contour:
+avoidance_enabled() checks both endpoints' regional activation and valid object
+instances, then the target's first-layer exclusion. Summaries can use it without
+building routing geometry. Providers use path() to apply the same eligibility;
+retraction planning also asks crosses() whether a route crosses a perimeter contour:
     CompatibilityPlanner planner(print, plan, run_ctx);
     std::vector<c_point> points = planner.path(source, target, extruder_id);
     bool retract = planner.crosses(source, target, extruder_id, points, false);
@@ -33,6 +35,10 @@ class CompatibilityPlanner
 public:
     // Retain borrowed views of the print and its settings, plus the plan and run context, during this worker callback.
     CompatibilityPlanner(const Print &print, const PrintingPlan &plan, const plugin_run_context *run_ctx);
+
+    // Check regional activation at both endpoints, valid instances and the target's first-layer exclusion.
+    bool avoidance_enabled(const TravelConnection::TravelEndpoint &source,
+                           const TravelConnection::TravelEndpoint &target) const;
 
     // Return print-space routing for an eligible gap, otherwise its direct segment; cancellation propagates.
     std::vector<c_point> path(const TravelConnection::TravelEndpoint &source,

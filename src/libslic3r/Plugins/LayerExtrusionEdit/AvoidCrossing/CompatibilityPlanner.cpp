@@ -44,7 +44,8 @@ operations use the run context's plugin storage. Planners do not escape the
 worker callback, so their mutable caches are not shared between workers.
 
     path: select straight travel or a detour
-    |-- endpoint_enables_avoidance: check each endpoint's regional setting
+    |-- avoidance_enabled: check regional provenance, instances and first-layer exclusion
+    |   `-- endpoint_enables_avoidance: check each endpoint's regional setting
     |-- input_for: obtain the target layer input
     |   `-- LayerInputCache::get: retain copied geometry, settings and spacing
     |-- router_for: retain layer/tool state and defer external input
@@ -150,17 +151,29 @@ std::vector<c_point> CompatibilityPlanner::straight(const TravelEndpoint &source
     return straight_path(source, target, extruder_id);
 }
 
+bool CompatibilityPlanner::avoidance_enabled(const TravelEndpoint &source,
+                                             const TravelEndpoint &target) const
+{
+    // Missing regional provenance is normal for support and print-level
+    // auxiliary paths. Those gaps deliberately retain the direct travel.
+    if (!source.region_island.valid() || source.region_island.region_count() == 0 ||
+        !target.region_island.valid() || target.region_island.region_count() == 0)
+        return false;
+    if (!endpoint_enables_avoidance(source) || !endpoint_enables_avoidance(target))
+        return false;
+
+    const Layer target_layer_view = target.region_island.region(0).layer();
+    const Object target_object = target_layer_view.object();
+    return !m_print_config.bool_or_default("avoid_crossing_not_first_layer", true) ||
+        !AC::is_first_layer(target_object, target_layer_view);
+}
+
 std::vector<c_point> CompatibilityPlanner::path(const TravelEndpoint &source,
                                               const TravelEndpoint &target,
                                               const extruder_index_t extruder_id)
 {
     throw_if_cancelled(m_run_ctx);
-    // Missing regional provenance is normal for support and print-level
-    // auxiliary paths. Those gaps deliberately retain the direct travel.
-    if (!source.region_island.valid() || source.region_island.region_count() == 0 ||
-        !target.region_island.valid() || target.region_island.region_count() == 0)
-        return straight(source, target, extruder_id);
-    if (!endpoint_enables_avoidance(source) || !endpoint_enables_avoidance(target))
+    if (!avoidance_enabled(source, target))
         return straight(source, target, extruder_id);
 
     const Layer source_layer_view = source.region_island.region(0).layer();
@@ -169,9 +182,6 @@ std::vector<c_point> CompatibilityPlanner::path(const TravelEndpoint &source,
     const Object target_object = target_layer_view.object();
     const uint64_t target_instance_idx = m_plan.object_instance(target.printing_catalog_id).object_instance_idx();
 
-    if (m_print_config.bool_or_default("avoid_crossing_not_first_layer", true) &&
-        AC::is_first_layer(target_object, target_layer_view))
-        return straight(source, target, extruder_id);
     const AC::Input &input = input_for(target_layer_view);
 
     const c_point target_shift = target_object.instance_shift(static_cast<size_t>(target_instance_idx));
