@@ -750,11 +750,11 @@ consecutive runs of the same target owner and, separately, consecutive runs of
 the same tool to half-open T intervals, including empty ones.
 
 The exclusive group `layer_extrusion_edit.travel.advanced.planner` selects
-`.compatibility` (priority -1, the default) or `.zones` (0), using those suffixes
-after the group ID. Compatibility uses the same routes as
+`.legacy` (Legacy, priority -1, the default) or `.advanced` (Advanced, 0), using those suffixes
+after the group ID. Legacy uses the same routes as
 `travel.avoid_crossing_perimeters`. The host resolves the selector among active
-members; if only zones is active, it selects zones. The advanced provider uses
-compatibility only when the resolved plugin is null or is not the zones member.
+members; if only Advanced is active, it selects Advanced. The advanced provider uses
+Legacy only when the resolved plugin is null or is not the Advanced member.
 Planner members expose selection; the advanced provider performs the routing itself.
 
 A dated zone has an attractor or forbidden role, polygon geometry in platter XY
@@ -792,10 +792,10 @@ contributor with `orchestrator_find_plugin`. It checks `forbidden_tops` only whe
 `printed_tops` is inactive: disabling `printed_tops` restores static tops if
 `forbidden_tops` is active, while disabling `forbidden_tops` changes nothing when
 `printed_tops` is active. Otherwise, disabling a contributor removes only its
-zones. Compatibility routing delegated inside an attractor still performs its
+zones. Legacy routing delegated inside an attractor still performs its
 own top avoidance.
 
-The zones planner uses the regional check described above, but an endpoint
+The advanced planner uses the regional check described above, but an endpoint
 without an object instance does not veto the other endpoint. When neither has
 an instance, the default region configuration's
 `avoid_crossing_perimeters` value governs eligibility (false if unavailable).
@@ -804,7 +804,7 @@ The incoming layer-entry travel has no source extrusion and stays straight.
 For an eligible gap, individual forbidden zones containing either endpoint in
 their unexpanded filled area are ignored before union and expansion; other zones
 remain obstacles. If both endpoints belong to one active attractor and
-compatibility avoidance is enabled, the planner tries the compatibility route.
+legacy avoidance is enabled, the planner tries the legacy route.
 It accepts that candidate only if no segment enters the remaining original
 forbidden material.
 
@@ -823,7 +823,7 @@ obstacle-free result: a fallback remains straight.
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- ScopeTravelConnector::prepare: record chronology and snap seams
-|-- orchestrator_select_plugin: choose compatibility or zones
+|-- orchestrator_select_plugin: choose Legacy or Advanced
 |-- summarize: evaluate eligibility and date owner/tool runs
 |-- TravelZoneView: collect active contributors and cache dated role unions
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels

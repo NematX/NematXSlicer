@@ -1107,8 +1107,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced");
-        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.compatibility");
-        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.zones");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.legacy");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.advanced");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.island_attractors");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.forbidden_tops");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
@@ -1256,8 +1256,8 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.default", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false);
-        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.compatibility", false);
-        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.zones", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.legacy", false);
+        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.advanced", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false);
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);

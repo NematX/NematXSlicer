@@ -9,11 +9,11 @@ Register the default advanced travel provider during built-in plugin registratio
 The layer_extrusion_edit.travel selector honours explicit active provider IDs. It uses
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
 gaps, then fills them with XY routes from the selected advanced planner.
-Compatibility is the planner group's default and the fallback for absent or unknown planner choices.
-The opt-in zones planner collects active island attractors, forbidden tops and support obstacles.
+Legacy is the planner group's default and the fallback for absent or unknown planner choices.
+The opt-in advanced planner collects active island attractors, forbidden tops and support obstacles.
 Active means present in the host activation set, configured by activated.ini.
 Collection occurs only when the chronology contains an eligible travel after layer entry. The
-layer-entry travel stays straight. Compatibility owns its worker-local input
+layer-entry travel stays straight. The legacy planner owns its worker-local input
 cache; the three boundary contributors share a second cache owned by advanced
 travel, so layer geometry may be copied twice. Support obstacles read slices directly.
 The permanent contributor plugins are non-exclusive no-op members, dependent on
@@ -25,7 +25,7 @@ in its original island rather than at the beginning of the layer.
 Support obstacles forbid separate object components at or below travel Z only
 for travels touching support, using the instances in the plan catalog.
 Disabling a member
-removes only its zones; same-attractor compatibility routing retains its own top
+removes only its zones; same-attractor legacy routing retains its own top
 avoidance. An inactive advanced provider blocks its dependent members even when
 their IDs are enabled in the profile.
 The connector owns insertion, Z interpolation and materialized travel flags.

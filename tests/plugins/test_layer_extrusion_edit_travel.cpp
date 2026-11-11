@@ -878,7 +878,7 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), advanced ? "layer_extrusion_edit.travel.advanced" : TRAVEL_PLUGIN);
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -934,7 +934,7 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     print.pipeline_progress().reset();
     ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
         TRAVEL_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones",
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
         "layer_extrusion_edit.travel.advanced.zones.island_attractors",
         "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", (contributors & 1) != 0));
@@ -962,7 +962,7 @@ TEST_CASE("Printed tops start avoiding a third island only after its last arriva
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -1018,7 +1018,7 @@ TEST_CASE("Printed tops start avoiding a third island only after its last arriva
     }
     print.pipeline_progress().reset();
     ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones",
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
         "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", static_tops));
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", printed_tops));

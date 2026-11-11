@@ -49,13 +49,13 @@ than two vertices; this is not a geometric test of departure from a straight lin
 
 For the avoid-crossing baseline, the gate compares disabled avoidance with the
 straight-travel provider; the advanced baseline instead varies the selector toward
-the avoid-crossing provider. The advanced matrix runs with both compatibility
-and zones selected. One additional run omits the travel selector and verifies that
+the avoid-crossing provider. The advanced matrix runs with both Legacy
+and Advanced selected. One additional run omits the travel selector and verifies that
 the implicit advanced provider preserves the explicit avoid-crossing baseline routes.
 For every baseline, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
-and checks that island weights change compatibility routes while keeping their
-endpoints; the zones planner's inter-island routes are independent of those weights.
+and checks that island weights change legacy routes while keeping their
+endpoints; the advanced planner's inter-island routes are independent of those weights.
 It compares deposited volume except for settings that change extrusion geometry.
 For each case with deviations, at least one intermediate plan XY must occur in
 the published G0/G1 XY moves without an E word within 0.001 mm. This does not match every
@@ -65,7 +65,7 @@ integration, not general routing correctness.
 The activation guard saves and restores the active plugin set, including the
 exporter, after the case-local Prints are destroyed. Output removal is attempted
 only on the normal return path, and removal errors are ignored.
-Contributor activation cases keep the zones planner selected and round-trip a
+Contributor activation cases keep the advanced planner selected and round-trip a
 reference with both members and each member disabled independently.
 The printed-top case activates its opt-in member separately, checks its plugin
 declaration, and compares both static-top activation states through STL export.
@@ -117,8 +117,8 @@ struct TravelActivation {
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced", true);
-        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.compatibility", true);
-        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.zones", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.legacy", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.advanced", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
@@ -147,8 +147,8 @@ TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    for (const char *id : {"layer_extrusion_edit.travel.advanced.planner.compatibility",
-                           "layer_extrusion_edit.travel.advanced.planner.zones"}) {
+    for (const char *id : {"layer_extrusion_edit.travel.advanced.planner.legacy",
+                           "layer_extrusion_edit.travel.advanced.planner.advanced"}) {
         const Plugin *planner = host.get_plugin(id);
         REQUIRE(planner != nullptr);
         CHECK(planner->get_used_config_keys().empty());
@@ -158,8 +158,8 @@ TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const std::string planner_selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner");
-    const char *compatibility = "layer_extrusion_edit.travel.advanced.planner.compatibility";
-    const char *zones = "layer_extrusion_edit.travel.advanced.planner.zones";
+    const char *compatibility = "layer_extrusion_edit.travel.advanced.planner.legacy";
+    const char *zones = "layer_extrusion_edit.travel.advanced.planner.advanced";
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
@@ -174,8 +174,8 @@ TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[
     REQUIRE(baseline.deviated > 0);
     bool expect_zones = false;
     std::string expected = compatibility;
-    SECTION("Explicit compatibility") { config.set_deserialize_strict(planner_selector, compatibility); }
-    SECTION("Explicit zones") {
+    SECTION("Explicit Legacy") { config.set_deserialize_strict(planner_selector, compatibility); }
+    SECTION("Explicit Advanced") {
         config.set_deserialize_strict(planner_selector, zones);
         expected = zones;
         expect_zones = true;
@@ -185,8 +185,8 @@ TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[
         REQUIRE(host.set_plugin_active(zones, false));
         expected.clear();
     }
-    SECTION("Only compatibility active") { REQUIRE(host.set_plugin_active(zones, false)); }
-    SECTION("Only zones active") {
+    SECTION("Only Legacy active") { REQUIRE(host.set_plugin_active(zones, false)); }
+    SECTION("Only Advanced active") {
         REQUIRE(host.set_plugin_active(compatibility, false));
         expected = zones;
         expect_zones = true;
@@ -242,7 +242,7 @@ TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -257,7 +257,7 @@ TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins
         INFO(id);
         REQUIRE(host.set_plugin_active(id, false));
         const Result result = run_case(config, "contributor-disabled");
-        CHECK(result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+        CHECK(result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
         CHECK(result.volume == Approx(reference.volume).margin(0.01));
         CHECK_FALSE(result.travels.empty());
         REQUIRE(host.set_plugin_active(id, true));
@@ -287,7 +287,7 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -298,7 +298,7 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     const Result both = run_case(config, "printed-tops-both");
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
     const Result dated = run_case(config, "printed-tops-only");
-    CHECK(dated.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+    CHECK(dated.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
     CHECK(dated.travels == both.travels);
     CHECK(dated.volume == Approx(both.volume).margin(0.01));
     CHECK(dated.volume > 0.);
@@ -344,7 +344,7 @@ TEST_CASE("Support obstacles are opt-in and process real support travels", "[plu
         "layer_extrusion_edit.travel");
     config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_perimeters_max_detour", "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"perimeters", "2"}, {"fill_density", "20%"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
@@ -356,7 +356,7 @@ TEST_CASE("Support obstacles are opt-in and process real support travels", "[plu
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
     const Result enabled = run_case(config, "support-obstacles-enabled", Scene::Support);
     REQUIRE(enabled.support_travels > 0);
-    CHECK(enabled.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+    CHECK(enabled.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
     REQUIRE(host.set_plugin_active(id, false));
     const Result disabled = run_case(config, "support-obstacles-disabled", Scene::Support);
     CHECK(disabled.support_travels == enabled.support_travels);
@@ -388,8 +388,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    const std::string mode = GENERATE(std::string("avoid-crossing"), std::string("compatibility"), std::string("zones"));
-    const bool use_zones = mode == "zones";
+    const std::string mode = GENERATE(std::string("avoid-crossing"), std::string("legacy"), std::string("advanced"));
+    const bool use_zones = mode == "advanced";
     const char *provider = mode == "avoid-crossing" ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" :
                                                     "layer_extrusion_edit.travel.advanced";
     const std::string selector = Steps::plugin_exclusive_group_option_key(
@@ -427,7 +427,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     baseline.set_deserialize_strict(selector, provider);
     if (use_zones)
         baseline.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-            "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+            "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"avoid_travel_island", "1"}, {"avoid_travel_island_weight", "1"},
@@ -446,12 +446,12 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         REQUIRE(selected != nullptr);
         REQUIRE(selected->get_id() == "layer_extrusion_edit.travel.advanced");
         const Result default_routes = run_case(implicit, "implicit-default");
-        CHECK(default_routes.selected_planner == "layer_extrusion_edit.travel.advanced.planner.compatibility");
+        CHECK(default_routes.selected_planner == "layer_extrusion_edit.travel.advanced.planner.legacy");
         CHECK(default_routes.travels == enabled.travels);
     }
     if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
-        REQUIRE(enabled.selected_planner == (use_zones ? "layer_extrusion_edit.travel.advanced.planner.zones" :
-                                                        "layer_extrusion_edit.travel.advanced.planner.compatibility"));
+        REQUIRE(enabled.selected_planner == (use_zones ? "layer_extrusion_edit.travel.advanced.planner.advanced" :
+                                                        "layer_extrusion_edit.travel.advanced.planner.legacy"));
     REQUIRE(enabled.deviated > 0);
     Result disabled, straight, weight_zero, weight_two;
     for (const auto &domain : domains)

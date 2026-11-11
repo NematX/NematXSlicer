@@ -868,7 +868,7 @@ void check_scene(const Scene scenario)
             {
                 Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
                     "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
-                    provider, "layer_extrusion_edit.travel.advanced.planner.compatibility",
+                    provider, "layer_extrusion_edit.travel.advanced.planner.legacy",
                     "layer_extrusion_edit.travel.advanced.zones.island_attractors",
                     "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
                 REQUIRE(Steps::selected_active_plugin_from_group(orchestrator, STEP_LAYER_EXTRUSION_EDIT,

@@ -21,18 +21,18 @@ editor. Setup allocates connector summaries, and setup_run fills one summary per
 layer group before the host's worker barrier. Each run first prepares a chronology:
 an ordered record of borrowed extrusion gaps with their seams already snapped.
 It selects a planner through the advanced planner group, falling back to
-compatibility for absent or unknown selections. Compatibility preserves perimeter
-routing. The opt-in zones planner summarizes eligible gaps, collects active
+legacy for absent or unknown selections. Legacy preserves perimeter
+routing. The opt-in advanced planner summarizes eligible gaps, collects active
 attractors and forbidden tops, and routes in chronology order. Printed tops are
 opt-in and replace static forbidden tops when active; their dates start after
-the last arrival in each original island. Same-attractor compatibility routing
+the last arrival in each original island. Same-attractor legacy routing
 retains its own top avoidance.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
 selection and global contributor activation. Active means present in the host
 activation set, configured by activated.ini. Computation objects are worker-local;
-compatibility owns its input cache. The private implementation checks each ID
+the legacy planner owns its input cache. The private implementation checks each ID
 with orchestrator_find_plugin. Active contributors share
 a second input cache owned by advanced travel for boundary geometry, so a layer
 can be copied twice. Support obstacles copy slices directly without that cache.
@@ -69,8 +69,8 @@ using namespace TravelConnection;
 namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
 
 const char *const k_planner_group = "layer_extrusion_edit.travel.advanced.planner";
-const char *const k_compatibility_id = "layer_extrusion_edit.travel.advanced.planner.compatibility";
-const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.zones";
+const char *const k_compatibility_id = "layer_extrusion_edit.travel.advanced.planner.legacy";
+const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.advanced";
 const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
@@ -127,7 +127,7 @@ private:
     const char *const *dependencies_impl() const noexcept override { return k_planner_dependencies; }
     // Keep the same step priority as advanced travel.
     int32_t priority_impl() const noexcept override { return -50; }
-    // Prefer compatibility unless a configuration selects zones.
+    // Prefer Legacy unless a configuration selects Advanced.
     int32_t exclusive_group_priority_impl() const noexcept override { return m_priority; }
     // Leave the plan unchanged; AdvancedTravel performs routing once for the layer.
     void run_impl(const plugin_run_context *) const override {}
@@ -195,7 +195,7 @@ const char *AdvancedTravel::name_impl() const noexcept
 
 const char *AdvancedTravel::description_impl() const noexcept
 {
-    return "Connects travels using the compatibility planner or the opt-in forbidden-zone planner.";
+    return "Connects travels using the Legacy planner or the opt-in Advanced planner.";
 }
 
 const char *AdvancedTravel::exclusive_group_impl() const noexcept
@@ -305,7 +305,7 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
         m_connector.apply(chronology, route, progress());
         return;
     }
-    // The contributors share this cache; compatibility owns its separate cache.
+    // The contributors share this cache; the legacy planner owns its separate cache.
     AvoidCrossing::LayerInputCache inputs;
     const zones::ZoneContributorInput input{print, plan, *run_ctx, layer_group.print_z(),
                                           inputs, chronology.travels, summary};
@@ -348,14 +348,14 @@ void register_advanced_travel_plugin(orchestrator_handle *orchestrator)
 
 void register_advanced_travel_planners(orchestrator_handle *orchestrator)
 {
-    static PlannerChoice compatibility(orchestrator, k_compatibility_id, "Compatibility travel planner", -1);
-    static PlannerChoice zones(orchestrator, k_zones_id, "Forbidden-zone travel planner", 0);
+    static PlannerChoice compatibility(orchestrator, k_compatibility_id, "Legacy", -1);
+    static PlannerChoice zones(orchestrator, k_zones_id, "Advanced", 0);
     orchestrator_register_plugin(orchestrator, compatibility.c_instance());
     orchestrator_register_plugin(orchestrator, zones.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = k_planner_group;
     definition.label = "Advanced travel planner";
-    definition.tooltip = "Selects perimeter compatibility routing or forbidden-zone routing for Advanced travel.";
+    definition.tooltip = "Selects Legacy perimeter routing or Advanced forbidden-zone routing for Advanced travel.";
     compatibility.register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
@@ -364,7 +364,7 @@ void register_advanced_travel_contributors(orchestrator_handle *orchestrator)
     static ContributorChoice attractors(orchestrator, k_attractors_id, "Island attractor zones");
     static ContributorChoice tops(orchestrator, k_tops_id, "Forbidden top zones");
     static ContributorChoice printed_tops(orchestrator, k_printed_tops_id, "Printed top zones (replace static tops)",
-        "Replaces static forbidden tops with tops avoided after the last arrival in their island by the zones planner.");
+        "Replaces static forbidden tops with tops avoided after the last arrival in their island by the advanced planner.");
     orchestrator_register_plugin(orchestrator, attractors.c_instance());
     orchestrator_register_plugin(orchestrator, tops.c_instance());
     orchestrator_register_plugin(orchestrator, printed_tops.c_instance());
