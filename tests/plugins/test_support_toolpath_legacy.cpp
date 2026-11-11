@@ -853,7 +853,7 @@ TEST_CASE("Built-in support toolpaths turn interfaces by the angle increment per
     }
 }
 
-// Check registration, activation and dispatch ordering of the production algorithms: sparse, branch, bottom, top.
+// Check registration, activation and dispatch ordering of sparse, branch, bottom, top and residual gap-fill providers.
 TEST_CASE("Contact groups retain their declaring provider and elect complete selector descriptions",
           "[plugins][support-toolpath-legacy][support-contact]")
 {
@@ -943,13 +943,14 @@ TEST_CASE("Native support toolpath providers are active in role order", "[plugin
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const std::vector<Plugin *> providers = Orchestrator::instance().get_active_plugins_for_step(STEP_SUPPORT_TOOLPATH);
-    REQUIRE(providers.size() == 6);
+    REQUIRE(providers.size() == 7);
     const char *ids[] = {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom_contact",
-                         "support.toolpath.legacy_bottom", "support.toolpath.legacy_top_contact", "support.toolpath.legacy_top"};
-    const int32_t priorities[] = {0, 0, 90, 100, 190, 200};
+                         "support.toolpath.legacy_bottom", "support.toolpath.legacy_top_contact", "support.toolpath.legacy_top",
+                         "support.toolpath.interface_gap_fill"};
+    const int32_t priorities[] = {0, 0, 90, 100, 190, 200, 300};
     CHECK(providers[2]->get_priority() < providers[3]->get_priority());
     CHECK(providers[4]->get_priority() < providers[5]->get_priority());
-    for (size_t index = 0; index < 6; ++index) {
+    for (size_t index = 0; index < 7; ++index) {
         CHECK(providers[index]->get_id() == ids[index]);
         CHECK(providers[index]->get_priority() == priorities[index]);
     }
@@ -959,6 +960,7 @@ TEST_CASE("Native support toolpath providers are active in role order", "[plugin
     contents << stream.rdbuf();
     CHECK(contents.str().find("support.toolpath.legacy_bottom_contact = 1") != std::string::npos);
     CHECK(contents.str().find("support.toolpath.legacy_top_contact = 1") != std::string::npos);
+    CHECK(contents.str().find("support.toolpath.interface_gap_fill = 1") != std::string::npos);
 }
 
 // Run real surfaces through every role and check first-layer and bridge flows on a roof above a platform; a role with no interface layer prints its contact as base, without a bridge flow.
