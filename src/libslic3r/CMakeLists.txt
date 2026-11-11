@@ -451,6 +451,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/SlowdownSolver.hpp
 	Plugins/LayerExtrusionEdit/TravelConnectionHelpers.cpp
 	Plugins/LayerExtrusionEdit/TravelConnectionHelpers.hpp
+	Plugins/LayerExtrusionEdit/TravelPhaseHelpers.cpp
+	Plugins/LayerExtrusionEdit/TravelPhaseHelpers.hpp
 	Plugins/Ordering/AdvancedExtrusionTreeOrdering.cpp
 	Plugins/Ordering/AdvancedExtrusionTreeOrdering.hpp
 	Plugins/Ordering/ExtrusionTreeOrderingGeometry.cpp

@@ -422,6 +422,99 @@ TEST_CASE("CreateRetractionLift materializes vertical lift and respects its thre
     }
 }
 
+// Split the generated 10 mm travel as the deceleration provider does, then check one lift profile across all its ordered leaves.
+TEST_CASE("CreateRetractionLift lifts a travel split into ordered leaves",
+          "[plugins][layer-extrusion-edit][lift][travel]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    enum class Profile { Vertical, Triangle, Plateau };
+    const Profile profile = GENERATE(Profile::Vertical, Profile::Triangle, Profile::Plateau);
+    CAPTURE(static_cast<int>(profile));
+    Print print;
+    Model model;
+    // A 45 degree slope with a 1 mm lift ramps over 1 mm at each end.
+    prepare_lift_print(print, model, "1", profile == Profile::Vertical ? "0" : "1",
+                       profile == Profile::Plateau ? "45" : "0");
+    run_layer_plugins(print, {
+        TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN
+    });
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+        .layers.front().tool_groups.front();
+    OrderedExtrusionScope scope(find_scope(entity_view(*tool.extrusions[1].root)),
+                                scope_property_key());
+    REQUIRE(scope.travel().segment_count() == 1);
+    REQUIRE(scope.travel().local_length() == Approx(scale_d(10.)));
+    const slic3r_api::MutableExtrusionEntity final_part = split_travel_leaf(scope.travel(), 7.);
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, LIFT_PLUGIN});
+
+    std::vector<LiftLeaf> leaves;
+    collect_lift_leaves(scope.travel().readonly(), std::nullopt, leaves);
+    // The ramp ends become leaf boundaries inside the existing leaves.
+    REQUIRE(leaves.size() == (profile == Profile::Vertical ? 2 : profile == Profile::Triangle ? 3 : 4));
+    for (size_t idx = 0; idx < leaves.size(); ++idx) {
+        CHECK(RAW_EXTRUSION_ROLE_IS_TRAVEL(leaves[idx].role));
+        if (idx == 0)
+            continue;
+        const slic3r_api::ExtrusionEntity &previous = leaves[idx - 1].entity;
+        const slic3r_api::ExtrusionEntity &next = leaves[idx].entity;
+        CHECK(previous.point(previous.point_count() - 1).x == next.point(0).x);
+        CHECK(previous.point(previous.point_count() - 1).y == next.point(0).y);
+        CHECK(previous.z_offset(previous.point_count() - 1) == next.z_offset(0));
+    }
+
+    // The final part keeps its acceleration and still holds every point beyond its original start.
+    const slic3r_api::EPropertySpeed *speed = final_part.get(slic3r_api::EPropertySpeed::key);
+    REQUIRE(speed != nullptr);
+    CHECK(speed->accel_mm_per_s2 == 1234.f);
+    std::vector<LiftLeaf> final_leaves;
+    const slic3r_api::EPropertyAttributes *travel_attributes =
+        scope.travel().get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(travel_attributes != nullptr);
+    collect_lift_leaves(final_part.readonly(), *travel_attributes, final_leaves);
+    REQUIRE_FALSE(final_leaves.empty());
+    CHECK(final_leaves.front().entity.point(0).x == scale_i(17.));
+    CHECK(final_leaves.back().entity.same_handle(leaves.back().entity));
+
+    const slic3r_api::ExtrusionEntity &first = leaves.front().entity;
+    const slic3r_api::ExtrusionEntity &last = leaves.back().entity;
+    CHECK(first.point(0).x == scale_i(10.));
+    CHECK(first.z_offset(0) == 0);
+    CHECK(last.point(last.point_count() - 1).x == scale_i(20.));
+    CHECK(last.z_offset(last.point_count() - 1) == 0);
+    if (profile == Profile::Vertical) {
+        // Only the explicit vertical segments at both travel ends leave the lifted height.
+        CHECK(first.point(1).x == scale_i(10.));
+        CHECK(last.point(last.point_count() - 2).x == scale_i(20.));
+        for (const LiftLeaf &leaf : leaves)
+            for (uint32_t idx = 0; idx < leaf.entity.point_count(); ++idx) {
+                const bool travel_start = leaf.entity.same_handle(first) && idx == 0;
+                const bool travel_end = leaf.entity.same_handle(last) && idx + 1 == leaf.entity.point_count();
+                if (!travel_start && !travel_end)
+                    CHECK(leaf.entity.z_offset(idx) == scale_i(1.));
+            }
+        return;
+    }
+
+    // Every point follows the triangle or trapezoid along its planar distance from the start.
+    std::vector<double> breakpoints;
+    for (const LiftLeaf &leaf : leaves)
+        for (uint32_t idx = 0; idx < leaf.entity.point_count(); ++idx) {
+            const double distance = unscaled(leaf.entity.point(idx).x) - 10.;
+            const double expected = profile == Profile::Triangle ?
+                std::min(distance, 10. - distance) / 5. :
+                std::min({1., distance, 10. - distance});
+            CAPTURE(distance);
+            CHECK(unscaled(leaf.entity.z_offset(idx)) == Approx(expected).margin(1e-5));
+            if (leaf.entity.z_offset(idx) == scale_i(1.))
+                breakpoints.push_back(distance);
+        }
+    REQUIRE_FALSE(breakpoints.empty());
+    CHECK(*std::min_element(breakpoints.begin(), breakpoints.end()) ==
+          Approx(profile == Profile::Triangle ? 5. : 1.).margin(1e-5));
+    CHECK(*std::max_element(breakpoints.begin(), breakpoints.end()) ==
+          Approx(profile == Profile::Triangle ? 5. : 9.).margin(1e-5));
+}
+
 // Check shared ramp values and joins across outgoing wipe leaves, then verify the next travel inherits the final Z.
 TEST_CASE("CreateRetractionLift raises the whole outgoing wipe continuously",
           "[plugins][layer-extrusion-edit][lift][wipe]")

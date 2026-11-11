@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ExtrusionScopeHelpers.hpp"
+#include "TravelPhaseHelpers.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -70,9 +71,10 @@ on the generated travel. CreateCrossingWipe runs after travel generation and tes
 the actual travel vertices. The target's region identifies the layer and its
 tool group selects the nozzle radius and material areas. All travel vertices
 have the target instance's XY shift removed before testing.
-Only a phase containing a single segmented Travel leaf is eligible; composite
-travel phases are skipped. Global skirt and brim paths have no instance shift
-and stay in platter XY.
+The travel phase may be one segmented Travel leaf or an ordered subtree of
+them, such as a travel split for deceleration; its leaves must form one
+continuous path without Wipe geometry, otherwise the gap is skipped. Global
+skirt and brim paths have no instance shift and stay in platter XY.
 This is only a gate for adding a wipe; it never routes the gap around objects.
 
 PerimeterCrossing prepares two versions of the target's filled areas. For an
@@ -125,6 +127,7 @@ namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
 namespace AC = AvoidCrossing;
+namespace TP = TravelPhase;
 
 const char *const k_dependencies[] = {
     "layer_extrusion_edit.transition_scope.default",
@@ -172,7 +175,7 @@ public:
 
     // Test every travel vertex in target coordinates against offset boundaries; missing target regions or a null layer handle return false.
     // Copy inputs on first use; an absent layer throws, and exceptions from cancellation or geometry preparation propagate.
-    bool crosses(const ScopeEntity &target_scope, const ExtrusionEntity &travel);
+    bool crosses(const ScopeEntity &target_scope, const std::vector<TP::TravelLeaf> &travel);
 
 private:
     /* Identify one crossing cache by its target layer and active extruder. */
@@ -399,12 +402,12 @@ bool phase_holds_geometry(const ExtrusionEntity &entity);
 // Return the last materialized leaf of content; absent geometry returns an invalid view.
 ExtrusionEntity last_printable_leaf(const ExtrusionEntity &entity);
 
-// Borrow the sole segmented Travel leaf of a reserved phase, excluding wipes; other shapes return an invalid view.
-ExtrusionEntity sole_travel(const ScopeEntity &target,
+// Borrow the ordered continuous Travel leaves of a reserved phase, excluding wipes; other shapes return no leaves.
+std::vector<TP::TravelLeaf> travel_leaves(const ScopeEntity &target,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key);
 
-// Copy the exact start in plan XY and absolute Z from an eligible travel.
-FirstTravelSummary travel_summary(const ScopeEntity &target, const ExtrusionEntity &travel);
+// Copy the exact start in plan XY and absolute Z from the first leaf of an eligible travel.
+FirstTravelSummary travel_summary(const ScopeEntity &target, const std::vector<TP::TravelLeaf> &travel);
 
 // Read the source tool's two switches before preparing any crossing geometry.
 bool crossing_wipe_enabled(const Config &config, extruder_index_t tool);
@@ -953,12 +956,12 @@ WipeCrossingChecker::WipeCrossingChecker(
 
 bool WipeCrossingChecker::crosses(
     const ScopeEntity &target_scope,
-    const ExtrusionEntity &travel)
+    const std::vector<TP::TravelLeaf> &travel)
 {
     const LayerRegionIsland region_island =
         target_scope.printing_extrusion.region_island();
     if (!region_island.valid() || region_island.region_count() == 0 ||
-        travel.segment_count() == 0)
+        travel.empty())
         return false;
 
     const Layer layer_view = region_island.region(0).layer();
@@ -982,10 +985,12 @@ bool WipeCrossingChecker::crosses(
     // Crossing areas use target-local XY; global auxiliary paths have a zero shift.
     const c_point shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
     PluginCommon::work::Polyline polyline;
-    const c_point first = travel.segment(0).point_a;
+    const c_point first = travel.front().entity.segment(0).point_a;
     polyline.points.push_back({first.x - shift.x, first.y - shift.y});
-    for (const c_extrusion_segment &segment : travel.segments())
-        polyline.points.push_back({segment.point_b.x - shift.x, segment.point_b.y - shift.y});
+    // Continuous leaves share their junctions, so each one only contributes its segment ends.
+    for (const TP::TravelLeaf &leaf : travel)
+        for (const c_extrusion_segment &segment : leaf.entity.segments())
+            polyline.points.push_back({segment.point_b.x - shift.x, segment.point_b.y - shift.y});
     return crossing.can_cross_perimeter(polyline, true);
 }
 
@@ -1323,31 +1328,30 @@ ExtrusionEntity last_printable_leaf(const ExtrusionEntity &entity)
     return ExtrusionScope::leaf_endpoints(entity, endpoints) ? entity : ExtrusionEntity();
 }
 
-ExtrusionEntity sole_travel(const ScopeEntity &target,
+std::vector<TP::TravelLeaf> travel_leaves(const ScopeEntity &target,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key)
 {
     const ExtrusionScope::OrderedExtrusionScope scope(target.entity, key);
-    if (!scope.has_incoming_transition())
-        return ExtrusionEntity();
-    ExtrusionEntity travel = scope.travel().readonly();
-    if (travel.child_count() != 0 || travel.segment_count() == 0)
-        return ExtrusionEntity();
-    const EPropertyAttributes *attributes = travel.get(EPropertyAttributes::key);
-    if (attributes == nullptr || !RAW_EXTRUSION_ROLE_IS_TRAVEL(attributes->extrusion_role()) ||
-        RAW_EXTRUSION_ROLE_IS_WIPE(attributes->extrusion_role()))
-        return ExtrusionEntity();
-    return travel;
+    std::vector<TP::TravelLeaf> leaves;
+    if (!scope.has_incoming_transition() ||
+        !TP::collect_travel_leaves(scope.travel(),
+            traversal_state(target.effective_properties).z_offset, leaves))
+        return {};
+    for (const TP::TravelLeaf &leaf : leaves)
+        if (!RAW_EXTRUSION_ROLE_IS_TRAVEL(leaf.role) || RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role))
+            return {};
+    return leaves;
 }
 
-FirstTravelSummary travel_summary(const ScopeEntity &target, const ExtrusionEntity &travel)
+FirstTravelSummary travel_summary(const ScopeEntity &target, const std::vector<TP::TravelLeaf> &travel)
 {
     FirstTravelSummary summary;
     summary.has_scope = true;
     summary.has_travel = true;
-    const c_extrusion_segment first = travel.segment(0);
+    const c_extrusion_segment first = travel.front().entity.segment(0);
     summary.start = first.point_a;
     summary.start_z = checked_add(checked_add(target.layer_group.print_z(),
-        traversal_state(target.effective_properties).z_offset), first.z_offset_a);
+        travel.front().z_offset), first.z_offset_a);
     return summary;
 }
 
@@ -1465,8 +1469,8 @@ void CreateCrossingWipe::setup_run_impl(const plugin_run_context *run_ctx) const
             if (previous != nullptr || next == nullptr)
                 return;
             summary.has_scope = true;
-            const ExtrusionEntity travel = sole_travel(*next, m_scope_property);
-            if (travel.same_handle(ExtrusionEntity()))
+            const std::vector<TP::TravelLeaf> travel = travel_leaves(*next, m_scope_property);
+            if (travel.empty())
                 return;
             summary = travel_summary(*next, travel);
             if (enabled) {
@@ -1497,8 +1501,8 @@ void CreateCrossingWipe::run_impl(const plugin_run_context *run_ctx) const
             if (previous == nullptr || !crossing_wipe_enabled(config, previous->tool_group.extruder_id()))
                 return;
             if (next != nullptr) {
-                const ExtrusionEntity travel = sole_travel(*next, m_scope_property);
-                if (travel.same_handle(ExtrusionEntity()))
+                const std::vector<TP::TravelLeaf> travel = travel_leaves(*next, m_scope_property);
+                if (travel.empty())
                     return;
                 if (!checker)
                     checker = std::make_unique<WipeCrossingChecker>(config, plan, run_ctx);

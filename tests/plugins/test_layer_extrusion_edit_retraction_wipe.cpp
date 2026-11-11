@@ -29,6 +29,8 @@ it does not prove the core rule elsewhere. A sliced roof on a narrow post also
 supplies a real support layer with its support property and region identity.
 Controlled deposits, occupied departures and non-crossing detours suppress the
 second wipe; tool-change, lift and missing-dependency cases check pass ordering.
+Split cases cut the generated travel into two ordered leaves: a gap crossed only
+by the whole path still wipes, while a split detour or a broken junction does not.
 Certain local crossings use sliced instance and island identities, support in
 both directions, per-object brim published as Perimeter, and global skirt.
 Both passes run together: departure lengths and leaf counts exclude a second
@@ -443,13 +445,18 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         InterLayer, Deposit, OccupiedAfter, Detour, Blocked, Lift, Toolchange, Support,
         RoutedDetour, LimitedDetour, Instances, ZOffsets, WrongZ, ExtraLoop,
         Islands, SupportToObject, ObjectToSupport, BrimToObject, SkirtToObject,
-        OutsideSupports, OutsideBrims, GlobalToSupport, RegionlessToObject };
+        OutsideSupports, OutsideBrims, GlobalToSupport, RegionlessToObject,
+        SplitTravel, SplitDetour, BrokenSplit };
     const Shape shape = GENERATE(Shape::Open, Shape::LongLoop, Shape::EqualLoop, Shape::ShortLoop,
         Shape::Fragmented, Shape::Residual, Shape::InterLayer, Shape::Deposit, Shape::OccupiedAfter,
         Shape::Detour, Shape::Blocked, Shape::Lift, Shape::Toolchange, Shape::Support,
         Shape::RoutedDetour, Shape::LimitedDetour, Shape::Instances, Shape::ZOffsets, Shape::WrongZ, Shape::ExtraLoop,
         Shape::Islands, Shape::SupportToObject, Shape::ObjectToSupport, Shape::BrimToObject, Shape::SkirtToObject,
-        Shape::OutsideSupports, Shape::OutsideBrims, Shape::GlobalToSupport, Shape::RegionlessToObject);
+        Shape::OutsideSupports, Shape::OutsideBrims, Shape::GlobalToSupport, Shape::RegionlessToObject,
+        Shape::SplitTravel, Shape::SplitDetour, Shape::BrokenSplit);
+    // Split shapes cut the generated travel in two ordered leaves, as the deceleration provider does.
+    const bool split = shape == Shape::SplitTravel || shape == Shape::SplitDetour || shape == Shape::BrokenSplit;
+    const bool detour = shape == Shape::Detour || shape == Shape::SplitDetour;
     const bool outside_pair = shape == Shape::OutsideSupports || shape == Shape::OutsideBrims || shape == Shape::GlobalToSupport;
     const bool certain = shape == Shape::Instances || shape == Shape::Islands ||
         shape == Shape::SupportToObject || shape == Shape::ObjectToSupport ||
@@ -620,7 +627,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         start.x() = bounds.min.x() + scale_i(2.);
         end.x() = bounds.max.x() - scale_i(2.);
     }
-    if (shape == Shape::Detour)
+    if (detour)
         start.x() = bounds.min.x() - scale_i(3.);
     const slic3r_api::ConstPrintingPlan plan_view(reinterpret_cast<const printing_plan_handle *>(&plan));
     PrintingExtrusion identity;
@@ -763,7 +770,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         moved.z_offset_a += scale_i(0.01);
         REQUIRE(target_scope.travel().set_segments({moved}));
     }
-    if (shape == Shape::Detour) {
+    if (detour) {
         const coord_t outside_y = bounds.max.y() + shift.y + scale_i(3.);
         c_extrusion_segment a = original, b = original, c = original;
         a.point_b = {original.point_a.x, outside_y};
@@ -778,6 +785,23 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
             Point(c.point_b.x - shift.x, c.point_b.y - shift.y)};
         CHECK_FALSE(oracle.can_cross_perimeter(detour, true));
     }
+    if (split) {
+        slic3r_api::MutableExtrusionEntity final_part = split_travel_leaf(
+            target_scope.travel(), 0.5 * unscaled(target_scope.travel().local_length()));
+        const slic3r_api::ExtrusionEntity first_part = target_scope.travel().child(0);
+        if (shape == Shape::SplitTravel) {
+            // Only the whole ordered path crosses: the first part stays inside the object.
+            Polyline head;
+            for (uint32_t idx = 0; idx < first_part.point_count(); ++idx)
+                head.points.emplace_back(first_part.point(idx).x - shift.x, first_part.point(idx).y - shift.y);
+            CHECK_FALSE(oracle.can_cross_perimeter(head, true));
+        }
+        if (shape == Shape::BrokenSplit) {
+            std::vector<c_extrusion_segment> moved = final_part.segments();
+            moved.front().point_a.y += scale_i(1.);
+            REQUIRE(final_part.set_segments(moved));
+        }
+    }
     if (shape == Shape::Blocked) {
         ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, CROSSING_WIPE_PLUGIN});
         Orchestrator &host = Orchestrator::instance();
@@ -788,8 +812,9 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     } else
         run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, WIPE_PLUGIN, CROSSING_WIPE_PLUGIN});
     const slic3r_api::MutableExtrusionEntity wipe = find_role(source_root, RAW_EXTRUSION_ROLE_WIPE);
-    if (shape == Shape::Deposit || shape == Shape::OccupiedAfter || shape == Shape::Detour ||
-        shape == Shape::RoutedDetour || shape == Shape::Blocked || shape == Shape::WrongZ) {
+    if (shape == Shape::Deposit || shape == Shape::OccupiedAfter || detour ||
+        shape == Shape::RoutedDetour || shape == Shape::Blocked || shape == Shape::WrongZ ||
+        shape == Shape::BrokenSplit) {
         CHECK_FALSE(wipe.valid());
         return;
     }
@@ -809,8 +834,8 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     const coord_t source_base_z = mask->scaled_print_z() + (source_z == nullptr ? 0 : source_z->get());
     const coord_t target_base_z = plan.groups.back().layers.back().print_z + (target_z == nullptr ? 0 : target_z->get());
     CHECK(source_base_z + first.z_offset_a == target_base_z + original.z_offset_a);
-    CHECK(target_scope.travel().segment(0).point_a.x == original.point_a.x);
-    CHECK(target_scope.travel().segment(0).point_a.y == original.point_a.y);
+    CHECK(first_leaf_segment(target_scope.travel().readonly()).point_a.x == original.point_a.x);
+    CHECK(first_leaf_segment(target_scope.travel().readonly()).point_a.y == original.point_a.y);
     double length = 0.;
     for (size_t idx = 0; idx < leaves.size(); ++idx) {
         length += unscaled(leaves[idx].entity.local_length());

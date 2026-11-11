@@ -741,9 +741,12 @@ global, regionless and auxiliary-layer geometry, including support, brim and
 skirt. All other transitions, including those between two auxiliary paths and
 inter-layer gaps, depend on the generated travel in the second pass. The independent
 `layer_extrusion_edit.wipe.crossing` (-45) depends on that first pass and runs
-after built-in travels (-50), before lift (-40). It adds a wipe only for a sole
-Travel leaf without Wipe, with a valid target region island and no departure
-geometry. A terminal stationary deposit prevents the wipe.
+after built-in travels (-50), before lift (-40). It adds a wipe only for a
+travel phase whose Travel leaves, without Wipe, form one continuous path, with a
+valid target region island and no departure geometry. The phase may be a single
+leaf or an ordered subtree, such as a travel split for deceleration. A terminal
+stationary deposit prevents the wipe. The lift provider accepts the same
+travel shapes and applies one lift profile along all their leaves.
 
 The crossing wipe returns to its source start, which must agree with the unchanged
 travel start within `SCALED_EPSILON` in XY distance and absolute Z before lift.

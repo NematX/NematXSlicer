@@ -41,8 +41,9 @@ regionless and auxiliary-layer geometry.
 These normal wipes retain wipe_return and inside-end behavior. Other local gaps
 and inter-layer gaps leave outgoing retractions for the second pass, whose
 decision depends on the generated travel.
-The second pass tests a generated travel against target perimeter boundaries only
-when its phase contains a single segmented Travel leaf, not a composite tree.
+The second pass tests a generated travel against target perimeter boundaries
+when its phase holds one continuous path of Travel leaves, either a single leaf
+or an ordered subtree such as a travel split for deceleration.
 It adds a returning wipe only when its source start agrees with the travel start
 within SCALED_EPSILON in XY distance and absolute Z. Short loops use whole turns;
 longer loops and open paths go out and back. Inside-end and wipe_return do not

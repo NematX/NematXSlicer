@@ -18,14 +18,17 @@ pass contract and the prerequisites on transition scopes.
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <iterator>
 #include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ExtrusionScopeHelpers.hpp"
+#include "TravelPhaseHelpers.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
@@ -67,6 +70,8 @@ void register_create_retraction_lift_plugin(orchestrator_handle *orchestrator);
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
+namespace TP = TravelPhase;
+using TP::segment_planar_length;
 
 const char *const k_dependencies[] = {
     "layer_extrusion_edit.transition_scope.default",
@@ -217,9 +222,6 @@ private:
 /* Add scaled Z values and reject overflow before editing geometry. */
 coord_t checked_add_z(coord_t value, coord_t offset);
 
-/* Return the true planar length of one line or circular arc. */
-distf_t segment_planar_length(const c_extrusion_segment &segment);
-
 /* Resolve direct lift-relevant properties over an inherited state. */
 EffectiveState resolved_state(const ExtrusionEntity &entity,
                               const EffectiveState &parent);
@@ -265,16 +267,37 @@ SourceLiftState describe_source(
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx);
 
-/* Add a distance-linear Z ramp to every point of one travel phase. */
-void apply_z_ramp(MutableExtrusionEntity phase, coord_t from, coord_t to,
-                  const plugin_run_context *run_ctx);
+/* Lift added along a whole travel. It rises linearly from start to top until rise_end,
+   stays at top, then falls linearly to zero from fall_start to length. Distances are
+   planar and accumulated over the ordered travel leaves. */
+struct LiftProfile
+{
+    coord_t start = 0;
+    coord_t top = 0;
+    distf_t rise_end = 0.0;
+    distf_t fall_start = 0.0;
+    distf_t length = 0.0;
+};
 
-/* Raise every point of one travel plateau by the same amount. */
-void apply_constant_lift(MutableExtrusionEntity phase, coord_t lift,
-                         const plugin_run_context *run_ctx);
+/* Return the lift requested by a profile at one planar distance along the travel. */
+long double lift_at(const LiftProfile &profile, distf_t distance);
 
-/* Materialize a vertical or ramped lift on one reserved travel leaf. */
-void lift_travel(MutableExtrusionEntity travel,
+/* Sum planar segment lengths of the first end leaves in the order used by apply_lift_profile. */
+distf_t planar_length_before(const std::vector<TP::TravelLeaf> &leaves, size_t end);
+
+/* Make distance, measured with host leaf lengths, a leaf boundary of the ordered travel.
+   The leaf containing it is split into two ordered children which inherit its properties;
+   a junction within SCALED_EPSILON is reused. Returns the index of the first leaf after the
+   boundary; failed edits throw. */
+size_t split_travel_at(std::vector<TP::TravelLeaf> &leaves, distf_t distance,
+                       const plugin_run_context *run_ctx);
+
+/* Add the profile's lift to every point of the ordered travel leaves; overflow or a failed edit throws. */
+void apply_lift_profile(const std::vector<TP::TravelLeaf> &leaves, const LiftProfile &profile,
+                        const plugin_run_context *run_ctx);
+
+/* Materialize a vertical or ramped lift on the ordered leaves of one reserved travel. */
+void lift_travel(std::vector<TP::TravelLeaf> leaves,
                  coord_t lift,
                  coord_t inherited_start_lift,
                  bool ramping,
@@ -304,10 +327,12 @@ void prepare_scope_wipe_lift(
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx);
 
-/* Validate and return the absolute start Z of a reserved travel leaf. */
+/* Collect the continuous Travel leaves of a reserved travel and return its absolute start Z.
+   A travel without geometry, discontinuous leaves or a non-Travel role throws. */
 coord_t travel_start_z(
     const ScopeEntity &target,
     const ExtrusionScope::OrderedExtrusionScope &scope,
+    std::vector<TP::TravelLeaf> &leaves,
     const plugin_run_context *run_ctx);
 
 /*
@@ -337,21 +362,6 @@ coord_t checked_add_z(const coord_t value, const coord_t offset)
         (offset < 0 && value < (std::numeric_limits<coord_t>::min)() - offset))
         throw std::overflow_error("A retraction lift exceeds the coord_t range.");
     return value + offset;
-}
-
-distf_t segment_planar_length(const c_extrusion_segment &segment)
-{
-    const distf_t chord = c_point_distance_to(segment.point_a, segment.point_b);
-    if (segment.radius == 0.f)
-        return chord;
-    const double radius = std::abs(double(segment.radius));
-    if (!(radius > 0.0) || chord > 2.0 * radius + double(SCALED_EPSILON))
-        throw std::invalid_argument("A lifted path contains an invalid arc radius.");
-    double angle = 2.0 * std::asin(std::clamp(
-        double(chord) / (2.0 * radius), 0.0, 1.0));
-    if (segment.radius < 0.f)
-        angle = 2.0 * std::acos(-1.0) - angle;
-    return radius * angle;
 }
 
 EffectiveState resolved_state(const ExtrusionEntity &entity,
@@ -576,52 +586,94 @@ SourceLiftState describe_source(
     return result;
 }
 
-void apply_z_ramp(MutableExtrusionEntity phase,
-                  const coord_t from,
-                  const coord_t to,
-                  const plugin_run_context *run_ctx)
+long double lift_at(const LiftProfile &profile, const distf_t distance)
 {
-    throw_if_cancelled(run_ctx);
-    const uint32_t point_count = phase.point_count();
-    if (point_count == 0)
-        return;
-    const distf_t total_length = phase.local_length();
-    distf_t traversed = 0.0;
-    for (uint32_t point_idx = 0; point_idx < point_count; ++point_idx) {
-        throw_if_cancelled(run_ctx);
-        if (point_idx > 0)
-            traversed += segment_planar_length(phase.segment(point_idx - 1));
-        const double factor = total_length <= distf_t(SCALED_EPSILON) ? 1.0 :
-            std::clamp(double(traversed / total_length), 0.0, 1.0);
-        const long double added = static_cast<long double>(from) +
-            static_cast<long double>(to - from) * factor;
-        const long double value =
-            static_cast<long double>(phase.z_offset(point_idx)) + added;
-        if (value < static_cast<long double>((std::numeric_limits<coord_t>::min)()) ||
-            value > static_cast<long double>((std::numeric_limits<coord_t>::max)()))
-            throw std::overflow_error("A ramped travel lift exceeds the coord_t range.");
-        throw_if_cancelled(run_ctx);
-        if (!phase.set_z_offset(point_idx, coord_t(std::llround(value))))
-            throw std::runtime_error("Unable to apply a Z ramp to a travel phase.");
+    if (distance <= profile.rise_end) {
+        const double factor = profile.rise_end <= distf_t(SCALED_EPSILON) ? 1.0 :
+            std::clamp(double(distance / profile.rise_end), 0.0, 1.0);
+        return static_cast<long double>(profile.start) +
+            static_cast<long double>(profile.top - profile.start) * factor;
     }
+    if (distance >= profile.fall_start) {
+        const distf_t fall = profile.length - profile.fall_start;
+        const double factor = fall <= distf_t(SCALED_EPSILON) ? 0.0 :
+            std::clamp(double((profile.length - distance) / fall), 0.0, 1.0);
+        return static_cast<long double>(profile.top) * factor;
+    }
+    return static_cast<long double>(profile.top);
 }
 
-void apply_constant_lift(MutableExtrusionEntity phase,
-                         const coord_t lift,
-                         const plugin_run_context *run_ctx)
+distf_t planar_length_before(const std::vector<TP::TravelLeaf> &leaves, const size_t end)
 {
-    throw_if_cancelled(run_ctx);
-    for (uint32_t point_idx = 0; point_idx < phase.point_count(); ++point_idx) {
+    // One running sum, as in apply_lift_profile, so a boundary equals the distance of its junction point.
+    distf_t traversed = 0.0;
+    for (size_t leaf_idx = 0; leaf_idx < end; ++leaf_idx) {
+        const MutableExtrusionEntity &entity = leaves[leaf_idx].entity;
+        for (uint32_t segment_idx = 0; segment_idx < entity.segment_count(); ++segment_idx)
+            traversed += segment_planar_length(entity.segment(segment_idx));
+    }
+    return traversed;
+}
+
+size_t split_travel_at(std::vector<TP::TravelLeaf> &leaves,
+                       const distf_t distance,
+                       const plugin_run_context *run_ctx)
+{
+    distf_t before = 0.0;
+    for (size_t leaf_idx = 0; leaf_idx < leaves.size(); ++leaf_idx) {
         throw_if_cancelled(run_ctx);
-        const coord_t offset = checked_add_z(phase.z_offset(point_idx), lift);
-        throw_if_cancelled(run_ctx);
-        if (!phase.set_z_offset(point_idx, offset))
-            throw std::runtime_error("Unable to apply a constant travel lift.");
+        if (distance <= before + distf_t(SCALED_EPSILON))
+            return leaf_idx;
+        MutableExtrusionEntity leaf = leaves[leaf_idx].entity;
+        const distf_t after = before + leaf.local_length();
+        if (distance < after - distf_t(SCALED_EPSILON)) {
+            MutableExtrusionEntity first = leaf.emplace_ordered_leaf(
+                OrderedLeafPosition::Before, ExistingPropertyPlacement::KeepOnParent);
+            if (!first.valid() || leaf.child_count() != 2)
+                throw std::runtime_error("Unable to create ordered ramped-travel phases.");
+            MutableExtrusionEntity second = leaf.child_mutable(1);
+            throw_if_cancelled(run_ctx);
+            if (extrusion_polyline_split_at_distance(
+                    second.handle(), distance - before,
+                    first.mutable_handle(), second.mutable_handle()) == 0)
+                throw std::runtime_error("Unable to split a travel for ramped lift.");
+            TP::TravelLeaf tail = leaves[leaf_idx];
+            tail.entity = second;
+            leaves[leaf_idx].entity = first;
+            leaves.insert(leaves.begin() + std::ptrdiff_t(leaf_idx + 1), tail);
+            return leaf_idx + 1;
+        }
+        before = after;
+    }
+    return leaves.size();
+}
+
+void apply_lift_profile(const std::vector<TP::TravelLeaf> &leaves,
+                        const LiftProfile &profile,
+                        const plugin_run_context *run_ctx)
+{
+    distf_t traversed = 0.0;
+    for (const TP::TravelLeaf &leaf : leaves) {
+        MutableExtrusionEntity entity = leaf.entity;
+        // The first point of a leaf repeats the previous junction, so the running distance continues unchanged.
+        for (uint32_t point_idx = 0; point_idx < entity.point_count(); ++point_idx) {
+            throw_if_cancelled(run_ctx);
+            if (point_idx > 0)
+                traversed += segment_planar_length(entity.segment(point_idx - 1));
+            const long double value =
+                static_cast<long double>(entity.z_offset(point_idx)) + lift_at(profile, traversed);
+            if (value < static_cast<long double>((std::numeric_limits<coord_t>::min)()) ||
+                value > static_cast<long double>((std::numeric_limits<coord_t>::max)()))
+                throw std::overflow_error("A ramped travel lift exceeds the coord_t range.");
+            throw_if_cancelled(run_ctx);
+            if (!entity.set_z_offset(point_idx, coord_t(std::llround(value))))
+                throw std::runtime_error("Unable to apply a Z ramp to a travel phase.");
+        }
     }
 }
 
 void lift_travel(
-    MutableExtrusionEntity travel,
+    std::vector<TP::TravelLeaf> leaves,
     const coord_t lift,
     const coord_t inherited_start_lift,
     const bool ramping,
@@ -629,50 +681,56 @@ void lift_travel(
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if ((lift <= 0 && inherited_start_lift <= 0) ||
-        travel.point_count() == 0)
+    if ((lift <= 0 && inherited_start_lift <= 0) || leaves.empty())
         return;
 
     const coord_t effective_lift = std::max(lift, inherited_start_lift);
     if (!ramping || slope_degrees >= 90.0) {
-        throw_if_cancelled(run_ctx);
-        std::vector<c_extrusion_segment> lifted = travel.segments();
-        if (lifted.empty())
-            return;
-
-        // Explicit vertical segments expose the complete lift in the plan.
-        c_extrusion_segment raise{};
-        raise.point_a = lifted.front().point_a;
-        raise.point_b = lifted.front().point_a;
-        raise.z_offset_a = checked_add_z(
-            lifted.front().z_offset_a, inherited_start_lift);
-        raise.z_offset_b = checked_add_z(
-            lifted.front().z_offset_a, effective_lift);
-        raise.orientation = RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN;
-
-        c_extrusion_segment lower{};
-        lower.point_a = lifted.back().point_b;
-        lower.point_b = lifted.back().point_b;
-        lower.z_offset_a = checked_add_z(
-            lifted.back().z_offset_b, effective_lift);
-        lower.z_offset_b = lifted.back().z_offset_b;
-        lower.orientation = RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN;
-
-        for (c_extrusion_segment &segment : lifted) {
+        for (size_t leaf_idx = 0; leaf_idx < leaves.size(); ++leaf_idx) {
             throw_if_cancelled(run_ctx);
-            segment.z_offset_a = checked_add_z(segment.z_offset_a, effective_lift);
-            segment.z_offset_b = checked_add_z(segment.z_offset_b, effective_lift);
+            MutableExtrusionEntity travel = leaves[leaf_idx].entity;
+            std::vector<c_extrusion_segment> lifted = travel.segments();
+            if (lifted.empty())
+                continue;
+
+            // Explicit vertical segments at both ends of the travel expose the complete lift in the plan.
+            c_extrusion_segment raise{};
+            raise.point_a = lifted.front().point_a;
+            raise.point_b = lifted.front().point_a;
+            raise.z_offset_a = checked_add_z(
+                lifted.front().z_offset_a, inherited_start_lift);
+            raise.z_offset_b = checked_add_z(
+                lifted.front().z_offset_a, effective_lift);
+            raise.orientation = RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN;
+
+            c_extrusion_segment lower{};
+            lower.point_a = lifted.back().point_b;
+            lower.point_b = lifted.back().point_b;
+            lower.z_offset_a = checked_add_z(
+                lifted.back().z_offset_b, effective_lift);
+            lower.z_offset_b = lifted.back().z_offset_b;
+            lower.orientation = RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN;
+
+            for (c_extrusion_segment &segment : lifted) {
+                throw_if_cancelled(run_ctx);
+                segment.z_offset_a = checked_add_z(segment.z_offset_a, effective_lift);
+                segment.z_offset_b = checked_add_z(segment.z_offset_b, effective_lift);
+            }
+            throw_if_cancelled(run_ctx);
+            if (leaf_idx == 0)
+                lifted.insert(lifted.begin(), raise);
+            if (leaf_idx + 1 == leaves.size())
+                lifted.push_back(lower);
+            throw_if_cancelled(run_ctx);
+            if (!travel.set_segments(lifted))
+                throw std::runtime_error("Unable to materialize a complete travel lift.");
         }
-        throw_if_cancelled(run_ctx);
-        lifted.insert(lifted.begin(), raise);
-        lifted.push_back(lower);
-        throw_if_cancelled(run_ctx);
-        if (!travel.set_segments(lifted))
-            throw std::runtime_error("Unable to materialize a complete travel lift.");
         return;
     }
 
-    const distf_t length = travel.local_length();
+    distf_t length = 0.0;
+    for (const TP::TravelLeaf &leaf : leaves)
+        length += leaf.entity.local_length();
     if (length <= distf_t(SCALED_EPSILON))
         return;
 
@@ -689,38 +747,17 @@ void lift_travel(
     ramp_length = std::clamp<distf_t>(
         ramp_length, distf_t(SCALED_EPSILON), length * 0.5);
 
-    throw_if_cancelled(run_ctx);
-    MutableExtrusionEntity ascending = travel.emplace_ordered_leaf(
-        OrderedLeafPosition::Before, ExistingPropertyPlacement::KeepOnParent);
-    if (!ascending.valid() || travel.child_count() != 2)
-        throw std::runtime_error("Unable to create ordered ramped-travel phases.");
-    MutableExtrusionEntity descending = travel.child_mutable(1);
-    throw_if_cancelled(run_ctx);
-    if (extrusion_polyline_split_at_distance(
-            descending.handle(), ramp_length,
-            ascending.mutable_handle(), descending.mutable_handle()) == 0)
-        throw std::runtime_error("Unable to split a travel for ramped lift.");
-    apply_z_ramp(ascending, inherited_start_lift, effective_lift, run_ctx);
-
-    const distf_t plateau_length = length - 2.0 * ramp_length;
-    if (plateau_length > distf_t(SCALED_EPSILON)) {
-        throw_if_cancelled(run_ctx);
-        MutableExtrusionEntity plateau = descending.emplace_ordered_leaf(
-            OrderedLeafPosition::Before,
-            ExistingPropertyPlacement::KeepOnParent);
-        if (!plateau.valid() || descending.child_count() != 2)
-            throw std::runtime_error("Unable to create a lifted travel plateau.");
-        MutableExtrusionEntity final_descent = descending.child_mutable(1);
-        throw_if_cancelled(run_ctx);
-        if (extrusion_polyline_split_at_distance(
-                final_descent.handle(), plateau_length,
-                plateau.mutable_handle(), final_descent.mutable_handle()) == 0)
-            throw std::runtime_error("Unable to split the lifted travel plateau.");
-        apply_constant_lift(plateau, effective_lift, run_ctx);
-        apply_z_ramp(final_descent, effective_lift, 0, run_ctx);
-        return;
-    }
-    apply_z_ramp(descending, effective_lift, 0, run_ctx);
+    // Ramp ends become leaf boundaries, so they are exact points of the lifted path.
+    const size_t rise_end = split_travel_at(leaves, ramp_length, run_ctx);
+    const size_t fall_start = length - 2.0 * ramp_length > distf_t(SCALED_EPSILON) ?
+        split_travel_at(leaves, length - ramp_length, run_ctx) : rise_end;
+    LiftProfile profile;
+    profile.start = inherited_start_lift;
+    profile.top = effective_lift;
+    profile.rise_end = planar_length_before(leaves, rise_end);
+    profile.fall_start = planar_length_before(leaves, fall_start);
+    profile.length = planar_length_before(leaves, leaves.size());
+    apply_lift_profile(leaves, profile, run_ctx);
 }
 
 void lift_wipe(MutableExtrusionEntity entity,
@@ -831,24 +868,22 @@ void prepare_scope_wipe_lift(
 coord_t travel_start_z(
     const ScopeEntity &target,
     const ExtrusionScope::OrderedExtrusionScope &scope,
+    std::vector<TP::TravelLeaf> &leaves,
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    MutableExtrusionEntity travel = scope.travel();
-    if (!travel.valid() || travel.child_count() != 0 ||
-        travel.segment_count() == 0)
+    if (!TP::collect_travel_leaves(scope.travel(),
+            traversal_state(target.effective_properties).z_offset, leaves) ||
+        leaves.empty())
         throw std::runtime_error(
-            "A lifted transition requires one materialized travel leaf.");
-    const EPropertyAttributes *attributes = travel.get(EPropertyAttributes::key);
-    if (attributes == nullptr ||
-        !RAW_EXTRUSION_ROLE_IS_TRAVEL(attributes->extrusion_role()))
-        throw std::runtime_error("A lifted travel has an incompatible role.");
+            "A lifted transition requires one continuous materialized travel.");
+    for (const TP::TravelLeaf &leaf : leaves)
+        if (!RAW_EXTRUSION_ROLE_IS_TRAVEL(leaf.role))
+            throw std::runtime_error("A lifted travel has an incompatible role.");
 
-    const EffectiveState travel_parent = traversal_state(
-        target.effective_properties);
-    const c_extrusion_segment first = travel.segment(0);
+    const c_extrusion_segment first = leaves.front().entity.segment(0);
     return checked_add_z(
-        checked_add_z(target.layer_group.print_z(), travel_parent.z_offset),
+        checked_add_z(target.layer_group.print_z(), leaves.front().z_offset),
         first.z_offset_a);
 }
 
@@ -876,7 +911,8 @@ void apply_transition_lift(
         (travel.segment_count() == 0 && travel.child_count() == 0))
         return;
 
-    const coord_t initial_travel_z = travel_start_z(target, target_scope, run_ctx);
+    std::vector<TP::TravelLeaf> leaves;
+    const coord_t initial_travel_z = travel_start_z(target, target_scope, leaves, run_ctx);
     const extruder_index_t extruder_id = source.extruder_id == EXTRUDER_ID_UNKNOWN ?
         target.tool_group.extruder_id() : source.extruder_id;
     double lift_mm = source.requested_lift_mm;
@@ -907,7 +943,10 @@ void apply_transition_lift(
 
     const double minimum_travel = print_config.vector_float_or_default(
         "retract_lift_before_travel", extruder_id, 0.0);
-    if (unscaled(travel.local_length()) <= minimum_travel)
+    distf_t travel_length = 0.0;
+    for (const TP::TravelLeaf &leaf : leaves)
+        travel_length += leaf.entity.local_length();
+    if (unscaled(travel_length) <= minimum_travel)
         lift_mm = 0.0;
     const double max_print_height = print_config.float_or_default(
         "max_print_height", 0.0);
@@ -926,7 +965,7 @@ void apply_transition_lift(
     if (!std::isfinite(slope))
         throw std::runtime_error("Travel lift slope is not finite.");
     throw_if_cancelled(run_ctx);
-    lift_travel(travel, scale_i(lift_mm), inherited_start_lift,
+    lift_travel(std::move(leaves), scale_i(lift_mm), inherited_start_lift,
                 ramping, slope, run_ctx);
 }
 
