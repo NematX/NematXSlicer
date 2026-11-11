@@ -19,8 +19,23 @@ real gap.
 ScopeTravelConnector mirrors the three callbacks of a layer-extrusion-edit
 plugin. setup() allocates a small summary slot per PrintingLayerGroup,
 setup_run() publishes each layer's first-boundary decision independently, and
-run() connects local scopes through PrintingEntityPropertyTraversal. The host
-barrier makes summaries immutable before any run reads another layer.
+run() connects the layer's scopes.
+The host barrier makes summaries immutable before any run reads another layer.
+
+run() has two phases. prepare() records local pairs through
+PrintingEntityPropertyTraversal and snaps nearby seams immediately, so later
+sources can see the changed closed seam. apply() asks the provider for paths,
+writes travels and updates flags.
+
+A LayerTravelChronology owns its bookkeeping and borrowed plan views, not the
+plan geometry. Apply it with the same connector before any structural plan
+mutation or layer destruction.
+Calling reset() or setup() on that connector also invalidates the chronology,
+because apply() reads the connector's next-layer summaries.
+No property pointer or traversal context is retained. Typical use after setup_run
+and the host barrier is:
+    LayerTravelChronology chronology = connector.prepare(layer, group, index);
+    connector.apply(chronology, planner, progress);
 
 All tree mutations remain local to the current layer. In particular, a worker
 never writes the previous layer's final scope: that scope's own worker updates
@@ -72,12 +87,41 @@ using TravelPathPlanner = std::function<std::vector<c_point>(
     const TravelEndpoint &target,
     extruder_index_t extruder_id)>;
 
+/* One real gap after earlier seam snaps; source_extrusion is invalid when the travel starts from the layer entry. */
+struct PendingTravel
+{
+    TravelEndpoint source;
+    TravelEndpoint target;
+    extruder_index_t extruder_id = 0;
+    PrintingExtrusion source_extrusion{nullptr};
+    PrintingExtrusion target_extrusion{nullptr};
+    size_t pair_index = 0;
+};
+
+/* Own ordered gaps and application state, including print Z and borrowed scope roots; structural mutation, layer destruction or connector reset/setup invalidates it. */
+struct LayerTravelChronology
+{
+    std::vector<PendingTravel> travels;
+
+private:
+    friend class ScopeTravelConnector;
+    coord_t print_z = 0;
+    size_t flat_idx = 0;
+    std::vector<MutableExtrusionEntity> roots;
+    std::vector<bool> materialized;
+    std::vector<coord_t> target_z;
+    MutableExtrusionEntity final_root;
+    bool final_has_outgoing = false;
+};
+
 /*
 Shared lifecycle and tree editor used by one travel provider instance.
 
 The object stores only runtime property keys, the stable flat layer mapping and
 one scalar summary per layer. It never stores borrowed extrusion or property
-pointers between callbacks.
+pointers between callbacks. prepare() returns a layer-local chronology with
+seams already snapped; apply() consumes its pair order to plan paths and update
+flags. run() combines these phases for providers that need no intermediate work.
 */
 class ScopeTravelConnector
 {
@@ -97,7 +141,17 @@ public:
                    uint32_t layer_idx,
                    PluginProgress &progress);
 
-    /* Connect consecutive scopes and update only properties owned by layer. */
+    /* Copy ordered plan views and endpoints while snapping seams in traversal order, without planning paths, writing travels or updating flags.
+       Invalid indexes, unprepared summaries or invalid pairs throw. */
+    LayerTravelChronology prepare(PrintingLayerGroup &layer,
+                                  uint32_t group_idx, uint32_t layer_idx) const;
+
+    /* Plan gaps in pair order, reacquiring phases and flags from borrowed roots, and update layer-owned flags and progress.
+       Invalid paths, lost markers or inter-layer disagreement throw; use the same connector before reset() or setup(). */
+    void apply(LayerTravelChronology &chronology,
+               const TravelPathPlanner &planner, PluginProgress &progress) const;
+
+    /* Prepare and apply consecutive scopes with a non-empty planner; either phase may throw after local edits. */
     void run(PrintingLayerGroup &layer,
              uint32_t group_idx,
              uint32_t layer_idx,

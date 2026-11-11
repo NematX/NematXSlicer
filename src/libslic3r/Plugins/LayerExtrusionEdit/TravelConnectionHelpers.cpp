@@ -8,12 +8,29 @@ Compact-scope travel connection implementation
 ==============================================
 
 CreateTransitionScope has already marked maximal printable scopes and reserved
-a travel phase before each real incoming transition. This module streams those
-roots, resolves their endpoints and fills only the reserved phase.
+a travel phase before each real incoming transition. prepare() streams those
+roots and records real gaps without calling a planner. It snaps nearby seams
+immediately because a closed seam can also be the next pair's source. apply()
+plans the recorded paths, fills reserved phases and publishes materialized flags.
+The chronology owns vectors of plan views, not geometry, property pointers or
+traversal contexts. Use the same connector to apply it before structural plan
+mutation, layer destruction or connector reset()/setup(). apply() reads the
+connector's next-layer summaries. Leaf geometry edits do not change child lists.
 
 Layer workers remain independent. setup_run() publishes a scalar prediction
 for the first scope. After the host barrier, the preceding layer uses that fact
 to update its own final outgoing flag without mutating the next layer.
+
+    setup_run -> predict_first_materialized: publish the layer boundary summary
+    run
+        prepare
+            prepare_to_scope: validate pairs, snap seams and record gaps
+                source_geometry / target_geometry: resolve endpoint leaves
+                endpoint_from_leaf: copy position and regional provenance
+        apply
+            planner: choose each planar path in pair order
+            define_travel_leaf: validate endpoints and interpolate Z
+            next_nonempty_layer: resolve the final outgoing flag
 */
 
 #include "TravelConnectionHelpers.hpp"
@@ -122,12 +139,13 @@ GeometricLeaf source_geometry(const ScopeEntity &source,
 GeometricLeaf target_geometry(const ScopeEntity &target,
     const ExtrusionScope::OrderedExtrusionScope &scope, coord_t inherited_z_offset);
 
-/* Connect one preceding scope or layer entry to a target scope. */
-bool connect_to_scope(ScopeEntity *source, ScopeEntity &target,
+/* Validate a pair and snap a nearby target, or append its gap and inherited Z; malformed phases and unknown or discontinuous sources throw. */
+bool prepare_to_scope(ScopeEntity *source, ScopeEntity &target,
     const PlannedPosition &layer_entry,
     const std::map<const extrusion_entity_handle *, coord_t> &z_contexts,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const TravelPathPlanner &planner);
+    size_t pair_index, std::vector<PendingTravel> &travels,
+    std::vector<coord_t> &target_z_offsets);
 
 /* Predict the first scope's final materialized bit before the run barrier. */
 bool predict_first_materialized(ScopeEntity &first,
@@ -442,11 +460,12 @@ GeometricLeaf target_geometry(const ScopeEntity &target,
     return result;
 }
 
-bool connect_to_scope(ScopeEntity *source, ScopeEntity &target,
+bool prepare_to_scope(ScopeEntity *source, ScopeEntity &target,
     const PlannedPosition &layer_entry,
     const std::map<const extrusion_entity_handle *, coord_t> &z_contexts,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const TravelPathPlanner &planner)
+    const size_t pair_index, std::vector<PendingTravel> &travels,
+    std::vector<coord_t> &target_z_offsets)
 {
     ExtrusionScope::OrderedExtrusionScope target_scope(target.entity, key);
     const bool incoming = target_scope.has_incoming_transition();
@@ -487,10 +506,16 @@ bool connect_to_scope(ScopeEntity *source, ScopeEntity &target,
     }
     if (!incoming)
         throw std::runtime_error("Discontinuous scopes have no reserved travel phase.");
-    const std::vector<c_point> path = planner(
-        source_endpoint, target_endpoint, target.tool_group.extruder_id());
-    define_travel_leaf(target_scope.travel(), path, source_endpoint.position,
-                       target_endpoint.position, target.layer_group.print_z(), target_z);
+    PendingTravel pending;
+    pending.source = source_endpoint;
+    pending.target = target_endpoint;
+    pending.extruder_id = target.tool_group.extruder_id();
+    if (source != nullptr)
+        pending.source_extrusion = source->printing_extrusion;
+    pending.target_extrusion = target.printing_extrusion;
+    pending.pair_index = pair_index;
+    travels.push_back(pending);
+    target_z_offsets.push_back(target_z);
     return true;
 }
 
@@ -599,65 +624,104 @@ void ScopeTravelConnector::setup_run(PrintingLayerGroup &layer,
     progress.add_max(scope_count(layer, m_scope_property));
 }
 
-/* Connect local pairs and synchronize only flags owned by this layer. */
 void ScopeTravelConnector::run(PrintingLayerGroup &layer,
     const uint32_t group_idx, const uint32_t layer_idx,
     const TravelPathPlanner &planner, PluginProgress &progress) const
 {
     if (!planner)
         throw std::invalid_argument("ScopeTravelConnector needs a path planner.");
+    LayerTravelChronology chronology = prepare(layer, group_idx, layer_idx);
+    apply(chronology, planner, progress);
+}
+
+LayerTravelChronology ScopeTravelConnector::prepare(PrintingLayerGroup &layer,
+    const uint32_t group_idx, const uint32_t layer_idx) const
+{
     const size_t flat_idx = flat_layer_index(group_idx, layer_idx);
     const LayerBoundarySummary &summary = m_layers[flat_idx];
     if (!summary.prepared)
         throw std::runtime_error("Travel run has no prepared layer summary.");
+    LayerTravelChronology chronology;
+    chronology.print_z = layer.print_z();
+    chronology.flat_idx = flat_idx;
     if (!summary.has_scope)
-        return;
+        return chronology;
 
     const PlannedPosition entry = layer_entry_position(layer, m_entry_position_property);
     const std::map<const extrusion_entity_handle *, coord_t> contexts =
         scope_z_contexts(layer, m_scope_property);
-    const LayerBoundarySummary *following = next_nonempty_layer(flat_idx);
     PrintingEntityPropertyTraversal<PrintingExtrusionScopeProperty> traversal(
         m_scope_property,
-        [this, &entry, &contexts, &planner, &progress, following]
+        [this, &entry, &contexts, &chronology]
         (ScopeEntity *previous, ScopeEntity *next) {
             if (next != nullptr) {
-                const bool materialized = connect_to_scope(
-                    previous, *next, entry, contexts, m_scope_property, planner);
-                PrintingExtrusionScopeProperty *target = next->entity.get_mutable(m_scope_property);
-                if (target == nullptr)
-                    throw std::runtime_error("A target scope lost its marker.");
-                printing_extrusion_scope_set_flag(*target,
-                    PRINTING_EXTRUSION_SCOPE_INCOMING_TRAVEL_MATERIALIZED, materialized);
-                if (previous != nullptr) {
-                    PrintingExtrusionScopeProperty *source =
-                        previous->entity.get_mutable(m_scope_property);
-                    if (source == nullptr)
-                        throw std::runtime_error("A source scope lost its marker.");
-                    printing_extrusion_scope_set_flag(*source,
-                        PRINTING_EXTRUSION_SCOPE_OUTGOING_TRAVEL_MATERIALIZED, materialized);
-                }
-                progress.increment();
+                const bool materialized = prepare_to_scope(
+                    previous, *next, entry, contexts, m_scope_property,
+                    chronology.roots.size(), chronology.travels, chronology.target_z);
+                chronology.roots.push_back(next->entity);
+                chronology.materialized.push_back(materialized);
                 return;
             }
             if (previous != nullptr) {
-                const bool has_outgoing = printing_extrusion_scope_has_flag(
+                chronology.final_root = previous->entity;
+                chronology.final_has_outgoing = printing_extrusion_scope_has_flag(
                     *previous->property, PRINTING_EXTRUSION_SCOPE_OUTGOING_TRANSITION);
-                const bool materialized = following != nullptr ?
-                    following->first_travel_materialized_after_run : false;
-                if ((following != nullptr &&
-                     following->first_has_incoming_transition != has_outgoing) ||
-                    (following == nullptr && has_outgoing))
-                    throw std::runtime_error("Inter-layer scopes disagree about their transition.");
-                PrintingExtrusionScopeProperty *source =
-                    previous->entity.get_mutable(m_scope_property);
-                if (source == nullptr)
-                    throw std::runtime_error("A final scope lost its marker.");
-                printing_extrusion_scope_set_flag(*source,
-                    PRINTING_EXTRUSION_SCOPE_OUTGOING_TRAVEL_MATERIALIZED, materialized);
             }
         }, MatchingEntityDescendants::Skip);
     traversal.process(layer);
+    return chronology;
+}
+
+void ScopeTravelConnector::apply(LayerTravelChronology &chronology,
+    const TravelPathPlanner &planner, PluginProgress &progress) const
+{
+    if (!planner)
+        throw std::invalid_argument("ScopeTravelConnector needs a path planner.");
+    if (chronology.roots.empty())
+        return;
+    size_t travel_idx = 0;
+    for (size_t pair_idx = 0; pair_idx < chronology.roots.size(); ++pair_idx) {
+        if (travel_idx < chronology.travels.size() &&
+            chronology.travels[travel_idx].pair_index == pair_idx) {
+            const PendingTravel &pending = chronology.travels[travel_idx];
+            const std::vector<c_point> path = planner(
+                pending.source, pending.target, pending.extruder_id);
+            const ExtrusionScope::OrderedExtrusionScope target_scope(
+                chronology.roots[pair_idx], m_scope_property);
+            define_travel_leaf(target_scope.travel(), path,
+                pending.source.position, pending.target.position,
+                chronology.print_z, chronology.target_z[travel_idx]);
+            ++travel_idx;
+        }
+        const bool materialized = chronology.materialized[pair_idx];
+        PrintingExtrusionScopeProperty *target =
+            chronology.roots[pair_idx].get_mutable(m_scope_property);
+        if (target == nullptr)
+            throw std::runtime_error("A target scope lost its marker.");
+        printing_extrusion_scope_set_flag(*target,
+            PRINTING_EXTRUSION_SCOPE_INCOMING_TRAVEL_MATERIALIZED, materialized);
+        if (pair_idx > 0) {
+            PrintingExtrusionScopeProperty *source =
+                chronology.roots[pair_idx - 1].get_mutable(m_scope_property);
+            if (source == nullptr)
+                throw std::runtime_error("A source scope lost its marker.");
+            printing_extrusion_scope_set_flag(*source,
+                PRINTING_EXTRUSION_SCOPE_OUTGOING_TRAVEL_MATERIALIZED, materialized);
+        }
+        progress.increment();
+    }
+    const LayerBoundarySummary *following = next_nonempty_layer(chronology.flat_idx);
+    if ((following != nullptr &&
+         following->first_has_incoming_transition != chronology.final_has_outgoing) ||
+        (following == nullptr && chronology.final_has_outgoing))
+        throw std::runtime_error("Inter-layer scopes disagree about their transition.");
+    PrintingExtrusionScopeProperty *source =
+        chronology.final_root.get_mutable(m_scope_property);
+    if (source == nullptr)
+        throw std::runtime_error("A final scope lost its marker.");
+    printing_extrusion_scope_set_flag(*source,
+        PRINTING_EXTRUSION_SCOPE_OUTGOING_TRAVEL_MATERIALIZED,
+        following != nullptr ? following->first_travel_materialized_after_run : false);
 }
 
 /* Return the direct path used by the simple provider and advanced fallbacks. */
