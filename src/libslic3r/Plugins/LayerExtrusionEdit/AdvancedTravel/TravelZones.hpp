@@ -123,6 +123,8 @@ struct ActiveZones
     size_t id = 0;
     polygon_work::ExPolygons attractors;
     polygon_work::ExPolygons forbidden;
+    // Individual applicable forbidden zones, before union or expansion; indexes refer to TravelZoneView::zone_area().
+    std::vector<size_t> forbidden_indexes;
 };
 
 class TravelZoneView
@@ -134,6 +136,8 @@ public:
     // Return cached role unions for the dated, scope-matching set using the borrowed context's valid storage; T must not decrease (logic_error).
     // Cancellation and geometry failures propagate without caching partial areas.
     const ActiveZones &query(size_t t, const PendingTravel &travel);
+    // Borrow one collected zone's unchanged area for an index returned by query(); valid until view destruction.
+    const polygon_work::ExPolygons &zone_area(size_t index) const { return m_zones.at(index).area; }
     // Return the number of contributor calls completed at construction.
     size_t contributor_calls() const { return m_contributor_calls; }
     // Return the number of completed nonempty role-union constructions, including work later discarded by cancellation; empty sets add nothing.

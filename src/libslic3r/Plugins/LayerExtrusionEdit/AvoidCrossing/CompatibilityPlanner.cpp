@@ -90,15 +90,8 @@ c_point CompatibilityPlanner::local_point(const c_point point, const TravelEndpo
 
 bool CompatibilityPlanner::endpoint_enables_avoidance(const TravelEndpoint &endpoint) const
 {
-    if (!endpoint.region_island.valid() || endpoint.region_island.region_count() == 0)
-        return false;
-
     // Global skirt and brim regions have no object instance for local coordinates.
-    if (endpoint.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
-        endpoint.printing_catalog_id >= m_plan.object_instance_count())
-        return false;
-    const Object object = endpoint.region_island.region(0).layer().object();
-    if (m_plan.object_instance(endpoint.printing_catalog_id).object_instance_idx() >= object.instance_count())
+    if (!endpoint_has_object_instance(endpoint))
         return false;
 
     const c_point endpoint_point{endpoint.position.x, endpoint.position.y};
@@ -119,6 +112,15 @@ bool CompatibilityPlanner::endpoint_enables_avoidance(const TravelEndpoint &endp
             return result.value.get_bool();
     }
     return false;
+}
+
+bool CompatibilityPlanner::endpoint_has_object_instance(const TravelEndpoint &endpoint) const
+{
+    if (!endpoint.region_island.valid() || endpoint.region_island.region_count() == 0 ||
+        endpoint.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
+        endpoint.printing_catalog_id >= m_plan.object_instance_count()) return false;
+    const Object object = endpoint.region_island.region(0).layer().object();
+    return m_plan.object_instance(endpoint.printing_catalog_id).object_instance_idx() < object.instance_count();
 }
 
 const AC::Input &CompatibilityPlanner::input_for(const Layer &layer)

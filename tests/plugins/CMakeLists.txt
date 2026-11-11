@@ -219,6 +219,7 @@ test_support_tree_family.cpp
     test_wipe_tower_layout.cpp
     test_wipe_tower_manager.cpp
     test_wipe_tower_toolchange_unretract.cpp
+    test_zone_planner.cpp
     )
 
 add_library(plugin_loader_missing_register_fixture SHARED plugin_loader_fixture.cpp)

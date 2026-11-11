@@ -284,6 +284,9 @@ TEST_CASE("Travel zones collect eagerly and cache dated applicable sets", "[plug
     CHECK(overlap.id != attracted.id);
     CHECK(overlap.attractors.front().area() == Approx(15000. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
     CHECK(overlap.forbidden.front().area() == Approx(2500. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
+    REQUIRE(overlap.forbidden_indexes.size() == 1);
+    CHECK(view.zone_area(overlap.forbidden_indexes.front()).front().area() ==
+          Approx(2500. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
     const zones::ActiveZones &ended = view.query(3, pending);
     CHECK(ended.attractors.empty());
     CHECK_FALSE(ended.forbidden.empty());

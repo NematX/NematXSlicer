@@ -40,6 +40,12 @@ public:
     bool avoidance_enabled(const TravelConnection::TravelEndpoint &source,
                            const TravelConnection::TravelEndpoint &target) const;
 
+    // Return false without a valid region island, object instance and regional avoid_crossing_perimeters value; retry at the interior probe.
+    bool endpoint_enables_avoidance(const TravelConnection::TravelEndpoint &endpoint) const;
+
+    // Require a valid nonempty region island and a catalog entry naming an existing instance of that island's object.
+    bool endpoint_has_object_instance(const TravelConnection::TravelEndpoint &endpoint) const;
+
     // Return print-space routing for an eligible gap, otherwise its direct segment; cancellation propagates.
     std::vector<c_point> path(const TravelConnection::TravelEndpoint &source,
                               const TravelConnection::TravelEndpoint &target,
@@ -75,9 +81,6 @@ private:
         TravelRouter router;
         PerimeterCrossing crossing;
     };
-
-    // Resolve regional activation only for valid object instances, probing inside on a boundary.
-    bool endpoint_enables_avoidance(const TravelConnection::TravelEndpoint &endpoint) const;
 
     /* Convert a final-plan point into the source object's local coordinates. */
     c_point local_point(c_point point, const TravelConnection::TravelEndpoint &endpoint) const;

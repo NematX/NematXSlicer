@@ -151,6 +151,8 @@ const ActiveZones &TravelZoneView::query(const size_t t, const PendingTravel &tr
         polygon_work::ExPolygons &area = m_zones[index].role == ZoneRole::Attractor ?
             active.attractors : active.forbidden;
         area.insert(area.end(), m_zones[index].area.begin(), m_zones[index].area.end());
+        if (m_zones[index].role == ZoneRole::Forbidden)
+            active.forbidden_indexes.push_back(index);
     }
     throw_if_cancelled(&m_context);
     if (!active.attractors.empty()) {

@@ -402,6 +402,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.cpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp
+	Plugins/LayerExtrusionEdit/AdvancedTravel/ZonePlanner.cpp
+	Plugins/LayerExtrusionEdit/AdvancedTravel/ZonePlanner.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/CompatibilityPlanner.cpp
