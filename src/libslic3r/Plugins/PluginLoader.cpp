@@ -823,6 +823,9 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.wipe.default",
         slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin::
             register_create_retraction_wipe_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.wipe.crossing",
+        slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin::
+            register_create_crossing_wipe_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.lift.default",
         slic3r_api::LayerExtrusionEdit::CreateRetractionLiftPlugin::
             register_create_retraction_lift_plugin);

@@ -28,6 +28,7 @@ scope phases and semantic process events can be inspected directly.
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_extrusion_polyline.h"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
@@ -195,6 +196,47 @@ inline void collect_transition_events(
     }
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         collect_transition_events(entity.child(child_idx), events);
+}
+
+/* Split one segmented travel leaf at a planar distance as the deceleration provider does,
+   giving the returned final part its own acceleration; the outer handle keeps its properties. */
+inline slic3r_api::MutableExtrusionEntity split_travel_leaf(
+    slic3r_api::MutableExtrusionEntity travel, const double distance_mm,
+    const float final_acceleration = 1234.f)
+{
+    REQUIRE(travel.child_count() == 0);
+    REQUIRE(travel.segment_count() != 0);
+    slic3r_api::MutableExtrusionEntity first = travel.emplace_ordered_leaf(
+        slic3r_api::OrderedLeafPosition::Before, slic3r_api::ExistingPropertyPlacement::KeepOnParent);
+    REQUIRE(first.valid());
+    REQUIRE(travel.child_count() == 2);
+    slic3r_api::MutableExtrusionEntity final_part = travel.child_mutable(1);
+    REQUIRE(extrusion_polyline_split_at_distance(final_part.handle(), scale_d(distance_mm),
+        first.mutable_handle(), final_part.mutable_handle()) != 0);
+    final_part.get_or_add(slic3r_api::EPropertySpeed::key).acceleration(final_acceleration);
+    return final_part;
+}
+
+/* Find the first segment of the first segmented leaf below entity, in machine order. */
+inline bool find_first_leaf_segment(const slic3r_api::ExtrusionEntity &entity,
+                                    c_extrusion_segment &segment)
+{
+    if (entity.segment_count() != 0) {
+        segment = entity.segment(0);
+        return true;
+    }
+    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+        if (find_first_leaf_segment(entity.child(child_idx), segment))
+            return true;
+    return false;
+}
+
+/* Return the first segment of a single or split travel; a travel without geometry fails the test. */
+inline c_extrusion_segment first_leaf_segment(const slic3r_api::ExtrusionEntity &entity)
+{
+    c_extrusion_segment segment{};
+    REQUIRE(find_first_leaf_segment(entity, segment));
+    return segment;
 }
 
 /* Run the selected layer plugins through the real parallel host. */

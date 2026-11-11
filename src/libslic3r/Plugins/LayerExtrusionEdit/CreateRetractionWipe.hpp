@@ -33,15 +33,32 @@ approach turns the existing target Unretract into geometry inside
 target.before. It never changes the marked scope root, the phase order, or the
 printable content.
 
-Layer workers are independent. A worker may inspect the next scope only when
-it belongs to the same PrintingLayerGroup. Consequently wipe_only_crossing is
-conservative at layer boundaries: the wipe is omitted when the target cannot
-be inspected safely, while the original E-only retraction remains intact.
+CreateCrossingWipe runs after travel generation and before lift. When
+wipe_only_crossing is enabled, the first pass wipes within a layer when exactly
+one side is outside object material, or when both sides are object material on
+different instances or slice islands. Object material excludes global,
+regionless and auxiliary-layer geometry.
+These normal wipes retain wipe_return and inside-end behavior. Other local gaps
+and inter-layer gaps leave outgoing retractions for the second pass, whose
+decision depends on the generated travel.
+The second pass tests a generated travel against target perimeter boundaries
+when its phase holds one continuous path of Travel leaves, either a single leaf
+or an ordered subtree such as a travel split for deceleration.
+It adds a returning wipe only when its source start agrees with the travel start
+within SCALED_EPSILON in XY distance and absolute Z. Short loops use whole turns;
+longer loops and open paths go out and back. Inside-end and wipe_return do not
+control this second pass. Existing departure geometry and terminal deposits prevent it.
 
-After this provider, DefaultLayerEntryState observes the position left by the
-wipe. The selected travel provider starts there and aims at an inside-start
+Layer workers publish plain first-travel summaries before a barrier. A source
+worker reads the next non-empty layer's summary, never its geometry, and edits
+only its own departure. Crossing inputs and caches belong to individual calls.
+
+After CreateRetractionWipe, DefaultLayerEntryState observes the position left by
+the wipe. The selected travel provider starts there and aims at an inside-start
 approach when one exists. A later lift provider may add Z motion without
-changing the semantic E-axis request.
+changing the semantic E-axis request. CreateCrossingWipe runs after the entry
+state has been stored. It returns to its source start, checked against the travel
+start with the tolerance above; travel geometry and stored entry state are unchanged.
 */
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
@@ -50,6 +67,9 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetraction
 
 /* Register the built-in provider which distributes retraction over wipe motion. */
 void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator);
+
+/* Register the independent travel-based returning wipe provider. */
+void register_create_crossing_wipe_plugin(orchestrator_handle *orchestrator);
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin
 

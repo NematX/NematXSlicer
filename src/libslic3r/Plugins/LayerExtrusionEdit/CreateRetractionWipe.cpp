@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ExtrusionScopeHelpers.hpp"
+#include "TravelPhaseHelpers.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -48,15 +49,32 @@ and distribute the rest over a wipe, with a final stationary request if the
 wipe is too short. When the last printed leaf is not a loop, the wipe walks
 source content backwards and stops before a bridge, a discontinuity or a leaf
 without role attributes; only that connected tail is kept.
-A final loop instead continues forward
-from its seam without visiting older leaves. Segment vectors preserve lines,
+A final loop first joins its seam from the printed tip if a gap remains, then
+continues forward without visiting older leaves. The gap is a non-extruding
+wipe and counts in each repeated turn and its return length. A loop parent retains its ordered
+fragments, whose lengths together define one turn. Segment vectors preserve lines,
 arcs and endpoint Z offsets while the wipe is assembled and clipped.
+Inside-start and inside-end movements use the complete loop's orientation and
+hole flag to select the material side, while leaf endpoints locate the nozzle.
+An outgoing fragmented loop stops before its first bridge fragment. Such a
+partial turn is an open forward path, without loop repetition or turn rounding;
+a terminal bridge still prevents the outgoing wipe entirely.
+External loop prefixes retain the extra perimeter wipe distance, but only a
+complete turn supplies the orientation needed for an inside-end movement.
 No source geometry or neighbour pointer is retained after the callback.
 
-When wipe_only_crossing is enabled, the target's region identifies the layer
-and its tool group selects the nozzle radius and material areas. The straight
-gap is tested after removing the target instance's XY shift from both ends.
-Global skirt and brim paths have no instance shift and stay in platter XY.
+When wipe_only_crossing is enabled, CreateRetractionWipe wipes within a layer
+when exactly one side is outside object material, or when both sides are object
+material on different instances or slice islands. Object material excludes
+global, regionless and auxiliary-layer geometry. All other transitions depend
+on the generated travel. CreateCrossingWipe runs after travel generation and tests
+the actual travel vertices. The target's region identifies the layer and its
+tool group selects the nozzle radius and material areas. All travel vertices
+have the target instance's XY shift removed before testing.
+The travel phase may be one segmented Travel leaf or an ordered subtree of
+them, such as a travel split for deceleration; its leaves must form one
+continuous path without Wipe geometry, otherwise the gap is skipped. Global
+skirt and brim paths have no instance shift and stay in platter XY.
 This is only a gate for adding a wipe; it never routes the gap around objects.
 
 PerimeterCrossing prepares two versions of the target's filled areas. For an
@@ -75,27 +93,41 @@ is shared by parallel calls; the returned geometry copies own their buffers
 independently of it. The plan and run context are borrowed for the
 run; inputs outlive the crossing caches that refer to them. No cache is shared
 between workers or refreshed after print edits. Cancellation propagates.
+The second pass publishes plain first-travel summaries during setup_run. After
+the host barrier, each source worker uses the next non-empty layer's summary
+without borrowing that layer's geometry. Return wipes end at their source start,
+accepted only within SCALED_EPSILON of the travel start in XY distance and absolute
+Z. Short loops round up to whole turns, while other paths go out and back.
+Existing departure geometry or a terminal deposit prevents a second-pass wipe.
 
-    run_impl: visit adjacent printable scopes in output order
+    CreateRetractionWipe::run_impl: visit adjacent printable scopes in output order
     |-- add_inside_start: move an eligible unretract into an approach to the seam
     `-- add_outgoing_wipe: distribute the source retract over its printed tail
+        |-- material_island: distinguish object slice islands from global, regionless and auxiliary geometry
         |-- source_wipe_path: collect the reversed connected tail, or a forward final loop
-        |-- WipeCrossingChecker::crosses: gate wipes on the direct gap if requested
+        |   `-- append_forward_loop: join ordered fragments and sum one complete turn
+        `-- fit_wipe_length: repeat loops before clipping and assigning wipe motion
+    CreateCrossingWipe::setup_run_impl: publish the first travel's crossing and exact start
+    CreateCrossingWipe::run_impl: inspect local travels and the next layer summary
+        |-- WipeCrossingChecker::crosses: test generated travel vertices
         |   |-- LayerInputCache::get: resolve and copy the target layer
         |   |-- PerimeterCrossing::prepare: prepare target areas for the tool
         |   `-- PerimeterCrossing::can_cross_perimeter: test the offset boundaries
-        `-- fit_wipe_length: repeat loops before clipping and assigning wipe motion
+        `-- add_outgoing_wipe: return to the supplied travel start and distribute retraction
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetractionWipePlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
 // Print data is unchanged; allocation failures or rejected descriptions throw.
 void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator);
+// Register the permanent second pass without creating an exclusive selector.
+void register_create_crossing_wipe_plugin(orchestrator_handle *orchestrator);
 
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
 namespace AC = AvoidCrossing;
+namespace TP = TravelPhase;
 
 const char *const k_dependencies[] = {
     "layer_extrusion_edit.transition_scope.default",
@@ -120,13 +152,16 @@ struct WipeLeaf
     bool loop = false;
 };
 
-/* Arc-preserving path emitted while the source content is walked backwards. */
+/* Arc-preserving path from the reversed open tail or a loop's usable forward turn. */
 struct WipePath
 {
     std::vector<c_extrusion_segment> segments;
     WipeLeaf source;
     bool has_source = false;
     bool stopped = false;
+    distf_t loop_length = 0.;
+    // True only when the collected geometry contains the whole loop, allowing repetition, turn rounding and an inside end.
+    bool complete_turn = false;
 };
 
 /* Own the worker's layer-input cache and crossing caches indexed by layer and tool. */
@@ -138,10 +173,9 @@ public:
                         const PrintingPlan &plan,
                         const plugin_run_context *run_ctx);
 
-    // Test the direct gap in target coordinates against offset boundaries; missing target regions, a null layer handle or empty leaves return false.
+    // Test every travel vertex in target coordinates against offset boundaries; missing target regions or a null layer handle return false.
     // Copy inputs on first use; an absent layer throws, and exceptions from cancellation or geometry preparation propagate.
-    bool crosses(const WipeLeaf &source, const ScopeEntity &target_scope,
-                 const WipeLeaf &target);
+    bool crosses(const ScopeEntity &target_scope, const std::vector<TP::TravelLeaf> &travel);
 
 private:
     /* Identify one crossing cache by its target layer and active extruder. */
@@ -165,27 +199,96 @@ private:
     std::map<Key, AC::PerimeterCrossing> m_crossings;
 };
 
+/* Shared step identity and scope marker, without worker state. */
+class WipePluginBase : public PluginBase
+{
+protected:
+    // Borrow the orchestrator and resolve its scope marker.
+    explicit WipePluginBase(orchestrator_handle *orchestrator) :
+        PluginBase(orchestrator),
+        m_scope_property(printing_extrusion_scope_property_key(orchestrator)) {}
+    // Run both wipe providers in the layer edit step.
+    slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
+    PluginPropertyKey<PrintingExtrusionScopeProperty> m_scope_property;
+};
+
 /* Built-in provider which converts semantic retraction into wipe motion. */
-class CreateRetractionWipe final : public PluginBase
+class CreateRetractionWipe final : public WipePluginBase
 {
 public:
+    // Return the permanent provider registered with the orchestrator.
     static CreateRetractionWipe &instance(orchestrator_handle *orchestrator);
+    // Resolve the shared marker without retaining print data.
     explicit CreateRetractionWipe(orchestrator_handle *orchestrator);
 
 private:
+    // Identify the first wipe pass.
     const char *id_impl() const noexcept override;
+    // Name the provider in plugin lists.
     const char *name_impl() const noexcept override;
+    // Explain retraction distribution to plugin users.
     const char *description_impl() const noexcept override;
+    // Select this provider through the wipe group.
     const char *exclusive_group_impl() const noexcept override;
-    slicing_step_t step_impl() const noexcept override;
+    // Require marked transition scopes.
     const char *const *dependencies_impl() const noexcept override;
+    // Run before layer entry state and travel generation.
     int32_t priority_impl() const noexcept override;
+    // Copy the settings read by this pass, or return their count.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
+    // Label the layer progress reported by this pass.
     const char *progress_message_format_impl() const noexcept override;
+    // Count a layer job without retaining its geometry.
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
+    // Apply incoming approaches, ordinary outgoing wipes and wipes for certain local crossings to this layer.
     void run_impl(const plugin_run_context *run_ctx) const override;
 
-    PluginPropertyKey<PrintingExtrusionScopeProperty> m_scope_property;
+};
+
+/* Plain values published by a target worker before source workers edit departures. */
+struct FirstTravelSummary
+{
+    bool prepared = false;
+    bool has_scope = false;
+    bool has_travel = false;
+    bool crosses = false;
+    c_point start{};
+    coord_t start_z = 0;
+};
+
+/* Add returning wipes after the travel provider has fixed each gap's geometry. */
+class CreateCrossingWipe final : public WipePluginBase
+{
+public:
+    // Return the permanent plugin registered with this orchestrator.
+    static CreateCrossingWipe &instance(orchestrator_handle *orchestrator);
+    // Resolve the shared scope marker without retaining print data.
+    explicit CreateCrossingWipe(orchestrator_handle *orchestrator);
+private:
+    // Identify this independent second wipe pass.
+    const char *id_impl() const noexcept override;
+    // Describe the provider in plugin lists.
+    const char *name_impl() const noexcept override;
+    // Explain the travel-based wipe decision.
+    const char *description_impl() const noexcept override;
+    // Leave this pass outside exclusive selection groups.
+    const char *exclusive_group_impl() const noexcept override;
+    // Require prepared scopes and the first wipe pass.
+    const char *const *dependencies_impl() const noexcept override;
+    // Run after built-in travels and before lift.
+    int32_t priority_impl() const noexcept override;
+    // Copy the settings read by this pass, or return their count.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
+    // Label layer progress for the second pass.
+    const char *progress_message_format_impl() const noexcept override;
+    // Allocate one summary per plan layer; mismatched run counts throw.
+    void setup_impl(const plugin_run_context *run_ctx, uint32_t run_count) const override;
+    // Publish only this worker's first travel and its crossing result.
+    void setup_run_impl(const plugin_run_context *run_ctx) const override;
+    // Edit local departures, using immutable summaries across layer boundaries.
+    void run_impl(const plugin_run_context *run_ctx) const override;
+    mutable std::vector<std::vector<size_t>> m_flat_indices;
+    mutable std::vector<FirstTravelSummary> m_layers;
 };
 
 /* Add two scaled values without allowing signed coordinate overflow. */
@@ -209,7 +312,12 @@ std::vector<c_extrusion_segment> reversed_segments(
 std::vector<c_extrusion_segment> rebased_segments(
     const WipeLeaf &leaf, coord_t phase_base_z);
 
-/* Walk source content backwards and append only its connected printable tail. */
+/* Append ordered loop leaves and sum their true lengths, optionally stopping geometry before the first bridge while retaining the last leaf's metadata. Missing attributes, process geometry or an out-of-range Z offset throws. */
+void append_forward_loop(MutableExtrusionEntity entity, coord_t print_z,
+                         coord_t phase_base_z, const EffectiveState &state,
+                         WipePath &path, bool stop_before_bridge = false);
+
+/* Walk source content backwards, collecting a resolved loop's forward prefix before a bridge or the connected reversed open tail; a terminal bridge prevents wiping. */
 void append_reverse_wipe_path(MutableExtrusionEntity entity,
                               coord_t print_z,
                               coord_t phase_base_z,
@@ -222,19 +330,22 @@ WipePath source_wipe_path(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key);
 
-/* Find the first printable leaf used by crossing and inside-start decisions. */
+/* Find the first printable leaf and optionally copy its complete loop once at the first composed loop node, relative to phase_base_z. Invalid process geometry in a collected loop throws. */
 bool find_first_printable_leaf(MutableExtrusionEntity entity,
                                coord_t print_z,
+                               coord_t phase_base_z,
                                const EffectiveState &parent,
                                WipeLeaf &leaf,
-                               bool entity_already_resolved = false);
+                               bool entity_already_resolved = false,
+                               std::vector<c_extrusion_segment> *loop_segments = nullptr);
 
-/* Resolve the first leaf and phase-relative base Z of one target scope. */
+/* Resolve the first leaf and phase-relative base Z of one target scope, optionally copying the complete loop for an inside approach. */
 bool target_first_leaf(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     WipeLeaf &leaf,
-    coord_t &phase_base_z);
+    coord_t &phase_base_z,
+    std::vector<c_extrusion_segment> *loop_segments = nullptr);
 
 /* Locate one semantic E-axis event inside a small ordered phase. */
 MutableExtrusionEntity find_axis_event(MutableExtrusionEntity entity,
@@ -246,16 +357,18 @@ std::vector<c_extrusion_segment> fit_wipe_length(
     bool loop,
     distf_t requested_length);
 
-/* Compute a point on the material side of an external perimeter seam. */
+/* Compute a point on the material side of an external perimeter seam using the complete loop and its hole flag; degenerate geometry returns no point. */
 std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
-                                         coord_t depth);
+                                       const std::vector<c_extrusion_segment> &segments,
+                                       coord_t depth);
 
-/* Extend a non-returning loop wipe from its tangent toward printed material. */
+/* Extend a non-returning loop wipe toward material, using the complete source loop for its orientation; a failed geometry assignment throws. */
 void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
+                       const std::vector<c_extrusion_segment> &source_segments,
                        coord_t depth);
 
-/* Add an inside-to-seam approach when the target starts with an eligible external loop; ineligible or missing geometry returns unchanged, while an out-of-range Z offset or a failed segment assignment throws. The borrowed target keeps ownership. */
+/* Add an inside-to-seam approach for an external loop, collecting its complete geometry only after the setting and unretract allow it. Ineligible or missing geometry returns unchanged; an out-of-range Z offset or a failed segment assignment throws. The borrowed target keeps ownership. */
 void add_inside_start(
     const ScopeEntity &target,
     const Config &print_config,
@@ -268,13 +381,36 @@ void set_wipe_attributes(MutableExtrusionEntity entity,
 /* Return the configured wipe speed or its travel-speed fallback. */
 double wipe_speed(const Config &print_config, extruder_index_t extruder_id);
 
-/* Convert an eligible source Retract into initial E motion, a wipe and residual E; ineligible transitions return unchanged. The scope tree is changed in place without transferring ownership; path collection, crossing checks and failed geometry edits may throw, as may a lost Retract. */
+// Borrow the slice island of object material; global, regionless or auxiliary-layer geometry returns an invalid view. Missing region ownership throws.
+LayerIsland material_island(const ScopeEntity &scope);
+
+/* Convert an eligible source Retract into initial E motion, a wipe and residual E.
+   Crossing mode returns to its source start, accepted within SCALED_EPSILON of the
+   supplied travel start in XY distance and absolute Z. Certain local crossings
+   use normal wipe geometry. Ineligible transitions return unchanged; failed
+   geometry edits or a lost Retract throw. */
 void add_outgoing_wipe(
     const ScopeEntity &source,
-    const ScopeEntity *target,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    WipeCrossingChecker &crossing_checker);
+    const FirstTravelSummary *return_start = nullptr,
+    const ScopeEntity *target = nullptr);
+
+// Find materialized leaves, including stationary deposits, without treating E-only events as geometry.
+bool phase_holds_geometry(const ExtrusionEntity &entity);
+
+// Return the last materialized leaf of content; absent geometry returns an invalid view.
+ExtrusionEntity last_printable_leaf(const ExtrusionEntity &entity);
+
+// Borrow the ordered continuous Travel leaves of a reserved phase, excluding wipes; other shapes return no leaves.
+std::vector<TP::TravelLeaf> travel_leaves(const ScopeEntity &target,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &key);
+
+// Copy the exact start in plan XY and absolute Z from the first leaf of an eligible travel.
+FirstTravelSummary travel_summary(const ScopeEntity &target, const std::vector<TP::TravelLeaf> &travel);
+
+// Read the source tool's two switches before preparing any crossing geometry.
+bool crossing_wipe_enabled(const Config &config, extruder_index_t tool);
 
 coord_t checked_add(const coord_t lhs, const coord_t rhs)
 {
@@ -357,6 +493,39 @@ std::vector<c_extrusion_segment> rebased_segments(
     return result;
 }
 
+void append_forward_loop(MutableExtrusionEntity entity, const coord_t print_z,
+                         const coord_t phase_base_z, const EffectiveState &state,
+                         WipePath &path, const bool stop_before_bridge)
+{
+    for (uint32_t idx = 0; idx < entity.child_count(); ++idx) {
+        MutableExtrusionEntity child = entity.child_mutable(idx);
+        append_forward_loop(child, print_z, phase_base_z,
+                            resolved_state(child.readonly(), state), path, stop_before_bridge);
+    }
+    if (entity.segment_count() == 0)
+        return;
+    if (!state.attributes)
+        throw std::runtime_error("A printable loop fragment has no role attributes.");
+    const raw_extrusion_role role = state.attributes->extrusion_role();
+    if (RAW_EXTRUSION_ROLE_IS_TRAVEL(role) || RAW_EXTRUSION_ROLE_IS_WIPE(role) ||
+        RAW_EXTRUSION_ROLE_IS_RETRACT(role) || RAW_EXTRUSION_ROLE_IS_UNRETRACT(role))
+        throw std::runtime_error("Printable scope content contains process geometry.");
+    const uint16_t flags = state.perimeter ? state.perimeter->perimeter_flags() :
+        C_EXTRUSION_PERIMETER_FLAG_NONE;
+    WipeLeaf leaf{entity, role, flags,
+                  checked_add(print_z, state.z_offset), true};
+    // A bridge cuts the usable forward path, but later leaves still identify the nozzle position.
+    if (stop_before_bridge && RAW_EXTRUSION_ROLE_IS_BRIDGE(role))
+        path.stopped = true;
+    if (!path.stopped) {
+        std::vector<c_extrusion_segment> segments = rebased_segments(leaf, phase_base_z);
+        path.segments.insert(path.segments.end(), segments.begin(), segments.end());
+        path.loop_length += entity.local_length();
+    }
+    path.source = leaf;
+    path.has_source = true;
+}
+
 void append_reverse_wipe_path(
     MutableExtrusionEntity entity,
     const coord_t print_z,
@@ -369,6 +538,21 @@ void append_reverse_wipe_path(
         return;
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
+
+    // A loop node with several children is one composed turn; inherited LOOP flags must not make each fragment a whole loop.
+    // Single-child wrappers continue to the leaf or the node holding the fragments.
+    if (!path.has_source && entity.child_count() > 1 && state.perimeter &&
+        (state.perimeter->perimeter_flags() & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0) {
+        append_forward_loop(entity, print_z, phase_base_z, state, path, true);
+        // Only the immediately preceding printable leaf decides whether a bridge prevents wiping.
+        if (path.has_source && RAW_EXTRUSION_ROLE_IS_BRIDGE(path.source.role)) {
+            path.has_source = false;
+            path.segments.clear();
+        }
+        path.complete_turn = path.has_source && !path.stopped;
+        path.stopped = true;
+        return;
+    }
 
     // Reverse child order mirrors the machine's immediately preceding path.
     for (uint32_t child_idx = entity.child_count(); child_idx > 0; --child_idx) {
@@ -412,6 +596,8 @@ void append_reverse_wipe_path(
         path.source = leaf;
         path.has_source = true;
         path.segments = std::move(leaf_segments);
+        path.loop_length = entity.local_length();
+        path.complete_turn = true;
         path.stopped = true;
         return;
     }
@@ -443,18 +629,42 @@ WipePath source_wipe_path(
     append_reverse_wipe_path(content, scope.layer_group.print_z(), phase_base_z,
                              scope_state, path,
                              content.handle() == ordered.root().handle());
+    // Join the printed tip only after collecting the whole loop, so fragmented and single-leaf loops share a continuous cycle.
+    if (path.complete_turn && !path.segments.empty()) {
+        const c_extrusion_segment &first = path.segments.front();
+        const c_extrusion_segment &last = path.segments.back();
+        if (last.point_b.x != first.point_a.x || last.point_b.y != first.point_a.y ||
+            last.z_offset_b != first.z_offset_a) {
+            const c_extrusion_segment gap{
+                last.point_b, first.point_a, 0.f, RAW_EXTRUSION_ARC_ORIENTATION_UNKNOWN,
+                last.z_offset_b, first.z_offset_a};
+            path.loop_length += c_point_distance_to(gap.point_a, gap.point_b);
+            path.segments.insert(path.segments.begin(), gap);
+        }
+    }
     return path;
 }
 
 bool find_first_printable_leaf(
     MutableExtrusionEntity entity,
     const coord_t print_z,
+    const coord_t phase_base_z,
     const EffectiveState &parent,
     WipeLeaf &leaf,
-    const bool entity_already_resolved)
+    const bool entity_already_resolved,
+    std::vector<c_extrusion_segment> *loop_segments)
 {
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
+    // Collect at the first composed loop node on descent, not again at its descendants or ancestors.
+    std::vector<c_extrusion_segment> *child_loop_segments = loop_segments;
+    if (loop_segments != nullptr && entity.child_count() > 1 && state.perimeter &&
+        (state.perimeter->perimeter_flags() & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0) {
+        WipePath loop;
+        append_forward_loop(entity, print_z, phase_base_z, state, loop);
+        *loop_segments = std::move(loop.segments);
+        child_loop_segments = nullptr;
+    }
     if (entity.segment_count() > 0) {
         if (!state.attributes)
             return false;
@@ -471,12 +681,15 @@ bool find_first_printable_leaf(
             checked_add(print_z, state.z_offset),
             (perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0
         };
+        if (loop_segments != nullptr && leaf.loop)
+            *loop_segments = entity.segments();
         return true;
     }
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         if (find_first_printable_leaf(entity.child_mutable(child_idx), print_z,
-                                      state, leaf))
+                                      phase_base_z, state, leaf, false, child_loop_segments)) {
             return true;
+        }
     return false;
 }
 
@@ -484,15 +697,16 @@ bool target_first_leaf(
     const ScopeEntity &scope,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     WipeLeaf &leaf,
-    coord_t &phase_base_z)
+    coord_t &phase_base_z,
+    std::vector<c_extrusion_segment> *loop_segments)
 {
     const ExtrusionScope::OrderedExtrusionScope ordered(scope.entity, key);
     const EffectiveState scope_state = traversal_state(scope.effective_properties);
     phase_base_z = checked_add(scope.layer_group.print_z(), scope_state.z_offset);
     MutableExtrusionEntity content = ordered.content();
     return find_first_printable_leaf(content, scope.layer_group.print_z(),
-                                     scope_state, leaf,
-                                     content.handle() == ordered.root().handle());
+                                     phase_base_z, scope_state, leaf,
+                                     content.handle() == ordered.root().handle(), loop_segments);
 }
 
 MutableExtrusionEntity find_axis_event(MutableExtrusionEntity entity,
@@ -540,11 +754,11 @@ std::vector<c_extrusion_segment> fit_wipe_length(
 }
 
 std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
-                                         const coord_t depth)
+                                       const std::vector<c_extrusion_segment> &segments,
+                                       const coord_t depth)
 {
-    if (!leaf.loop || depth <= 0 || leaf.entity.segment_count() < 2)
+    if (!leaf.loop || depth <= 0 || segments.size() < 2)
         return std::nullopt;
-    const std::vector<c_extrusion_segment> segments = leaf.entity.segments();
     const c_point seam = segments.front().point_a;
     const c_point next = segments.front().point_b;
     const c_point previous = segments.back().point_a;
@@ -595,12 +809,11 @@ std::optional<c_point> loop_inside_point(const WipeLeaf &leaf,
 
 void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
+                       const std::vector<c_extrusion_segment> &source_segments,
                        const coord_t depth)
 {
     if (!source.loop || depth <= 0 || wipe.segment_count() == 0)
         return;
-    const std::vector<c_extrusion_segment> source_segments =
-        source.entity.segments();
     long double signed_area_twice = 0.0L;
     for (const c_extrusion_segment &segment : source_segments)
         signed_area_twice += static_cast<long double>(segment.point_a.x) * segment.point_b.y -
@@ -652,12 +865,6 @@ void add_inside_start(
     if (!scope.has_incoming_transition())
         return;
 
-    WipeLeaf target_leaf;
-    coord_t phase_base_z = 0;
-    if (!target_first_leaf(target, key, target_leaf, phase_base_z) ||
-        !target_leaf.loop ||
-        !RAW_EXTRUSION_ROLE_HAS(target_leaf.role, RAW_EXTRUSION_ROLE_EXTERNAL))
-        return;
     const extruder_index_t extruder_id = target.tool_group.extruder_id();
     if (!print_config.vector_bool_or_default(
             "wipe_inside_start", extruder_id, false))
@@ -674,13 +881,21 @@ void add_inside_start(
         axis->toolchange != 0)
         return;
 
+    WipeLeaf target_leaf;
+    std::vector<c_extrusion_segment> loop_segments;
+    coord_t phase_base_z = 0;
+    if (!target_first_leaf(target, key, target_leaf, phase_base_z, &loop_segments) ||
+        !target_leaf.loop ||
+        !RAW_EXTRUSION_ROLE_HAS(target_leaf.role, RAW_EXTRUSION_ROLE_EXTERNAL))
+        return;
+
     const double nozzle_diameter = print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const double configured_depth = print_config.vector_percent_or_default(
-        "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
+        "wipe_inside_depth", extruder_id, 0.5) * nozzle_diameter;
     const coord_t depth = scale_i(
         configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5);
-    const std::optional<c_point> inside = loop_inside_point(target_leaf, depth);
+    const std::optional<c_point> inside = loop_inside_point(target_leaf, loop_segments, depth);
     if (!inside || target_leaf.entity.segment_count() == 0)
         return;
 
@@ -740,14 +955,13 @@ WipeCrossingChecker::WipeCrossingChecker(
 {}
 
 bool WipeCrossingChecker::crosses(
-    const WipeLeaf &source,
     const ScopeEntity &target_scope,
-    const WipeLeaf &target)
+    const std::vector<TP::TravelLeaf> &travel)
 {
     const LayerRegionIsland region_island =
         target_scope.printing_extrusion.region_island();
     if (!region_island.valid() || region_island.region_count() == 0 ||
-        source.entity.segment_count() == 0 || target.entity.segment_count() == 0)
+        travel.empty())
         return false;
 
     const Layer layer_view = region_island.region(0).layer();
@@ -770,25 +984,22 @@ bool WipeCrossingChecker::crosses(
 
     // Crossing areas use target-local XY; global auxiliary paths have a zero shift.
     const c_point shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
-    const c_extrusion_segment source_last =
-        source.entity.segment(source.entity.segment_count() - 1);
-    const c_extrusion_segment target_first = target.entity.segment(0);
-    PluginCommon::work::Polyline direct;
-    direct.points = {
-        PluginCommon::work::Point{source_last.point_b.x - shift.x,
-                      source_last.point_b.y - shift.y},
-        PluginCommon::work::Point{target_first.point_a.x - shift.x,
-                      target_first.point_a.y - shift.y}
-    };
-    return crossing.can_cross_perimeter(direct, true);
+    PluginCommon::work::Polyline polyline;
+    const c_point first = travel.front().entity.segment(0).point_a;
+    polyline.points.push_back({first.x - shift.x, first.y - shift.y});
+    // Continuous leaves share their junctions, so each one only contributes its segment ends.
+    for (const TP::TravelLeaf &leaf : travel)
+        for (const c_extrusion_segment &segment : leaf.entity.segments())
+            polyline.points.push_back({segment.point_b.x - shift.x, segment.point_b.y - shift.y});
+    return crossing.can_cross_perimeter(polyline, true);
 }
 
 void add_outgoing_wipe(
     const ScopeEntity &source,
-    const ScopeEntity *target,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    WipeCrossingChecker &crossing_checker)
+    const FirstTravelSummary *return_start,
+    const ScopeEntity *target)
 {
     const ExtrusionScope::OrderedExtrusionScope scope(source.entity, key);
     if (!scope.has_outgoing_transition())
@@ -796,6 +1007,30 @@ void add_outgoing_wipe(
     const extruder_index_t extruder_id = source.tool_group.extruder_id();
     if (!print_config.vector_bool_or_default("wipe", extruder_id, false))
         return;
+    const bool only_crossing = print_config.vector_bool_or_default(
+        "wipe_only_crossing", extruder_id, false);
+    if (return_start != nullptr && !only_crossing)
+        return;
+    if (return_start == nullptr && only_crossing) {
+        // Only local changes between object material and outside it, or between two object-material paths on different instances or islands, establish a crossing before travel generation.
+        if (target == nullptr)
+            return;
+        const LayerIsland source_island = material_island(source);
+        const LayerIsland target_island = material_island(*target);
+        const bool certain = source_island.valid() != target_island.valid() ||
+            (source_island.valid() && target_island.valid() &&
+             (source.printing_extrusion.printing_catalog_id() != target->printing_extrusion.printing_catalog_id() ||
+              source_island.handle() != target_island.handle()));
+        if (!certain)
+            return;
+    }
+    if (return_start != nullptr) {
+        if (phase_holds_geometry(scope.after().readonly()))
+            return;
+        const ExtrusionEntity terminal = last_printable_leaf(scope.content().readonly());
+        if (terminal.same_handle(ExtrusionEntity()) || terminal.segment_count() == 0)
+            return;
+    }
 
     MutableExtrusionEntity retract = find_axis_event(
         scope.after(), RAW_EXTRUSION_ROLE_RETRACT);
@@ -822,14 +1057,12 @@ void add_outgoing_wipe(
     WipePath path = source_wipe_path(source, key);
     if (!path.has_source || path.segments.empty())
         return;
-    if (print_config.vector_bool_or_default(
-            "wipe_only_crossing", extruder_id, false)) {
-        if (target == nullptr)
-            return;
-        WipeLeaf target_leaf;
-        coord_t unused_phase_base_z = 0;
-        if (!target_first_leaf(*target, key, target_leaf, unused_phase_base_z) ||
-            !crossing_checker.crosses(path.source, *target, target_leaf))
+    if (return_start != nullptr) {
+        const coord_t phase_base_z = checked_add(source.layer_group.print_z(),
+            traversal_state(source.effective_properties).z_offset);
+        if (c_point_distance_to(path.segments.front().point_a, return_start->start) > SCALED_EPSILON ||
+            std::abs(double(checked_add(phase_base_z, path.segments.front().z_offset_a)) -
+                     double(return_start->start_z)) > SCALED_EPSILON)
             return;
     }
 
@@ -841,19 +1074,21 @@ void add_outgoing_wipe(
         RAW_EXTRUSION_ROLE_HAS(path.source.role, RAW_EXTRUSION_ROLE_EXTERNAL))
         wipe_length_mm += print_config.vector_float_or_default(
             "wipe_extra_perimeter", extruder_id, 0.0);
-    const bool return_to_seam = print_config.vector_bool_or_default(
+    const bool return_to_seam = return_start != nullptr || print_config.vector_bool_or_default(
         "wipe_return", extruder_id, false);
-    double requested_outbound_mm = return_to_seam && !path.source.loop ?
+    const bool whole_turns = path.complete_turn &&
+        (return_start == nullptr || unscaled(path.loop_length) <= wipe_length_mm);
+    double requested_outbound_mm = return_to_seam && !whole_turns ?
         wipe_length_mm * 0.5 : wipe_length_mm;
-    if (return_to_seam && path.source.loop) {
-        const double turn_mm = unscaled(path.source.entity.local_length());
+    if (return_to_seam && whole_turns) {
+        const double turn_mm = unscaled(path.loop_length);
         if (turn_mm > EPSILON)
             requested_outbound_mm = std::ceil(wipe_length_mm / turn_mm) * turn_mm;
     }
 
     const distf_t requested_outbound = scale_d(requested_outbound_mm);
     std::vector<c_extrusion_segment> fitted = fit_wipe_length(
-        path.segments, path.source.loop, requested_outbound);
+        path.segments, return_start != nullptr ? whole_turns : path.complete_turn, requested_outbound);
     if (fitted.empty())
         return;
 
@@ -863,7 +1098,7 @@ void add_outgoing_wipe(
     if (wipe.local_length() > requested_outbound + distf_t(SCALED_EPSILON) &&
         !wipe.clip_end(wipe.local_length() - requested_outbound))
         throw std::runtime_error("Unable to clip wipe geometry to its configured length.");
-    if (return_to_seam && !path.source.loop) {
+    if (return_to_seam && !whole_turns) {
         std::vector<c_extrusion_segment> round_trip = wipe.segments();
         const std::vector<c_extrusion_segment> return_path =
             reversed_segments(round_trip);
@@ -871,14 +1106,14 @@ void add_outgoing_wipe(
         if (!wipe.set_segments(round_trip))
             throw std::runtime_error("Unable to append the wipe return path.");
     }
-    if (!return_to_seam && path.source.loop &&
+    if (!return_to_seam && path.complete_turn &&
         print_config.vector_bool_or_default(
             "wipe_inside_end", extruder_id, false)) {
         const double nozzle_diameter = print_config.vector_float_or_default(
             "nozzle_diameter", extruder_id, 0.4);
         const double configured_depth = print_config.vector_percent_or_default(
-            "wipe_inside_depth", extruder_id, 50.0) * nozzle_diameter * 0.01;
-        append_inside_end(wipe, path.source, scale_i(
+            "wipe_inside_depth", extruder_id, 0.5) * nozzle_diameter;
+        append_inside_end(wipe, path.source, path.segments, scale_i(
             configured_depth > 0.0 ? configured_depth : nozzle_diameter * 0.5));
     }
 
@@ -899,7 +1134,7 @@ void add_outgoing_wipe(
     if (mutable_axis == nullptr)
         throw std::runtime_error("The source Retract lost its E-axis request.");
     const double before_percent = print_config.vector_percent_or_default(
-        "retract_before_wipe", extruder_id, 0.0) * 0.01;
+        "retract_before_wipe", extruder_id, 0.0);
     const double initial_retraction = std::clamp(
         total_retraction * before_percent, 0.0, total_retraction);
     mutable_axis->value = initial_retraction;
@@ -955,8 +1190,7 @@ CreateRetractionWipe &CreateRetractionWipe::instance(
 }
 
 CreateRetractionWipe::CreateRetractionWipe(orchestrator_handle *orchestrator) :
-    PluginBase(orchestrator),
-    m_scope_property(printing_extrusion_scope_property_key(orchestrator))
+    WipePluginBase(orchestrator)
 {}
 
 const char *CreateRetractionWipe::id_impl() const noexcept
@@ -977,11 +1211,6 @@ const char *CreateRetractionWipe::description_impl() const noexcept
 const char *CreateRetractionWipe::exclusive_group_impl() const noexcept
 {
     return "layer_extrusion_edit.wipe";
-}
-
-slicing_step_t CreateRetractionWipe::step_impl() const noexcept
-{
-    return STEP_LAYER_EXTRUSION_EDIT;
 }
 
 const char *const *CreateRetractionWipe::dependencies_impl() const noexcept
@@ -1040,21 +1269,262 @@ void CreateRetractionWipe::run_impl(const plugin_run_context *run_ctx) const
     const Config print_config = Print(ctx->print).config();
     if (ctx->plan == nullptr)
         return;
-    PrintingPlan plan(ctx->plan);
-    WipeCrossingChecker crossing_checker(print_config, plan, run_ctx);
     PrintingEntityPropertyTraversal<PrintingExtrusionScopeProperty> traversal(
         m_scope_property,
         wipe_state_definition(),
-        [this, &print_config, &crossing_checker]
+        [this, &print_config]
         (ScopeEntity *previous, ScopeEntity *next) {
             if (next != nullptr)
                 add_inside_start(*next, print_config, m_scope_property);
             if (previous != nullptr)
                 add_outgoing_wipe(
-                    *previous, next, print_config, m_scope_property,
-                    crossing_checker);
+                    *previous, print_config, m_scope_property, nullptr, next);
         },
         MatchingEntityDescendants::Skip);
+    traversal.process(layer);
+    progress().increment();
+}
+
+LayerIsland material_island(const ScopeEntity &scope)
+{
+    if (scope.printing_extrusion.printing_catalog_id() == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE)
+        return LayerIsland();
+    const LayerRegionIsland region = scope.printing_extrusion.region_island();
+    if (!region.valid() || region.region_count() == 0)
+        return LayerIsland();
+    const Layer layer = region.region(0).layer();
+    const Object object = layer.object();
+    for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx)
+        if (object.auxiliary_layer(idx).handle() == layer.handle())
+            return LayerIsland();
+    for (uint32_t idx = 0; idx < layer.island_count(); ++idx) {
+        const LayerIsland island = layer.island(idx);
+        for (uint32_t part = 0; part < island.region_island_count(); ++part)
+            if (island.region_island(part).handle() == region.handle())
+                return island;
+    }
+    throw std::runtime_error("Printing extrusion LayerRegionIsland has no owning LayerIsland.");
+}
+
+bool phase_holds_geometry(const ExtrusionEntity &entity)
+{
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity, endpoints))
+        return true;
+    for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
+        if (phase_holds_geometry(entity.child(idx)))
+            return true;
+    return false;
+}
+
+ExtrusionEntity last_printable_leaf(const ExtrusionEntity &entity)
+{
+    for (uint32_t idx = entity.child_count(); idx > 0; --idx) {
+        ExtrusionEntity found = last_printable_leaf(entity.child(idx - 1));
+        if (!found.same_handle(ExtrusionEntity()))
+            return found;
+    }
+    ExtrusionScope::LeafEndpoints endpoints;
+    return ExtrusionScope::leaf_endpoints(entity, endpoints) ? entity : ExtrusionEntity();
+}
+
+std::vector<TP::TravelLeaf> travel_leaves(const ScopeEntity &target,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &key)
+{
+    const ExtrusionScope::OrderedExtrusionScope scope(target.entity, key);
+    std::vector<TP::TravelLeaf> leaves;
+    if (!scope.has_incoming_transition() ||
+        !TP::collect_travel_leaves(scope.travel(),
+            traversal_state(target.effective_properties).z_offset, leaves))
+        return {};
+    for (const TP::TravelLeaf &leaf : leaves)
+        if (!RAW_EXTRUSION_ROLE_IS_TRAVEL(leaf.role) || RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role))
+            return {};
+    return leaves;
+}
+
+FirstTravelSummary travel_summary(const ScopeEntity &target, const std::vector<TP::TravelLeaf> &travel)
+{
+    FirstTravelSummary summary;
+    summary.has_scope = true;
+    summary.has_travel = true;
+    const c_extrusion_segment first = travel.front().entity.segment(0);
+    summary.start = first.point_a;
+    summary.start_z = checked_add(checked_add(target.layer_group.print_z(),
+        travel.front().z_offset), first.z_offset_a);
+    return summary;
+}
+
+bool crossing_wipe_enabled(const Config &config, const extruder_index_t tool)
+{
+    return config.vector_bool_or_default("wipe", tool, false) &&
+        config.vector_bool_or_default("wipe_only_crossing", tool, false);
+}
+
+CreateCrossingWipe &CreateCrossingWipe::instance(orchestrator_handle *orchestrator)
+{
+    static CreateCrossingWipe plugin(orchestrator);
+    return plugin;
+}
+
+CreateCrossingWipe::CreateCrossingWipe(orchestrator_handle *orchestrator) :
+    WipePluginBase(orchestrator)
+{}
+
+const char *CreateCrossingWipe::id_impl() const noexcept
+{
+    return "layer_extrusion_edit.wipe.crossing";
+}
+
+const char *CreateCrossingWipe::name_impl() const noexcept
+{
+    return "Create crossing wipe";
+}
+
+const char *CreateCrossingWipe::description_impl() const noexcept
+{
+    return "Adds a returning retraction wipe when the generated travel crosses a perimeter.";
+}
+
+const char *CreateCrossingWipe::exclusive_group_impl() const noexcept
+{
+    return "";
+}
+
+const char *const *CreateCrossingWipe::dependencies_impl() const noexcept
+{
+    static const char *const dependencies[] = {
+        "layer_extrusion_edit.transition_scope.default",
+        "layer_extrusion_edit.wipe.default", nullptr
+    };
+    return dependencies;
+}
+
+int32_t CreateCrossingWipe::priority_impl() const noexcept
+{
+    return -45;
+}
+
+int32_t CreateCrossingWipe::used_config_keys(raw_used_config_key *keys) const noexcept
+{
+    static const raw_used_config_key used_keys[] = {
+        {"wipe", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"wipe_only_crossing", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"wipe_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"travel_speed", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"wipe_min", RAW_CO_VECTOR_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"wipe_extra_perimeter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"retract_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"retract_before_wipe", RAW_CO_VECTOR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"nozzle_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+    };
+    if (keys != nullptr)
+        std::copy(std::begin(used_keys), std::end(used_keys), keys);
+    return int32_t(std::size(used_keys));
+}
+
+const char *CreateCrossingWipe::progress_message_format_impl() const noexcept
+{
+    return "Creating crossing wipes: %u / %u layers";
+}
+
+void CreateCrossingWipe::setup_impl(const plugin_run_context *run_ctx, const uint32_t run_count) const
+{
+    m_flat_indices.clear();
+    m_layers.clear();
+    const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
+    if (ctx == nullptr || ctx->plan == nullptr)
+        return;
+    PrintingPlan plan(ctx->plan);
+    size_t flat_idx = 0;
+    m_flat_indices.resize(plan.group_count());
+    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
+        throw_if_cancelled(run_ctx);
+        const PrintingGroup group = plan.group(group_idx);
+        m_flat_indices[group_idx].resize(group.layer_group_count());
+        for (size_t &index : m_flat_indices[group_idx])
+            index = flat_idx++;
+    }
+    if (flat_idx != run_count)
+        throw std::runtime_error("Crossing wipe run count does not match PrintingPlan layers.");
+    m_layers.resize(flat_idx);
+}
+
+void CreateCrossingWipe::setup_run_impl(const plugin_run_context *run_ctx) const
+{
+    const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
+    if (ctx == nullptr || ctx->plan == nullptr || ctx->print == nullptr || ctx->layer_group == nullptr)
+        return;
+    PrintingPlan plan(ctx->plan);
+    const Config config = Print(ctx->print).config();
+    bool enabled = false;
+    for (uint32_t tool = 0; tool < config.size("wipe", 0); ++tool)
+        enabled = enabled || crossing_wipe_enabled(config, tool);
+    FirstTravelSummary summary;
+    std::unique_ptr<WipeCrossingChecker> checker;
+    PrintingEntityPropertyTraversal<PrintingExtrusionScopeProperty> traversal(
+        m_scope_property, wipe_state_definition(),
+        [this, &summary, &checker, &config, &plan, enabled, run_ctx](ScopeEntity *previous, ScopeEntity *next) {
+            throw_if_cancelled(run_ctx);
+            if (previous != nullptr || next == nullptr)
+                return;
+            summary.has_scope = true;
+            const std::vector<TP::TravelLeaf> travel = travel_leaves(*next, m_scope_property);
+            if (travel.empty())
+                return;
+            summary = travel_summary(*next, travel);
+            if (enabled) {
+                checker = std::make_unique<WipeCrossingChecker>(config, plan, run_ctx);
+                summary.crosses = checker->crosses(*next, travel);
+            }
+        }, MatchingEntityDescendants::Skip);
+    PrintingLayerGroup layer(ctx->layer_group);
+    traversal.process(layer);
+    summary.prepared = true;
+    m_layers.at(m_flat_indices.at(ctx->group_idx).at(ctx->layer_group_idx)) = summary;
+    progress().add_max(1);
+}
+
+void CreateCrossingWipe::run_impl(const plugin_run_context *run_ctx) const
+{
+    const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
+    if (ctx == nullptr || ctx->plan == nullptr || ctx->print == nullptr || ctx->layer_group == nullptr)
+        return;
+    PrintingPlan plan(ctx->plan);
+    const Config config = Print(ctx->print).config();
+    const size_t flat_idx = m_flat_indices.at(ctx->group_idx).at(ctx->layer_group_idx);
+    std::unique_ptr<WipeCrossingChecker> checker;
+    PrintingEntityPropertyTraversal<PrintingExtrusionScopeProperty> traversal(
+        m_scope_property, wipe_state_definition(),
+        [this, &checker, &config, &plan, flat_idx, run_ctx](ScopeEntity *previous, ScopeEntity *next) {
+            throw_if_cancelled(run_ctx);
+            if (previous == nullptr || !crossing_wipe_enabled(config, previous->tool_group.extruder_id()))
+                return;
+            if (next != nullptr) {
+                const std::vector<TP::TravelLeaf> travel = travel_leaves(*next, m_scope_property);
+                if (travel.empty())
+                    return;
+                if (!checker)
+                    checker = std::make_unique<WipeCrossingChecker>(config, plan, run_ctx);
+                if (checker->crosses(*next, travel)) {
+                    const FirstTravelSummary start = travel_summary(*next, travel);
+                    add_outgoing_wipe(*previous, config, m_scope_property, &start);
+                }
+            } else {
+                for (size_t idx = flat_idx + 1; idx < m_layers.size(); ++idx) {
+                    throw_if_cancelled(run_ctx);
+                    const FirstTravelSummary &following = m_layers[idx];
+                    if (!following.prepared)
+                        throw std::runtime_error("A crossing wipe summary was read before the host barrier.");
+                    if (!following.has_scope)
+                        continue;
+                    if (following.has_travel && following.crosses)
+                        add_outgoing_wipe(*previous, config, m_scope_property, &following);
+                    break;
+                }
+            }
+        }, MatchingEntityDescendants::Skip);
+    PrintingLayerGroup layer(ctx->layer_group);
     traversal.process(layer);
     progress().increment();
 }
@@ -1071,6 +1541,11 @@ void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator)
     definition.label = "Retraction wipe";
     definition.tooltip = "Selects how retraction is distributed over movement on printed material.";
     CreateRetractionWipe::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
+}
+
+void register_create_crossing_wipe_plugin(orchestrator_handle *orchestrator)
+{
+    orchestrator_register_plugin(orchestrator, CreateCrossingWipe::instance(orchestrator).c_instance());
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin

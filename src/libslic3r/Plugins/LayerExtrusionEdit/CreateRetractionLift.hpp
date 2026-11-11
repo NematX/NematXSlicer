@@ -25,8 +25,14 @@ Prerequisites
 Mutations and guarantees
 ------------------------
 
-During setup_run(), each worker raises only retracting Wipe geometry owned by
-its layer. The host barrier then makes the final wipe Z available before run()
+During setup_run(), each worker applies one ramp across all outgoing Wipe leaves
+owned by its layer, including motion without retraction. The ramp covers the last
+wipe_lift_length of the total wipe, capped to that length. When both settings are
+positive, the first point keeps its path Z and every following Z is the maximum
+of the preceding wipe Z and the original path Z plus the ramp, across all leaves.
+For planar wipes the final increase is wipe_lift; for non-planar wipes the final
+Z is the running maximum of path Z plus ramp rather than necessarily that increase.
+The host barrier then makes the final wipe Z available before run()
 shapes incoming travels. During run(), a worker modifies only target.travel in
 its own layer; it never reads or mutates a neighboring layer's extrusion tree.
 

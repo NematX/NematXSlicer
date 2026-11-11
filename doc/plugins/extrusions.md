@@ -730,5 +730,42 @@ AvoidCrossingPerimetersTravel: choose a route for each eligible gap
 ```
 
 Retraction with `wipe_only_crossing` uses the same copied-input and crossing
-helpers as a gate for wiping, independently of travel-provider selection; it
-does not ask the router for a detour.
+helpers on the generated travel, independently of travel-provider selection.
+`layer_extrusion_edit.wipe.default` (-80) retains inside-start approaches and
+plain outgoing wipes when this setting is off. With it on, gaps within a layer
+where exactly one side is outside object material, or both sides are object
+material on different instances or slice islands, use the normal outgoing
+wipe with `wipe_return` and inside-end settings. Regions and tools sharing one
+slice island do not establish a certain crossing. Object material excludes
+global, regionless and auxiliary-layer geometry, including support, brim and
+skirt. All other transitions, including those between two auxiliary paths and
+inter-layer gaps, depend on the generated travel in the second pass. The independent
+`layer_extrusion_edit.wipe.crossing` (-45) depends on that first pass and runs
+after built-in travels (-50), before lift (-40). It adds a wipe only for a
+travel phase whose Travel leaves, without Wipe, form one continuous path, with a
+valid target region island and no departure geometry. The phase may be a single
+leaf or an ordered subtree, such as a travel split for deceleration. A terminal
+stationary deposit prevents the wipe. The lift provider accepts the same
+travel shapes and applies one lift profile along all their leaves.
+
+The crossing wipe returns to its source start, which must agree with the unchanged
+travel start within `SCALED_EPSILON` in XY distance and absolute Z before lift.
+The lift provider then applies one ramp over every outgoing Wipe
+leaf, including motion-only leaves, returning wipes and inside-end segments.
+`wipe_lift_length` is relative to the total wipe length when expressed as a
+percentage and is capped to that length. The final wipe point reaches
+`wipe_lift` above its original Z on planar wipes when both settings are positive.
+For non-planar wipes, the first point keeps its original Z and each following
+point takes the maximum of the preceding wipe Z and its original path Z plus
+the ramp. The final Z is therefore the running maximum of these values across
+all wipe leaves. The following travel starts at this lifted Z.
+Complete source loops no longer than the configured wipe use whole turns rounded
+up to the required length; longer loops and open paths go halfway out and return
+over the same path. `wipe_return` and inside-end settings do not apply. Wipe and
+retraction settings belong to the source tool; crossing preparation and nozzle
+diameter belong to the target tool. Support uses the same crossing test.
+
+Before editing, each target layer worker publishes its first travel's exact start
+and crossing result as plain values. Source workers can thus handle inter-layer
+gaps, skipping empty layer groups, without reading another worker's geometry.
+Retraction remains split into stationary, moving and residual absolute targets.
