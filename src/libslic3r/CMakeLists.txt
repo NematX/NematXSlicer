@@ -632,6 +632,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Toolpath/BranchSheathPaths.hpp
 	Plugins/Support/Toolpath/LegacySupportPaths.cpp
 	Plugins/Support/Toolpath/LegacySupportPaths.hpp
+	Plugins/Support/Toolpath/SupportInterfaceGapFill.cpp
+	Plugins/Support/Toolpath/SupportInterfaceGapFill.hpp
 	Plugins/Support/Toolpath/SupportToolpathBranch.cpp
 	Plugins/Support/Toolpath/SupportToolpathBranch.hpp
 	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp

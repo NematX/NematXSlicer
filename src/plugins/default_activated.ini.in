@@ -154,6 +154,7 @@ support.toolpath.legacy_bottom = 1
 support.toolpath.legacy_bottom_contact = 1
 support.toolpath.legacy_top = 1
 support.toolpath.legacy_top_contact = 1
+support.toolpath.interface_gap_fill = 1
 
 [plugin_packages]
 ; External plugin ids enabled above and the package that provides them.

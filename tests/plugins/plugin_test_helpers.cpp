@@ -1118,6 +1118,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_bottom_contact");
         activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_top");
         activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_top_contact");
+        activate_plugin_or_fail(orchestrator, "support.toolpath.interface_gap_fill");
         activate_plugin_or_fail(orchestrator, "support.toolpath.branch_sheath");
         activate_plugin_or_fail(orchestrator, "gui_rules.core");
         activate_plugin_or_fail(orchestrator, "perimeter.generator.arachne");
