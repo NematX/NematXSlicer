@@ -666,10 +666,10 @@ mutation for the same reasons as in C++.
 ## Travel provider selection
 
 The exclusive group `layer_extrusion_edit.travel` selects how gaps between
-ordered extrusion leaves become travels. Both bundled providers are enabled.
-`layer_extrusion_edit.travel.avoid_crossing_perimeters` has the lowest group
-priority and is the default; `layer_extrusion_edit.travel.default` is the
-straight-line alternative. Group priority orders selector choices independently
+ordered extrusion leaves become travels. The three bundled providers are enabled:
+`layer_extrusion_edit.travel.avoid_crossing_perimeters` (group priority -1, the
+default), `layer_extrusion_edit.travel.default` (0, straight lines), and
+`layer_extrusion_edit.travel.advanced` (1). Group priority orders selector choices independently
 of execution priority. Presets storing `layer_extrusion_edit.travel.default`
 keep straight travel. The avoidance default applies when the selector is absent;
 newly initialized configurations receive that ID from the generated definition.
@@ -735,6 +735,102 @@ AvoidCrossingPerimetersTravel: choose a route for each eligible gap
     |-- TravelBoundary: retain rings and their search grids
     `-- build_external_input: copy other objects only when needed
 ```
+
+### Advanced travel
+
+`layer_extrusion_edit.travel.advanced` uses the same connector in two phases.
+`ScopeTravelConnector::prepare` records a layer-local chronology of gaps and
+snaps nearby seams, without inserting travels. `apply` requests one route per
+recorded gap in order, inserts travels, interpolates Z and updates flags.
+`T` is the zero-based index in `LayerTravelChronology::travels`, not a scope
+index. The chronology also retains the target extrusion owner and tool for
+every traversed pair, including pairs without a new gap. Its summary maps
+consecutive runs of the same target owner and, separately, consecutive runs of
+the same tool to half-open T intervals, including empty ones.
+
+The exclusive group `layer_extrusion_edit.travel.advanced.planner` selects
+`.compatibility` (priority -1, the default) or `.zones` (0), using those suffixes
+after the group ID. Compatibility uses the same routes as
+`travel.avoid_crossing_perimeters`. The host resolves the selector among active
+members; if only zones is active, it selects zones. The advanced provider uses
+compatibility only when the resolved plugin is null or is not the zones member.
+Planner members expose selection; the advanced provider performs the routing itself.
+
+A dated zone has an attractor or forbidden role, polygon geometry in platter XY
+coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
+means an open end for the rest of the layer. Scope can restrict the tool, require
+either endpoint to match an instance in the plan catalog, or require either
+endpoint extrusion to be support. An attractor is a membership area, not a
+promise that the route stays inside it.
+
+`TravelZoneView` collects contributor geometry once per worker, rejects reversed
+dates and drops empty areas and intervals. Queries advance through dated events
+in nondecreasing T order, filter by scope and cache unions by role for each
+applicable set. Zone construction is skipped if there is no eligible gap after
+layer entry.
+
+Contributors are independently activated plugins under
+`layer_extrusion_edit.travel.advanced.zones.`:
+
+- `island_attractors` is active by default. It copies original island membership
+  areas before inset, top removal and tool clipping, shifted for each target
+  instance. Each area is active over consecutive runs of target membership.
+- `forbidden_tops` is active by default. It copies the boundary's excluded top
+  components as separate forbidden zones for the whole layer, scoped per instance.
+- `printed_tops` is opt-in and replaces `forbidden_tops` when active. It uses the
+  same top components, but starts each after the last target arrival in its
+  original island; a top without such an arrival is omitted.
+- `support_obstacles` is opt-in. It copies separate object slice components from
+  the layer at the group's Z or just below it, shifted for every instance in the
+  plan catalog. These whole-layer forbidden zones apply only to travels touching
+  support, regardless of endpoint instance or tool.
+
+Activation is global through the plugin activation set, configured by
+`activated.ini`, not a per-region contributor setting. The provider checks each
+contributor with `orchestrator_find_plugin`. It checks `forbidden_tops` only when
+`printed_tops` is inactive: disabling `printed_tops` restores static tops if
+`forbidden_tops` is active, while disabling `forbidden_tops` changes nothing when
+`printed_tops` is active. Otherwise, disabling a contributor removes only its
+zones. Compatibility routing delegated inside an attractor still performs its
+own top avoidance.
+
+The zones planner uses the regional check described above, but an endpoint
+without an object instance does not veto the other endpoint. When neither has
+an instance, the default region configuration's
+`avoid_crossing_perimeters` value governs eligibility (false if unavailable).
+The incoming layer-entry travel has no source extrusion and stays straight.
+
+For an eligible gap, individual forbidden zones containing either endpoint in
+their unexpanded filled area are ignored before union and expansion; other zones
+remain obstacles. If both endpoints belong to one active attractor and
+compatibility avoidance is enabled, the planner tries the compatibility route.
+It accepts that candidate only if no segment enters the remaining original
+forbidden material.
+
+Otherwise, the planner expands the remaining forbidden union by the target
+tool's nozzle radius and follows the shorter outer-contour arc between the first
+entry and last exit of each crossed component. Holes, tangencies and collinear
+contacts are not filled material. It validates the resulting segments against
+the original forbidden areas and applies
+`avoid_crossing_perimeters_max_detour` to extra length, with zero unlimited.
+A missing contour route, exhausted component bound, failed validation or excess
+detour produces a counted straight fallback. This includes an endpoint in an
+obstacle hole, or only in its expanded margin, when a required outer-contour
+entry or exit is missing. The planner does not guarantee a shortest or
+obstacle-free result: a fallback remains straight.
+
+```text
+AdvancedTravel::run_impl: prepare and fill one layer's gaps
+|-- ScopeTravelConnector::prepare: record chronology and snap seams
+|-- orchestrator_select_plugin: choose compatibility or zones
+|-- summarize: evaluate eligibility and date owner/tool runs
+|-- TravelZoneView: collect active contributors and cache dated role unions
+`-- ScopeTravelConnector::apply: request routes in T order and insert travels
+    |-- CompatibilityPlanner::path: use perimeter routing
+    `-- ZonePlanner::path: validate a same-attractor candidate or route around forbidden areas
+```
+
+### Crossing wipes and lift
 
 Retraction with `wipe_only_crossing` uses the same copied-input and crossing
 helpers on the generated travel, independently of travel-provider selection.
