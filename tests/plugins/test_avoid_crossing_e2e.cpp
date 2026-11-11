@@ -50,7 +50,9 @@ than two vertices; this is not a geometric test of departure from a straight lin
 For the avoid-crossing baseline, the gate compares disabled avoidance with the
 straight-travel provider; the advanced baseline instead varies the selector toward
 the avoid-crossing provider. The advanced matrix runs with both compatibility
-and zones selected. For every baseline, the gate checks
+and zones selected. One additional run omits the travel selector and verifies that
+the implicit advanced provider preserves the explicit avoid-crossing baseline routes.
+For every baseline, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change compatibility routes while keeping their
 endpoints; the zones planner's inter-island routes are independent of those weights.
@@ -129,7 +131,7 @@ struct TravelActivation {
             host.set_plugin_active(plugin, true);
     }
 };
-// Slice and process the explicitly selected scene, publish text G-code under file names built from name,
+// Slice and process the selected scene, checking the stored provider or implicit advanced default; publish text G-code under file names built from name,
 // and return copied routes, support chords crossing object slices, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
@@ -379,7 +381,7 @@ TEST_CASE("Support obstacles are opt-in and process real support travels", "[plu
     CHECK(legacy.volume == Approx(enabled.volume).margin(0.01));
 }
 
-// Validate setting coverage and compare an enabled baseline with variations; ironing is coupled with top avoidance.
+// Validate setting coverage and default route parity through text export; ironing is coupled with top avoidance.
 TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e2e][avoid-crossing-perimeters]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -435,6 +437,18 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
     const Result enabled = run_case(baseline, "baseline");
+    if (mode == "avoid-crossing") {
+        DynamicPrintConfig implicit = baseline;
+        implicit.erase(selector);
+        REQUIRE(implicit.option(selector) == nullptr);
+        const Plugin *selected = Steps::selected_active_plugin_from_group(host,
+            STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &implicit);
+        REQUIRE(selected != nullptr);
+        REQUIRE(selected->get_id() == "layer_extrusion_edit.travel.advanced");
+        const Result default_routes = run_case(implicit, "implicit-default");
+        CHECK(default_routes.selected_planner == "layer_extrusion_edit.travel.advanced.planner.compatibility");
+        CHECK(default_routes.travels == enabled.travels);
+    }
     if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
         REQUIRE(enabled.selected_planner == (use_zones ? "layer_extrusion_edit.travel.advanced.planner.zones" :
                                                         "layer_extrusion_edit.travel.advanced.planner.compatibility"));
@@ -526,7 +540,8 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &print.config());
     REQUIRE(selected != nullptr);
-    REQUIRE(selected->get_id() == config.opt_serialize(selector));
+    REQUIRE(selected->get_id() == (config.option(selector) == nullptr ?
+        "layer_extrusion_edit.travel.advanced" : config.opt_serialize(selector)));
     Plugin *selected_planner = Steps::selected_active_plugin_from_group(orchestrator,
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner", &print.config());
     print.set_status_silent();

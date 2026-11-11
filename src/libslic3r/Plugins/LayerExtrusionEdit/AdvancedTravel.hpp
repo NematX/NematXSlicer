@@ -5,11 +5,11 @@
 #define slic3r_Plugins_LayerExtrusionEdit_AdvancedTravel_hpp_
 
 /*
-Register the advanced travel alternative during built-in plugin registration.
-The layer_extrusion_edit.travel selector can choose it explicitly. It uses
+Register the default advanced travel provider during built-in plugin registration.
+The layer_extrusion_edit.travel selector honours explicit active provider IDs. It uses
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
 gaps, then fills them with XY routes from the selected advanced planner.
-Compatibility is the default and the fallback for absent or unknown choices.
+Compatibility is the planner group's default and the fallback for absent or unknown planner choices.
 The opt-in zones planner collects active island attractors, forbidden tops and support obstacles.
 Active means present in the host activation set, configured by activated.ini.
 Collection occurs only when the chronology contains an eligible travel after layer entry. The
@@ -29,7 +29,8 @@ removes only its zones; same-attractor compatibility routing retains its own top
 avoidance. An inactive advanced provider blocks its dependent members even when
 their IDs are enabled in the profile.
 The connector owns insertion, Z interpolation and materialized travel flags.
-Avoid-crossing remains the default when active; straight travel is next.
+Travel group priorities select advanced (-2), then avoid-crossing (-1) when
+advanced is inactive, then straight travel (0).
 */
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"

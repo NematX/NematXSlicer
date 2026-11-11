@@ -289,7 +289,7 @@ TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
     CHECK(plugin->get_used_config_keys().empty());
 }
 
-TEST_CASE("Avoid-crossing travel is the default provider in the travel group",
+TEST_CASE("Avoid-crossing travel ranks second in the travel group",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -321,7 +321,7 @@ TEST_CASE("Advanced travel exposes the compatibility routing settings",
     CHECK(advanced->get_id() == "layer_extrusion_edit.travel.advanced");
     CHECK(advanced->get_step() == STEP_LAYER_EXTRUSION_EDIT);
     CHECK(advanced->get_priority() == -50);
-    CHECK(advanced->get_exclusive_group_priority() == 1);
+    CHECK(advanced->get_exclusive_group_priority() == -2);
     CHECK(advanced->get_exclusive_group() == "layer_extrusion_edit.travel");
     CHECK(advanced->get_dependencies() == avoidance->get_dependencies());
     const std::vector<Plugin::UsedConfigKey> actual = advanced->get_used_config_keys();

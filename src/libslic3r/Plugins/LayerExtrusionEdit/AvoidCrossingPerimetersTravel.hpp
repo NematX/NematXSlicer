@@ -12,7 +12,7 @@ Avoid-crossing travel provider
 
 Call register_avoid_crossing_perimeters_travel_plugin during plugin registration
 to add the built-in perimeter-avoiding alternative to layer_extrusion_edit.travel.
-The selector chooses this provider or the straight-travel provider for gaps in
+The selector chooses this provider, advanced travel or straight travel for gaps in
 the ordered PrintingPlan. The connector in TravelConnectionHelpers.hpp owns
 insertion, Z interpolation and travel flags; this provider supplies XY only.
 
@@ -22,15 +22,15 @@ TravelRouter then seeks a detour using copied public API inputs. The detour
 limit can retain straight travel; this is neither a shortest-path service nor
 a guarantee that every perimeter crossing is removed.
 
-When both providers are active, this provider is the exclusive group's default.
-An explicit selector ID takes precedence and can retain straight travel.
+Travel group priorities select advanced (-2), this provider (-1) when advanced
+is inactive, then straight travel (0). Explicit active provider IDs take precedence.
 */
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossingPerimetersTravelPlugin {
 
-/* Register the perimeter-avoiding travel producer, preferred by the travel group. */
+/* Register the perimeter-avoiding travel provider, ranked after advanced and before straight travel. */
 void register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle *orchestrator);
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin

@@ -101,8 +101,9 @@ object instance. Their connectors must stay direct, while object paths in the
 same sliced ring still receive detours.
 
 Selection checks keep all three travel providers active: an absent selector
-chooses avoidance and explicit straight or advanced IDs are kept. With avoidance
-inactive, even its serialized ID falls back to straight travel. Paired editor
+chooses advanced and every explicit provider ID is kept. With advanced inactive,
+selection falls back to avoidance; with both inactive, it uses straight travel
+without rewriting the stored advanced ID. Paired editor
 runs rebuild ordering on one sliced ring and compare XY coordinates, Z offsets,
 Travel roles and incoming/outgoing materialized travel flags of generated travels
 between advanced and avoidance, or against straight travel when avoidance is disabled.
@@ -472,8 +473,8 @@ TEST_CASE("Avoid-crossing plugin matches core routes on sliced scenes",
     check_scene(scenario);
 }
 
-// Resolve absent and serialized selections with both production providers available.
-TEST_CASE("Travel defaults to avoidance and respects an explicit straight provider",
+// Resolve absent and stored selections in priority order without changing stored provider IDs.
+TEST_CASE("Travel defaults to advanced and respects explicit providers and inactive fallbacks",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-parity]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -490,25 +491,32 @@ TEST_CASE("Travel defaults to avoidance and respects an explicit straight provid
         Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
             STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", settings);
         REQUIRE(selected != nullptr);
-        CHECK(selected->get_id() == "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+        CHECK(selected->get_id() == "layer_extrusion_edit.travel.advanced");
     }
-    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.default");
+    config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.opt_serialize(selector) == "layer_extrusion_edit.travel.advanced");
+    for (const char *id : {"layer_extrusion_edit.travel.default",
+                          "layer_extrusion_edit.travel.avoid_crossing_perimeters",
+                          "layer_extrusion_edit.travel.advanced"}) {
+        config.set_deserialize_strict(selector, id);
+        Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
+            STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &config);
+        REQUIRE(selected != nullptr);
+        CHECK(selected->get_id() == id);
+        CHECK(config.opt_serialize(selector) == id);
+    }
+    REQUIRE(orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false));
     Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
-        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &config);
+        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", nullptr);
     REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "layer_extrusion_edit.travel.default");
-    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
-    selected = Steps::selected_active_plugin_from_group(orchestrator,
-        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &config);
-    REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "layer_extrusion_edit.travel.advanced");
+    CHECK(selected->get_id() == "layer_extrusion_edit.travel.avoid_crossing_perimeters");
     REQUIRE(orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false));
     selected = Steps::selected_active_plugin_from_group(orchestrator,
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", nullptr);
     REQUIRE(selected != nullptr);
     CHECK(selected->get_id() == "layer_extrusion_edit.travel.default");
     config = DynamicPrintConfig::full_print_config();
-    REQUIRE(config.opt_serialize(selector) == "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+    REQUIRE(config.opt_serialize(selector) == "layer_extrusion_edit.travel.advanced");
     selected = Steps::selected_active_plugin_from_group(orchestrator,
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &config);
     REQUIRE(selected != nullptr);

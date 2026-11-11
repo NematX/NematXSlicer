@@ -162,7 +162,7 @@ private:
     const char *const *dependencies_impl() const noexcept override;
     // Run after the default wipe (-80), before the crossing wipe (-45) and lift (-40).
     int32_t priority_impl() const noexcept override;
-    // Keep avoidance and straight travel ahead of advanced for implicit selection.
+    // Select advanced travel before avoidance (-1) and straight travel (0) when no ID is stored.
     int32_t exclusive_group_priority_impl() const noexcept override;
     // Return the count, and copy static key descriptions when the caller supplies an array of that size.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
@@ -220,7 +220,7 @@ int32_t AdvancedTravel::priority_impl() const noexcept
 
 int32_t AdvancedTravel::exclusive_group_priority_impl() const noexcept
 {
-    return 1;
+    return -2;
 }
 
 int32_t AdvancedTravel::used_config_keys(raw_used_config_key *keys) const noexcept

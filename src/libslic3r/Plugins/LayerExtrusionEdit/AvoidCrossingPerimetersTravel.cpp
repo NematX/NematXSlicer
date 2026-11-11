@@ -20,8 +20,8 @@ callbacks, so a run can read the next non-empty layer's summary to set its
 outgoing flag. Each run owns an AvoidCrossing::CompatibilityPlanner for that
 layer group; CompatibilityPlanner.hpp defines its routing interface.
 
-When both travel providers are active, this provider is the group default;
-an explicit selector can still choose straight travel.
+Travel group priorities select advanced (-2), this provider (-1) when advanced
+is inactive, then straight travel (0). Explicit active provider IDs take precedence.
 
     setup_impl: reset and allocate connector summaries
     setup_run_impl: prepare the current layer group's summary
@@ -85,7 +85,7 @@ private:
     const char *const *dependencies_impl() const noexcept override;
     // Run after the entry-state, retraction and wipe providers and before lift insertion.
     int32_t priority_impl() const noexcept override;
-    // Prefer this provider when the travel selector is absent; explicit provider IDs take precedence.
+    // Rank after advanced (-2) and before straight travel (0); explicit active provider IDs take precedence.
     int32_t exclusive_group_priority_impl() const noexcept override;
     // Report key types for host validation and GUI activation. Call with null to get the count,
     // then supply a caller-owned array of that size; copied entries borrow static key strings.

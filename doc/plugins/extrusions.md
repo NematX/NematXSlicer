@@ -667,11 +667,12 @@ mutation for the same reasons as in C++.
 
 The exclusive group `layer_extrusion_edit.travel` selects how gaps between
 ordered extrusion leaves become travels. The three bundled providers are enabled:
-`layer_extrusion_edit.travel.avoid_crossing_perimeters` (group priority -1, the
-default), `layer_extrusion_edit.travel.default` (0, straight lines), and
-`layer_extrusion_edit.travel.advanced` (1). Group priority orders selector choices independently
-of execution priority. Presets storing `layer_extrusion_edit.travel.default`
-keep straight travel. The avoidance default applies when the selector is absent;
+`layer_extrusion_edit.travel.advanced` (group priority -2, the default),
+`layer_extrusion_edit.travel.avoid_crossing_perimeters` (-1), and
+`layer_extrusion_edit.travel.default` (0, straight lines). Group priority orders
+selector choices independently of execution priority. Presets keep their stored
+provider IDs without migration; storing `layer_extrusion_edit.travel.default`
+keeps straight travel. The advanced default applies when the selector is absent;
 newly initialized configurations receive that ID from the generated definition.
 
 The avoidance provider checks `avoid_crossing_perimeters` at both regional
