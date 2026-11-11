@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <map>
@@ -15,6 +16,9 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
@@ -63,6 +67,12 @@ Contributor activation cases keep the zones planner selected and round-trip a
 reference with both members and each member disabled independently.
 The printed-top case activates its opt-in member separately, checks its plugin
 declaration, and compares both static-top activation states through STL export.
+The support-obstacle case explicitly selects an overhanging roof with a separate
+post and two instances. It identifies real support travel phases whose endpoint
+chords cross an object slice component containing neither endpoint. Slice copies
+are shifted using the plan catalog. With other contributors disabled, the same
+endpoints must have a detour with support obstacles and a straight route without
+them; an intermediate vertex of that detour must occur in published G-code.
 
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
@@ -73,6 +83,7 @@ declaration, and compares both static-top activation states through STL export.
 */
 namespace {
 using namespace Slic3r;
+enum class Scene { Ring, Support };
 struct Result {
     // Planner selected by the host before processing; empty when no member is active.
     std::string selected_planner;
@@ -82,6 +93,12 @@ struct Result {
     std::vector<std::vector<coord_t>> inter_island;
     // Number of copied routes with more than two vertices, regardless of collinearity.
     size_t deviated = 0;
+    // Reserved travel phases found in actual support printing extrusions.
+    size_t support_travels = 0;
+    // Support routes whose endpoint chord intersects an object component containing neither endpoint.
+    std::vector<std::vector<coord_t>> support_crossings;
+    // Routes with an intermediate vertex found among published travel moves.
+    std::vector<std::vector<coord_t>> published_detours;
     // Extruded volume read back from the published G-code, in mm³.
     double volume = 0.;
 };
@@ -112,10 +129,10 @@ struct TravelActivation {
             host.set_plugin_active(plugin, true);
     }
 };
-// Slice and process the two-island mesh for config, publish text G-code under file names built from name,
-// and return the copied plan routes with the volume read from the published file.
+// Slice and process the explicitly selected scene, publish text G-code under file names built from name,
+// and return copied routes, support chords crossing object slices, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
-Result run_case(const DynamicPrintConfig &config, const std::string &name);
+Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
 // Copy reserved travel phases without changing the plan; skip routes below two vertices and count those above two.
 void collect_travels(const ExtrusionEntity &entity, Result &result);
 // Append geometric leaves in child order, skipping consecutive duplicate XY and Z-offset triples.
@@ -301,6 +318,67 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     CHECK(host.blocked_plugin_activations().count(id) == 1);
 }
 
+// Check separate opt-in activation and actual support travel phases through STL import and text G-code export.
+TEST_CASE("Support obstacles are opt-in and process real support travels", "[plugins][plugin-e2e][travel-zones]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    const char *id = "layer_extrusion_edit.travel.advanced.zones.support_obstacles";
+    const Plugin *plugin = host.get_plugin(id);
+    REQUIRE(plugin != nullptr);
+    CHECK(plugin->get_id() == id);
+    CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+    CHECK(plugin->get_priority() == -50);
+    CHECK(plugin->get_exclusive_group().empty());
+    CHECK(plugin->get_used_config_keys().empty());
+    CHECK(plugin->get_defined_config_keys().empty());
+    CHECK(plugin->get_dependencies() == std::vector<std::string>{"layer_extrusion_edit.travel.advanced"});
+    CHECK_FALSE(host.is_plugin_active(id));
+    REQUIRE(host.set_plugin_active(id, true));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const std::string selector = Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel");
+    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "2"}, {"fill_density", "20%"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
+        {"support_material", "1"}, {"support_material_style", "grid"}, {"support_material_extruder", "1"},
+        {"support_material_interface_extruder", "1"}, {"support_material_contact_distance", "0.2"},
+        {"dont_support_bridges", "0"}, {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
+        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
+    const Result enabled = run_case(config, "support-obstacles-enabled", Scene::Support);
+    REQUIRE(enabled.support_travels > 0);
+    CHECK(enabled.selected_planner == "layer_extrusion_edit.travel.advanced.planner.zones");
+    REQUIRE(host.set_plugin_active(id, false));
+    const Result disabled = run_case(config, "support-obstacles-disabled", Scene::Support);
+    CHECK(disabled.support_travels == enabled.support_travels);
+    CHECK(disabled.volume == Approx(enabled.volume).margin(0.01));
+    size_t observed_detours = 0;
+    for (const std::vector<coord_t> &route : enabled.support_crossings) {
+        if (route.size() <= 6) continue;
+        for (const std::vector<coord_t> &straight : disabled.support_crossings) {
+            if (straight.size() != 6 || !std::equal(route.begin(), route.begin() + 3, straight.begin()) ||
+                !std::equal(route.end() - 3, route.end(), straight.end() - 3)) continue;
+            CHECK(route != straight);
+            REQUIRE(std::find(enabled.published_detours.begin(), enabled.published_detours.end(), route) !=
+                    enabled.published_detours.end());
+            ++observed_detours;
+        }
+    }
+    REQUIRE(observed_detours > 0);
+    REQUIRE(host.set_plugin_active(id, true));
+    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+    const Result legacy = run_case(config, "support-obstacles-legacy", Scene::Support);
+    CHECK(legacy.support_travels > 0);
+    CHECK(legacy.volume == Approx(enabled.volume).margin(0.01));
+}
+
 // Validate setting coverage and compare an enabled baseline with variations; ironing is coupled with top avoidance.
 TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e2e][avoid-crossing-perimeters]")
 {
@@ -409,7 +487,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         CHECK(weight_zero.inter_island != weight_two.inter_island);
 }
 
-Result run_case(const DynamicPrintConfig &config, const std::string &name)
+Result run_case(const DynamicPrintConfig &config, const std::string &name, const Scene scene)
 {
     TriangleMesh mesh = make_cube(20., 4., 0.6);
     const std::pair<Vec3d, Vec3f> bars[] = {
@@ -424,10 +502,24 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
         mesh.merge(bar);
     }
     CHECK(mesh.volume() == Approx(163.2).margin(0.001));
+    if (scene == Scene::Support) {
+        mesh = make_cube(4., 8., 2.);
+        TriangleMesh post = make_cube(4., 8., 2.);
+        post.translate(12., 0., 0.); mesh.merge(post);
+        TriangleMesh roof = make_cube(12., 8., 0.6);
+        roof.translate(0., 0., 2.);
+        mesh.merge(roof);
+        CHECK(mesh.volume() == Approx(185.6).margin(0.001));
+    }
     mesh = Test::PluginE2E::stl_fixture(mesh);
     Model model;
     Print print;
     Test::init_print({mesh}, print, model, config);
+    if (scene == Scene::Support) {
+        ModelObject &object = model.objects().front();
+        object.add_instance()->set_offset(object.instances.front()->get_offset() + Vec3d(35., 0., 0.));
+        print.apply(model, config);
+    }
     Orchestrator &orchestrator = Orchestrator::instance();
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         orchestrator, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
@@ -458,8 +550,34 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers)
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
-                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                    const size_t before = result.travels.size();
                     collect_travels(*extrusion.root, result);
+                    if (extrusion.sregion_island_role.is_support()) {
+                        result.support_travels += result.travels.size() - before;
+                        for (size_t r = before; r < result.travels.size(); ++r) {
+                            const std::vector<coord_t> &route = result.travels[r];
+                            const Point from(route[0], route[1]);
+                            const Point to(route[route.size() - 3], route[route.size() - 2]);
+                            bool crosses = false;
+                            for (const Printing::PrintingObjectInstance &instance : print.printing_plan()->object_instances) {
+                                if (instance.object == nullptr) continue;
+                                const Layer *below = nullptr;
+                                for (const Layer &candidate : instance.object->layers())
+                                    if (candidate.scaled_print_z() <= layer.print_z + SCALED_EPSILON) below = &candidate;
+                                if (below == nullptr) continue;
+                                const Point shift = instance.object->instances()[instance.object_instance_idx].shift;
+                                for (ExPolygon area : below->lslices()) {
+                                    area.translate(shift);
+                                    if (!area.contains(from) && !area.contains(to) &&
+                                        !intersection_pl(Polylines{Polyline(Points{from, to})}, ExPolygons{area}).empty())
+                                        crosses = true;
+                                }
+                            }
+                            if (crosses) result.support_crossings.push_back(route);
+                        }
+                    }
+                }
     REQUIRE(result.travels.size() > 10);
     REQUIRE(result.travels.size() < 10000);
     const std::string gcode = Test::GCode::read_text_file(exported);
@@ -479,6 +597,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
     // Finding an intermediate plan XY in the published moves checks that a detour reaches text output.
     bool emitted_detour = false;
     for (const std::vector<coord_t> &route : result.travels) {
+        bool route_emitted = false;
         // Both islands are centred at (100,100); a 6 mm box around the centre identifies endpoints on the central island.
         const bool source_central = route[0] > scale_i(97.) && route[0] < scale_i(103.) &&
             route[1] > scale_i(97.) && route[1] < scale_i(103.);
@@ -491,7 +610,8 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
             for (const Point &point : emitted_travels)
                 if (std::abs(point.x() - route[idx]) <= scale_i(0.001) &&
                     std::abs(point.y() - route[idx + 1]) <= scale_i(0.001))
-                    emitted_detour = true;
+                    emitted_detour = route_emitted = true;
+        if (route_emitted) result.published_detours.push_back(route);
     }
     if (result.deviated > 0)
         CHECK(emitted_detour);

@@ -8,6 +8,7 @@
 #include <set>
 #include <utility>
 
+#include "../../Common/ClipperHelpers.hpp"
 #include "../AvoidCrossing/LayerInputCache.hpp"
 #include "../AvoidCrossing/TravelBoundary.hpp"
 
@@ -32,12 +33,17 @@ original island containing the component. Target positions are unshifted before
 membership testing, with the same border-inclusive rule as attractors. A top
 whose island has no target is omitted.
 Cancellation and geometry failures propagate; output may already contain zones.
+Support obstacles instead copy slices directly at or below the group's Z, once
+per plan-catalog instance. Separate components let an endpoint ignore only the
+material it touches; all other components remain forbidden for support travels.
 
     DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute / PrintedTopsContributor::contribute
     `-- contribute_zones: select target layer/instance pairs and copy areas
         |-- LayerInputCache::get: borrow immutable worker-local layer input
         |-- TravelBoundary::init_layer / build_internal: build temporary geometry
         `-- shifted_area: copy local areas into platter coordinates
+    SupportObstacleContributor::contribute: copy lower object slices for catalog instances
+        `-- first_layer_below_print_z: select the last layer below Z plus epsilon
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
@@ -149,6 +155,30 @@ void DefaultForbiddenTopsContributor::contribute(const ZoneContributorInput &inp
 void PrintedTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
     contribute_zones(input, out, ZoneRole::Forbidden, true);
+}
+
+void SupportObstacleContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
+{
+    for (uint32_t oi = 0; oi < input.print.object_count(); ++oi) {
+        throw_if_cancelled(&input.run_context);
+        const Object object = input.print.object(oi);
+        const std::optional<uint32_t> below = AC::first_layer_below_print_z(object, input.print_z + SCALED_EPSILON);
+        if (!below)
+            continue;
+        const polygon_work::ExPolygons slices = PluginCommon::clipper::from_expolygon_collection_view(object.layer(*below).slices());
+        for (uint32_t ii = 0; ii < input.plan.object_instance_count(); ++ii) {
+            throw_if_cancelled(&input.run_context);
+            const PrintingObjectInstance instance = input.plan.object_instance(ii);
+            if (!instance.has_object() || instance.object().handle() != object.handle())
+                continue;
+            const c_point shift = object.instance_shift(instance.object_instance_idx());
+            const ZoneScope scope{EXTRUDER_ID_UNKNOWN, SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE, true};
+            for (const polygon_work::ExPolygon &slice : slices) {
+                throw_if_cancelled(&input.run_context);
+                out.push_back({ZoneRole::Forbidden, shifted_area({slice}, shift), 0, SIZE_MAX, scope});
+            }
+        }
+    }
 }
 
 }}}

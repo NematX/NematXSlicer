@@ -10,18 +10,20 @@ The layer_extrusion_edit.travel selector can choose it explicitly. It uses
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
 gaps, then fills them with XY routes from the selected advanced planner.
 Compatibility is the default and the fallback for absent or unknown choices.
-The opt-in zones planner collects active island attractors and forbidden tops.
+The opt-in zones planner collects active island attractors, forbidden tops and support obstacles.
 Active means present in the host activation set, configured by activated.ini.
 Collection occurs only when the chronology contains an eligible travel after layer entry. The
 layer-entry travel stays straight. Compatibility owns its worker-local input
-cache; the default contributors share a second cache owned by advanced travel,
-so layer geometry may be copied twice.
+cache; the three boundary contributors share a second cache owned by advanced
+travel, so layer geometry may be copied twice. Support obstacles read slices directly.
 The permanent contributor plugins are non-exclusive no-op members, dependent on
 advanced travel. Its private implementation checks each ID with
 orchestrator_find_plugin before passing its borrowed worker-local computation.
-The members are island_attractors, forbidden_tops and printed_tops. When active,
+The four members are island_attractors, forbidden_tops, printed_tops and support_obstacles. When active,
 printed_tops replaces forbidden_tops, starting each top after the last arrival
 in its original island rather than at the beginning of the layer.
+Support obstacles forbid separate object components at or below travel Z only
+for travels touching support, using the instances in the plan catalog.
 Disabling a member
 removes only its zones; same-attractor compatibility routing retains its own top
 avoidance. An inactive advanced provider blocks its dependent members even when
@@ -38,7 +40,7 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register the two no-op planner choices and declare their exclusive selection group.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
-// Register the three independently activated no-op contributors: island_attractors, forbidden_tops and printed_tops.
+// Register four independently activated no-op contributors: island_attractors, forbidden_tops, printed_tops and support_obstacles.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 }}}

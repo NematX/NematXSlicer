@@ -18,6 +18,9 @@ obstacle routing; a sliced cube supplies real regional provenance and shifted
 instances for compatibility candidates. Segment checks inspect filled material,
 not just route vertices. The fixture selects travel.advanced to keep its settings
 active while slicing, but invokes ZonePlanner directly without production wiring.
+Support obstacle checks slice an overhanging roof and two posts, retaining real support
+printing extrusions. Controlled endpoint chords test each shifted component;
+the support roles are read from the sliced plan, not synthesized.
 
     Owner: own print, geometry storage, cancellation and contributor inputs
     FixedZones::contribute: copy synthetic dated areas
@@ -552,5 +555,179 @@ TEST_CASE("Zone planner delegates shifted attractors but forbidden material wins
     zones::ZonePlanner excluding(compatibility, view, first_excluded, true, &owner.context);
     CHECK_FALSE(excluding.eligible(auxiliary, first_target));
     CHECK(excluding.eligible(first_target, auxiliary));
+}
+// Slice real support, then test component isolation, instance shifts, Z selection and non-support travels remaining unaffected.
+TEST_CASE("Support obstacles retain other components and catalog instances", "[plugins][zone-planner][travel-zones]")
+{
+    Owner owner;
+    owner.model.clear_objects();
+    Slic3r::TriangleMesh mesh = Slic3r::make_cube(4., 8., 2.);
+    Slic3r::TriangleMesh second = Slic3r::make_cube(4., 8., 2.);
+    second.translate(12., 0., 0.); mesh.merge(second);
+    Slic3r::TriangleMesh roof = Slic3r::make_cube(12., 8., 0.6);
+    roof.translate(0., 0., 2.); mesh.merge(roof);
+    Slic3r::ModelObject *object = owner.model.add_object();
+    object->add_volume(mesh, Slic3r::ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->add_instance()->set_offset(Slic3r::Vec3d(35., 0., 0.));
+    object->ensure_on_bed();
+    owner.config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "grid"},
+        {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
+        {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"},
+        {"nozzle_diameter", "0.4"}});
+    owner.print.apply(owner.model, owner.config);
+    owner.print.process();
+    owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    owner.print.pipeline_progress().reset();
+    Slic3r::Steps::StepExtrusionOrdering::clear(owner.print);
+    Slic3r::Steps::StepExtrusionOrdering::prepare(owner.print);
+    Slic3r::Steps::StepExtrusionOrdering::run_step(host, owner.print);
+    owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
+    owner.print.pipeline_progress().reset();
+    Slic3r::Test::TransitionPipeline::run_layer_plugins(owner.print, {
+        "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default"});
+    travel::ScopeTravelConnector connector(reinterpret_cast<orchestrator_handle *>(&host));
+    uint32_t layer_count = 0;
+    Slic3r::Printing::PrintingPlan &plan = owner.print.mutable_printing_plan();
+    for (const Slic3r::Printing::PrintingGroup &group : plan.groups)
+        layer_count += uint32_t(group.layers.size());
+    slic3r_api::PluginProgress progress;
+    progress.reset(nullptr, layer_count, nullptr);
+    connector.setup(owner.plan, layer_count);
+    for (uint32_t g = 0; g < plan.groups.size(); ++g)
+        for (uint32_t l = 0; l < plan.groups[g].layers.size(); ++l) {
+            slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(
+                &plan.groups[g].layers[l]));
+            connector.setup_run(layer_view, g, l, progress);
+        }
+    size_t real_support_gaps = 0, real_support_detours = 0;
+    const zones::SupportObstacleContributor real_contributor;
+    ac::CompatibilityPlanner real_compatibility(owner.print_view, owner.plan, &owner.context);
+    for (uint32_t g = 0; g < plan.groups.size(); ++g) {
+        for (uint32_t l = 0; l < plan.groups[g].layers.size(); ++l) {
+            slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(
+                &plan.groups[g].layers[l]));
+            const travel::LayerTravelChronology chronology = connector.prepare(layer_view, g, l);
+            zones::ZoneContributorInput real_input = owner.input();
+            real_input.print_z = plan.groups[g].layers[l].print_z;
+            zones::TravelZoneView real_view({std::cref(real_contributor)}, real_input);
+            zones::ZonePlanner real_planner(real_compatibility, real_view, owner.settings(), true, &owner.context);
+            for (size_t t = 0; t < chronology.travels.size(); ++t) {
+                const travel::PendingTravel &gap = chronology.travels[t];
+                if (!gap.source_extrusion.valid() ||
+                    !(RAW_EXTRUSION_ROLE_IS_SUPPORT(gap.source_extrusion.role()) ||
+                      RAW_EXTRUSION_ROLE_IS_SUPPORT(gap.target_extrusion.role())))
+                    continue;
+                REQUIRE(real_planner.eligible(gap.source, gap.target));
+                REQUIRE_FALSE(real_view.query(t, gap).forbidden_indexes.empty());
+                const size_t before = real_planner.detours();
+                const std::vector<c_point> route = real_planner.path(t, gap);
+                CHECK(route.size() >= 2);
+                if (real_planner.detours() != before) {
+                    work::ExPolygons remaining;
+                    for (size_t index : real_view.query(t, gap).forbidden_indexes)
+                        for (const work::ExPolygon &area : real_view.zone_area(index))
+                            if (!area.contains({gap.source.position.x, gap.source.position.y}) &&
+                                !area.contains({gap.target.position.x, gap.target.position.y}))
+                                remaining.push_back(area);
+                    check_clear(route, remaining, owner.storage);
+                    ++real_support_detours;
+                }
+                ++real_support_gaps;
+            }
+        }
+    }
+    REQUIRE(real_support_gaps > 0);
+    REQUIRE(real_support_detours > 0);
+    slic3r_api::PrintingExtrusion support(nullptr);
+    for (Slic3r::Printing::PrintingGroup &group : owner.print.mutable_printing_plan().groups)
+        for (Slic3r::Printing::PrintingLayerGroup &layer : group.layers)
+            for (Slic3r::Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (Slic3r::Printing::PrintingExtrusion &pe : tool.extrusions)
+                    if (pe.sregion_island_role.is_support())
+                        support = slic3r_api::PrintingExtrusion(reinterpret_cast<printing_extrusion_handle *>(&pe));
+    REQUIRE(support.valid());
+    const Slic3r::Layer &layer = owner.print.object(0).layers()[2];
+    REQUIRE(layer.lslices().size() == 2);
+    zones::SupportObstacleContributor contributor;
+    zones::ZoneContributorInput input = owner.input();
+    input.print_z = layer.scaled_print_z();
+    std::vector<zones::TravelZone> exact, between, absent;
+    contributor.contribute(input, exact);
+    REQUIRE(exact.size() == 4);
+    input.print_z += Slic3r::scale_i(0.05);
+    contributor.contribute(input, between);
+    REQUIRE(between.size() == exact.size());
+    input.print_z = 0;
+    contributor.contribute(input, absent);
+    CHECK(absent.empty());
+    // The roof replaces two pillar components at the first layer above the pillars.
+    std::vector<zones::TravelZone> roof_exact, below_roof;
+    input.print_z = owner.print.object(0).layers()[10].scaled_print_z();
+    contributor.contribute(input, roof_exact);
+    input.print_z -= Slic3r::scale_i(0.1);
+    contributor.contribute(input, below_roof);
+    REQUIRE(roof_exact.size() == 2);
+    REQUIRE(below_roof.size() == 4);
+    for (size_t z = 0; z < exact.size(); ++z) {
+        CHECK(exact[z].begin == 0);
+        CHECK(exact[z].end == SIZE_MAX);
+        CHECK(exact[z].scope.extruder == EXTRUDER_ID_UNKNOWN);
+        CHECK(exact[z].scope.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE);
+        CHECK(exact[z].scope.support_travels_only);
+        REQUIRE(exact[z].area.front().contour.points == between[z].area.front().contour.points);
+        const Slic3r::Polygon &expected = layer.lslices()[z % 2].contour;
+        const c_point instance_shift = owner.print_view.object(0).instance_shift(z / 2);
+        REQUIRE(exact[z].area.front().contour.points.size() == expected.size());
+        for (size_t p = 0; p < expected.size(); ++p) {
+            CHECK(exact[z].area.front().contour.points[p].x() == expected.points[p].x() + instance_shift.x);
+            CHECK(exact[z].area.front().contour.points[p].y() == expected.points[p].y() + instance_shift.y);
+        }
+    }
+    input.print_z = layer.scaled_print_z();
+    const Slic3r::Point minimum = Slic3r::get_extents(layer.lslices()).min;
+    const c_point shift = owner.print_view.object(0).instance_shift(0);
+    const bool target_object = GENERATE(false, true);
+    travel::PendingTravel gap = pending(-5., 4., target_object ? 49. : 56., 4.);
+    gap.source.position.x += minimum.x() + shift.x;
+    gap.source.position.y += minimum.y() + shift.y;
+    gap.target.position.x += minimum.x() + shift.x;
+    gap.target.position.y += minimum.y() + shift.y;
+    gap.source_extrusion = gap.target_extrusion = support;
+    if (target_object) {
+        const slic3r_api::Layer view(reinterpret_cast<const layer_handle *>(&layer));
+        gap.target.printing_catalog_id = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), 1);
+        for (size_t i = 0; i < layer.lslices().size(); ++i)
+            if (layer.lslices()[i].contains(minimum + Slic3r::Point(Slic3r::scale_i(14.), Slic3r::scale_i(4.))))
+                gap.target.region_island = view.island(i).get_or_create_full_region_island(0);
+        REQUIRE(gap.target.region_island.valid());
+        gap.target_extrusion = slic3r_api::PrintingExtrusion(nullptr);
+    }
+    zones::TravelZoneView view({std::cref(contributor)}, input);
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context);
+    REQUIRE(planner.eligible(gap.source, gap.target));
+    const std::vector<c_point> result = planner.path(0, gap);
+    REQUIRE(result.size() > 2);
+    CHECK(planner.fallbacks() == 0);
+    work::ExPolygons obstacles;
+    for (const zones::TravelZone &zone : exact)
+        if (!zone.area.front().contains({gap.target.position.x, gap.target.position.y}))
+            obstacles.push_back(zone.area.front());
+    REQUIRE(obstacles.size() == (target_object ? 3 : 4));
+    check_clear(result, obstacles, owner.storage);
+    gap.source_extrusion = gap.target_extrusion = slic3r_api::PrintingExtrusion(nullptr);
+    CHECK(view.query(1, gap).forbidden_indexes.empty());
+    CHECK(planner.path(1, gap).size() == 2);
+    // Removing a catalog entry must not create zones for its still-existing object instance.
+    REQUIRE(plan.object_instances.size() == 2);
+    plan.object_instances.pop_back();
+    std::vector<zones::TravelZone> catalog_only;
+    contributor.contribute(input, catalog_only);
+    CHECK(catalog_only.size() == 2);
+    owner.checks = 0;
+    owner.cancel_at = 2;
+    CHECK_THROWS_AS(contributor.contribute(input, catalog_only), slic3r_api::PluginCancelled);
 }
 } // namespace

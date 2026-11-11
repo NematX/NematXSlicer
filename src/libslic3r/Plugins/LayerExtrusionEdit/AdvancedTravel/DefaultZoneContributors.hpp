@@ -13,13 +13,18 @@ no top. This is the first travel after that island's last arrival, not an
 extrusion timestamp. Advanced travel uses dated tops instead of static tops
 when printed tops are active. Same-attractor compatibility routing still has
 its own top avoidance.
-All three use the worker's borrowed LayerInputCache and return owned platter geometry.
+The three boundary contributors use the worker's borrowed LayerInputCache and
+return owned platter geometry; SupportObstacleContributor reads slices directly.
 An original island is a layer perimeter slice before inset; TravelBoundary also
 uses the object layer at or below a support target. A membership mask decides
 island membership, not a route. Support masks include that lower object layer;
 support targets have no forbidden tops. DefaultAttractorContributor appends
 Attractor zones to out; both top contributors append Forbidden zones.
 No contributor replaces existing output.
+SupportObstacleContributor copies object slices at or below the group's Z for
+only the instances in the plan catalog. Each connected component is a separate
+whole-layer forbidden zone for travels touching support, with no tool or instance
+restriction. It reads slices directly, without the boundary cache.
     DefaultAttractorContributor attractors;
     DefaultForbiddenTopsContributor tops;
     TravelZoneView view({std::cref(attractors), std::cref(tops)}, input);
@@ -49,6 +54,13 @@ class PrintedTopsContributor : public ZoneContributor
 {
 public:
     // Append per-instance tops from the first travel after their original island's last arrival; failures propagate.
+    void contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const override;
+};
+
+class SupportObstacleContributor : public ZoneContributor
+{
+public:
+    // Append shifted object components at or below print Z for support travels; cancellation and geometry failures propagate.
     void contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const override;
 };
 
