@@ -727,6 +727,7 @@ void CountEntities::visit_leaf(const ExtrusionEntity &entity)
     ++leaf_number;
 }
 
+// Copy atomic nodes or prepare owned grouping collections with matching permissions; borrowed input remains unchanged and allocation failures propagate.
 void FlatenEntities::enter_node(const ExtrusionEntity &entity)
 {
     if (m_skip_depth > 0) {
@@ -752,6 +753,7 @@ void FlatenEntities::enter_node(const ExtrusionEntity &entity)
         // single child so later path planning cannot reorder it accidentally.
         m_group_stack.push_back(std::make_unique<ExtrusionEntityCollection>());
         m_group_stack.back()->set_can_sort_reverse(entity.can_sort(), entity.can_reverse());
+        m_group_stack.back()->set_can_rotate(entity.can_rotate());
         m_output_stack.push_back(m_group_stack.back().get());
     }
 }

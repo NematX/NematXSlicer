@@ -17,6 +17,7 @@ checks arc geometry without including any internal host header.
     gcode_sdk_probe()
     |-- ExternalFirmware::probe(): dispatch to the fixture's E reset encoder
     |-- compensate_convex_holes: require resolution from the SDK archive
+    |-- extrusion_can_rotate / extrusion_set_can_rotate: link additive rotation exports
     |-- FanPolicy stages: link the shared kernels and validate the public context
     `-- arc_center(): check the public signed-radius calculation
 */
@@ -60,6 +61,8 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
         const slic3r_api::ConvexHoleDelta &, bool &) = &slic3r_api::compensate_convex_holes;
     if (compensate == nullptr)
         return 3;
+    if (extrusion_can_rotate(nullptr) != 0 || extrusion_set_can_rotate(nullptr, 1) != 0)
+        return 6;
     slic3r_api::FanPolicy::Settings settings;
     settings.configured[RAW_FAN_ROLE_DEFAULT] = 20;
     settings.validate();

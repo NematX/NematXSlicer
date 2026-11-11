@@ -342,10 +342,13 @@ void copy_scope_events(const PrintingScopeEvents &source,
 
 } // namespace
 
+// Create two fixed event sequences; empty geometry never grants permission to rotate execution boundaries.
 PrintingScopeEvents::PrintingScopeEvents()
     : m_before(ExtrusionEntity::Children(), false, false, true)
     , m_after(ExtrusionEntity::Children(), false, false, true)
 {
+    m_before.set_can_rotate(false);
+    m_after.set_can_rotate(false);
 }
 
 PrintingScopeEvents::PrintingScopeEvents(PrintingScopeEvents &&other) noexcept

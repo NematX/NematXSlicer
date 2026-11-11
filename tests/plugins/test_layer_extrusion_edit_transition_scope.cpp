@@ -253,7 +253,7 @@ TEST_CASE("Compact extrusion scope property uses one private runtime contract",
 }
 
 TEST_CASE("Ordered extrusion scope exposes its four compact layouts",
-          "[plugins][layer-extrusion-edit][transition-scope][scope-helper]")
+          "[plugins][layer-extrusion-edit][transition-scope][scope-helper][rotation]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const slic3r_api::PluginPropertyKey<slic3r_api::PrintingExtrusionScopeProperty>
@@ -267,10 +267,12 @@ TEST_CASE("Ordered extrusion scope exposes its four compact layouts",
                 slic3r_api::PRINTING_EXTRUSION_SCOPE_OUTGOING_TRANSITION)
     };
     const uint32_t child_counts[] = {0, 2, 3, 4};
+    const bool allowed = GENERATE(false, true);
 
     for (uint32_t shape_idx = 0; shape_idx < 4; ++shape_idx) {
         std::unique_ptr<ExtrusionPath> root = make_path(
             Point(0, 0), Point(scale_i(1.), 0));
+        root->set_can_rotate(allowed);
         ExtrusionEntity *stable_root = root.get();
         slic3r_api::MutableExtrusionEntity view = entity_view(*root);
         OrderedExtrusionScope scope =
@@ -291,11 +293,23 @@ TEST_CASE("Ordered extrusion scope exposes its four compact layouts",
             CHECK(scope.content().handle() != scope.root().handle());
         CHECK_FALSE(scope.root().readonly().sortable());
         CHECK_FALSE(scope.root().readonly().reversible());
+        CHECK(scope.root().can_rotate() == (shape_idx == 0 && allowed));
+        CHECK(scope.content().can_rotate() == allowed);
+        if (scope.travel().valid())
+            CHECK_FALSE(scope.travel().can_rotate());
+        if (scope.before().valid())
+            CHECK_FALSE(scope.before().can_rotate());
+        if (scope.after().valid())
+            CHECK_FALSE(scope.after().can_rotate());
+        const auto content_handle = scope.content().handle();
 
         OrderedExtrusionScope repeated =
             slic3r_api::LayerExtrusionEdit::ExtrusionScope::ensure_scope(
                 view, key, shapes[shape_idx]);
         CHECK(repeated.root().child_count() == child_counts[shape_idx]);
+        CHECK(repeated.content().handle() == content_handle);
+        CHECK(repeated.content().can_rotate() == allowed);
+        CHECK(repeated.root().can_rotate() == (shape_idx == 0 && allowed));
     }
 }
 

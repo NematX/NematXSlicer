@@ -330,14 +330,18 @@ public:
     FlatenEntities(bool preserve_ordering) : preserve_ordering(preserve_ordering), to_fill(true, true) {
         m_output_stack.push_back(&to_fill);
     }
+    // Initialize flattened output with the pattern's ordering and cyclic-start permissions.
     FlatenEntities(ExtrusionEntity pattern, bool preserve_ordering)
         : preserve_ordering(preserve_ordering), to_fill(pattern.can_sort(), pattern.can_reverse()) {
         to_fill.set_can_sort_reverse(pattern.can_sort(), pattern.can_reverse());
+        to_fill.set_can_rotate(pattern.can_rotate());
         m_output_stack.push_back(&to_fill);
     }
+    // Initialize flattened output with the borrowed pattern's ordering and cyclic-start permissions.
     FlatenEntities(const ExtrusionEntity &pattern, bool preserve_ordering)
         : preserve_ordering(preserve_ordering), to_fill(pattern.can_sort(), pattern.can_reverse()) {
         to_fill.set_can_sort_reverse(pattern.can_sort(), pattern.can_reverse());
+        to_fill.set_can_rotate(pattern.can_rotate());
         m_output_stack.push_back(&to_fill);
     }
     const ExtrusionEntityCollection &get() { return to_fill; };

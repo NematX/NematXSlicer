@@ -721,6 +721,10 @@ class ExtrusionEntityReadMixin:
     def sortable(self) -> bool:
         return (self.flags() & RAW_EXTRUSION_FLAG_SORTABLE) != 0
 
+    def can_rotate(self) -> bool:
+        """Read cyclic-start permission independently of geometry and flags."""
+        return bool(self.api.host.extrusion_can_rotate(self.c_handle()))
+
     def continuous(self) -> bool:
         """Return True when current children form one ordered path.
 
@@ -814,6 +818,10 @@ class ExtrusionEntityMutableMixin:
 
     def set_flags(self, flags: int) -> bool:
         return bool(self.api.host.extrusion_set_flags(self.mutable_c_handle(), int(flags)))
+
+    def set_can_rotate(self, enabled: bool) -> bool:
+        """Change only cyclic-start permission; a null handle is rejected."""
+        return bool(self.api.host.extrusion_set_can_rotate(self.mutable_c_handle(), int(enabled)))
 
     def set_reversible(self, enabled: bool = True):
         flags = self.flags()

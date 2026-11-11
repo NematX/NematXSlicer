@@ -297,8 +297,9 @@ a leaf that already carries a different event or process state.
 
 `Before` places the new leaf first and `After` places it last. Existing children
 are transferred without cloning, so their handles remain stable. The returned
-leaf is empty, non-sortable, and non-reversible; populate it only after checking
-that the returned view is valid.
+leaf is empty, non-sortable, non-reversible, and non-rotatable; populate it only
+after checking that the returned view is valid. The parent becomes non-rotatable,
+while wrapped old content and existing child objects retain their rotation permissions.
 
 The operation is structurally atomic: invalid arguments or an allocation
 failure leave the tree unchanged. A successful insertion invalidates borrowed
@@ -312,13 +313,23 @@ valid.
 `RAW_EXTRUSION_FLAG_SORTABLE` allows it to reorder the entity's direct children.
 The C++ helpers expose these as `reversible()` and `sortable()`.
 
+Since extrusion API 1.1, `extrusion_can_rotate()` / `extrusion_set_can_rotate()`
+and the C++ / Python helpers `can_rotate()` / `set_can_rotate()` expose a separate
+permission to change a closed contour's cyclic starting point. A true permission
+does not prove geometric closure. Reading or rewriting the two legacy flags,
+including `disable_sort()` / `disable_reverse()`, does not change this permission.
+Copies, clones and moves preserve it; leaf splits preserve it on the stable
+container and every fragment, and `clear_content()` does not reset it.
+
 Continuity is computed, not stored as a mutable flag. A non-sortable collection
 is continuous when all non-empty descendants are continuous and adjacent paths
 touch end-to-start. A sortable collection is never reported as continuous
 because its order may change later.
 
 Use a non-sortable, non-reversible parent whenever child order carries semantic
-meaning, such as a command that must execute immediately before a path.
+meaning, such as a command that must execute immediately before a path. Explicitly
+set its rotation permission to false as well; ordered boundary insertion does
+this for both its parent and the new event leaf.
 
 ## Points, Segments, Arcs, And Z Offsets
 

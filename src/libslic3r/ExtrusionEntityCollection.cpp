@@ -129,11 +129,13 @@ void ExtrusionEntityCollection::append_move_from(ExtrusionEntityCollection &src)
     src_children.clear();
 }
 
+// Exchange owned content, identity and ordering permissions, invalidating both borrowed pointer caches without allocation.
 void ExtrusionEntityCollection::swap(ExtrusionEntityCollection &c)
 {
     std::swap(this->m_content, c.m_content);
     std::swap(this->m_can_sort, c.m_can_sort);
     std::swap(this->m_can_reverse, c.m_can_reverse);
+    std::swap(this->m_can_rotate, c.m_can_rotate);
     std::swap(this->m_id, c.m_id);
     this->m_entities_cache.clear();
     c.m_entities_cache.clear();

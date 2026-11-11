@@ -6,7 +6,7 @@
 #define slic3r_extrusion_entity_h_
 
 #define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MAJOR 1u
-#define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MINOR 0u
+#define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MINOR 1u
 
 #include <stdint.h>
 
@@ -80,14 +80,14 @@ child collections. A sortable entity is never reported as continuous.
 /* Create an empty extrusion entity owned by storage. Release it with storage_free(). */
 SLIC3R_HOST_API extrusion_entity_handle *extrusion_create_empty(storage_handle *storage);
 
-/* Create a deep copy of src owned by storage. Release it with storage_free(). */
+/* Create a deep copy of src, including rotation permission, owned by storage. Release it with storage_free(). */
 SLIC3R_HOST_API extrusion_entity_handle *extrusion_clone(storage_handle *storage, const extrusion_entity_handle *src);
 
 /*
 Replace dst with a deep copy of src.
 
 dst keeps its handle identity, but its content, properties, flags, children and
-stored data are replaced.
+stored data are replaced. Rotation permission is copied from src as well.
 */
 SLIC3R_HOST_API int32_t extrusion_copy_from(extrusion_entity_handle *dst, const extrusion_entity_handle *src);
 
@@ -95,10 +95,11 @@ SLIC3R_HOST_API int32_t extrusion_copy_from(extrusion_entity_handle *dst, const 
 Move src into dst.
 
 dst keeps its handle identity. src remains valid but becomes empty afterwards.
+Rotation permission is transferred to dst and remains unchanged on the empty src.
 */
 SLIC3R_HOST_API int32_t extrusion_move_from(extrusion_entity_handle *dst, extrusion_entity_handle *src);
 
-/* Remove local polyline and all children. Properties and flags are unchanged. */
+/* Remove local polyline and all children. Properties, flags and rotation permission are unchanged. */
 SLIC3R_HOST_API int32_t extrusion_clear_content(extrusion_entity_handle *entity);
 
 /* Return the current entity flags bitset. Returns 0 for NULL. */
@@ -112,6 +113,12 @@ extrusion_is_continuous() and cannot be forced through flags. Returns non-zero
 on success.
 */
 SLIC3R_HOST_API int32_t extrusion_set_flags(extrusion_entity_handle *entity, uint32_t flags);
+
+/* 1.1: Read cyclic-start permission, independently of flags and closure. Returns 0 for NULL. */
+SLIC3R_HOST_API int32_t extrusion_can_rotate(const extrusion_entity_handle *entity);
+
+/* 1.1: Set cyclic-start permission without changing flags or geometry. NULL returns 0; otherwise returns 1. */
+SLIC3R_HOST_API int32_t extrusion_set_can_rotate(extrusion_entity_handle *entity, int32_t enabled);
 
 /*
 Return non-zero if the entity is currently one continuous ordered path.
@@ -147,6 +154,7 @@ SLIC3R_HOST_API const extrusion_entity_handle *extrusion_child(const extrusion_e
 
 /*
 Insert a deep copy of child into parent.
+The copy retains child's rotation permission.
 
 Insertion at idx == extrusion_child_count(parent) appends to the end. idx larger
 than child_count is invalid and returns EXTRUSION_INDEX_INVALID. If parent has a
@@ -159,6 +167,7 @@ SLIC3R_HOST_API uint32_t extrusion_insert_child_copy(extrusion_entity_handle *pa
 
 /*
 Insert child content into parent, then leave child empty.
+The inserted node retains child's rotation permission; the empty child keeps it too.
 
 This moves the content of the child handle, not a node already attached to some
 other parent. To move an existing child between parents, use extrusion_move_child().
@@ -168,11 +177,13 @@ SLIC3R_HOST_API uint32_t extrusion_insert_child_move(extrusion_entity_handle *pa
                                                      extrusion_entity_handle *child);
 
 /*
-Create one empty, non-sortable and non-reversible leaf at an ordered boundary.
+Create one empty, non-sortable, non-reversible and non-rotatable leaf at an ordered boundary.
 
 The entity handle keeps its identity and becomes a fixed parent. BEFORE places
 the new leaf before all previous logical content; AFTER places it after that
 content. Existing child objects are moved without changing their addresses.
+The parent becomes non-rotatable in both insertion paths; wrapped old content
+retains its previous rotation permission, as do all existing child objects.
 
 KEEP_ON_PARENT leaves direct properties on entity. It inserts directly when
 entity is already a fixed collection, so the new leaf inherits those
@@ -199,7 +210,8 @@ Move an existing child from one parent to another.
 
 The moved child keeps its content and properties. dst_idx follows normal insert
 semantics: dst_idx == extrusion_child_count(dst_parent) appends to the end.
-Indices larger than the destination child count are invalid.
+Indices larger than the destination child count are invalid. The child's
+rotation permission is unchanged.
 */
 SLIC3R_HOST_API uint32_t extrusion_move_child(extrusion_entity_handle *dst_parent,
                                               uint32_t dst_idx,
@@ -218,7 +230,8 @@ tree is left unchanged. Otherwise the leaf becomes a non-sortable collection
 whose children follow source traversal order. Each child receives the leaf's
 direct properties and flags. Arc geometry and interpolated Z offsets are
 preserved by cutting the original ArcPolyline after clipping its temporary
-linearization.
+linearization. The stable container and every fragment retain the source leaf's
+rotation permission independently of their geometric closure.
 
 on_fragment is optional and is called synchronously after a successful
 publication. It must not throw or structurally modify leaf. Borrowed fragment

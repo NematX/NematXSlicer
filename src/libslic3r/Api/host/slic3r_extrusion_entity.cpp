@@ -124,6 +124,21 @@ int32_t extrusion_set_flags(extrusion_entity_handle *entity, uint32_t flags)
     return 1;
 }
 
+// Read a borrowed node's explicit permission; NULL has no permission and no geometry is traversed.
+int32_t extrusion_can_rotate(const extrusion_entity_handle *entity)
+{
+    return entity != nullptr && Slic3r::to_extrusion(entity)->can_rotate();
+}
+
+// Set only the borrowed node's cyclic-start permission; reject NULL without side effects or allocation.
+int32_t extrusion_set_can_rotate(extrusion_entity_handle *entity, int32_t enabled)
+{
+    if (entity == nullptr)
+        return 0;
+    Slic3r::to_extrusion(entity)->set_can_rotate(enabled != 0);
+    return 1;
+}
+
 int32_t extrusion_is_continuous(const extrusion_entity_handle *entity)
 {
     return entity != nullptr && Slic3r::to_extrusion(entity)->is_continuous();

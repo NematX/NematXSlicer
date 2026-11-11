@@ -96,6 +96,7 @@ protected:
     bool m_can_reverse; //TODO: use (int64_t) m_id sign to embed this property, currently not an issue as 32+8 <= 64
     Content m_content;
     bool    m_can_sort = false;
+    bool    m_can_rotate = true;
 
 public:
     explicit ExtrusionEntity(bool can_reverse)
@@ -110,38 +111,47 @@ public:
         : ExtrusionPropertyContainer(std::move(eprop)), m_id(++id_generator), m_can_reverse(can_reverse) {}
     ExtrusionEntity(ExtrusionPropertyUPtrs &&eprops, bool can_reverse)
         : ExtrusionPropertyContainer(std::move(eprops)), m_id(++id_generator), m_can_reverse(can_reverse) {}
+    // Deep-copy content and properties while preserving identity and all ordering permissions.
     ExtrusionEntity(const ExtrusionEntity &rhs)
         : ExtrusionPropertyContainer(rhs)
         , m_id(rhs.m_id)
         , m_can_reverse(rhs.m_can_reverse)
         , m_content(clone_content(rhs.m_content))
-        , m_can_sort(rhs.m_can_sort) {}
+        , m_can_sort(rhs.m_can_sort)
+        , m_can_rotate(rhs.m_can_rotate) {}
+    // Transfer content and properties while preserving identity and all ordering permissions.
     ExtrusionEntity(ExtrusionEntity &&rhs)
         : ExtrusionPropertyContainer(std::move(rhs))
         , m_id(rhs.m_id)
         , m_can_reverse(rhs.m_can_reverse)
         , m_content(std::move(rhs.m_content))
-        , m_can_sort(rhs.m_can_sort) {}
+        , m_can_sort(rhs.m_can_sort)
+        , m_can_rotate(rhs.m_can_rotate) {}
     
+    // Replace state with an independent copy, including the source rotation permission.
     ExtrusionEntity &operator=(const ExtrusionEntity &rhs) {
         this->m_id = rhs.m_id;
         this->m_can_reverse = rhs.m_can_reverse;
         this->m_content = clone_content(rhs.m_content);
         this->m_can_sort = rhs.m_can_sort;
+        this->m_can_rotate = rhs.m_can_rotate;
         ExtrusionPropertyContainer::operator=(rhs);
         return *this;
     }
+    // Replace state by transfer, including the source rotation permission.
     ExtrusionEntity &operator=(ExtrusionEntity &&rhs) {
         this->m_id = rhs.m_id;
         this->m_can_reverse = rhs.m_can_reverse;
         this->m_content = std::move(rhs.m_content);
         this->m_can_sort = rhs.m_can_sort;
+        this->m_can_rotate = rhs.m_can_rotate;
         ExtrusionPropertyContainer::operator=(std::move(rhs));
         return *this;
     }
 
 protected:
     static Content clone_content(const Content &content);
+    // Materialize children while carrying local geometry's rotation permission into its preserved child.
     Children& ensure_children();
 
 public:
@@ -158,7 +168,9 @@ public:
     ArcPolyline* polyline_or_null();
     const ArcPolyline& polyline_ref() const;
     ArcPolyline& polyline_ref();
+    // Copy local geometry without changing cyclic-start permission.
     void set_polyline(const ArcPolyline &polyline);
+    // Transfer local geometry without changing cyclic-start permission.
     void set_polyline(ArcPolyline &&polyline);
 
     const Children& children() const;
@@ -200,6 +212,10 @@ public:
     virtual bool is_loop() const;
     bool can_sort() const { return m_can_sort && this->is_collection(); }
     virtual bool can_reverse() const { return this->can_sort() || m_can_reverse; }
+    // Read the independent permission to change a closed contour's cyclic starting point.
+    bool can_rotate() const { return m_can_rotate; }
+    // Set cyclic-start permission without changing geometry, sorting or reversal permissions.
+    void set_can_rotate(bool enabled) { m_can_rotate = enabled; }
     void set_can_sort_reverse(bool can_sort, bool can_reverse);
     virtual ExtrusionEntity* clone() const { return new ExtrusionEntity(*this); }
     // Create a new object, initialize it with this object using the move semantics.
@@ -680,11 +696,14 @@ public:
 template <typename THING = ExtrusionEntity>
 class ExtrusionMultiEntity : public ExtrusionEntity {
 public:
-    ExtrusionMultiEntity(): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {};
+    // Create an ordered sequence whose starting point must not rotate.
+    ExtrusionMultiEntity(): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); };
     ExtrusionMultiEntity(const ExtrusionMultiEntity &rhs) : ExtrusionEntity(rhs) {}
     ExtrusionMultiEntity(ExtrusionMultiEntity &&rhs) : ExtrusionEntity(std::move(rhs)) {}
-    ExtrusionMultiEntity(const std::vector<THING> &paths) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->paths() = paths; };
-    ExtrusionMultiEntity(const THING &path): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->paths().push_back(path); }
+    // Copy paths into a fixed-start ordered sequence.
+    ExtrusionMultiEntity(const std::vector<THING> &paths) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); this->paths() = paths; };
+    // Copy one path into a fixed-start ordered sequence.
+    ExtrusionMultiEntity(const THING &path): ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(false); this->paths().push_back(path); }
 
     ExtrusionMultiEntity &operator=(const ExtrusionMultiEntity &rhs) {
         ExtrusionEntity::operator=(rhs);
@@ -817,26 +836,35 @@ class ExtrusionLoop : public ExtrusionEntity
 {
 public:
     //ExtrusionLoop(const ExtrusionLoop& rhs) : ExtrusionEntity(rhs), m_loop_role(rhs.m_loop_role) {}
-    ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_loop_role(role); }
+    // Create an empty loop with cyclic-start permission and the requested perimeter role.
+    ExtrusionLoop(ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) { this->set_can_rotate(true); this->set_loop_role(role); }
+    // Copy a nonempty closed sequence and permit choosing its cyclic start.
     ExtrusionLoop(const ExtrusionPaths &paths, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths() = paths;
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Transfer a nonempty closed sequence and permit choosing its cyclic start.
     ExtrusionLoop(ExtrusionPaths &&paths, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths() = std::move(paths);
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Copy one closed path into a loop with cyclic-start permission.
     ExtrusionLoop(const ExtrusionPath &path, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths().push_back(path);
         assert(!this->paths().empty());
         assert(this->first_point().coincides_with_epsilon(this->paths().back().polyline().back()));
     }
+    // Transfer one closed path into a loop with cyclic-start permission.
     ExtrusionLoop(ExtrusionPath &&path, ExtrusionLoopRole role = elrDefault) : ExtrusionEntity(ExtrusionEntity::Children(), false, false, true) {
+        this->set_can_rotate(true);
         this->set_loop_role(role);
         this->paths().emplace_back(std::move(path));
         assert(!this->paths().empty());

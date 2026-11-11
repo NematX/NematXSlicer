@@ -739,6 +739,8 @@ public:
     */
     bool reversible() const { return (flags() & RAW_EXTRUSION_FLAG_REVERSIBLE) != 0; }
     bool sortable() const { return (flags() & RAW_EXTRUSION_FLAG_SORTABLE) != 0; }
+    // Read cyclic-start permission independently of geometry, sorting and reversal.
+    bool can_rotate() const { return extrusion_can_rotate(self().handle()) != 0; }
     bool continuous() const { return extrusion_is_continuous(self().handle()) != 0; }
     /* Return whether this is a non-empty, fixed, continuous closed path. */
     bool is_loop() const { return extrusion_is_loop(self().handle()) != 0; }
@@ -890,6 +892,8 @@ public:
     MutableExtrusionEntity child_mutable(uint32_t idx) const;
 
     bool set_flags(uint32_t flags) { return extrusion_set_flags(self().mutable_handle(), flags) != 0; }
+    // Change only cyclic-start permission; an invalid mutable handle is rejected by the host.
+    bool set_can_rotate(bool enabled) { return extrusion_set_can_rotate(self().mutable_handle(), enabled ? 1 : 0) != 0; }
 
     /* Allow or forbid path planners from reversing this entity. */
     Derived &reversible(bool enabled = true) {

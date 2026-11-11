@@ -36,7 +36,7 @@
        ExtrusionEntity::swap_content()
            |-- m_content.swap()
            |-- ExtrusionPropertyContainer::swap_properties()
-           `-- std::swap() [sorting and reversal permissions]
+           `-- std::swap() [sorting, reversal and rotation permissions]
 
    Owned child trees and property resources travel with the exchanged content.
    The surrounding slicing/ordering step is responsible for excluding concurrent
@@ -63,6 +63,7 @@ void ExtrusionEntity::swap_content(ExtrusionEntity &other) noexcept
     swap_properties(other);
     std::swap(m_can_sort, other.m_can_sort);
     std::swap(m_can_reverse, other.m_can_reverse);
+    std::swap(m_can_rotate, other.m_can_rotate);
 }
 
 static_assert(std::is_nothrow_move_assignable<ExtrusionEntity::Content>::value,
@@ -104,6 +105,7 @@ bool explicit_properties_match_parent(const ExtrusionEntity &child,
 
 // Decide whether a direct child collection may be removed and replaced by its
 // children without changing ordering, reversing or inherited property state.
+// Compare ordering permissions and inherited property payloads before removing a borrowed structural child.
 bool is_transparent_collection_child(const ExtrusionEntity &parent,
                                      const ExtrusionEntity &child,
                                      const EffectiveExtrusionProperties &parent_properties);
@@ -175,6 +177,8 @@ bool is_transparent_collection_child(const ExtrusionEntity &parent,
     if (child.can_sort() != parent.can_sort())
         return false;
     if (child.can_reverse() != parent.can_reverse())
+        return false;
+    if (child.can_rotate() != parent.can_rotate())
         return false;
     return explicit_properties_match_parent(child, parent_properties);
 }
@@ -281,11 +285,14 @@ ArcPolyline& ExtrusionEntity::polyline_ref()
     return *polyline;
 }
 
+// Copy local geometry without resetting rotation; the legacy child fallback retains the same permission and may allocate.
 void ExtrusionEntity::set_polyline(const ArcPolyline &polyline)
 {
     if (Children *children = std::get_if<Children>(&m_content)) {
         assert(false);
-        children->insert(children->begin(), std::make_unique<ExtrusionEntity>(m_can_reverse, polyline));
+        auto child = std::make_unique<ExtrusionEntity>(m_can_reverse, polyline);
+        child->m_can_rotate = m_can_rotate;
+        children->insert(children->begin(), std::move(child));
         return;
     }
 
@@ -293,11 +300,14 @@ void ExtrusionEntity::set_polyline(const ArcPolyline &polyline)
     m_can_sort = false;
 }
 
+// Transfer local geometry without resetting rotation; the legacy child fallback retains the same permission and may allocate.
 void ExtrusionEntity::set_polyline(ArcPolyline &&polyline)
 {
     if (Children *children = std::get_if<Children>(&m_content)) {
         assert(false);
-        children->insert(children->begin(), std::make_unique<ExtrusionEntity>(m_can_reverse, std::move(polyline)));
+        auto child = std::make_unique<ExtrusionEntity>(m_can_reverse, std::move(polyline));
+        child->m_can_rotate = m_can_rotate;
+        children->insert(children->begin(), std::move(child));
         return;
     }
 
@@ -339,6 +349,7 @@ ExtrusionEntity& ExtrusionEntity::child(size_t idx)
     return *children[idx];
 }
 
+// Borrow existing children or wrap local geometry in an owned child with its rotation permission; allocation failures propagate.
 ExtrusionEntity::Children& ExtrusionEntity::ensure_children()
 {
     if (Children *children = std::get_if<Children>(&m_content))
@@ -348,6 +359,7 @@ ExtrusionEntity::Children& ExtrusionEntity::ensure_children()
     if (ArcPolyline *polyline = std::get_if<ArcPolyline>(&m_content)) {
         if (!polyline->empty()) {
             std::unique_ptr<ExtrusionEntity> polyline_child = std::make_unique<ExtrusionEntity>(m_can_reverse, std::move(*polyline));
+            polyline_child->m_can_rotate = m_can_rotate;
             polyline_child->m_properties = m_properties;
             children.emplace_back(std::move(polyline_child));
         }
@@ -385,6 +397,7 @@ void ExtrusionEntity::insert_child(size_t idx, ExtrusionEntityUPtr &&child)
     children.insert(children.begin() + idx, std::move(child));
 }
 
+// Allocate a fixed execution leaf, retaining existing handles and moving permissions with wrapped content; rejected enums leave state unchanged.
 ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
     OrderedLeafPosition position,
     ExistingPropertyPlacement property_placement)
@@ -395,6 +408,7 @@ ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
         return nullptr;
 
     std::unique_ptr<ExtrusionEntity> new_leaf = std::make_unique<ExtrusionEntity>(false);
+    new_leaf->m_can_rotate = false;
     ExtrusionEntity *new_leaf_ptr = new_leaf.get();
 
     /*
@@ -409,6 +423,7 @@ ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
         const size_t insertion_idx =
             position == OrderedLeafPosition::Before ? 0 : current_children->size();
         current_children->insert(current_children->begin() + insertion_idx, std::move(new_leaf));
+        m_can_rotate = false;
         return new_leaf_ptr;
     }
 
@@ -438,6 +453,7 @@ ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
     previous_content_ptr->m_content = std::move(m_content);
     previous_content_ptr->m_can_sort = m_can_sort;
     previous_content_ptr->m_can_reverse = m_can_reverse;
+    previous_content_ptr->m_can_rotate = m_can_rotate;
 
     if (property_placement == ExistingPropertyPlacement::MoveWithExistingContent) {
         static_cast<ExtrusionPropertyContainer &>(*previous_content_ptr) =
@@ -447,6 +463,7 @@ ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
     m_content = std::move(replacement);
     m_can_sort = false;
     m_can_reverse = false;
+    m_can_rotate = false;
     return new_leaf_ptr;
 }
 
@@ -830,11 +847,14 @@ coordf_t ExtrusionPath::length() const
     return this->has_polyline() ? this->polyline().length() : ExtrusionEntity::length();
 }
 
+// Append owned clipped paths with the source's properties and ordering permissions; allocation failures propagate.
 void ExtrusionPath::_inflate_collection(const Polylines &polylines, ExtrusionEntityCollection *collection) const
 {
     ExtrusionEntitiesPtr to_add;
-    for (const Polyline &polyline : polylines)
+    for (const Polyline &polyline : polylines) {
         to_add.push_back(new ExtrusionPath(ArcPolyline{polyline}, this->attributes(), this->clone_properties(), this->can_reverse()));
+        to_add.back()->set_can_rotate(this->can_rotate());
+    }
     collection->append(std::move(to_add));
 }
 
@@ -1107,7 +1127,7 @@ ExtrusionLoop::ClosestPathPoint ExtrusionLoop::get_closest_path_and_point(const 
     return out;
 }
 
-// Splitting an extrusion loop, possibly made of multiple segments, some of the segments may be bridging.
+// Split a loop at the closest point, retaining the split path's permissions on both fragments and preserving the cyclic order.
 void ExtrusionLoop::split_at(const Point &point, bool prefer_non_overhang, const double scaled_epsilon)
 {
     if (this->paths().empty())
@@ -1135,6 +1155,8 @@ void ExtrusionLoop::split_at(const Point &point, bool prefer_non_overhang, const
     assert(path.polyline().is_valid());
     ExtrusionPath        p1(path.attributes(), path.clone_properties(), can_reverse());
     ExtrusionPath        p2(path.attributes(), path.clone_properties(), can_reverse());
+    p1.set_can_rotate(path.can_rotate());
+    p2.set_can_rotate(path.can_rotate());
     path.polyline().split_at(close_p.foot_pt, p1.polyline(), p2.polyline());
 
     if (this->paths().size() == 1) {

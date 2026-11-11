@@ -200,10 +200,13 @@ void append_tagged_script(storage_handle *storage,
     /* One non-sortable event root keeps the processor tag immediately before
        the script while still allowing each child to own its custom property. */
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     event.disable_sort().disable_reverse();
     MutableExtrusionEntity tag_entity = event.emplace_child();
+    tag_entity.set_can_rotate(false);
     tag_entity.custom_gcode(tag, C_EXTRUSION_CUSTOM_GCODE_GCODE);
     MutableExtrusionEntity script_entity = event.emplace_child();
+    script_entity.set_can_rotate(false);
     script_entity.script_gcode(script, script_type, arguments, processing_extruder);
     if (!events.append_before_move(event.mutable_view()).valid())
         throw std::runtime_error("Cannot append a custom height-marker script to the printing plan.");
@@ -215,10 +218,13 @@ void append_tagged_raw_gcode(storage_handle *storage,
                              const std::string &gcode)
 {
     StoredExtrusionEntity event(storage);
+    event.set_can_rotate(false);
     event.disable_sort().disable_reverse();
     MutableExtrusionEntity tag_entity = event.emplace_child();
+    tag_entity.set_can_rotate(false);
     tag_entity.custom_gcode(tag, C_EXTRUSION_CUSTOM_GCODE_GCODE);
     MutableExtrusionEntity gcode_entity = event.emplace_child();
+    gcode_entity.set_can_rotate(false);
     gcode_entity.custom_gcode(gcode, C_EXTRUSION_CUSTOM_GCODE_GCODE);
     if (!events.append_before_move(event.mutable_view()).valid())
         throw std::runtime_error("Cannot append custom height-marker G-code to the printing plan.");

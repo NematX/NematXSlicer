@@ -661,6 +661,7 @@ void append_visit_speed_command(storage_handle *storage, PrintingToolGroup tool,
                                 const c_extrusion_special_command code, const double value)
 {
     StoredExtrusionEntity command(storage);
+    command.set_can_rotate(false);
     command.get_or_add(EPropertySpecialCommand::key).set(code, value);
     command.disable_sort().disable_reverse();
     if (!tool.events().append_before_move(command.mutable_view()).valid())
