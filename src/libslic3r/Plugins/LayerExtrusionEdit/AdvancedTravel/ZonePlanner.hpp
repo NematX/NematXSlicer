@@ -4,13 +4,15 @@
 /*
 ZonePlanner supplies platter-space XY routes to travel providers. Construct one
 per worker with a compatibility planner, dated zone view, a copied Config view
-and a live run context. Settings must include the print-level default of
-avoid_crossing_perimeters, avoid_crossing_not_first_layer, nozzle_diameter and
-avoid_crossing_perimeters_max_detour: pass the complete print configuration,
-not Print::config(), which omits regional defaults. Config borrows its referenced
+and a live run context. Pass Print::config() for print settings and resolve the
+auxiliary avoidance flag from print_get_default_region_config(). The flag governs
+travels whose two endpoints have no valid object instance, such as skirt and brim.
+Config borrows its referenced
 configuration; that configuration must outlive the planner.
-Call eligible() for summaries and path(T, travel) in
-nondecreasing T order. Dependencies and context storage must outlive this object.
+Call static eligible(compatibility, config, auxiliary_avoidance, source, target)
+for summarize(), then build TravelZoneView and ZonePlanner, then call path(T, travel)
+in nondecreasing T order. Instance eligible(source, target) uses the same test
+with the planner's settings. Dependencies and context storage must outlive this object.
 Attractors select compatibility candidates; forbidden material takes precedence.
 The planner owns expanded geometry cached by active set, tool and ignored zones.
 Counters describe completed delegations, obstacle detours and straight fallbacks.
@@ -29,9 +31,13 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
 class ZonePlanner
 {
 public:
-    // Copy the complete print configuration view and borrow its settings, worker-local planners, zones and cancellation storage.
+    // Copy the print configuration view and resolved auxiliary flag; borrow worker-local planners, zones and cancellation storage.
     ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
-                const Config &print_config, const plugin_run_context *context);
+                const Config &print_config, bool auxiliary_avoidance, const plugin_run_context *context);
+    // Evaluate eligibility without constructing zones; settings and planner are borrowed for this call.
+    static bool eligible(const AvoidCrossing::CompatibilityPlanner &compatibility, const Config &print_config,
+                         bool auxiliary_avoidance, const TravelConnection::TravelEndpoint &source,
+                         const TravelConnection::TravelEndpoint &target);
     // Check regional activation only for valid object instances; other endpoints do not veto, and object targets respect first-layer exclusion.
     bool eligible(const TravelConnection::TravelEndpoint &source,
                   const TravelConnection::TravelEndpoint &target) const;
@@ -53,6 +59,7 @@ private:
     AvoidCrossing::CompatibilityPlanner &m_compatibility;
     TravelZoneView &m_zones;
     Config m_config;
+    bool m_auxiliary_avoidance;
     const plugin_run_context *m_context;
     std::map<CacheKey, Obstacles> m_obstacles;
     size_t m_delegations = 0;

@@ -4,7 +4,8 @@
 /*
 Default contributors supply instance-scoped membership masks and excluded tops
 to TravelZoneView. Pass either contributor in the view's contributor list.
-Attractors copy original islands, not routing rings, and are active only during
+Each forbidden top component is a separate zone, so ignoring an endpoint's top
+does not ignore disjoint tops. Attractors copy original islands, not routing rings, and are active only during
 consecutive travels targeting that island. Forbidden tops last for the layer.
 Both use the worker's borrowed LayerInputCache and return owned platter geometry.
 An original island is a layer perimeter slice before inset; TravelBoundary also

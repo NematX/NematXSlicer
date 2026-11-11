@@ -156,6 +156,7 @@ public:
                                   uint32_t group_idx, uint32_t layer_idx) const;
 
     /* Plan gaps in pair order, reacquiring phases and flags from borrowed roots, and update layer-owned flags and progress.
+       On normal return the planner has been called exactly once per PendingTravel, in travels order.
        Invalid paths, lost markers or inter-layer disagreement throw; use the same connector before reset() or setup(). */
     void apply(LayerTravelChronology &chronology,
                const TravelPathPlanner &planner, PluginProgress &progress) const;

@@ -187,7 +187,7 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
     attractors.contribute(owner.input(), masks);
     forbidden.contribute(owner.input(), excluded);
     REQUIRE(masks.size() == (support ? 12 : 6));
-    REQUIRE(excluded.size() == (tops && !support ? 2 : 0));
+    REQUIRE(excluded.size() == 2 * expected.to_avoid.size());
     for (const zones::TravelZone &zone : masks) {
         CHECK(zone.role == zones::ZoneRole::Attractor);
         CHECK_FALSE(zone.scope.support_travels_only);
@@ -227,11 +227,14 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
             CHECK(index == (instance + 1) * 6);
         }
         if (!excluded.empty()) {
-            CHECK(excluded[instance].begin == 0);
-            CHECK(excluded[instance].end == SIZE_MAX);
-            CHECK(excluded[instance].scope.extruder == EXTRUDER_ID_UNKNOWN);
-            CHECK(excluded[instance].scope.printing_catalog_id == id);
-            check_shifted_area(excluded[instance].area, expected.to_avoid, shifts[instance]);
+            for (size_t top = 0; top < expected.to_avoid.size(); ++top) {
+                const zones::TravelZone &zone = excluded[instance * expected.to_avoid.size() + top];
+                CHECK(zone.begin == 0);
+                CHECK(zone.end == SIZE_MAX);
+                CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
+                CHECK(zone.scope.printing_catalog_id == id);
+                check_shifted_area(zone.area, {expected.to_avoid[top]}, shifts[instance]);
+            }
         }
     }
     zones::TravelZoneView view({std::cref(attractors)}, owner.input());

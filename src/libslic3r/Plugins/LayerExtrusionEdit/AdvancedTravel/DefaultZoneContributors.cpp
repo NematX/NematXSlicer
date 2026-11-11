@@ -25,7 +25,8 @@ The attractor contributor appends Attractor zones from these original islands,
 before inset, top removal and tool clipping. Support masks include the lower
 object layer and have no forbidden tops. The tops contributor appends Forbidden
 zones. Neither contributor replaces out. Each mask is dated by consecutive target membership, whereas
-excluded tops apply throughout the layer. Scope is per instance, not per object.
+excluded tops apply throughout the layer, one zone per connected ExPolygon so
+endpoint membership ignores only that top. Scope is per instance, not per object.
 Cancellation and geometry failures propagate; output may already contain zones.
 
     DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute
@@ -41,7 +42,7 @@ namespace AC = AvoidCrossing;
 
 // Copy local contours and holes with the instance shift; the source geometry remains unchanged.
 polygon_work::ExPolygons shifted_area(polygon_work::ExPolygons area, c_point shift);
-// Append dated masks or whole-layer tops for valid target pairs; cancellation and geometry errors propagate.
+// Append dated masks or one whole-layer zone per top component for valid target pairs; cancellation and geometry errors propagate.
 void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, ZoneRole role);
 
 void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, const ZoneRole role)
@@ -72,8 +73,10 @@ void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone>
         }
         const ZoneScope scope{EXTRUDER_ID_UNKNOWN, target.printing_catalog_id, false};
         if (role == ZoneRole::Forbidden) {
-            if (!boundary->internal_boundary().to_avoid.empty())
-                out.push_back({role, shifted_area(boundary->internal_boundary().to_avoid, shift), 0, SIZE_MAX, scope});
+            for (const polygon_work::ExPolygon &top : boundary->internal_boundary().to_avoid) {
+                throw_if_cancelled(&input.run_context);
+                out.push_back({role, shifted_area({top}, shift), 0, SIZE_MAX, scope});
+            }
             continue;
         }
         for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygon> &growth : boundary->internal_boundary().boundary_growth) {

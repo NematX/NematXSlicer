@@ -8,7 +8,13 @@
 Register the advanced travel alternative during built-in plugin registration.
 The layer_extrusion_edit.travel selector can choose it explicitly. It uses
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
-gaps, then fills them with XY routes from AvoidCrossing::CompatibilityPlanner.
+gaps, then fills them with XY routes from the selected advanced planner.
+Compatibility is the default and the fallback for absent or unknown choices.
+The opt-in zones planner collects default island attractors and forbidden tops
+only when the chronology contains an eligible travel after layer entry. The
+layer-entry travel stays straight. Compatibility owns its worker-local input
+cache; the default contributors share a second cache owned by advanced travel,
+so layer geometry may be copied twice.
 The connector owns insertion, Z interpolation and materialized travel flags.
 Avoid-crossing remains the default when active; straight travel is next.
 */
@@ -19,6 +25,8 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 
 // Register the built-in advanced travel provider without redeclaring its group.
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
+// Register the two no-op planner choices and declare their exclusive selection group.
+void register_advanced_travel_planners(orchestrator_handle *orchestrator);
 
 }}}
 #endif

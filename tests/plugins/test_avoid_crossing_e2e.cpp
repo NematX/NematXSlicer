@@ -20,7 +20,7 @@
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 
 /*
-This end-to-end gate checks that both compatible travel providers' settings
+This end-to-end gate checks that compatible and zone-based travel providers' settings
 affect a processed printing plan and the text G-code published by the production
 exporter. The scene is a 0.6 mm-high square ring with a separate central island,
 so travels can stay on one island or cross between the two.
@@ -45,9 +45,11 @@ than two vertices; this is not a geometric test of departure from a straight lin
 
 For the avoid-crossing baseline, the gate compares disabled avoidance with the
 straight-travel provider; the advanced baseline instead varies the selector toward
-the avoid-crossing provider. For both baselines, the gate checks
+the avoid-crossing provider. The advanced matrix runs with both compatibility
+and zones selected. For every baseline, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
-and checks that island weights change routes while keeping their endpoints.
+and checks that island weights change compatibility routes while keeping their
+endpoints; the zones planner's inter-island routes are independent of those weights.
 It compares deposited volume except for settings that change extrusion geometry.
 For each case with deviations, at least one intermediate plan XY must occur in
 the published G0/G1 XY moves without an E word within 0.001 mm. This does not match every
@@ -68,6 +70,8 @@ only on the normal return path, and removal errors are ignored.
 namespace {
 using namespace Slic3r;
 struct Result {
+    // Planner selected by the host before processing; empty when no member is active.
+    std::string selected_planner;
     // Each route contains consecutive scaled X, Y, Z-offset triples in execution order.
     std::vector<std::vector<coord_t>> travels;
     // Routes whose endpoints lie on different islands.
@@ -90,6 +94,8 @@ struct TravelActivation {
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.compatibility", true);
+        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.zones", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
     }
     // Clear the test activation and reactivate the saved plugins after all case-local Prints are destroyed.
@@ -109,6 +115,67 @@ void collect_travels(const ExtrusionEntity &entity, Result &result);
 // Append geometric leaves in child order, skipping consecutive duplicate XY and Z-offset triples.
 void append_points(const ExtrusionEntity &entity, std::vector<coord_t> &points);
 
+// Compare explicit planner selection and activation fallbacks through STL, slicing and exported G-code.
+TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[plugins][plugin-e2e][travel][travel-zones]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    for (const char *id : {"layer_extrusion_edit.travel.advanced.planner.compatibility",
+                           "layer_extrusion_edit.travel.advanced.planner.zones"}) {
+        const Plugin *planner = host.get_plugin(id);
+        REQUIRE(planner != nullptr);
+        CHECK(planner->get_used_config_keys().empty());
+        CHECK(planner->get_defined_config_keys().empty());
+    }
+    const std::string selector = Steps::plugin_exclusive_group_option_key(
+        host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
+    const std::string planner_selector = Steps::plugin_exclusive_group_option_key(
+        host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner");
+    const char *compatibility = "layer_extrusion_edit.travel.advanced.planner.compatibility";
+    const char *zones = "layer_extrusion_edit.travel.advanced.planner.zones";
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"}, {"ironing", "0"},
+        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
+        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const Result baseline = run_case(config, "planner-default");
+    CHECK(baseline.selected_planner == compatibility);
+    REQUIRE(baseline.deviated > 0);
+    bool expect_zones = false;
+    std::string expected = compatibility;
+    SECTION("Explicit compatibility") { config.set_deserialize_strict(planner_selector, compatibility); }
+    SECTION("Explicit zones") {
+        config.set_deserialize_strict(planner_selector, zones);
+        expected = zones;
+        expect_zones = true;
+    }
+    SECTION("Both inactive") {
+        REQUIRE(host.set_plugin_active(compatibility, false));
+        REQUIRE(host.set_plugin_active(zones, false));
+        expected.clear();
+    }
+    SECTION("Only compatibility active") { REQUIRE(host.set_plugin_active(zones, false)); }
+    SECTION("Only zones active") {
+        REQUIRE(host.set_plugin_active(compatibility, false));
+        expected = zones;
+        expect_zones = true;
+    }
+    const Result result = run_case(config, "planner-selection");
+    CHECK(result.selected_planner == expected);
+    CHECK(result.volume == Approx(baseline.volume).margin(0.01));
+    CHECK(result.deviated > 0);
+    if (expect_zones)
+        CHECK(result.travels != baseline.travels);
+    else
+        CHECK(result.travels == baseline.travels);
+}
+
 // Validate setting coverage and compare an enabled baseline with variations; ironing is coupled with top avoidance.
 TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e2e][avoid-crossing-perimeters]")
 {
@@ -116,8 +183,10 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    const char *provider = GENERATE("layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                                    "layer_extrusion_edit.travel.advanced");
+    const std::string mode = GENERATE(std::string("avoid-crossing"), std::string("compatibility"), std::string("zones"));
+    const bool use_zones = mode == "zones";
+    const char *provider = mode == "avoid-crossing" ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" :
+                                                    "layer_extrusion_edit.travel.advanced";
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const std::map<std::string, std::vector<std::string>> domains{
@@ -151,6 +220,9 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     }
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict(selector, provider);
+    if (use_zones)
+        baseline.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+            "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
     baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"avoid_travel_island", "1"}, {"avoid_travel_island_weight", "1"},
@@ -160,6 +232,9 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
     const Result enabled = run_case(baseline, "baseline");
+    if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
+        REQUIRE(enabled.selected_planner == (use_zones ? "layer_extrusion_edit.travel.advanced.planner.zones" :
+                                                        "layer_extrusion_edit.travel.advanced.planner.compatibility"));
     REQUIRE(enabled.deviated > 0);
     Result disabled, straight, weight_zero, weight_two;
     for (const auto &domain : domains)
@@ -203,7 +278,10 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         CHECK(std::vector<coord_t>(zero.begin(), zero.begin() + 3) == std::vector<coord_t>(two.begin(), two.begin() + 3));
         CHECK(std::vector<coord_t>(zero.end() - 3, zero.end()) == std::vector<coord_t>(two.end() - 3, two.end()));
     }
-    CHECK(weight_zero.inter_island != weight_two.inter_island);
+    if (use_zones)
+        CHECK(weight_zero.inter_island == weight_two.inter_island);
+    else
+        CHECK(weight_zero.inter_island != weight_two.inter_island);
 }
 
 Result run_case(const DynamicPrintConfig &config, const std::string &name)
@@ -232,6 +310,8 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &print.config());
     REQUIRE(selected != nullptr);
     REQUIRE(selected->get_id() == config.opt_serialize(selector));
+    Plugin *selected_planner = Steps::selected_active_plugin_from_group(orchestrator,
+        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner", &print.config());
     print.set_status_silent();
     print.process();
     REQUIRE_FALSE(Orchestrator::instance().is_plugin_cancelled());
@@ -249,6 +329,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name)
     REQUIRE(published_path == exported.string());
     REQUIRE(print.printing_plan() != nullptr);
     Result result;
+    if (selected_planner != nullptr) result.selected_planner = selected_planner->get_id();
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers)
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)

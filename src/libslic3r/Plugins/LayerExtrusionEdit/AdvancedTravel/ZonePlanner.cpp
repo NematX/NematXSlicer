@@ -14,9 +14,10 @@ ZonePlanner chooses compatibility candidates inside one attractor and otherwise
 routes straight segments around forbidden material in platter coordinates.
 Endpoint membership removes individual unexpanded zones before union and nozzle
 expansion, so overlapping margins do not erase unrelated obstacles. Cached areas
-belong to this worker. The Config view is copied but its complete print
-configuration (including avoid_crossing_not_first_layer) is borrowed, as are
-the other inputs; all must outlive the planner.
+belong to this worker. The Config view of print settings is copied, its configuration borrowed;
+the auxiliary avoidance flag is resolved from the default region configuration
+and governs travels whose two endpoints have no valid object instance (skirt and brim).
+The other inputs are borrowed too; all borrowed data must outlive the planner.
 
 Segment intersections split the filled area into open intervals. Midpoint tests
 exclude tangencies, collinear contacts and holes. For each blocked segment, the
@@ -169,18 +170,26 @@ work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const H
 } // namespace
 
 ZonePlanner::ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
-                         const Config &print_config, const plugin_run_context *context) :
-    m_compatibility(compatibility), m_zones(zones), m_config(print_config), m_context(context)
+                         const Config &print_config, const bool auxiliary_avoidance, const plugin_run_context *context) :
+    m_compatibility(compatibility), m_zones(zones), m_config(print_config),
+    m_auxiliary_avoidance(auxiliary_avoidance), m_context(context)
 {}
 
 bool ZonePlanner::eligible(const travel::TravelEndpoint &source, const travel::TravelEndpoint &target) const
 {
-    const bool source_has_instance = m_compatibility.endpoint_has_object_instance(source);
-    const bool target_has_instance = m_compatibility.endpoint_has_object_instance(target);
-    if ((source_has_instance && !m_compatibility.endpoint_enables_avoidance(source)) ||
-        (target_has_instance && !m_compatibility.endpoint_enables_avoidance(target))) return false;
-    if (!source_has_instance && !target_has_instance && !m_config.bool_or_default("avoid_crossing_perimeters", false)) return false;
-    if (target_has_instance && m_config.bool_or_default("avoid_crossing_not_first_layer", true)) {
+    return eligible(m_compatibility, m_config, m_auxiliary_avoidance, source, target);
+}
+
+bool ZonePlanner::eligible(const AvoidCrossing::CompatibilityPlanner &compatibility, const Config &print_config,
+                           const bool auxiliary_avoidance, const travel::TravelEndpoint &source,
+                           const travel::TravelEndpoint &target)
+{
+    const bool source_has_instance = compatibility.endpoint_has_object_instance(source);
+    const bool target_has_instance = compatibility.endpoint_has_object_instance(target);
+    if ((source_has_instance && !compatibility.endpoint_enables_avoidance(source)) ||
+        (target_has_instance && !compatibility.endpoint_enables_avoidance(target))) return false;
+    if (!source_has_instance && !target_has_instance && !auxiliary_avoidance) return false;
+    if (target_has_instance && print_config.bool_or_default("avoid_crossing_not_first_layer", true)) {
         const Layer layer = target.region_island.region(0).layer();
         if (AvoidCrossing::is_first_layer(layer.object(), layer)) return false;
     }

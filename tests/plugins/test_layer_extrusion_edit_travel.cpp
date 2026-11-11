@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 #include <cstdint>
 #include <initializer_list>
@@ -852,6 +853,79 @@ TEST_CASE("Semantic continuous transitions keep the travel slot empty",
         slic3r_api::PRINTING_EXTRUSION_SCOPE_INCOMING_TRAVEL_MATERIALIZED));
 }
 
+// Exercise the production zones branch with an incoming layer travel across two tops and an optional eligible gap after it.
+TEST_CASE("Advanced zones keep layer entry straight while later travels avoid tops", "[plugins][travel][travel-zones]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool following_gap = GENERATE(false, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.zones");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}});
+    TriangleMesh mesh = make_cube(4., 4., 0.6);
+    TriangleMesh middle = make_cube(4., 4., 0.6);
+    middle.translate(8., 0., 0.); mesh.merge(middle);
+    TriangleMesh tower = make_cube(4., 4., 1.);
+    tower.translate(16., 0., 0.); mesh.merge(tower);
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    print.set_status_silent();
+    print.process();
+    Layer &layer = print.object(0).layers()[2];
+    const Point minimum = get_extents(layer.lslices()).min;
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const c_point shift = print_view.object(0).instance_shift(0);
+    const Point left = minimum + Point(scale_i(2.), scale_i(2.));
+    const Point right = minimum + Point(scale_i(18.), scale_i(2.));
+    const LayerRegionIsland *left_region = nullptr, *right_region = nullptr;
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+    for (size_t i = 0; i < layer.lslices().size(); ++i) {
+        const slic3r_api::LayerRegionIsland region = layer_view.island(i).get_or_create_full_region_island(0);
+        if (layer.lslices()[i].contains(left)) left_region = reinterpret_cast<const LayerRegionIsland *>(region.handle());
+        if (layer.lslices()[i].contains(right)) right_region = reinterpret_cast<const LayerRegionIsland *>(region.handle());
+    }
+    REQUIRE(left_region != nullptr);
+    REQUIRE(right_region != nullptr);
+    PrintingPlan &plan = print.mutable_printing_plan();
+    const uint32_t catalog = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.clear();
+    plan.groups.resize(1);
+    plan.groups[0].layers.resize(2);
+    PrintingLayerGroup &previous = plan.groups[0].layers[0];
+    previous.print_z = scale_i(0.4);
+    previous.tool_groups.resize(1);
+    previous.tool_groups[0].extruder_id = 0;
+    const Point entry = minimum + Point(scale_i(-2.) + shift.x, scale_i(2.) + shift.y);
+    append_extrusion(previous.tool_groups[0], make_path(entry - Point(scale_i(1.), 0), entry));
+    PrintingLayerGroup &current = plan.groups[0].layers[1];
+    current.print_z = layer.scaled_print_z();
+    current.tool_groups.resize(1);
+    PrintingToolGroup &tool = current.tool_groups[0];
+    tool.extruder_id = 0;
+    const Point target = right + Point(shift.x, shift.y);
+    append_extrusion(tool, make_path(target, target + Point(scale_i(1.), 0)), right_region, catalog);
+    if (following_gap)
+        append_extrusion(tool, make_path(left + Point(shift.x, shift.y),
+            left + Point(shift.x + scale_i(1.), shift.y)), left_region, catalog);
+    // This hand-built plan is a separate layer-edit run, not another unit of the completed slicing run.
+    print.pipeline_progress().reset();
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.zones"});
+    const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope first = ordered_scope(*tool.extrusions[0].root);
+    REQUIRE(first.travel().point_count() == 2);
+    CHECK(first.travel().point(0).x == entry.x());
+    CHECK(first.travel().point(1).x == target.x());
+    if (following_gap)
+        CHECK(ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2);
+}
+
 TEST_CASE("Prepared travel chronology records snapped sources and layer entry provenance",
           "[plugins][layer-extrusion-edit][travel][chronology]")
 {
@@ -918,12 +992,15 @@ TEST_CASE("Prepared travel chronology records snapped sources and layer entry pr
     size_t calls = 0;
     connector.apply(chronology, [&calls, &chronology](const TravelEndpoint &source,
         const TravelEndpoint &target, extruder_index_t tool) {
+        REQUIRE(calls < chronology.travels.size());
         CHECK(source.position.x == chronology.travels[calls].source.position.x);
         CHECK(target.position.x == chronology.travels[calls].target.position.x);
+        CHECK(tool == chronology.travels[calls].extruder_id);
         ++calls;
         return straight_path(source, target, tool);
     }, progress);
     CHECK(calls == 2);
+    CHECK(calls == chronology.travels.size());
     CHECK(progress.done() == 4);
     size_t index = 0;
     for (PrintingToolGroup &tool : first.tool_groups) {
