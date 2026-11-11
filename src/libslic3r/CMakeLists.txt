@@ -398,6 +398,8 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/SmoothPattern.hpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel.cpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel.hpp
+	Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.cpp
+	Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.cpp
 	Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.cpp
