@@ -12,6 +12,7 @@ requested output directory, outside versioned source files.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 import json
@@ -172,8 +173,12 @@ def main() -> None:
         moves = read_moves(case / "output.gcode")
         if not moves:
             raise AssertionError(f"{name}: empty deposition")
-        results.append({"name": name, "changes": changes or {}, "status": "passed", "moves": len(moves),
-                        "gaps": sum(m[0] == "Gap fill" for m in moves)})
+        result = {"name": name, "changes": changes or {}, "status": "passed", "moves": len(moves),
+                  "gaps": sum(m[0] == "Gap fill" for m in moves)}
+        if name == "enabled":
+            result["moves_sha256"] = hashlib.sha256(
+                json.dumps(moves, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")).hexdigest()
+        results.append(result)
         return moves
 
     def run_all(cases):

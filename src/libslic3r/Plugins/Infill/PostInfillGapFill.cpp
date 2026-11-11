@@ -18,6 +18,7 @@
 #include "libslic3r/Api/plugin/cpp/ParallelFor.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
+#include "libslic3r/Plugins/Common/ResidualGapFill.hpp"
 
 /* Complete solid infill without regenerating its pattern. A source surface and
    the island's free infill area bound every addition. Inherited path attributes
@@ -27,8 +28,8 @@
 
        run_impl -> fill_layer: independent layer trees and scratch storage
            fill_region -> fill_surface: recover the stamped source and recipe
-               CoverageVisitor: measure existing paths before any insertion
-               generate_gaps: open residuals and build variable-width paths
+               GapFill::collect_paths / coverage: measure paths before insertion
+               GapFill::generate: open residuals and build variable-width paths
                publish: order additions after old content, retain the root stamp
 
    Old paths and their private properties remain unchanged. New paths inherit
@@ -40,7 +41,7 @@
 namespace slic3r_api { namespace Infill { namespace PostInfillGapFillPlugin {
 namespace {
 
-constexpr double k_rounded_section = 1. - PI / 4.;
+using GapFill::k_rounded_section;
 const char *k_no_dependencies[] = { nullptr };
 const raw_used_config_key k_used_keys[] = {
     {"infill_filled_top", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -60,9 +61,6 @@ const raw_used_config_key k_used_keys[] = {
 const char *activation_key(raw_surface_type type);
 // Rebuild the nominal non-bridge flow from the final recipe, retaining its nozzle.
 c_flow recipe_flow(const EPropertyInfill &recipe, const LayerRegion &region);
-// Open residuals at the minimum width and generate paths inside the allowed area.
-StoredExtrusionEntity generate_gaps(storage_handle *, const ExPolygonCollection &,
-    const ExPolygonCollection &, c_flow, const RegionSettingsValue &, coord_t, const plugin_run_context *);
 // Complete one stamped subtree, keeping its recipe on the direct bucket child.
 void fill_surface(storage_handle *, MutableExtrusionEntity, const Surface &, const LayerIsland &,
     const RegionSettings &, const LayerRegion &, coord_t, const plugin_run_context *);
@@ -71,41 +69,6 @@ void fill_region(storage_handle *, const run_ctx_post_infill_generation &, const
     const LayerRegionIsland &, coord_t, const plugin_run_context *);
 // Parallel worker: layers own disjoint extrusion trees and temporary storage.
 void fill_layer(uint32_t, storage_handle *, const run_ctx_post_infill_generation *, const plugin_run_context *);
-
-// Accumulate spacing footprints while resolving attributes through the tree.
-class CoverageVisitor : public ExtrusionTreeVisitor<>
-{
-public:
-    CoverageVisitor(storage_handle *storage, float ratio) : occupied(storage), m_storage(storage), m_ratio(ratio) {}
-    StoredPolygonCollection occupied;
-
-    // Resolve inherited flow before offsetting the local centerline.
-    void visit_leaf(MutableExtrusionEntity entity) override
-    {
-        if (!entity.has_polyline())
-            return;
-        const EPropertyAttributes *attributes = current_property(EPropertyAttributes::key);
-        if (attributes == nullptr)
-            throw std::runtime_error("Missing infill extrusion attributes for gap fill");
-        const c_extrusion_property_attributes &a = *attributes;
-        // A path's section is a rectangle with rounded ends: neighbouring paths
-        // overlap by height * (1 - pi/4), so a path covers its spacing, not its width.
-        const double spacing = a.width - a.height * k_rounded_section * m_ratio;
-        if (!(spacing > 0.) || !std::isfinite(spacing))
-            throw std::runtime_error("Invalid infill coverage spacing");
-        StoredPolyline line(m_storage);
-        const std::vector<c_point> points = entity.readonly().linear_points();
-        line.insert_array(0, points.data(), uint32_t(points.size()));
-        StoredPolylineCollection lines(m_storage);
-        lines.push_back(line);
-        StoredPolygonCollection footprint = clipper_offset_polylines(m_storage, lines,
-            scale_d(spacing / 2.) + SCALED_EPSILON).to_polygon_collection();
-        occupied.append_move_from(footprint);
-    }
-private:
-    storage_handle *m_storage;
-    float m_ratio;
-};
 
 // Apply the recipe multiplier exactly once, only to newly generated attributes.
 class MultiplyFlowVisitor : public ExtrusionTreeVisitor<>
@@ -142,7 +105,7 @@ c_flow recipe_flow(const EPropertyInfill &recipe, const LayerRegion &region)
         RAW_EXTRUSION_ROLE_TOP_SOLID_INFILL : RAW_EXTRUSION_ROLE_SOLID_INFILL;
     c_flow flow = region.flow(role);
     // The recipe stores the spacing between paths; the width adds back the
-    // overlap of their rounded ends, as in CoverageVisitor.
+    // overlap of their rounded ends, as in GapFill::coverage.
     const double h = unscaled(recipe.height());
     const double w = unscaled(recipe.spacing()) + h * k_rounded_section * recipe.spacing_ratio();
     flow.height = recipe.height();
@@ -154,55 +117,6 @@ c_flow recipe_flow(const EPropertyInfill &recipe, const LayerRegion &region)
     if (!(h > 0. && w > 0. && flow.mm3_per_mm > 0. && flow.nozzle_diameter > 0))
         throw std::runtime_error("Invalid infill recipe flow for gap fill");
     return flow;
-}
-
-StoredExtrusionEntity generate_gaps(storage_handle *storage, const ExPolygonCollection &residual,
-    const ExPolygonCollection &allowed, c_flow flow, const RegionSettingsValue &settings,
-    coord_t resolution, const plugin_run_context *run_ctx)
-{
-    const double w = unscaled(flow.width), h = unscaled(flow.height);
-    // Narrowest gap: the largest of the historical 0.4 * (1 - 0.4) of the nozzle, the
-    // configured minimum, and just above height * (1 - pi/4), below which a path would
-    // have no positive spacing. Widest gap: two path widths, or the smaller configured
-    // maximum.
-    const double minimum = std::max({0.24 * unscaled(flow.nozzle_diameter),
-        settings.get_effective_value(w, "gap_fill_min_width"), h * k_rounded_section + EPSILON});
-    const double configured_max = settings.get_effective_value(w, "gap_fill_max_width");
-    const double maximum = configured_max > 0. ? std::min(2. * w, configured_max) : 2. * w;
-    StoredExtrusionEntity output(storage);
-    if (minimum > maximum)
-        return output;
-    const double min_area = settings.get_effective_value(w * w, "gap_fill_min_area");
-    const coord_t min_length = scale_i(settings.get_effective_value(w, "gap_fill_min_length"));
-    const double extension = settings.get_effective_value(w, "gap_fill_extension");
-    const ClipperContext clip(storage);
-    StoredExPolygonCollection opened = clipper_offset2(clip(residual), -scale_d(minimum / 2.),
-        scale_d(minimum / 2.)).to_expolygon_collection();
-    StoredExPolygonCollection areas = clipper_intersection(clip(opened), clip(allowed)).to_expolygon_collection();
-    areas.ensure_valid(resolution);
-    for (const ExPolygon area : areas) {
-        throw_if_cancelled(run_ctx);
-        if (unscaled(unscaled(area.area())) <= min_area)
-            continue;
-        MedialAxisExtrusionFactory factory(RAW_EXTRUSION_ROLE_GAP_FILL, flow);
-        factory.medial_widths(scale_i(minimum), scale_i(maximum))
-            .min_centerline_length(min_length).min_extrusion_length(min_length)
-            .variable_width_resolution(resolution).endpoint_extension(scale_i(extension)).can_reverse();
-        if (extension > 0.) {
-            for (const ExPolygon bound : allowed) {
-                StoredExPolygonCollection crossing = clipper_intersection(clip(area), clip(bound)).to_expolygon_collection();
-                if (!crossing.empty()) {
-                    factory.extension_area(bound);
-                    break;
-                }
-            }
-        }
-        StoredExtrusionEntity generated = factory.build(storage, area);
-        if (!generated.readonly().empty() &&
-            output.append_child_move(generated.mutable_view()) == EXTRUSION_INDEX_INVALID)
-            throw std::runtime_error("Cannot collect infill gap fill");
-    }
-    return output;
 }
 
 void fill_surface(storage_handle *storage, MutableExtrusionEntity tree, const Surface &surface,
@@ -225,9 +139,10 @@ void fill_surface(storage_handle *storage, MutableExtrusionEntity tree, const Su
         clipper_intersection(clip(surface.expolygon()), clip(free)).to_expolygon_collection();
     if (domain.empty())
         return;
-    CoverageVisitor coverage(storage, recipe.spacing_ratio());
-    coverage.traverse(tree);
-    StoredExPolygonCollection residual = clipper_diff(clip(domain), clip(coverage.occupied)).to_expolygon_collection();
+    std::vector<GapFill::Path> paths;
+    GapFill::collect_paths(tree.readonly(), paths);
+    StoredPolygonCollection occupied = GapFill::coverage(storage, paths, recipe.spacing_ratio(), GapFill::Footprint::Spacing);
+    StoredExPolygonCollection residual = clipper_diff(clip(domain), clip(occupied)).to_expolygon_collection();
     if (residual.empty())
         return;
     StoredExtrusionEntity additions(storage);
@@ -236,8 +151,12 @@ void fill_surface(storage_handle *storage, MutableExtrusionEntity tree, const Su
             continue;
         StoredExPolygonCollection allowed = entry.second.intersections(domain.readonly());
         StoredExPolygonCollection remaining = entry.second.intersections(residual.readonly());
-        StoredExtrusionEntity gaps = generate_gaps(storage, remaining, allowed, recipe_flow(recipe, region),
-            entry.first, resolution, run_ctx);
+        const c_flow flow = recipe_flow(recipe, region);
+        const GapFill::Limits limits = GapFill::resolve_limits([&entry](const char *name, double base) {
+            return entry.first.get_effective_value(base, name);
+        }, unscaled(flow.width), resolution);
+        StoredExtrusionEntity gaps = GapFill::generate(storage, remaining, allowed, flow,
+            limits, RAW_EXTRUSION_ROLE_GAP_FILL, run_ctx);
         if (!gaps.readonly().empty() && additions.append_child_move(gaps.mutable_view()) == EXTRUSION_INDEX_INVALID)
             throw std::runtime_error("Cannot stage infill gap fill");
     }
@@ -249,14 +168,10 @@ void fill_surface(storage_handle *storage, MutableExtrusionEntity tree, const Su
     // The old content keeps all its private properties. Its surface recipe moves
     // up to the tree root, the bucket child read by the full-fill volume corrector,
     // so that pass measures the old content and the new gap fill together.
-    MutableExtrusionEntity queue = tree.emplace_ordered_leaf(OrderedLeafPosition::After,
-        ExistingPropertyPlacement::MoveWithExistingContent);
-    if (!queue.valid())
-        throw std::runtime_error("Cannot order infill gap fill");
+    MutableExtrusionEntity queue = GapFill::ordered_boundary(tree);
     tree.get_or_add(EPropertyInfill::key) = recipe;
     tree.child_mutable(0).remove(EPropertyInfill::key);
-    if (queue.append_child_move(additions.mutable_view()) == EXTRUSION_INDEX_INVALID)
-        throw std::runtime_error("Cannot publish infill gap fill");
+    GapFill::append_additions(queue, additions);
 }
 
 void fill_region(storage_handle *storage, const run_ctx_post_infill_generation &ctx,

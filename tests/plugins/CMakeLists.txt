@@ -83,6 +83,7 @@ add_executable(${_TEST_NAME}_tests
     test_smooth_pattern.cpp
     test_post_full_fill_volume.cpp
     test_post_infill_gap_fill.cpp
+    test_residual_gap_fill.cpp
     test_rectilinear_connect.cpp
     test_rectilinear_fills.cpp
     test_rectilinear_sawtooth.cpp
@@ -460,7 +461,7 @@ add_test(NAME infill_gap_fill COMMAND ${_TEST_NAME}_tests "[plugins][infill][gap
 set_tests_properties(infill_gap_fill PROPERTIES LABELS "infill;gap-fill" TIMEOUT 180)
 
 # The export gate uses the production registry and the host's default plugins.
-if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND TARGET Slic3r_app_console)
+if(TARGET Slic3r_app_console)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME infill_gap_fill_export
