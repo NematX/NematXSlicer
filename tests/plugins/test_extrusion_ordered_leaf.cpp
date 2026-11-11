@@ -176,6 +176,103 @@ TEST_CASE("Protected extrusion wrappers retain separate eligible contour childre
     CHECK(copy->child(1).first_point() == view.child(1).ExtrusionEntity::first_point());
 }
 
+// Child seam eligibility follows the actual stored continuity, not a legacy type or an inherited permission bit.
+TEST_CASE("Seam descent preserves fixed contour entries and continuous connections",
+          "[plugins][extrusion][seam-unit-preparation]")
+{
+    using namespace Slic3r;
+    ExtrusionPath loop_path(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+    loop_path.set_polyline(ArcPolyline(Points{{0, 0}, {0, 10000}, {10000, 10000}, {0, 0}}));
+    ExtrusionMultiPath fixed_contour(loop_path);
+    const ExtrusionEntity &fixed_view = fixed_contour;
+    REQUIRE(is_seam_unit(fixed_view.child(0)));
+    CHECK_FALSE(can_choose_child_seam(fixed_view, fixed_view.child(0), true));
+    CHECK(fixed_view.child(0).can_rotate());
+    ExtrusionEntityUPtr fixed_copy = fixed_contour.clone_canonical();
+    CHECK_FALSE(can_choose_child_seam(*fixed_copy, fixed_copy->child(0), true));
+
+    ExtrusionEntity wrapper(ExtrusionEntity::Children(), false, false, true);
+    wrapper.set_can_rotate(false);
+    wrapper.append_child(std::make_unique<ExtrusionEntity>(false));
+    wrapper.append_child(std::make_unique<ExtrusionPath>(loop_path));
+    const ExtrusionEntity &wrapper_view = wrapper;
+    CHECK(can_choose_child_seam(wrapper_view, wrapper_view.child(1), true));
+    CHECK_FALSE(can_choose_child_seam(wrapper_view, wrapper_view.child(1), false));
+    ExtrusionEntityUPtr wrapper_copy = wrapper.clone_canonical();
+    CHECK(can_choose_child_seam(*wrapper_copy, wrapper_copy->child(1), true));
+
+    ExtrusionEntity connected(ExtrusionEntity::Children(), false, false, true);
+    connected.set_can_rotate(false);
+    connected.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{-10000, 0}, {0, 0}})));
+    connected.append_child(std::move(wrapper_copy));
+    connected.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {20000, 0}})));
+    const ExtrusionEntity &connected_view = connected;
+    REQUIRE(connected_view.is_continuous());
+    const bool child_context = can_choose_child_seam(connected_view, connected_view.child(1), true);
+    CHECK_FALSE(child_context);
+    CHECK_FALSE(can_choose_child_seam(connected_view.child(1), connected_view.child(1).child(1), child_context));
+    CHECK(is_seam_unit(connected_view.child(1).child(1)));
+
+    ExtrusionEntity separated(ExtrusionEntity::Children(), false, false, true);
+    separated.set_can_rotate(false);
+    separated.append_child(std::make_unique<ExtrusionPath>(loop_path));
+    loop_path.polyline().translate(Point(50000, 0));
+    separated.append_child(std::make_unique<ExtrusionPath>(loop_path));
+    const ExtrusionEntity &separated_view = separated;
+    REQUIRE_FALSE(separated_view.is_continuous());
+    CHECK(can_choose_child_seam(separated_view, separated_view.child(0), true));
+    CHECK(can_choose_child_seam(separated_view, separated_view.child(1), true));
+}
+
+// Every one-shot property type is detected on a leaf and makes its parent a seam barrier.
+TEST_CASE("One shot seam events make their parent a seam barrier",
+          "[plugins][extrusion][seam-unit-preparation]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    struct PropertySpec { extrusion_property_type type; size_t size; size_t alignment; };
+    const PropertySpec properties[] = {
+        {EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE, sizeof(c_extrusion_property_custom_gcode), alignof(c_extrusion_property_custom_gcode)},
+        {EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND, sizeof(c_extrusion_property_special_command), alignof(c_extrusion_property_special_command)},
+        {EXTRUSION_PROPERTY_TYPE_HEATER, sizeof(c_extrusion_property_heater), alignof(c_extrusion_property_heater)},
+        {EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS, sizeof(c_extrusion_property_extrusion_axis), alignof(c_extrusion_property_extrusion_axis)}
+    };
+    for (const PropertySpec &property : properties) {
+        CAPTURE(property.type);
+        ExtrusionEntity leaf(false, ArcPolyline(Points{{0, 0}, {10000, 0}}));
+        REQUIRE_FALSE(has_one_shot_extrusion_event(leaf));
+        void *const event = Access::get_or_add_property_data_mutable(leaf, property.type, property.size, property.alignment);
+        REQUIRE(event != nullptr);
+        CHECK(has_one_shot_extrusion_event(leaf));
+        ExtrusionEntity parent(ExtrusionEntity::Children(), false, false, true);
+        parent.append_child(leaf.clone_canonical());
+        CHECK(has_seam_barrier(parent));
+    }
+}
+
+// Empty opaque events block parent reordering, while a sole closed child may still rotate in place after delegation.
+TEST_CASE("Seam barriers distinguish geometry from empty property events",
+          "[plugins][extrusion][seam-unit-preparation]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}, {0, 0}})));
+    root.child(0).add_property(ExtrusionPropertySpeed(25.f));
+    CHECK_FALSE(has_seam_barrier(root));
+    root.append_child(std::make_unique<ExtrusionEntity>(false));
+    CHECK_FALSE(has_seam_barrier(root));
+    REQUIRE(Access::get_or_add_property_data_mutable(root.child(1), SLIC3R_PROPERTY_TYPE_CUSTOM_BEGIN + 932,
+                                                    sizeof(uint32_t), alignof(uint32_t)) != nullptr);
+    CHECK(has_seam_barrier(root));
+    const ExtrusionEntity &view = root;
+    CHECK(is_seam_unit(view));
+    CHECK(can_choose_child_seam(view, view.child(0), true));
+    root.set_can_rotate(false);
+    CHECK(can_choose_child_seam(view, view.child(0), true));
+    CHECK_FALSE(is_seam_unit(view));
+}
+
 // Copy mixed native and hybrid trees once without changing their source handles or legacy clone behavior.
 TEST_CASE("Canonical extrusion copies remove legacy views at every depth",
           "[plugins][extrusion][canonical-copy]")
