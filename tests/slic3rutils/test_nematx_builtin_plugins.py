@@ -22,7 +22,7 @@ SOURCES = (
     "plugins/wipetower/src/WipeTowerManager.cpp", "plugins/wipetower/src/WipeTowerLayout.cpp",
     "plugins/wipetower/src/TowerFootprints.cpp", "plugins/wipetower/src/FilamentSections.cpp",
     "plugins/wipetower/src/rectilinear/RectilinearFills.cpp",
-    "plugins/wipetower/src/rectilinear/RectilinearEdgeGrid.cpp",
+    "plugins/wipetower/src/rectilinear/PluginEdgeGrid.cpp",
     "plugins/smooth_temperature/src/SmoothTemperature.cpp",
     "plugins/support_interface_perimeters/src/SupportInterfacePerimeters.cpp",
     "plugins/support_interface_perimeters/src/InterfacePerimeters.cpp",

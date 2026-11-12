@@ -92,7 +92,7 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
             plugins/wipetower/src/TowerFootprints.cpp
             plugins/wipetower/src/FilamentSections.cpp
             plugins/wipetower/src/rectilinear/RectilinearFills.cpp
-            plugins/wipetower/src/rectilinear/RectilinearEdgeGrid.cpp
+            plugins/wipetower/src/rectilinear/PluginEdgeGrid.cpp
         PLUGIN_IDS nematx_wipetower)
     # The module derives from the host's LayerTemperature, already in libslic3r.
     nematx_add_builtin_module(smooth_temperature
