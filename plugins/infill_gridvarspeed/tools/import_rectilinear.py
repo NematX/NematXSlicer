@@ -5,15 +5,22 @@ The committed generated files are independent of subsequent host changes.
 """
 import hashlib
 import argparse
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1] / "src" / "rectilinear"
 HASHES = {
     "RectilinearFills.cpp": "b6c79befd2038a7e715711a2903d8ebacadd3fd3d7a900a46425169276501f52",
-    "RectilinearWorkBuffers.hpp": "2c95791504285392aeb3cb3915f037fb4b3c2e4a54436e13e9ab7d0f413c9f26",
-    "RectilinearClipper.hpp": "8c53e36f3825044c609132c5bcfa7d4c47d5390107b56788a7b32f858c9446e3",
-    "InfillWorkBuffers.hpp": "48df7ecf5d6b7d826c1bb1bcbd58b2060db174be555e891abf8c16ea1a439763",
+    "PolygonWorkBuffers.hpp": "8389fc6f43ea9d67b1ea32bc677657bf89c1632cb5be9aba929d0eb65561650f",
+    "ClipperHelpers.hpp": "e7a18092e75c191be24ddfc33fa1d9f2a8b6d5b366936e3c11abb90cdf59f873",
+    "WorkBuffers.hpp": "a4121d62a9298c9db02d7c178cea8def3c3cb4f233bd5f1d15dff620a19c3f99",
 }
+
+
+def source_path(source, name):
+    """Host location of one copied file: the fill algorithm, or a shared plugin helper."""
+    plugins = source / "Plugins"
+    return plugins / "Infill" / "Rectilinear" / name if name == "RectilinearFills.cpp" else plugins / "Common" / name
 
 
 def main():
@@ -25,8 +32,7 @@ def main():
     if source == output or source in output.parents or output in source.parents:
         raise ValueError("Input must be a separate upstream checkout")
     for name, expected in HASHES.items():
-        path = source / "Plugins/Infill"
-        path /= name if name == "InfillWorkBuffers.hpp" else "Rectilinear/" + name
+        path = source_path(source, name)
         data = path.read_bytes().replace(b"\r\n", b"\n")
         if hashlib.sha256(data).hexdigest() != expected:
             raise ValueError(f"Unreviewed source revision: {path}")
@@ -47,10 +53,13 @@ def main():
                 if line.lstrip().startswith("BOOST_LOG_TRIVIAL") else line
                 for line in text.splitlines()
             ) + "\n\n} // namespace fills\n}}} // namespace slic3r_api::GridVarSpeedCopy::RectilinearPatternsPlugin\n"
-        text = text.replace("namespace Infill", "namespace GridVarSpeedCopy")
-        text = text.replace("slic3r_api::Infill", "slic3r_api::GridVarSpeedCopy")
-        text = text.replace('"libslic3r/Plugins/Infill/InfillWorkBuffers.hpp"', '"InfillWorkBuffers.hpp"')
+        for host in ("Infill", "PluginCommon"):
+            # Namespace uses only: comments and messages keep the word Infill.
+            text = re.sub(r"\b(namespace |slic3r_api::)" + host + r"\b", r"\1GridVarSpeedCopy", text)
+            text = text.replace(host + "::", "GridVarSpeedCopy::")
+        text = text.replace('"libslic3r/Plugins/Common/', '"')
         text = text.replace("plugins_infill_", "nematx_gridvarspeed_copy_")
+        text = text.replace("plugins_common_", "nematx_gridvarspeed_copy_common_")
         text = "\n".join(line.rstrip() for line in text.splitlines()) + "\n"
         output.mkdir(parents=True, exist_ok=True)
         (output / name).write_text(text, encoding="utf-8", newline="\n")

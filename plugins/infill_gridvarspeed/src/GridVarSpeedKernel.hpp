@@ -5,7 +5,7 @@
 
 // Local adaptation of FillRectilinear::change_flow_intersection (2.7).
 // Geometry and pure process policy: no host calls, G-code or mutable global state.
-#include "rectilinear/InfillWorkBuffers.hpp"
+#include "rectilinear/WorkBuffers.hpp"
 #include <stdexcept>
 
 namespace nematx_gridvarspeed {

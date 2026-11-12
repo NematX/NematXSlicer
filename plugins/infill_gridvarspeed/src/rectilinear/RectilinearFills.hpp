@@ -6,10 +6,14 @@
 
 // Only the connected single-direction sweep required by gridvarspeed. No host-private
 // includes, nested pattern dispatch, monotonic solver or support connectors.
-#include "RectilinearClipper.hpp"
+#include "ClipperHelpers.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 
-namespace slic3r_api { namespace GridVarSpeedCopy { namespace RectilinearPatternsPlugin { namespace fills {
+namespace slic3r_api { namespace GridVarSpeedCopy { namespace RectilinearPatternsPlugin {
+// The copied helpers live in the shared plugin namespaces, as in the host's RectilinearConnect.hpp.
+namespace work = GridVarSpeedCopy::polygon_work;
+namespace clipper = GridVarSpeedCopy::clipper;
+namespace fills {
 using namespace work;
 using namespace clipper;
 struct SegmentedIntersectionLine;

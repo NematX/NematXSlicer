@@ -16,10 +16,10 @@ with tempfile.TemporaryDirectory() as directory:
     for label, newline in (("lf", b"\n"), ("crlf", b"\r\n")):
         checkout, output = root / label, root / (label + "-output")
         for name in module.HASHES:
-            relative = Path("Plugins/Infill") / (name if name == "InfillWorkBuffers.hpp" else "Rectilinear/" + name)
-            path = checkout / relative
+            path = module.source_path(checkout, name)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes((source / relative).read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline))
+            data = module.source_path(source, name).read_bytes().replace(b"\r\n", b"\n")
+            path.write_bytes(data.replace(b"\n", newline))
         subprocess.run([sys.executable, str(script), str(checkout), "--output", str(output)], check=True)
         result = {name: (output / name).read_bytes() for name in module.HASHES}
         for name, data in result.items():
