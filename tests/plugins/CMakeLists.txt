@@ -21,6 +21,7 @@ add_executable(${_TEST_NAME}_tests
     test_avoid_crossing_input.cpp
     test_avoid_crossing_router.cpp
     test_avoid_crossing_travel_parity.cpp
+    test_bridge_detector_angle.cpp
     test_bridge_detector_cancellation.cpp
     test_bridge_ordering.cpp
     test_bridge_pipeline.cpp

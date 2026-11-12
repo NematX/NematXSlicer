@@ -306,8 +306,8 @@ stop_fake_bridge_test: ;
     // if no direction produced coverage, then there's no bridge direction ?
     if (!have_coverage) {
         //try again to choose the least worse
-        // use only poly contour angles
-        if (bridge_direction_override == 0.) {
+        // use only poly contour angles; a negative override is the automatic sentinel, not an angle
+        if (bridge_direction_override < 0.) {
             candidates = bridge_direction_candidates(true);
         } else
             candidates.emplace_back(BridgeDirection(bridge_direction_override));
