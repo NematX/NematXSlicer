@@ -471,6 +471,8 @@ set(SLIC3R_SOURCES
 	Plugins/Ordering/ObjectInstanceCatalog.hpp
 	Plugins/Ordering/ObjectInstanceCatalog.cpp
 	Plugins/Ordering/DefaultToolGroupOrdering.cpp
+	Plugins/Ordering/PlanBuilderCommon.cpp
+	Plugins/Ordering/PlanBuilderCommon.hpp
 	Plugins/Ordering/PrintingExtrusionPreSort.cpp
 	Plugins/Ordering/PrintingExtrusionPreSort.hpp
 	Plugins/Ordering/XYSerpentineExtrusionTreeOrdering.cpp

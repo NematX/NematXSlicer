@@ -39,6 +39,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PointUtils.hpp"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
+#include "libslic3r/Plugins/Ordering/PlanBuilderCommon.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Printing/PrintingPlanValidation.hpp"
@@ -58,6 +59,8 @@ only a successful complete chain freezes the resulting plan. Reversal probes
 verify the full authorized unit, including fixed descendants and command phases.
 Native-reader probes preserve warmed child-pointer views and stable identities
 through ordering, and compare extents using inherited widths across siblings.
+Common-builder probes select source islands and half-open Z intervals, then check
+the cloned roots and source context for the selected object instance.
 */
 namespace {
 using namespace Slic3r;
@@ -2520,6 +2523,96 @@ TEST_CASE("STEP_ORDERING includes print-level auxiliary layers", "[printing][pla
     REQUIRE(group.layers.front().tool_groups.front().extrusions.size() == 1);
     CHECK(group.layers.front().tool_groups.front().extrusions.front().printing_catalog_id ==
           PRINTING_OBJECT_INSTANCE_ID_NONE);
+}
+
+// Build two printable source islands for one instance, apply each selection,
+// and compare the plan-owned clones with their unchanged borrowed sources.
+TEST_CASE("Common plan builder filters layer extrusions for one instance",
+          "[plugins][printing-plan][plan-builder-common]")
+{
+    using namespace slic3r_api::Ordering::PlanBuilderCommon;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    const slic3r_api::Object object = print_view(print).object(0);
+    PluginStorage storage;
+    const ExPolygons subject{
+        rectangle_expolygon(0., 0., 5., 5.),
+        rectangle_expolygon(20., 0., 25., 5.)};
+    const slic3r_api::AuxiliaryLayerBuildResult built =
+        slic3r_api::build_auxiliary_layer_regions_from_subject(
+            reinterpret_cast<storage_handle *>(&storage), print_view(print),
+            object, expolygons_view(subject), scale_i(1.), scale_i(1.), scale_i(0.5));
+    REQUIRE(built.created);
+    const slic3r_api::Layer source = built.layer;
+    REQUIRE(source.island_count() == 2);
+    std::vector<const LayerRegionIsland *> source_regions;
+    for (uint32_t index = 0; index < source.island_count(); ++index) {
+        const slic3r_api::LayerRegionIsland region =
+            source.island(index).get_or_create_full_region_island(0);
+        REQUIRE(region.valid());
+        extrusion_entity_handle *root_handle = layer_region_island_get_mutable_extrusion(
+            const_cast<layer_region_island_handle *>(region.handle()), RAW_EXTRUSION_ROLE_PERIMETER);
+        REQUIRE(root_handle != nullptr);
+        ExtrusionEntityCollection &root = *reinterpret_cast<ExtrusionEntityCollection *>(root_handle);
+        root.append(test_path({Point(scale_i(index * 20.), 0), Point(scale_i(index * 20. + 5.), 0)}));
+        source_regions.push_back(reinterpret_cast<const LayerRegionIsland *>(region.handle()));
+    }
+
+    LayerExtrusionFilter filter;
+    std::vector<uint32_t> selected;
+    std::vector<uint32_t> expected{0, 1};
+    bool use_default = false;
+    SECTION("Absent filter copies every island") { use_default = true; }
+    SECTION("Z interval includes its start") {
+        filter.print_z_interval = std::make_pair(source.print_z(), source.print_z() + 1);
+    }
+    SECTION("Z interval excludes its end") {
+        filter.print_z_interval = std::make_pair(source.print_z() - 1, source.print_z());
+        expected.clear();
+    }
+    SECTION("Island list selects only one island") {
+        selected = {1};
+        filter.island_indices = &selected;
+        expected = selected;
+    }
+    SECTION("Empty island list selects nothing") {
+        filter.island_indices = &selected;
+        expected.clear();
+    }
+
+    PrintingPlan native_plan;
+    slic3r_api::PrintingPlan plan(reinterpret_cast<printing_plan_handle *>(&native_plan));
+    const uint32_t catalog_id = plan.find_or_add_object_instance(object, 0);
+    slic3r_api::PrintingGroup group = plan.append_group();
+    slic3r_api::PrintingLayerGroup layer_group = group.append_layer_group(source.print_z());
+    if (use_default)
+        append_layer_instance_extrusions(plan, layer_group, source, object.instance_shift(0), catalog_id, nullptr);
+    else
+        append_layer_instance_extrusions(plan, layer_group, source, object.instance_shift(0), catalog_id, nullptr, filter);
+
+    const PrintingLayerGroup &result = native_plan.groups.front().layers.front();
+    if (expected.empty()) {
+        CHECK(result.tool_groups.empty());
+    } else {
+        REQUIRE(result.tool_groups.size() == 1);
+        const PrintingToolGroup &tool = result.tool_groups.front();
+        REQUIRE(tool.extrusions.size() == expected.size());
+        REQUIRE(tool.region_islands.size() == expected.size());
+        for (size_t index = 0; index < expected.size(); ++index) {
+            const LayerRegionIsland *region = source_regions[expected[index]];
+            const PrintingExtrusion &extrusion = tool.extrusions[index];
+            CHECK(tool.region_islands[index] == region);
+            CHECK(extrusion.region_island == region);
+            CHECK(extrusion.printing_catalog_id == catalog_id);
+            REQUIRE(extrusion.root != nullptr);
+            CHECK_FALSE(extrusion.root->empty());
+            CHECK(extrusion.root.get() != &region->extrusion(LayerRegionIsland::PERIMETERS));
+        }
+    }
+    for (const LayerRegionIsland *region : source_regions)
+        CHECK_FALSE(region->extrusion(LayerRegionIsland::PERIMETERS).empty());
 }
 
 TEST_CASE("DataTree extruder index boundaries validate before narrowing",
