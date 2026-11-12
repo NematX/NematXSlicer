@@ -11,9 +11,16 @@
 #include "libslic3r/AABBTreeLines.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "test_data.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <map>
+#include <sstream>
+#include <string>
 
 namespace {
 using namespace Slic3r;
@@ -675,4 +682,98 @@ TEST_CASE("Extra perimeters on overhangs owns its setting and activation rule",
         CHECK(rule.clauses[0].condition == RAW_GUI_RULE_CONDITION_VALUE_NON_ZERO);
     }
     CHECK(found_moved_rule);
+}
+
+// Zero perimeters leave islands with infill but no perimeter bucket; the post-process must skip them for either setting value.
+TEST_CASE("Extra perimeters on overhangs skip islands without perimeters", "[plugins][perimeter][extra-overhang][zero-perimeters]")
+{
+    const char *enabled = GENERATE("0", "1");
+    CAPTURE(enabled);
+    const ExPolygon target = overhang_target();
+    const ExPolygon lower_support = narrow_left_support();
+    const DynamicPrintConfig config = extra_overhang_config({
+        {"perimeters", "0"}, {"extra_perimeters_on_overhangs", enabled}});
+
+    const PerimeterRunCapture baseline =
+        run_perimeter_case(config, {SIMPLE_PERIMETER_GENERATOR}, target, 1);
+    const PerimeterRunCapture post =
+        run_perimeter_and_post_case_with_lower_area(
+            config, {SIMPLE_PERIMETER_GENERATOR}, {EXTRA_PERIMETERS_ON_OVERHANGS},
+            target, lower_support, 1);
+
+    // The island keeps its whole fill domain and gains no anchor paths.
+    CHECK(external_perimeter_count(post) == 0);
+    REQUIRE(free_fill_area(baseline) > 0.);
+    CHECK(free_fill_area(post) == Approx(free_fill_area(baseline)));
+    require_leaf_fill_area_consistency(post);
+
+    // The same overhang with one perimeter still receives anchors, so the post-process stays active elsewhere.
+    if (std::string(enabled) == "1") {
+        const DynamicPrintConfig one = extra_overhang_config({{"perimeters", "1"}});
+        const PerimeterRunCapture one_baseline =
+            run_perimeter_case(one, {SIMPLE_PERIMETER_GENERATOR}, target, 1);
+        const PerimeterRunCapture one_post =
+            run_perimeter_and_post_case_with_lower_area(
+                one, {SIMPLE_PERIMETER_GENERATOR}, {EXTRA_PERIMETERS_ON_OVERHANGS},
+                target, lower_support, 1);
+        CHECK(external_perimeter_count(one_post) > external_perimeter_count(one_baseline));
+    }
+}
+
+// Slice and export a small native cube through the default providers, as a user print without perimeters would.
+TEST_CASE("A native print without perimeters exports infill only", "[plugins][perimeter][extra-overhang][zero-perimeters]")
+{
+    const char *perimeters = GENERATE("0", "1");
+    CAPTURE(perimeters);
+    DynamicPrintConfig config = perimeter_config({
+        {"gcode_exporter_plugin", "gcode.exporter.simple"},
+        {"layer_height", "0.2"},
+        {"first_layer_height", "0.2"},
+        {"perimeters", perimeters},
+        {"fill_density", "15%"},
+        {"raft_layers", "0"},
+        {"solid_over_perimeters", "0"},
+        {"top_solid_layers", "1"},
+        {"bottom_solid_layers", "1"},
+        {"top_solid_min_thickness", "0"},
+        {"bottom_solid_min_thickness", "0"},
+        {"use_relative_e_distances", "1"}
+    });
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(make_cube(4., 4., 4.), ModelVolumeType::MODEL_PART, false);
+    object->add_instance()->set_offset(Vec3d(100., 100., 0.));
+    Print print;
+    print.apply(model, config);
+    REQUIRE(print.validate().second.empty());
+    const std::string code = Slic3r::Test::gcode(print);
+
+    // Sum the positive relative extrusion of each feature type.
+    std::map<std::string, double> extruded;
+    std::string type, line;
+    std::istringstream input(code);
+    while (std::getline(input, line)) {
+        if (line.rfind(";TYPE:", 0) == 0)
+            type = line.substr(6, line.find_last_not_of(" \t\r") - 5);
+        std::istringstream words(line.substr(0, line.find(';')));
+        std::string word;
+        words >> word;
+        if (word != "G1")
+            continue;
+        while (words >> word)
+            if (word.size() > 1 && word[0] == 'E' && std::stod(word.substr(1)) > 0.)
+                extruded[type] += std::stod(word.substr(1));
+    }
+    CAPTURE(extruded.size());
+    const auto extruded_as = [&extruded](const std::string &label) {
+        const auto found = extruded.find(label);
+        return found == extruded.end() ? 0. : found->second;
+    };
+    const double perimeter = extruded_as("External perimeter") + extruded_as("Perimeter");
+    const double infill = extruded_as("Internal infill") + extruded_as("Solid infill") + extruded_as("Top solid infill");
+    CHECK(infill > 0.);
+    if (std::string(perimeters) == "0")
+        CHECK(perimeter == 0.);
+    else
+        CHECK(perimeter > 0.);
 }
