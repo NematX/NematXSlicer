@@ -29,10 +29,10 @@ Regional flow spacing and external width are averaged
 over regions with raw slices, with the nozzle average as fallback.
 
 For support targets build_input also copies the owner's object-layer perimeter slices
-strictly below target Z + SCALED_EPSILON for routing. With a plan it separately
-copies each object's last lslices below that height, shifted for each catalog
-instance by its XY shift only for crossing tests. Instance rotation is not applied,
-as in SupportObstacleContributor. Without a plan, support has no crossing blockers.
+strictly below target Z + SCALED_EPSILON for routing. platter_blockers separately
+unions last normal object slices below a supplied Z plus epsilon, translated for
+real catalog instances in the current and earlier groups. Synthetic entries are
+ignored. is_off_object_layer compares a layer handle with the normal layer at its Z.
 build_external_input independently reads
 each object's exact-Z layer for holes and the global perimeter-spacing average.
 For support it appends holes from the last object layer strictly below target Z +
@@ -56,6 +56,9 @@ An owner without normal layers cannot mark a target as first_layer.
     |-- layer_at_print_z: find an exact-Z object-layer index
     |-- first_layer_below_print_z: find the last object-layer index below the supplied Z
     `-- default_spacing: supply the fallback when no exact-Z region has slices
+    platter_blockers: union translated object slices from eligible printing groups
+    `-- first_layer_below_print_z: select each object's last normal layer below Z plus epsilon
+    is_off_object_layer: compare the normal layer at Z with the supplied layer
 
 The caller supplies temporary API storage and keeps the print unchanged during
 these reads. Returned buffers own their geometry independently of that storage.
@@ -78,6 +81,12 @@ static LayerInput copy_layer(storage_handle *storage, const Print &print, LayerI
 static RegionInput copy_region(storage_handle *storage, const Layer &layer, const LayerRegion &region, bool support);
 // Average scaled nozzle diameters over collected printing tools; at least one tool must be collected.
 static coord_t default_spacing(const Print &print, const Object &object);
+// Compare the supplied layer with its owner's normal layer at the same Z; the print's global auxiliary owner has no normal layers.
+bool is_off_object_layer(const Layer &layer);
+// Copy and union translated normal slices for real instances in existing groups 0 through group_idx; geometry failures propagate.
+pw::ExPolygons platter_blockers(storage_handle *storage, const PrintingPlan &plan, uint32_t group_idx, coord_t print_z);
+// Copy the target and the owner's lower perimeter slices for support routing into independent buffers.
+Input build_input(storage_handle *storage, const Print &print, LayerIdentity target);
 
 std::optional<uint32_t> layer_at_print_z(const Object &object, coord_t z)
 {
@@ -104,7 +113,7 @@ bool is_first_layer(const Object &object, const Layer &layer)
     return object.layer_count() != 0 && layer.print_z() == object.layer(0).print_z();
 }
 
-Input build_input(storage_handle *storage, const Print &print, LayerIdentity target, const PrintingPlan *plan)
+Input build_input(storage_handle *storage, const Print &print, LayerIdentity target)
 {
     Input input;
     // Keep the target at a stable address shared by its extruder-specific consumers.
@@ -122,32 +131,43 @@ Input build_input(storage_handle *storage, const Print &print, LayerIdentity tar
             }
         }
     }
-    // Crossing areas are independent of the owner's perimeter-based routing boundary.
-    if (input.target->support && plan != nullptr) {
-        for (uint32_t oi = 0; oi < print.object_count(); ++oi) {
-            const Object object = print.object(oi);
-            const std::optional<uint32_t> below = first_layer_below_print_z(object, input.target->print_z + SCALED_EPSILON);
+    return input;
+}
+
+bool is_off_object_layer(const Layer &layer)
+{
+    const Object object = layer.object();
+    const std::optional<uint32_t> normal = layer_at_print_z(object, layer.print_z());
+    return !normal || object.layer(*normal).handle() != layer.handle();
+}
+
+pw::ExPolygons platter_blockers(storage_handle *storage, const PrintingPlan &plan,
+                              uint32_t group_idx, coord_t print_z)
+{
+    pw::ExPolygons blockers;
+    for (uint32_t gi = 0; gi <= group_idx; ++gi) {
+        const ConstPrintingGroup group = plan.group(gi);
+        for (uint32_t ii = 0; ii < group.object_instance_count(); ++ii) {
+            const PrintingObjectInstance instance = plan.object_instance(group.printing_catalog_id(ii));
+            if (!instance.has_object())
+                continue;
+            const Object object = instance.object();
+            const std::optional<uint32_t> below = first_layer_below_print_z(object, print_z + SCALED_EPSILON);
             if (!below)
                 continue;
-            const pw::ExPolygons slices = clipper::from_expolygon_collection_view(object.layer(*below).slices());
-            for (uint32_t ii = 0; ii < plan->object_instance_count(); ++ii) {
-                const PrintingObjectInstance instance = plan->object_instance(ii);
-                if (!instance.has_object() || instance.object().handle() != object.handle())
-                    continue;
-                const c_point shift = object.instance_shift(instance.object_instance_idx());
-                SupportObjectInput area{ii, slices};
-                for (pw::ExPolygon &polygon : area.slices) {
-                    for (pw::Point &point : polygon.contour.points)
+            pw::ExPolygons slices = clipper::from_expolygon_collection_view(object.layer(*below).slices());
+            const c_point shift = object.instance_shift(instance.object_instance_idx());
+            for (pw::ExPolygon &polygon : slices) {
+                for (pw::Point &point : polygon.contour.points)
+                    point += pw::Point(shift.x, shift.y);
+                for (pw::Polygon &hole : polygon.holes)
+                    for (pw::Point &point : hole.points)
                         point += pw::Point(shift.x, shift.y);
-                    for (pw::Polygon &hole : polygon.holes)
-                        for (pw::Point &point : hole.points)
-                            point += pw::Point(shift.x, shift.y);
-                }
-                input.support_object_slices.push_back(std::move(area));
             }
+            blockers.insert(blockers.end(), slices.begin(), slices.end());
         }
     }
-    return input;
+    return clipper::union_ex(storage, blockers);
 }
 
 ExternalInput build_external_input(const Print &print, LayerIdentity target)

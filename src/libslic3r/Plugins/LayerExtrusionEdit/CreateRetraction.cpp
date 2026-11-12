@@ -997,7 +997,8 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
     PrintingLayerGroup layer(ctx->layer_group);
     PrintingPlan plan(ctx->plan);
     const Config print_config = Print(ctx->print).config();
-    AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner planner(Print(ctx->print), plan, run_ctx);
+    AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner planner(Print(ctx->print), plan, run_ctx,
+        ctx->group_idx, layer.print_z());
     const orchestrator_plugin_handle *travel_provider = orchestrator_select_plugin(
         m_orchestrator, print_config.handle(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const char *travel_id = orchestrator_plugin_id(travel_provider);

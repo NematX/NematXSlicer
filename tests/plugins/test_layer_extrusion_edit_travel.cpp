@@ -12,8 +12,6 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
-#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
-#include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -324,15 +322,9 @@ TEST_CASE("Avoid-crossing travel ranks second in the travel group",
     CHECK(plugin->get_dependencies()[1] == ENTRY_STATE_PLUGIN);
 
     const std::vector<Plugin::UsedConfigKey> keys = plugin->get_used_config_keys();
-    REQUIRE(keys.size() == 14);
+    REQUIRE(keys.size() == 12);
     CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
         return key.key == "avoid_crossing_perimeters" && key.type == RAW_CO_BOOL;
-    }));
-    CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
-        return key.key == "complete_objects" && key.type == RAW_CO_BOOL;
-    }));
-    CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
-        return key.key == "parallel_objects_step" && key.type == RAW_CO_FLOAT;
     }));
 }
 
@@ -431,57 +423,40 @@ TEST_CASE("Avoid-crossing travel routes around a hole between enabled endpoints"
     });
     Print print;
     Model model;
-    Slic3r::Test::init_print(
-        {Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
-
-    Polygon contour({
-        Point(scale_i(0.), scale_i(0.)),
-        Point(scale_i(30.), scale_i(0.)),
-        Point(scale_i(30.), scale_i(30.)),
-        Point(scale_i(0.), scale_i(30.))
-    });
-    contour.make_counter_clockwise();
-    Polygon hole({
-        Point(scale_i(10.), scale_i(10.)),
-        Point(scale_i(20.), scale_i(10.)),
-        Point(scale_i(20.), scale_i(20.)),
-        Point(scale_i(10.), scale_i(20.))
-    });
-    hole.make_clockwise();
-    const ExPolygons subject{ExPolygon(std::move(contour), {std::move(hole)})};
-
-    PluginStorage storage;
+    TriangleMesh mesh = make_cube(30., 10., 0.6);
+    TriangleMesh upper = make_cube(30., 10., 0.6);
+    upper.translate(0., 20., 0.);
+    mesh.merge(upper);
+    TriangleMesh left = make_cube(10., 10., 0.6);
+    left.translate(0., 10., 0.);
+    mesh.merge(left);
+    TriangleMesh right = make_cube(10., 10., 0.6);
+    right.translate(20., 10., 0.);
+    mesh.merge(right);
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}});
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    print.set_status_silent();
+    print.process();
+    print.pipeline_progress().reset();
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
     const slic3r_api::Object object_view(
         reinterpret_cast<const object_handle *>(&print.object(0)));
-    const slic3r_api::AuxiliaryLayerBuildResult built =
-        slic3r_api::build_auxiliary_layer_regions_from_subject(
-            reinterpret_cast<storage_handle *>(&storage),
-            print_view,
-            object_view,
-            slic3r_api::ExPolygonCollection(
-                reinterpret_cast<const expolygon_collection_handle *>(&subject)),
-            scale_i(0.2), scale_i(0.2), scale_i(0.1));
-    REQUIRE(built.created);
-    REQUIRE(built.layer.island_count() == 1);
-    Layer *built_layer = reinterpret_cast<Layer *>(
-        const_cast<layer_handle *>(built.layer.handle()));
-    REQUIRE(built_layer != nullptr);
-    REQUIRE(built_layer->islands().size() == 1);
-    Slic3r::ApiInternal::LayerIslandAccess::perimeter_slices_mutable(
-        built_layer->islands()[0]) = subject;
+    Layer *built_layer = &print.object(0).layers().front();
     const slic3r_api::LayerRegionIsland region_view =
-        built.layer.island(0).get_or_create_full_region_island(0);
+        object_view.layer(0).island(0).region_island(0);
     REQUIRE(region_view.valid());
     const LayerRegionIsland *region_island =
         reinterpret_cast<const LayerRegionIsland *>(region_view.handle());
 
     const c_point instance_shift = object_view.instance_shift(0);
     const Point shift(instance_shift.x, instance_shift.y);
-    const Point source = Point(scale_i(5.), scale_i(15.)) + shift;
-    const Point target = Point(scale_i(25.), scale_i(15.)) + shift;
+    const BoundingBox box = get_extents(built_layer->lslices());
+    const Point source = box.min + Point(scale_i(5.), scale_i(15.)) + shift;
+    const Point target = box.min + Point(scale_i(25.), scale_i(15.)) + shift;
 
     PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.clear();
     const PrintingObjectInstanceId catalog_id =
         plan.find_or_add_object_instance(print.object(0), 0);
     plan.groups.emplace_back();
@@ -977,7 +952,7 @@ NarrowBridgeResult narrow_bridge_scene()
     plugin_run_context context{};
     context.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
-    avoidance::CompatibilityPlanner eligibility(print_view, plan_view, &context);
+    avoidance::CompatibilityPlanner eligibility(print_view, plan_view, &context, 0, 0);
     const travel::PendingTravel &pending = chronology.travels.front();
     REQUIRE(eligibility.avoidance_enabled(pending.source, pending.target));
     REQUIRE(pending.source.position.x == result.source.x());
@@ -1388,7 +1363,7 @@ TEST_CASE("Compatibility eligibility supplies dated travel activation",
     REQUIRE(chronology.travels.size() == 2);
     const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
     plugin_run_context context{};
-    AvoidCrossing::CompatibilityPlanner planner(print_view, plan_view, &context);
+    AvoidCrossing::CompatibilityPlanner planner(print_view, plan_view, &context, 0, 0);
     const bool expected = enabled && !(exclude_first && layer_index == 0);
     CHECK(planner.avoidance_enabled(chronology.travels[0].source, chronology.travels[0].target) == expected);
     CHECK_FALSE(planner.avoidance_enabled(chronology.travels[1].source, chronology.travels[1].target));

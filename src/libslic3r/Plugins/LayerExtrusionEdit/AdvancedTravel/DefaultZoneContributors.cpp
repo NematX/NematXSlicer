@@ -95,7 +95,7 @@ void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone>
         const c_point shift = object.instance_shift(static_cast<size_t>(instance));
         std::unique_ptr<AC::TravelBoundary> &boundary = boundaries[layer.handle()];
         if (!boundary) {
-            const AC::Input &layer_input = input.layer_inputs.get(input.print, layer, &input.run_context, nullptr);
+            const AC::Input &layer_input = input.layer_inputs.get(input.print, layer, &input.run_context);
             boundary = std::make_unique<AC::TravelBoundary>();
             boundary->init_layer(input.run_context.plugin_storage, *layer_input.target);
             boundary->build_internal(input.run_context.plugin_storage, layer_input, travel.extruder_id);
@@ -186,7 +186,7 @@ void DefaultAttractorContributor::contribute(const ZoneContributorInput &input, 
             if (instance >= object.instance_count() || !visited.emplace(layer.handle(), endpoint->printing_catalog_id).second) continue;
             const c_point shift = object.instance_shift(static_cast<size_t>(instance));
             if (domains.find(layer.handle()) == domains.end()) {
-                const AC::Input &layer_input = input.layer_inputs.get(input.print, layer, &input.run_context, nullptr);
+                const AC::Input &layer_input = input.layer_inputs.get(input.print, layer, &input.run_context);
                 domains.emplace(layer.handle(), withdrawn_slices(input.run_context.plugin_storage, layer_input));
             }
             const ZoneScope scope{EXTRUDER_ID_UNKNOWN, endpoint->printing_catalog_id, false};

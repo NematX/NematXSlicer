@@ -84,7 +84,7 @@ bool find_first_geometry(MutableExtrusionEntity entity, coord_t print_z,
 bool find_last_geometry(MutableExtrusionEntity entity, coord_t print_z,
                         coord_t inherited_z_offset, GeometricLeaf &result);
 
-/* Build one planner endpoint, including regional provenance and an inner probe. */
+/* Copy one leaf endpoint, regional provenance and inner probe into planner input. */
 TravelEndpoint endpoint_from_leaf(const GeometricLeaf &leaf,
                                   const PrintingExtrusion &owner, bool from_begin);
 

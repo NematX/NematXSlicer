@@ -5,18 +5,17 @@
 PerimeterCrossing answers path-crossing queries for travel and retraction
 decisions. It tests prepared area boundaries, not extrusion centerlines. It neither
 routes a path nor proves containment: a path wholly outside all contours or wholly
-inside a hole may return false. All paths use the target's local coordinates.
+inside a hole may return false. Object paths use target-local coordinates;
+off-object paths use platter coordinates.
 
 prepare builds a base version and an offset version of the layer slices. For
 objects, when any region assigns a perimeter or infill role to another tool,
 preparation clips the slices to the selected tool's area so that tool does not
 ooze its material over another tool's area. It then insets the offset version by
-1.5 nozzle radii. Tops are removed from both versions. For support the base unions
-the supplied last object areas below its Z plus epsilon. The offset version expands
-them by 1.5 radii, without tool clipping or top removal. Per-object plans retain only
-the target catalog instance; other plans retain all instances. Areas are moved from
-the translated object-slice coordinates to target-local coordinates by subtracting
-the target instance shift. Instance shifts apply translation only, not rotation.
+1.5 nozzle radii. Tops are removed from both versions. prepare_platter unions
+last normal object areas below its Z plus epsilon for real instances in current
+and earlier plan groups. The offset version expands them by 1.5 radii, without
+tool clipping or top removal. No target shift is removed from platter queries.
 Empty areas cross nothing. Both versions are simplified using the scaled nozzle radius.
 
 Queries first reject distant islands with contour boxes, compare inclusive
@@ -27,19 +26,19 @@ edges are tested. Large holes use boxes to avoid unnecessary edge scans.
     prepare: reuse or rebuild the two versions for a layer, tool and radius
     |-- object: union slices, clip if any region assigns a role to another tool,
     |           inset, then subtract regional tops
-    `-- support: select object instances, move to local coordinates and union their areas and expansion
-        Both branches simplify rings and retain unsimplified contour boxes.
+    prepare_platter: reuse or collect blockers by Z, group and radius, then expand
+    `-- slice_islands: simplify rings and retain unsimplified contour boxes
     can_cross_perimeter: choose base or offset version
     |-- reject by contour box, then compare endpoint containment
     |-- first_intersection: test path segments against the outer contour
     `-- build hole boxes lazily, then test path segments against hole edges
 
-The cache key is the LayerInput address, zero-based tool and scaled radius, plus
-the target catalog id, shift and per-object mode for support only.
+Object cache keys use the LayerInput address, zero-based tool and scaled radius;
+platter keys use Z, group and radius and need no LayerInput.
 The caller keeps that input alive and unchanged until preparation with another
 input; owned cached rings do not borrow temporary storage. One worker owns each
 instance because queries populate hole boxes. Cancellation may throw: prepare
-calls it per region before top subtraction for object layers, not during support
+calls it per region before top subtraction for object layers, not during platter
 preparation; queries call it once per examined hole.
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
@@ -48,95 +47,90 @@ namespace clipper = PluginCommon::clipper;
 
 void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer,
                                 size_t extruder, coord_t radius, std::function<void()> cancel,
-                                const std::vector<SupportObjectInput> &support_areas,
-                                uint32_t target_instance, PluginCommon::work::Point target_shift, bool per_object,
                                 bool exclude_top_surfaces)
 {
     m_cancel = cancel ? std::move(cancel) : []() {};
-    if (m_cache.layer == &layer && m_cache.extruder == extruder && m_cache.radius == radius &&
-        m_cache.exclude_top_surfaces == exclude_top_surfaces &&
-        (!layer.support || (m_cache.target_instance == target_instance &&
-         m_cache.target_shift == target_shift && m_cache.per_object == per_object)))
+    if (m_cache.prepared && m_cache.layer == &layer && m_cache.extruder == extruder && m_cache.radius == radius &&
+        m_cache.exclude_top_surfaces == exclude_top_surfaces)
         return;
     m_cache.layer = &layer;
     m_cache.extruder = extruder;
     m_cache.radius = radius;
+    m_cache.prepared = true;
     m_cache.exclude_top_surfaces = exclude_top_surfaces;
     m_cache.top_surfaces.clear();
-    m_cache.target_instance = target_instance;
-    m_cache.target_shift = target_shift;
-    m_cache.per_object = per_object;
     pw::ExPolygons slices;
     pw::ExPolygons offset_slices;
-    if (layer.support) {
-        pw::ExPolygons retained;
-        for (const SupportObjectInput &area : support_areas) {
-            if (per_object && area.printing_catalog_id != target_instance)
-                continue;
-            for (pw::ExPolygon polygon : area.slices) {
-                for (pw::Point &point : polygon.contour.points)
-                    point -= target_shift;
-                for (pw::Polygon &hole : polygon.holes)
-                    for (pw::Point &point : hole.points)
-                        point -= target_shift;
-                retained.push_back(std::move(polygon));
-            }
-        }
-        slices = clipper::union_ex(storage, retained);
-        offset_slices = clipper::union_ex(storage, clipper::offset_ex(storage, retained, radius * 1.5f));
-    } else {
-        slices = clipper::union_ex(storage, layer.lslices);
-        bool multiple_extruders = false;
-        for (const RegionInput &region : layer.regions) {
-            multiple_extruders = multiple_extruders || region.perimeter_extruder != extruder + 1 ||
-                region.infill_extruder != extruder + 1 || region.solid_infill_extruder != extruder + 1;
-            if (multiple_extruders)
-                break;
-        }
-        // Restrict this tool to its own material area before testing paths that could ooze over another tool's area.
-        if (multiple_extruders) {
-            pw::ExPolygons clip;
-            for (const RegionInput &region : layer.regions) {
-                const bool same = region.perimeter_extruder == region.infill_extruder &&
-                    region.infill_extruder == region.solid_infill_extruder;
-                if (same) {
-                    if (region.perimeter_extruder == extruder + 1)
-                        clip = clipper::union_ex(storage, clip, region.raw_slices);
-                } else if (region.perimeter_extruder == extruder + 1) {
-                    assert(region.infill_extruder != extruder + 1);
-                    clip = clipper::union_ex(storage, clip, clipper::diff_ex(storage, region.raw_slices, region.fill_expolygons));
-                } else {
-                    assert(region.infill_extruder == extruder + 1);
-                    clip = clipper::union_ex(storage, clip, region.fill_expolygons);
-                }
-            }
-            slices = clipper::intersection_ex(storage, slices, clipper::offset_ex(storage, clip, SCALED_EPSILON * 10));
-        }
-        offset_slices = clipper::offset_ex(storage, slices, -radius * 1.5f);
-        // Tops are excluded even when no outer contour would be crossed, unless
-        // the caller tests only real perimeter contours.
-        for (const RegionInput &region : layer.regions) {
-            if (!exclude_top_surfaces)
-                break;
-            m_cancel();
-            offset_slices = clipper::diff_ex(storage, offset_slices, region.top_surfaces);
-            slices = clipper::diff_ex(storage, slices, region.top_surfaces);
-            m_cache.top_surfaces.insert(m_cache.top_surfaces.end(), region.top_surfaces.begin(), region.top_surfaces.end());
-        }
+    slices = clipper::union_ex(storage, layer.lslices);
+    bool multiple_extruders = false;
+    for (const RegionInput &region : layer.regions) {
+        multiple_extruders = multiple_extruders || region.perimeter_extruder != extruder + 1 ||
+            region.infill_extruder != extruder + 1 || region.solid_infill_extruder != extruder + 1;
+        if (multiple_extruders)
+            break;
     }
-    // Preserve the unsimplified contour box, as used by the crossing rejection.
-    m_cache.slices.clear();
+    // Restrict this tool to its own material area before testing paths that could ooze over another tool's area.
+    if (multiple_extruders) {
+        pw::ExPolygons clip;
+        for (const RegionInput &region : layer.regions) {
+            const bool same = region.perimeter_extruder == region.infill_extruder &&
+                region.infill_extruder == region.solid_infill_extruder;
+            if (same) {
+                if (region.perimeter_extruder == extruder + 1)
+                    clip = clipper::union_ex(storage, clip, region.raw_slices);
+            } else if (region.perimeter_extruder == extruder + 1) {
+                assert(region.infill_extruder != extruder + 1);
+                clip = clipper::union_ex(storage, clip, clipper::diff_ex(storage, region.raw_slices, region.fill_expolygons));
+            } else {
+                assert(region.infill_extruder == extruder + 1);
+                clip = clipper::union_ex(storage, clip, region.fill_expolygons);
+            }
+        }
+        slices = clipper::intersection_ex(storage, slices, clipper::offset_ex(storage, clip, SCALED_EPSILON * 10));
+    }
+    offset_slices = clipper::offset_ex(storage, slices, -radius * 1.5f);
+    // Tops are excluded even when no outer contour would be crossed, unless
+    // the caller tests only real perimeter contours.
+    for (const RegionInput &region : layer.regions) {
+        if (!exclude_top_surfaces)
+            break;
+        m_cancel();
+        offset_slices = clipper::diff_ex(storage, offset_slices, region.top_surfaces);
+        slices = clipper::diff_ex(storage, slices, region.top_surfaces);
+        m_cache.top_surfaces.insert(m_cache.top_surfaces.end(), region.top_surfaces.begin(), region.top_surfaces.end());
+    }
+    m_cache.slices = slice_islands(storage, slices, radius);
+    m_cache.offset_slices = slice_islands(storage, offset_slices, radius);
+}
+
+void PerimeterCrossing::prepare_platter(storage_handle *storage, const PrintingPlan &plan,
+    uint32_t group_idx, coord_t print_z, coord_t radius, std::function<void()> cancel)
+{
+    m_cancel = cancel ? std::move(cancel) : []() {};
+    if (m_cache.prepared && m_cache.layer == nullptr && m_cache.group_idx == group_idx &&
+        m_cache.print_z == print_z && m_cache.radius == radius)
+        return;
+    const pw::ExPolygons slices = platter_blockers(storage, plan, group_idx, print_z);
+    m_cache.top_surfaces.clear();
+    m_cache.slices = slice_islands(storage, slices, radius);
+    m_cache.offset_slices = slice_islands(storage, clipper::offset_ex(storage, slices, radius * 1.5f), radius);
+    m_cache.layer = nullptr;
+    m_cache.group_idx = group_idx;
+    m_cache.print_z = print_z;
+    m_cache.radius = radius;
+    m_cache.prepared = true;
+}
+
+std::vector<PerimeterCrossing::SliceIsland> PerimeterCrossing::slice_islands(
+    storage_handle *storage, const pw::ExPolygons &slices, coord_t radius)
+{
+    std::vector<SliceIsland> islands;
     for (const pw::ExPolygon &polygon : slices) {
         const BoundingBox box(polygon.contour.points);
         for (pw::ExPolygon &simplified : clipper::simplify(storage, polygon, radius))
-            m_cache.slices.push_back({std::move(simplified), box, {}});
+            islands.push_back({std::move(simplified), box, {}});
     }
-    m_cache.offset_slices.clear();
-    for (const pw::ExPolygon &polygon : offset_slices) {
-        const BoundingBox box(polygon.contour.points);
-        for (pw::ExPolygon &simplified : clipper::simplify(storage, polygon, radius))
-            m_cache.offset_slices.push_back({std::move(simplified), box, {}});
-    }
+    return islands;
 }
 
 bool PerimeterCrossing::touches_top_surface(storage_handle *storage, const PluginCommon::work::Polyline &travel) const
@@ -152,7 +146,7 @@ bool PerimeterCrossing::touches_top_surface(storage_handle *storage, const Plugi
 
 bool PerimeterCrossing::can_cross_perimeter(const PluginCommon::work::Polyline &travel, bool offset)
 {
-    assert(m_cache.layer != nullptr);
+    assert(m_cache.prepared);
     std::vector<SliceIsland> &islands = offset ? m_cache.offset_slices : m_cache.slices;
     for (SliceIsland &island : islands) {
         // Reject paths whose sampled points and segments miss the contour box before scanning its edges.

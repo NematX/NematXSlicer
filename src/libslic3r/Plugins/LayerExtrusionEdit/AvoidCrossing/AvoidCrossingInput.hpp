@@ -15,10 +15,10 @@ published by perimeter processing, and spacing averages in scaled coordinates.
 Each RegionInput retains raw slices, reconstructed fill areas, top surfaces and
 regional settings, including regions with no slices. For support targets, Input
 also copies the owner's object-layer perimeter slices strictly below print Z +
-SCALED_EPSILON for routing. With a plan, separate crossing areas copy every
-catalog instance's last object slices below that height, translated by its XY
-instance shift only; rotation is not applied, as in SupportObstacleContributor.
-Without a plan, support crossing areas are empty and provide no blockers.
+SCALED_EPSILON for routing. platter_blockers separately unions the last normal
+object slices below a supplied Z plus epsilon, translated by each real instance's
+shift, for the current and earlier printing groups. Synthetic entries such as
+wipe towers supply no blockers. These areas use platter coordinates.
 
 An external boundary is a routing ring built from object holes placed at their
 instance shifts in print coordinates, rather than from the target's local filled
@@ -31,6 +31,8 @@ layer_at_print_z finds an exact object-layer Z; first_layer_below_print_z finds
 the last object layer strictly below a supplied Z. Neither searches auxiliary
 layers. is_first_layer reports exact equality with normal layer zero's print Z,
 including auxiliary targets; it returns false when there are no normal layers.
+is_off_object_layer compares the layer handle with the normal layer at its Z;
+auxiliary layers, including the global auxiliary owner's layers, are off object.
 Geometry and settings are copied; no host handle is retained. Keep Input
 alive while consumers borrow its target. Workers own separate inputs and geometry.
 Allocation storage may be shared; the host synchronizes its allocation bookkeeping.
@@ -108,19 +110,11 @@ struct ExternalObjectInput
     PluginCommon::work::Points instance_shifts;
 };
 
-// Own one catalog instance's last object area below the support height, translated by its instance shift only.
-struct SupportObjectInput
-{
-    uint32_t printing_catalog_id = 0;
-    PluginCommon::polygon_work::ExPolygons slices;
-};
-
-// Own the target, local support routing slices and separate object crossing areas translated by instance shift.
+// Own the target and local support routing slices.
 struct Input
 {
     std::unique_ptr<const LayerInput> target;
     PluginCommon::polygon_work::ExPolygons lower_perimeter_slices;
-    std::vector<SupportObjectInput> support_object_slices;
 };
 
 // Independently owned external boundary data, constructed only when requested by a consumer.
@@ -134,9 +128,13 @@ struct ExternalInput
 std::optional<uint32_t> layer_at_print_z(const Object &object, coord_t z);
 // Find the last object layer strictly below the supplied scaled Z; auxiliary layers are ignored.
 std::optional<uint32_t> first_layer_below_print_z(const Object &object, coord_t z);
-// Copy geometry/settings and support routing slices; supply the plan to collect support crossing areas by catalog id.
-Input build_input(storage_handle *storage, const Print &print, LayerIdentity target,
-                  const PrintingPlan *plan);
+// Copy geometry, settings and support routing slices.
+Input build_input(storage_handle *storage, const Print &print, LayerIdentity target);
+// Return whether the layer is absent from its owner's normal object layers.
+bool is_off_object_layer(const Layer &layer);
+// Union the last normal object slices below Z plus epsilon for real instances in groups through group_idx.
+PluginCommon::polygon_work::ExPolygons platter_blockers(storage_handle *storage,
+    const PrintingPlan &plan, uint32_t group_idx, coord_t print_z);
 // Return whether this layer shares the first object layer's print Z, including auxiliary layers; false without object layers.
 bool is_first_layer(const Object &object, const Layer &layer);
 // Given an existing public layer identity, own ordered external holes/shifts and the global spacing at its Z.

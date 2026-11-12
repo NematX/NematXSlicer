@@ -144,7 +144,7 @@ TEST_CASE("Attractor domain keeps a one-perimeter bridge and withdraws wide area
     object->add_volume(mesh, Slic3r::ModelVolumeType::MODEL_PART, false);
     object->add_instance(); object->ensure_on_bed();
     owner.print.apply(model, config); owner.print.set_status_silent(); owner.print.process();
-    const ac::Input input = ac::build_input(owner.context.plugin_storage, owner.print_view, {0, 0, false}, nullptr);
+    const ac::Input input = ac::build_input(owner.context.plugin_storage, owner.print_view, {0, 0, false});
     const ac::LayerInput &layer = *input.target;
     REQUIRE(layer.perimeter_slices.size() == (scene == 2 ? 2 : 1));
     const work::ExPolygons uniform = clipper::offset_ex(owner.context.plugin_storage, layer.perimeter_slices,
@@ -324,7 +324,7 @@ TEST_CASE("Default travel zones publish withdrawn slices and excluded tops", "[p
     }
     for (size_t instance = 0; instance < 2; ++instance) {
         const uint32_t id = owner.chronology.travels[instance * 5].target.printing_catalog_id;
-        const ac::Input &copied = owner.cache.get(owner.print_view, layer_view, &owner.context, nullptr);
+        const ac::Input &copied = owner.cache.get(owner.print_view, layer_view, &owner.context);
         work::ExPolygons slices = copied.target->perimeter_slices;
         if (support) slices.insert(slices.end(), copied.lower_perimeter_slices.begin(), copied.lower_perimeter_slices.end());
         for (size_t slice = 0; slice < slices.size(); ++slice) {

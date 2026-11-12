@@ -11,7 +11,7 @@ avoidance_enabled() checks both endpoints' regional activation and valid object
 instances, then the target's first-layer exclusion. Summaries can use it without
 building routing geometry. Providers use path() to apply the same eligibility;
 retraction planning also asks crosses() whether a route crosses a perimeter contour:
-    CompatibilityPlanner planner(print, plan, run_ctx);
+    CompatibilityPlanner planner(print, plan, run_ctx, group_idx, print_z);
     std::vector<c_point> points = planner.path(source, target, extruder_id);
     bool retract = planner.crosses(source, target, extruder_id, points, false);
 */
@@ -33,8 +33,9 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
 class CompatibilityPlanner
 {
 public:
-    // Retain borrowed views of the print and its settings, plus the plan and run context, during this worker callback.
-    CompatibilityPlanner(const Print &print, const PrintingPlan &plan, const plugin_run_context *run_ctx);
+    // Borrow print, plan and context; group_idx and print_z identify the current printing group and layer-group Z.
+    CompatibilityPlanner(const Print &print, const PrintingPlan &plan, const plugin_run_context *run_ctx,
+                         uint32_t group_idx, coord_t print_z);
 
     // Check regional activation at both endpoints, valid instances and the target's first-layer exclusion.
     bool avoidance_enabled(const TravelConnection::TravelEndpoint &source,
@@ -100,6 +101,8 @@ private:
     Config m_print_config;
     const PrintingPlan &m_plan;
     const plugin_run_context *m_run_ctx = nullptr;
+    uint32_t m_group_idx = 0;
+    coord_t m_print_z = 0;
     LayerInputCache m_inputs;
     std::map<RouterKey, std::unique_ptr<RoutingState>> m_routers;
     // Retraction filtering chooses whether tops are exposed, so it uses its own crossing caches

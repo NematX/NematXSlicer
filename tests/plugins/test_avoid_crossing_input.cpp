@@ -177,7 +177,7 @@ TEST_CASE("Avoid-crossing default spacing includes other objects' brim settings"
     check_print(print);
     PluginStorage storage;
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-    const input::Input snapshot = input::build_input(reinterpret_cast<storage_handle *>(&storage), view, {0, 0, false}, nullptr);
+    const input::Input snapshot = input::build_input(reinterpret_cast<storage_handle *>(&storage), view, {0, 0, false});
     CHECK(snapshot.target->default_perimeter_spacing == (scale_i(0.4) + scale_i(0.6)) / 2);
 }
 
@@ -217,7 +217,7 @@ TEST_CASE("Avoid-crossing input copies support object context at exact Z", "[plu
             ++layer_index;
         REQUIRE(layer_index < object_view.auxiliary_layer_count());
         const input::Input snapshot = input::build_input(reinterpret_cast<storage_handle *>(&storage), print_view,
-            {0, layer_index, true}, nullptr);
+            {0, layer_index, true});
         if (z == object_view.layer(1).print_z()) {
             REQUIRE(native.id() == 0);
             CHECK_FALSE(snapshot.target->first_layer);
@@ -404,7 +404,7 @@ Coverage check_print(const Print &print)
                 input::ExternalInput external;
                 {
                     PluginStorage storage;
-                    snapshot = input::build_input(reinterpret_cast<storage_handle *>(&storage), view, {oi, li, auxiliary}, nullptr);
+                    snapshot = input::build_input(reinterpret_cast<storage_handle *>(&storage), view, {oi, li, auxiliary});
                     external = input::build_external_input(view, {oi, li, auxiliary});
                 }
                 const Layer &layer = auxiliary ? core_object.auxiliary_layers()[li] : core_object.layers()[li];

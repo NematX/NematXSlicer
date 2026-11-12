@@ -29,9 +29,12 @@ through public API views, then
 subtracts the target instance shift from both endpoints. PerimeterCrossing tests
 the direct path against boundaries of prepared interior areas, not extrusion
 centerlines. Without a crossing, the planner keeps the straight path.
-For support targets, copied object areas below the target height provide the
-crossing boundaries. Per-object plans retain only the target catalog instance;
-other plans retain all instances. Routing geometry remains the owner's boundary.
+For off-object targets with a region and real instance, object areas below the
+layer-group Z provide platter-space crossing boundaries. Current producers set no
+inherited Z offset on these targets (support and per-object brim); regionless wipe-tower targets
+keep the early straight return before detection.
+Current and earlier groups supply real instances; later groups and synthetic entries
+are excluded. Routing geometry remains the owner's local boundary.
 
 TravelRouter uses internal boundaries for travel within one object instance and
 external boundaries for travel between instances or objects. The external input
@@ -52,7 +55,7 @@ worker callback, so their mutable caches are not shared between workers.
     |-- input_for: obtain the target layer input
     |   `-- LayerInputCache::get: retain copied geometry, settings and spacing
     |-- router_for: retain layer/tool state and defer external input
-    |-- PerimeterCrossing::prepare/can_cross_perimeter: test the direct path
+    |-- PerimeterCrossing::prepare/prepare_platter/can_cross_perimeter: test the direct path
     `-- TravelRouter::travel_to: choose a route within the detour budget
 */
 
@@ -70,11 +73,14 @@ const char *const k_region_setting_keys[] = {
 
 CompatibilityPlanner::CompatibilityPlanner(const Print &print,
                                        const PrintingPlan &plan,
-                                       const plugin_run_context *run_ctx) :
+                                       const plugin_run_context *run_ctx,
+                                       uint32_t group_idx, coord_t print_z) :
     m_print(print),
     m_print_config(print.config()),
     m_plan(plan),
-    m_run_ctx(run_ctx)
+    m_run_ctx(run_ctx),
+    m_group_idx(group_idx),
+    m_print_z(print_z)
 {}
 
 c_point CompatibilityPlanner::local_point(const c_point point, const TravelEndpoint &endpoint) const
@@ -128,7 +134,7 @@ bool CompatibilityPlanner::endpoint_has_object_instance(const TravelEndpoint &en
 
 const AC::Input &CompatibilityPlanner::input_for(const Layer &layer)
 {
-    return m_inputs.get(m_print, layer, m_run_ctx, &m_plan);
+    return m_inputs.get(m_print, layer, m_run_ctx);
 }
 
 CompatibilityPlanner::RoutingState &CompatibilityPlanner::router_for(
@@ -203,16 +209,19 @@ std::vector<c_point> CompatibilityPlanner::path(const TravelEndpoint &source,
         m_print_config.vector_float_or_default("nozzle_diameter", extruder_id, 0.4);
     const coord_t nozzle_radius = std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5));
     throw_if_cancelled(m_run_ctx);
-    state.crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id, nozzle_radius,
-                           [this]() { throw_if_cancelled(m_run_ctx); }, input.support_object_slices,
-                           target.printing_catalog_id, {target_shift.x, target_shift.y},
-                           // Keep this predicate aligned with DefaultPlanBuilder::use_object_plan.
-                           m_print_config.bool_or_default("complete_objects", false) ||
-                           m_print_config.float_or_default("parallel_objects_step", 0.) > 0.);
+    const bool off_object = is_off_object_layer(target_layer_view);
+    if (off_object)
+        state.crossing.prepare_platter(m_run_ctx->plugin_storage, m_plan, m_group_idx,
+            m_print_z, nozzle_radius,
+            [this]() { throw_if_cancelled(m_run_ctx); });
+    else
+        state.crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id, nozzle_radius,
+            [this]() { throw_if_cancelled(m_run_ctx); });
     throw_if_cancelled(m_run_ctx);
 
     Work::Polyline direct;
-    direct.points = {local_source, local_target};
+    direct.points = off_object ? Work::Points{{source.position.x, source.position.y}, {target.position.x, target.position.y}} :
+        Work::Points{local_source, local_target};
     throw_if_cancelled(m_run_ctx);
     if (!state.crossing.can_cross_perimeter(direct, true))
         return straight(source, target, extruder_id);
@@ -282,7 +291,7 @@ bool CompatibilityPlanner::crosses(const TravelEndpoint &source,
         m_perimeter_crossings[{RouterKey{target_layer.handle(), extruder_id}, exclude_top_surfaces}];
     crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
                      std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5)),
-                     [this]() { throw_if_cancelled(m_run_ctx); }, {}, 0, {}, false, exclude_top_surfaces);
+                     [this]() { throw_if_cancelled(m_run_ctx); }, exclude_top_surfaces);
     return crossing.touches_top_surface(m_run_ctx->plugin_storage, local) ||
         crossing.can_cross_perimeter(local, true);
 }

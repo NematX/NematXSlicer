@@ -29,19 +29,24 @@ it does not prove the core rule elsewhere. A sliced roof on a narrow post also
 supplies a real support layer with its support property and region identity.
 Support crossing witnesses use the last object layer below support Z plus epsilon,
 not the support subject. Support-to-support paths over the part wipe, while paths
-across the unsupported overhang do not. Other-instance witnesses wipe in a layer
-plan but not with complete_objects or positive parallel_objects_step.
+across the unsupported overhang do not. Other-instance witnesses use all real
+instances listed in the controlled group, independently of planning settings.
 Controlled deposits, occupied departures and non-crossing detours suppress the
 second wipe; tool-change, lift and missing-dependency cases check pass ordering.
 Split cases cut the generated travel into two ordered leaves: a gap crossed only
 by the whole path still wipes, while a split detour or a broken junction does not.
-Certain local crossings use sliced instance and island identities, support in
-both directions, per-object brim published as Perimeter, and global skirt.
+Certain local crossings use sliced instance and island identities and support in
+both directions. Brim, skirt and regionless pairs have two off-object endpoints
+so their decisions reach the generated-travel pass rather than the first wipe pass.
 Both passes run together: departure lengths and leaf counts exclude a second
 wipe, while the travel starts at the normal non-returning wipe's endpoint.
 Pairs of support or brim paths on different instances remain for the returning
 pass. A global path carrying an object region paired with support distinguishes
-global ownership from that region; a regionless departure checks absent ownership.
+global ownership from that region. Synthetic tower targets have no region and
+must not request an instance shift. Their gaps cross the part or remain over void.
+Positive inherited Z offsets select object layers above the nominal group; negative
+offsets retain the nominal group's blockers. A per-object plan places the same
+instance in an earlier or later group: its part blocks only after its group has printed.
 Seam-gap cases retain the LOOP marker on an open path and require an explicit
 non-extruding wipe from its printed endpoint to the seam before each forward pass.
 Closed paths and return-to-seam settings share the same continuity and phase checks.
@@ -52,6 +57,8 @@ Closed paths and return-to-seam settings share the same continuity and phase che
         |-- prepare_crossing_test/can_cross_perimeter: compute core decisions
         |-- run_layer_plugins: create scopes, retractions and wipes
         `-- find_role: compare wipe presence with each expected decision
+    off-object offset cases: slice a cube and register a synthetic tower entry
+    `-- run_layer_plugins: compare returning wipes over the part and over void
 */
 
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
@@ -69,6 +76,7 @@ Closed paths and return-to-seam settings share the same continuity and phase che
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/PipelineProgress.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/LayerInputCache.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/PerimeterCrossing.hpp"
 
 namespace {
 
@@ -441,6 +449,74 @@ TEST_CASE("Retraction wipe retraces connected source content across a layer boun
     CHECK_FALSE(leaves.back().extrusion_axis.has_value());
 }
 
+// Check regionless and synthetic targets with inherited Z offsets against a real sliced part.
+TEST_CASE("Off-object wipes use inherited Z and printed per-object groups", "[plugins][wipe][off-object-crossing]")
+{
+    enum class Gap { Part, Void, Raised, Lowered, EarlierInstance, LaterInstance };
+    const Gap gap = GENERATE(Gap::Part, Gap::Void, Gap::Raised, Gap::Lowered, Gap::EarlierInstance, Gap::LaterInstance);
+    CAPTURE(static_cast<int>(gap));
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "1"}, {"wipe_only_crossing", "1"},
+        {"wipe_min", "2"}, {"wipe_return", "0"}, {"wipe_inside_end", "0"},
+        {"retract_before_travel", "0"}, {"retract_length", "2"}, {"retract_lift", "0"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(20., 20., 1.)}, print, model, config);
+    const bool per_object = gap == Gap::EarlierInstance || gap == Gap::LaterInstance;
+    if (per_object) {
+        model.objects().front().add_instance()->set_offset(Vec3d(160., 100., 0.));
+        print.apply(model, config);
+    }
+    print.set_status_silent();
+    print.process();
+    print.pipeline_progress().reset();
+    PrintingPlan &plan = print.mutable_printing_plan();
+    slic3r_api::PrintingPlan view(reinterpret_cast<printing_plan_handle *>(&plan));
+    view.clear();
+    plan.groups.reserve(3);
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const uint32_t real = view.find_or_add_object_instance(print_view.object(0), 0);
+    const uint32_t current = per_object ? view.find_or_add_object_instance(print_view.object(0), 1) : real;
+    const uint32_t tower = view.add_synthetic_object_instance("tower", slic3r_api::Polygon(
+        reinterpret_cast<const polygon_handle *>(&print.object(0).layers().front().lslices().front().contour)));
+    if (gap == Gap::EarlierInstance)
+        view.append_group().append_printing_catalog_id(view, real);
+    const uint32_t current_group_idx = view.group_count();
+    slic3r_api::PrintingGroup group = view.append_group();
+    group.append_printing_catalog_id(view, current);
+    group.append_printing_catalog_id(view, tower);
+    plan.groups[current_group_idx].layers.emplace_back();
+    PrintingLayerGroup &layer = plan.groups[current_group_idx].layers.back();
+    layer.print_z = scale_i(gap == Gap::Raised ? 0.1 : 0.8);
+    const coord_t offset = scale_i(gap == Gap::Raised ? 0.3 : gap == Gap::Lowered ? -0.7 : 0.);
+    layer.tool_groups.emplace_back();
+    PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    const c_point shift = print_view.object(0).instance_shift(0);
+    const BoundingBox box = get_extents(print.object(0).layers().front().lslices());
+    const coord_t y = box.center().y() + shift.y + (gap == Gap::Void ? scale_i(15.) : 0);
+    const Point start(box.min.x() + shift.x - scale_i(3.), y);
+    const Point end(box.max.x() + shift.x + scale_i(3.), y);
+    for (const Points &points : {Points{start - Point(0, scale_i(5.)), start},
+                                 Points{end, end + Point(0, scale_i(5.))}}) {
+        ArcPolyline line;
+        for (const Point &point : points) line.append(point);
+        append_printing_extrusion(tool, std::make_unique<ExtrusionPath>(line,
+            ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true));
+        tool.extrusions.back().printing_catalog_id = tower;
+        entity_view(*tool.extrusions.back().root).get_or_add(slic3r_api::EPropertyZOffset::key).set(offset);
+    }
+    // The same gap crosses instance zero: its normal slices block only when its group is already finished.
+    if (gap == Gap::LaterInstance)
+        view.append_group().append_printing_catalog_id(view, real);
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
+        ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, CROSSING_WIPE_PLUGIN});
+    CHECK(find_role(entity_view(*tool.extrusions.front().root), RAW_EXTRUSION_ROLE_WIPE).valid() ==
+        (gap != Gap::Void && gap != Gap::LaterInstance));
+}
+
 // Exercise both wipe passes on controlled plans with sliced identities and masks, checking normal departures for certain crossings and returning departures otherwise.
 TEST_CASE("Crossing wipes preserve generated travel starts and absolute retraction targets",
           "[plugins][layer-extrusion-edit][wipe][crossing]")
@@ -448,27 +524,25 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     enum class Shape { Open, LongLoop, EqualLoop, ShortLoop, Fragmented, Residual,
         InterLayer, Deposit, OccupiedAfter, Detour, Blocked, Lift, Toolchange, Support,
         RoutedDetour, LimitedDetour, Instances, ZOffsets, WrongZ, ExtraLoop,
-        Islands, SupportToObject, ObjectToSupport, BrimToObject, SkirtToObject,
-        OutsideSupports, OutsideBrims, GlobalToSupport, RegionlessToObject,
-        SplitTravel, SplitDetour, BrokenSplit, SupportVoid,
-        OtherSupport, OtherSupportComplete, OtherSupportParallel };
+        Islands, SupportToObject, ObjectToSupport, BrimPair, SkirtPair,
+        OutsideSupports, OutsideBrims, GlobalToSupport, RegionlessPair,
+        SplitTravel, SplitDetour, BrokenSplit, SupportVoid, OtherSupport };
     const Shape shape = GENERATE(Shape::Open, Shape::LongLoop, Shape::EqualLoop, Shape::ShortLoop,
         Shape::Fragmented, Shape::Residual, Shape::InterLayer, Shape::Deposit, Shape::OccupiedAfter,
         Shape::Detour, Shape::Blocked, Shape::Lift, Shape::Toolchange, Shape::Support,
         Shape::RoutedDetour, Shape::LimitedDetour, Shape::Instances, Shape::ZOffsets, Shape::WrongZ, Shape::ExtraLoop,
-        Shape::Islands, Shape::SupportToObject, Shape::ObjectToSupport, Shape::BrimToObject, Shape::SkirtToObject,
-        Shape::OutsideSupports, Shape::OutsideBrims, Shape::GlobalToSupport, Shape::RegionlessToObject,
-        Shape::SplitTravel, Shape::SplitDetour, Shape::BrokenSplit, Shape::SupportVoid,
-        Shape::OtherSupport, Shape::OtherSupportComplete, Shape::OtherSupportParallel);
+        Shape::Islands, Shape::SupportToObject, Shape::ObjectToSupport, Shape::BrimPair, Shape::SkirtPair,
+        Shape::OutsideSupports, Shape::OutsideBrims, Shape::GlobalToSupport, Shape::RegionlessPair,
+        Shape::SplitTravel, Shape::SplitDetour, Shape::BrokenSplit, Shape::SupportVoid, Shape::OtherSupport);
     // Split shapes cut the generated travel in two ordered leaves, as the deceleration provider does.
     const bool split = shape == Shape::SplitTravel || shape == Shape::SplitDetour || shape == Shape::BrokenSplit;
     const bool detour = shape == Shape::Detour || shape == Shape::SplitDetour;
-    const bool other_support = shape == Shape::OtherSupport || shape == Shape::OtherSupportComplete || shape == Shape::OtherSupportParallel;
+    const bool other_support = shape == Shape::OtherSupport;
+    const bool off_pair = shape == Shape::BrimPair || shape == Shape::SkirtPair || shape == Shape::RegionlessPair;
     const bool outside_supports = shape == Shape::OutsideSupports || other_support;
     const bool outside_pair = outside_supports || shape == Shape::OutsideBrims || shape == Shape::GlobalToSupport;
     const bool certain = shape == Shape::Instances || shape == Shape::Islands ||
-        shape == Shape::SupportToObject || shape == Shape::ObjectToSupport ||
-        shape == Shape::BrimToObject || shape == Shape::SkirtToObject || shape == Shape::RegionlessToObject;
+        shape == Shape::SupportToObject || shape == Shape::ObjectToSupport;
     const char *before = GENERATE("0%", "20%", "100%");
     CAPTURE(static_cast<int>(shape), before);
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -489,13 +563,9 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         {"wipe_lift", "0,0"}, {"use_firmware_retraction", "0"}});
     if (shape == Shape::Toolchange)
         config.set_deserialize_strict({{"perimeter_extruder", "2"}, {"infill_extruder", "2"}, {"solid_infill_extruder", "2"}});
-    if (shape == Shape::OtherSupportComplete)
-        config.set_deserialize_strict("complete_objects", "1");
-    if (shape == Shape::OtherSupportParallel)
-        config.set_deserialize_strict("parallel_objects_step", "1");
-    if (shape == Shape::BrimToObject || shape == Shape::OutsideBrims)
+    if (shape == Shape::BrimPair || shape == Shape::OutsideBrims)
         config.set_deserialize_strict({{"brim_width", "2"}});
-    if (shape == Shape::SkirtToObject)
+    if (shape == Shape::SkirtPair)
         config.set_deserialize_strict({{"skirts", "1"}});
     if (shape == Shape::Support || shape == Shape::SupportVoid || shape == Shape::SupportToObject || shape == Shape::ObjectToSupport || outside_supports || shape == Shape::GlobalToSupport)
         config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "grid"},
@@ -583,7 +653,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
         target_region = &mask->islands().back().regions_islands().front();
     }
     if (shape == Shape::SupportToObject || shape == Shape::ObjectToSupport ||
-        shape == Shape::BrimToObject || shape == Shape::SkirtToObject || outside_pair) {
+        shape == Shape::BrimPair || shape == Shape::SkirtPair || outside_pair) {
         const LayerRegionIsland *auxiliary_region = nullptr;
         uint32_t auxiliary_catalog = catalog;
         for (const PrintingGroup &group : plan.groups)
@@ -596,8 +666,8 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
                         if (view.region_count() == 0)
                             continue;
                         const slic3r_api::Layer owner = view.region(0).layer();
-                        const bool selected = shape == Shape::BrimToObject || shape == Shape::OutsideBrims ? slic3r_api::layer_is_brim(owner) :
-                            shape == Shape::SkirtToObject ? extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE :
+                        const bool selected = shape == Shape::BrimPair || shape == Shape::OutsideBrims ? slic3r_api::layer_is_brim(owner) :
+                            shape == Shape::SkirtPair ? extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE :
                             owner.properties().get(slic3r_api::LayerSupportProperty::key) != nullptr;
                         if (selected) {
                             auxiliary_region = extrusion.region_island;
@@ -619,6 +689,9 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
                 CHECK(slic3r_api::LayerRegionIsland(reinterpret_cast<const layer_region_island_handle *>(source_region)).region(0).layer().print_z() ==
                     slic3r_api::LayerRegionIsland(reinterpret_cast<const layer_region_island_handle *>(target_region)).region(0).layer().print_z());
             }
+        } else if (off_pair) {
+            source_region = target_region = auxiliary_region;
+            source_catalog = catalog = auxiliary_catalog;
         } else if (shape == Shape::ObjectToSupport)
             target_region = auxiliary_region;
         else {
@@ -626,14 +699,14 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
             source_catalog = auxiliary_catalog;
         }
     }
-    if (shape == Shape::RegionlessToObject)
-        source_region = nullptr;
+    if (shape == Shape::RegionlessPair)
+        source_region = target_region = nullptr;
     CHECK((mask->get_property<LayerSupportProperty>() != nullptr) ==
         (shape == Shape::Support || shape == Shape::SupportVoid || outside_supports || shape == Shape::GlobalToSupport));
     const Layer *crossing_mask = mask;
-    if (mask->get_property<LayerSupportProperty>() != nullptr) {
+    if (mask->get_property<LayerSupportProperty>() != nullptr || shape == Shape::OutsideBrims) {
         crossing_mask = nullptr;
-        for (const Layer &candidate : mask->object()->layers()) {
+        for (const Layer &candidate : print.object(0).layers()) {
             if (candidate.scaled_print_z() >= mask->scaled_print_z() + SCALED_EPSILON)
                 break;
             crossing_mask = &candidate;
@@ -659,8 +732,9 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     PrintingExtrusion identity;
     identity.region_island = region;
     identity.printing_catalog_id = catalog;
-    const c_point shift = plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
-        reinterpret_cast<const printing_extrusion_handle *>(&identity)));
+    const c_point shift = off_pair || shape == Shape::OutsideBrims ? slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)).object(0).instance_shift(0) :
+        plan_view.object_instance_shift(slic3r_api::ConstPrintingExtrusion(
+            reinterpret_cast<const printing_extrusion_handle *>(&identity)));
     Point oracle_shift;
     if (shape == Shape::Instances || outside_supports || shape == Shape::OutsideBrims) {
         REQUIRE(source_catalog != PRINTING_OBJECT_INSTANCE_ID_NONE);
@@ -673,7 +747,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
             end += oracle_shift;
         }
     } else {
-        if (shape != Shape::SkirtToObject && !outside_pair)
+        if (shape != Shape::SkirtPair && !outside_pair)
             source_catalog = catalog;
         start += Point(shift.x, shift.y);
     }
@@ -689,14 +763,31 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     // The core has no instance placement; query the other instance's copied object area in its own coordinates.
     for (Point &point : direct.points)
         point -= oracle_shift;
-    REQUIRE(oracle.can_cross_perimeter(direct, true) == (shape != Shape::SupportVoid));
+    if (!off_pair && shape != Shape::OutsideBrims)
+        REQUIRE(oracle.can_cross_perimeter(direct, true) == (shape != Shape::SupportVoid));
     plan.groups.clear();
     plan.groups.emplace_back();
-    plan.groups.back().printing_catalog_ids.push_back(catalog);
-    if (source_catalog != catalog)
+    if (catalog != PRINTING_OBJECT_INSTANCE_ID_NONE)
+        plan.groups.back().printing_catalog_ids.push_back(catalog);
+    if (source_catalog != catalog && source_catalog != PRINTING_OBJECT_INSTANCE_ID_NONE)
         plan.groups.back().printing_catalog_ids.push_back(source_catalog);
+    // Global and regionless gaps still have the real object's slices on the platter.
+    if (plan.groups.back().printing_catalog_ids.empty())
+        plan.groups.back().printing_catalog_ids.push_back(0);
     plan.groups.back().layers.emplace_back();
     plan.groups.back().layers.back().print_z = mask->scaled_print_z();
+    if (off_pair || shape == Shape::OutsideBrims) {
+        // Both endpoints are off object; the part, rather than auxiliary geometry, witnesses the crossing.
+        PluginStorage storage;
+        slic3r_api::LayerExtrusionEdit::AvoidCrossing::PerimeterCrossing crossing;
+        crossing.prepare_platter(reinterpret_cast<storage_handle *>(&storage),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&plan)), 0,
+            mask->scaled_print_z(), scale_i(0.2));
+        slic3r_api::PluginCommon::work::Polyline path;
+        path.points = {{start.x(), start.y()}, {target_start.x(), target_start.y()}};
+        CAPTURE(catalog, source_catalog, mask->scaled_print_z(), start.x(), start.y(), target_start.x(), target_start.y(), shift.x, shift.y);
+        REQUIRE(crossing.can_cross_perimeter(path, true));
+    }
     plan.groups.back().layers.back().tool_groups.emplace_back();
     PrintingToolGroup &source_tool = plan.groups.back().layers.back().tool_groups.back();
     source_tool.extruder_id = 0;
@@ -848,8 +939,7 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     const slic3r_api::MutableExtrusionEntity wipe = find_role(source_root, RAW_EXTRUSION_ROLE_WIPE);
     if (shape == Shape::Deposit || shape == Shape::OccupiedAfter || detour ||
         shape == Shape::RoutedDetour || shape == Shape::Blocked || shape == Shape::WrongZ ||
-        shape == Shape::BrokenSplit || shape == Shape::SupportVoid ||
-        shape == Shape::OtherSupportComplete || shape == Shape::OtherSupportParallel) {
+        shape == Shape::BrokenSplit || shape == Shape::SupportVoid) {
         CHECK_FALSE(wipe.valid());
         return;
     }
@@ -1041,7 +1131,7 @@ TEST_CASE("Wipe crossing distinguishes inset radii tools instances and global sk
                 continue;
             PluginStorage storage;
             const AC::Input input = AC::build_input(reinterpret_cast<storage_handle *>(&storage),
-                print_view, {0, idx, true, true}, nullptr);
+                print_view, {0, idx, true, true});
             CHECK(input.target->identity.global_object);
             CHECK(input.target->identity.object == 0);
             CHECK_FALSE(input.target->first_layer);
@@ -1051,13 +1141,13 @@ TEST_CASE("Wipe crossing distinguishes inset radii tools instances and global sk
             plugin_run_context ctx{};
             ctx.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
             AC::LayerInputCache cache;
-            const AC::Input &cached = cache.get(print_view, auxiliary.auxiliary_layer(idx), &ctx, nullptr);
+            const AC::Input &cached = cache.get(print_view, auxiliary.auxiliary_layer(idx), &ctx);
             CHECK(cached.target->identity.global_object);
             CHECK(cached.target->identity.object == input.target->identity.object);
             CHECK(cached.target->identity.layer == input.target->identity.layer);
             CHECK(cached.target->identity.auxiliary == input.target->identity.auxiliary);
             CHECK(cached.target->print_z == input.target->print_z);
-            CHECK(&cache.get(print_view, auxiliary.auxiliary_layer(idx), &ctx, nullptr) == &cached);
+            CHECK(&cache.get(print_view, auxiliary.auxiliary_layer(idx), &ctx) == &cached);
             copied = true;
         }
         REQUIRE(copied);

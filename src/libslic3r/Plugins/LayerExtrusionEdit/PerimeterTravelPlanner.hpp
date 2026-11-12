@@ -15,7 +15,7 @@
    owns its geometry caches and borrows immutable Print/PrintingPlan data only
    for the worker's lifetime. For example:
 
-       PerimeterTravelPlanner planner(print, plan, context);
+       PerimeterTravelPlanner planner(print, plan, context, group_idx, print_z);
        const auto route = planner.path(source, target, tool);
        const bool crossing = planner.crosses(source, target, tool, route);
 
@@ -26,8 +26,10 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossingPer
 class PerimeterTravelPlanner
 {
 public:
-    // Own worker-local routing caches; the borrowed plan must outlive the planner.
-    PerimeterTravelPlanner(const Print &, const PrintingPlan &, const plugin_run_context *);
+    // Own worker-local routing caches for one plan group at its layer-group Z, which places the
+    // objects already printed; the borrowed plan must outlive the planner.
+    PerimeterTravelPlanner(const Print &, const PrintingPlan &, const plugin_run_context *,
+                           uint32_t group_idx, coord_t print_z);
     // Release caches after the worker has finished its routing queries.
     ~PerimeterTravelPlanner();
     // Declare the settings read by the shared router and crossing caches.

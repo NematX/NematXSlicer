@@ -693,11 +693,18 @@ perimeters or infill to a tool other than the current one, object interiors are
 clipped to the current tool so its material does not ooze over another tool's
 area. Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
 then removes top surfaces from both. The provider tests the inset version.
-Support uses slices from each object's last layer strictly below target Z plus `SCALED_EPSILON`,
-expanded by 1.5 radii without tool clipping or top removal. Every catalog instance
-counts, except in per-object plans (`complete_objects` or positive
-`parallel_objects_step`), which retain only the target instance. No object below
-means no crossing. Support itself is not a blocker. A path that does not
+Off-object targets use slices from each object's last normal layer strictly below
+the query Z plus `SCALED_EPSILON`, expanded by 1.5 radii without tool clipping or
+top removal. A target is off object when it has no region or its layer is not a
+normal object layer: support, raft, skirt, brim and wipe-tower geometry qualify.
+The wipe queries at the higher of the layer group's print Z and that Z plus the
+target's inherited Z offset. The legacy planner queries its off-object targets
+with a region (support and per-object brim) at the layer-group Z.
+Real catalog instances in the current and earlier
+printing groups count; later groups and synthetic entries such as wipe towers
+do not supply blockers. These queries use platter coordinates, without removing
+the target's shift. No object below means no crossing. Auxiliary geometry itself
+is not a blocker. A path that does not
 cross those boundaries remains straight.
 
 Within one object instance, the router uses internal rings around inset object
@@ -707,10 +714,14 @@ uses object slices at or below the target height; its purpose is undocumented,
 and it does not route support travels around objects. Detection can see another
 instance while the support routing boundary still belongs to the owner; such a
 crossing may remain straight when no detour is available. Object areas are translated
-by each instance's XY shift only; instance rotation is not applied, matching
-`SupportObstacleContributor`. Per-object detection
-does not include previously finished instances. Support without regions stays
-straight and does not request a crossing wipe. The router places endpoints near usable rings, follows
+by each instance's XY shift; differently rotated instances have separate sliced
+objects. Detection includes finished instances in earlier groups, using their
+last normal layer below the query Z rather than a full height history.
+The compatible planner uses this detection for off-object targets with a region
+and real instance, including support and per-object brim. Its router still uses
+the owner's local geometry. Regionless and global targets keep straight routes,
+but the wipe gate also tests their generated travels against platter blockers.
+The router places endpoints near usable rings, follows
 ring arcs and tries shortcuts. It may keep a direct path and does not guarantee
 a shortest path or the removal of every crossing.
 
@@ -904,9 +915,9 @@ Complete source loops no longer than the configured wipe use whole turns rounded
 up to the required length; longer loops and open paths go halfway out and return
 over the same path. `wipe_return` and inside-end settings do not apply. Wipe and
 retraction settings belong to the source tool; crossing preparation and nozzle
-diameter belong to the target tool. Support uses the printed-object crossing rule
-described above, so a support-to-support gap crossing the part can wipe while a
-gap between support islands over void does not wipe for crossing alone.
+diameter belong to the target tool. Every off-object target uses the platter
+crossing rule described above, so an off-object-to-off-object gap crossing the part
+can wipe while a gap over void does not wipe for crossing alone.
 
 Before editing, each target layer worker publishes its first travel's exact start
 and crossing result as plain values. Source workers can thus handle inter-layer

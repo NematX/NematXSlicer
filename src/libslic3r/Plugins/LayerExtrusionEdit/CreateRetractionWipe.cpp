@@ -70,7 +70,7 @@ global, regionless and auxiliary-layer geometry. All other transitions depend
 on the generated travel. CreateCrossingWipe runs after travel generation and tests
 the actual travel vertices. The target's region identifies the layer and its
 tool group selects the nozzle radius and material areas. All travel vertices
-have the target instance's XY shift removed before testing.
+have the target instance's XY shift removed only for normal object targets.
 The travel phase may be one segmented Travel leaf or an ordered subtree of
 them, such as a travel split for deceleration; its leaves must form one
 continuous path without Wipe geometry, otherwise the gap is skipped. Global
@@ -79,11 +79,12 @@ This is only a gate for adding a wipe; it never routes the gap around objects.
 
 PerimeterCrossing prepares two versions of the target's filled areas. For an
 object it clips to the selected tool's areas, insets one version by 1.5 nozzle
-radii, and removes top surfaces from both. For support it uses each object's last
-slices below target Z plus epsilon, expanded by 1.5 radii without tool clipping
-or top removal. All catalog instances count unless complete_objects or positive
-parallel_objects_step selects a per-object plan; then only the target counts.
-An empty collection crosses nothing. Support without a region is skipped. Both versions are
+radii, and removes top surfaces from both. Off-object targets use each real instance's
+last normal slices below the query Z plus epsilon in current and earlier plan groups,
+expanded by 1.5 radii without tool clipping or top removal. The query Z is the higher
+of the layer group Z and that Z plus the target's inherited offset. Synthetic
+entries contribute no blockers. Classification precedes instance-shift lookup;
+platter queries also handle regionless targets. An empty collection crosses nothing. Both versions are
 simplified with the nozzle radius. The wipe gate queries the offset version's
 boundaries, not extrusion centre lines; a false result does not prove that
 the gap lies inside material.
@@ -112,8 +113,12 @@ Existing departure geometry or a terminal deposit prevents a second-pass wipe.
     CreateCrossingWipe::setup_run_impl: publish the first travel's crossing and exact start
     CreateCrossingWipe::run_impl: inspect local travels and the next layer summary
         |-- WipeCrossingChecker::crosses: test generated travel vertices
-        |   |-- LayerInputCache::get: resolve and copy the target layer
-        |   |-- PerimeterCrossing::prepare: prepare target areas for the tool
+        |   |-- is_off_object_layer: classify regional targets before instance-shift lookup
+        |   |-- off-object target (also regionless): target_first_leaf resolves inherited base Z
+        |   |   `-- PerimeterCrossing::prepare_platter: cache blockers at max(group Z, target base Z)
+        |   |       `-- platter_blockers: union normal slices from real instances in eligible groups
+        |   |-- object target: LayerInputCache::get resolves and copies the target layer
+        |   |   `-- PerimeterCrossing::prepare: prepare target-local areas for the tool
         |   `-- PerimeterCrossing::can_cross_perimeter: test the offset boundaries
         `-- add_outgoing_wipe: return to the supplied travel start and distribute retraction
 */
@@ -175,9 +180,10 @@ public:
                         const PrintingPlan &plan,
                         const plugin_run_context *run_ctx);
 
-    // Test every travel vertex in target coordinates against offset boundaries; missing target regions or a null layer handle return false.
+    // Test travel vertices against offset boundaries: platter blockers for off-object targets, local material for object targets.
     // Copy inputs on first use; an absent layer throws, and exceptions from cancellation or geometry preparation propagate.
-    bool crosses(const ScopeEntity &target_scope, const std::vector<TP::TravelLeaf> &travel);
+    bool crosses(const ScopeEntity &target_scope, const std::vector<TP::TravelLeaf> &travel,
+                 const PluginPropertyKey<PrintingExtrusionScopeProperty> &key);
 
 private:
     /* Identify one crossing cache by its target layer and active extruder. */
@@ -958,37 +964,42 @@ WipeCrossingChecker::WipeCrossingChecker(
 
 bool WipeCrossingChecker::crosses(
     const ScopeEntity &target_scope,
-    const std::vector<TP::TravelLeaf> &travel)
+    const std::vector<TP::TravelLeaf> &travel,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &key)
 {
     const LayerRegionIsland region_island =
         target_scope.printing_extrusion.region_island();
-    if (!region_island.valid() || region_island.region_count() == 0 ||
-        travel.empty())
+    if (travel.empty())
         return false;
-
-    const Layer layer_view = region_island.region(0).layer();
-    if (layer_view.handle() == nullptr)
-        return false;
-
+    const bool regionless = !region_island.valid() || region_island.region_count() == 0;
+    const Layer layer_view = regionless ? Layer() : region_island.region(0).layer();
+    const bool off_object = regionless || AC::is_off_object_layer(layer_view);
     const extruder_index_t extruder_id = target_scope.tool_group.extruder_id();
-    const Key cache_key{layer_view.handle(), extruder_id};
-    // Keep copied geometry stable while the per-tool crossing cache borrows it.
-    const AC::Input &input = m_inputs.get(
-        Print(plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->print), layer_view, m_run_ctx, &m_plan);
+    const Key cache_key{regionless ? nullptr : layer_view.handle(), extruder_id};
     AC::PerimeterCrossing &crossing = m_crossings[cache_key];
 
     const double nozzle_diameter = m_print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const coord_t nozzle_radius = std::max<coord_t>(
         1, scale_i(nozzle_diameter * 0.5));
-    // Crossing areas use target-local XY; global auxiliary paths have a zero shift.
-    const c_point shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
-    crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
-        nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); }, input.support_object_slices,
-        target_scope.printing_extrusion.printing_catalog_id(), {shift.x, shift.y},
-        // Keep this predicate aligned with DefaultPlanBuilder::use_object_plan.
-        m_print_config.bool_or_default("complete_objects", false) ||
-        m_print_config.float_or_default("parallel_objects_step", 0.) > 0.);
+    c_point shift{};
+    if (off_object) {
+        const coord_t print_z = target_scope.layer_group.print_z();
+        WipeLeaf target;
+        coord_t phase_base_z = 0;
+        if (!target_first_leaf(target_scope, key, target, phase_base_z))
+            return false;
+        crossing.prepare_platter(m_run_ctx->plugin_storage, m_plan,
+            plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->group_idx,
+            std::max(print_z, target.base_z), nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); });
+    } else {
+        // Object queries retain target-local geometry and the selected tool's material area.
+        const AC::Input &input = m_inputs.get(
+            Print(plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->print), layer_view, m_run_ctx);
+        shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
+        crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
+            nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); });
+    }
     PluginCommon::work::Polyline polyline;
     const c_point first = travel.front().entity.segment(0).point_a;
     polyline.points.push_back({first.x - shift.x, first.y - shift.y});
@@ -1298,10 +1309,8 @@ LayerIsland material_island(const ScopeEntity &scope)
     if (!region.valid() || region.region_count() == 0)
         return LayerIsland();
     const Layer layer = region.region(0).layer();
-    const Object object = layer.object();
-    for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx)
-        if (object.auxiliary_layer(idx).handle() == layer.handle())
-            return LayerIsland();
+    if (AC::is_off_object_layer(layer))
+        return LayerIsland();
     for (uint32_t idx = 0; idx < layer.island_count(); ++idx) {
         const LayerIsland island = layer.island(idx);
         for (uint32_t part = 0; part < island.region_island_count(); ++part)
@@ -1413,8 +1422,6 @@ int32_t CreateCrossingWipe::priority_impl() const noexcept
 int32_t CreateCrossingWipe::used_config_keys(raw_used_config_key *keys) const noexcept
 {
     static const raw_used_config_key used_keys[] = {
-        {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe_only_crossing", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -1482,7 +1489,7 @@ void CreateCrossingWipe::setup_run_impl(const plugin_run_context *run_ctx) const
             summary = travel_summary(*next, travel);
             if (enabled) {
                 checker = std::make_unique<WipeCrossingChecker>(config, plan, run_ctx);
-                summary.crosses = checker->crosses(*next, travel);
+                summary.crosses = checker->crosses(*next, travel, m_scope_property);
             }
         }, MatchingEntityDescendants::Skip);
     PrintingLayerGroup layer(ctx->layer_group);
@@ -1513,7 +1520,7 @@ void CreateCrossingWipe::run_impl(const plugin_run_context *run_ctx) const
                     return;
                 if (!checker)
                     checker = std::make_unique<WipeCrossingChecker>(config, plan, run_ctx);
-                if (checker->crosses(*next, travel)) {
+                if (checker->crosses(*next, travel, m_scope_property)) {
                     const FirstTravelSummary start = travel_summary(*next, travel);
                     add_outgoing_wipe(*previous, config, m_scope_property, &start);
                 }

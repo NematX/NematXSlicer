@@ -162,8 +162,6 @@ int32_t AvoidCrossingPerimetersTravel::used_config_keys(raw_used_config_key *key
 int32_t perimeter_travel_config_keys(raw_used_config_key *keys) noexcept
 {
     static const raw_used_config_key used_keys[] = {
-        {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_perimeters", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_not_first_layer", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_perimeters_max_detour", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -220,13 +218,13 @@ void AvoidCrossingPerimetersTravel::run_impl(const plugin_run_context *run_ctx) 
     if (ctx->plan == nullptr)
         return;
     PrintingPlan plan(ctx->plan);
-    AC::CompatibilityPlanner planner(Print(ctx->print), plan, run_ctx);
+    PrintingLayerGroup layer_group(ctx->layer_group);
+    AC::CompatibilityPlanner planner(Print(ctx->print), plan, run_ctx, ctx->group_idx, layer_group.print_z());
     const TravelPathPlanner route = [&planner](const TravelEndpoint &source,
                                                const TravelEndpoint &target,
                                                const extruder_index_t extruder_id) {
         return planner.path(source, target, extruder_id);
     };
-    PrintingLayerGroup layer_group(ctx->layer_group);
     m_connector.run(layer_group,
                     ctx->group_idx, ctx->layer_group_idx,
                     route, progress());
@@ -239,11 +237,13 @@ struct PerimeterTravelPlanner::Impl
 {
     AC::CompatibilityPlanner planner;
     // Keep the planner alive for all queries from one layer worker.
-    Impl(const Print &print, const PrintingPlan &plan, const plugin_run_context *ctx) : planner(print, plan, ctx) {}
+    Impl(const Print &print, const PrintingPlan &plan, const plugin_run_context *ctx, uint32_t group_idx,
+         coord_t print_z) : planner(print, plan, ctx, group_idx, print_z) {}
 };
 
 PerimeterTravelPlanner::PerimeterTravelPlanner(const Print &print, const PrintingPlan &plan,
-    const plugin_run_context *ctx) : m_impl(std::make_unique<Impl>(print, plan, ctx)) {}
+    const plugin_run_context *ctx, uint32_t group_idx, coord_t print_z) :
+    m_impl(std::make_unique<Impl>(print, plan, ctx, group_idx, print_z)) {}
 PerimeterTravelPlanner::~PerimeterTravelPlanner() = default;
 
 int32_t PerimeterTravelPlanner::used_config_keys(raw_used_config_key *keys) noexcept

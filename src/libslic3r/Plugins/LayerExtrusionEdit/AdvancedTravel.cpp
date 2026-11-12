@@ -231,8 +231,6 @@ int32_t AdvancedTravel::exclusive_group_priority_impl() const noexcept
 int32_t AdvancedTravel::used_config_keys(raw_used_config_key *keys) const noexcept
 {
     static const raw_used_config_key used_keys[] = {
-        {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_perimeters", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_not_first_layer", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"avoid_crossing_perimeters_max_detour", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -288,7 +286,7 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     PrintingPlan plan(ctx->plan);
     const Print print(ctx->print);
     const Config config = print.config();
-    AvoidCrossing::CompatibilityPlanner planner(print, plan, run_ctx);
+    AvoidCrossing::CompatibilityPlanner planner(print, plan, run_ctx, ctx->group_idx, layer_group.print_z());
     const TravelPathPlanner route = [&planner](const TravelEndpoint &source,
                                                const TravelEndpoint &target,
                                                const extruder_index_t extruder_id) {

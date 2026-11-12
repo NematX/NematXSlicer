@@ -10,11 +10,9 @@
 // Use one cache per worker and one unchanged print. Returned references stay valid
 // until the cache is destroyed; keep it alive while crossing tests or routers
 // borrow its inputs. The cache owns these copies, not the print or run context.
-// Supply the same unchanged plan on every call when support crossing areas are needed.
-// Passing nullptr deliberately leaves support crossing areas empty, with no blockers.
 // Example, with print, layer and ctx from the current worker:
 //     LayerInputCache cache;
-//     const Input &input = cache.get(print, layer, ctx, &plan);
+//     const Input &input = cache.get(print, layer, ctx);
 //     // Use *input.target while cache and the unchanged print remain alive.
 #ifndef slic3r_plugins_layer_input_cache_hpp_
 #define slic3r_plugins_layer_input_cache_hpp_
@@ -32,9 +30,8 @@ class LayerInputCache
     std::map<const layer_handle *, Input> m_inputs;
 public:
     // Return the copy keyed by layer handle; only misses check cancellation and scan the print tree.
-    // Require non-null ctx with valid storage; a non-null plan supplies support catalog areas. Copy/cancellation failures propagate.
-    const Input &get(const Print &print, const Layer &layer, const plugin_run_context *ctx,
-                     const PrintingPlan *plan)
+    // Require non-null ctx with valid storage; copy and cancellation failures propagate.
+    const Input &get(const Print &print, const Layer &layer, const plugin_run_context *ctx)
     {
         const auto found = m_inputs.find(layer.handle());
         if (found != m_inputs.end())
@@ -53,7 +50,7 @@ public:
                     const Layer candidate = auxiliary ? object.auxiliary_layer(idx) : object.layer(idx);
                     if (candidate.handle() == layer.handle())
                         return m_inputs.emplace(layer.handle(), build_input(
-                            ctx->plugin_storage, print, {global_object ? 0 : object_idx, idx, auxiliary, global_object}, plan)).first->second;
+                            ctx->plugin_storage, print, {global_object ? 0 : object_idx, idx, auxiliary, global_object})).first->second;
                 }
             }
         }

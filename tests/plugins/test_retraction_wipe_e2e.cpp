@@ -111,7 +111,6 @@ TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][lay
     const Plugin *plugin = host.get_plugin(wipe_id);
     REQUIRE(plugin != nullptr);
     const std::map<std::string, std::vector<std::string>> domains{
-        {"complete_objects", {"1"}}, {"parallel_objects_step", {"1"}},
         {"retract_before_wipe", {"0%", "100%"}}, {"wipe_inside_depth", {"0%", "100%"}},
         {"wipe_inside_end", {"1"}}, {"wipe_inside_start", {"1"}}, {"wipe", {"0"}},
         {"wipe_speed", {"30"}}, {"wipe_min", {"5"}}, {"wipe_return", {"1"}},
@@ -127,11 +126,7 @@ TEST_CASE("Wipe percentages reach production G-code", "[plugins][plugin-e2e][lay
     }
     const Plugin *crossing = host.get_plugin("layer_extrusion_edit.wipe.crossing");
     REQUIRE(crossing != nullptr);
-    REQUIRE(crossing->get_used_config_keys().size() == 11);
-    for (const Plugin::UsedConfigKey &key : crossing->get_used_config_keys()) {
-        if (key.key == "complete_objects") CHECK(key.type == RAW_CO_BOOL);
-        if (key.key == "parallel_objects_step") CHECK(key.type == RAW_CO_FLOAT);
-    }
+    REQUIRE(crossing->get_used_config_keys().size() == 9);
     for (const Plugin::UsedConfigKey &key : crossing->get_used_config_keys()) {
         INFO("crossing used setting: " << key.key);
         REQUIRE(domains.count(key.key) == 1);

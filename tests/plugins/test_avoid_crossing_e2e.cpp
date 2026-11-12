@@ -23,6 +23,7 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.hpp"
 
 /*
 This end-to-end gate checks that compatible and zone-based travel providers' settings
@@ -78,7 +79,7 @@ are shifted using the plan catalog. With other contributors disabled, the same
 endpoints must have a detour with support obstacles and a straight route without
 them; an intermediate vertex of that detour must occur in published G-code.
 The support-crossing matrix selects the compatible provider and independently
-varies crossing-only wipe, avoidance and both per-object planning settings. It
+varies crossing-only wipe and avoidance settings. It
 counts support wipe leaves, checks straight versus deviated routes and preserves
 deposited volume for settings that do not change extrusion geometry. It validates
 the declarations of both travel providers and crossing wipe against independent
@@ -89,6 +90,16 @@ with the first scope of the next one when layer, tool and instance are unchanged
 With avoidance disabled, intersection with expanded printed-object areas witnesses
 a wiped gap across the part. Two separate overhangs supply distinct support islands;
 an unwiped gap over void must join different islands and exceed wipe_min.
+
+The tower scene uses the same two separated overhangs plus a second object printed
+with tool two. WipeTowerManager generates its own tower and scopes; no paths or
+plan entries are inserted by the test. Consecutive off-object scopes in one layer
+are inspected when at least one belongs to the synthetic tower entry. Copied,
+translated normal object slices independently classify their straight travel chords.
+A support-to-tower chord across a part must wipe; a long tower-to-tower chord over
+void must not. The corresponding scope in the unconditional-wipe run must wipe,
+so the void witness is not explained by an ineligible source. Only those two runs
+share a volume comparison. Diagnostics name both endpoint kinds and their XY.
 
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
@@ -102,7 +113,7 @@ an unwiped gap over void must join different islands and exceed wipe_min.
 */
 namespace {
 using namespace Slic3r;
-enum class Scene { Ring, Support, SupportCrossing, Dumbbell };
+enum class Scene { Ring, Support, SupportCrossing, Dumbbell, Tower };
 struct Result {
     // Planner selected by the host before processing; empty when no member is active.
     std::string selected_planner;
@@ -129,6 +140,14 @@ struct Result {
     size_t published_bridges = 0;
     // Extruded volume read back from the published G-code, in mm³.
     double volume = 0.;
+    // Observations for the real two-tool tower scene; scope ordinals identify the same gaps in both wipe modes.
+    size_t tower_scopes = 0;
+    size_t tower_part_wipes = 0;
+    size_t tower_void_without_wipe = 0;
+    size_t tower_void_with_wipe = 0;
+    uint32_t tower_object_tools = 0;
+    std::vector<size_t> tower_void_scope_ids;
+    std::vector<size_t> tower_wiped_scope_ids;
 };
 // Restore the saved active plugin set, including the exporter, after the case-local Prints are destroyed.
 struct TravelActivation {
@@ -158,7 +177,7 @@ struct TravelActivation {
     }
 };
 // Slice and process the selected scene, checking the stored provider or implicit advanced default; publish text G-code under file names built from name,
-// and return copied routes, support crossing/wipe witnesses, published detour matches and deposited volume.
+// and return copied routes, support/tower crossing-wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
 // Copy reserved travel phases without changing the plan; skip routes below two vertices and count those above two.
@@ -192,7 +211,6 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {"wipe", "1"}, {"wipe_only_crossing", "1"}, {"wipe_min", "2"}, {"wipe_inside_end", "0"},
         {"wipe_return", "0"}, {"retract_before_travel", "0"}, {"retract_length", "2"},
         {"retract_before_wipe", "20%"}, {"retract_lift", "0"}, {"wipe_lift", "0"},
-        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
         {"nozzle_diameter", "0.4,0.4"}, {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"},
         {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1,1"},
         {"avoid_travel_island", "0"}, {"avoid_travel_island_weight", "1"}, {"ironing", "0"},
@@ -201,8 +219,6 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
     const std::vector<Test::PluginE2E::Domain> domains{
         {{"wipe_only_crossing"}, {{"all-wipes", {{"wipe_only_crossing", "0"}}}}},
         {{"avoid_crossing_perimeters"}, {{"straight", {{"avoid_crossing_perimeters", "0"}}}}},
-        {{"complete_objects"}, {{"complete-objects", {{"complete_objects", "1"}}}}},
-        {{"parallel_objects_step"}, {{"parallel-objects", {{"parallel_objects_step", "1"}}}}},
         {{"avoid_crossing_not_first_layer"}, {{"skip-first", {{"avoid_crossing_not_first_layer", "1"}}}}},
         {{"avoid_crossing_perimeters_max_detour"}, {{"detour-limit", {{"avoid_crossing_perimeters_max_detour", "5"}}}}},
         {{"nozzle_diameter"}, {{"nozzle", {{"nozzle_diameter", "0.6,0.4"}}}}},
@@ -251,6 +267,49 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
                 CHECK(result.support_wipes > baseline_wipes);
         }
     }
+}
+
+// Compare crossing-only wipes with unconditional wipes in one real two-tool tower scene.
+TEST_CASE("Off-object tower gaps reach production crossing wipes", "[plugins][plugin-e2e][off-object-tower-e2e]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.wipe.default", true));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.wipe.crossing", true));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.default");
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "1"}, {"brim_width", "0"}, {"perimeters", "2"}, {"fill_density", "20%"},
+        {"support_material", "1"}, {"support_material_style", "grid"},
+        {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
+        {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"},
+        {"wipe_tower", "1"}, {"wipe_tower_x", "20"}, {"wipe_tower_y", "0"},
+        {"wipe_tower_width", "20"}, {"single_extruder_multi_material", "0"},
+        {"nozzle_diameter", "0.4,0.4"}, {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1,1"},
+        {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"},
+        {"step_wipetower_plugin", "wipe_tower.manager.default"},
+        {"wipe", "1,1"}, {"wipe_only_crossing", "1,1"}, {"wipe_min", "2,2"},
+        {"wipe_inside_end", "0,0"}, {"wipe_return", "0,0"}, {"wipe_lift", "0,0"},
+        {"retract_before_travel", "0,0"}, {"retract_length", "2,2"},
+        {"retract_length_toolchange", "2,2"}, {"retract_lift", "0,0"},
+        {"retract_before_wipe", "20%,20%"}, {"binary_gcode", "0"},
+        {"use_relative_e_distances", "0"}, {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const Result crossing = run_case(config, "off-object-tower-crossing", Scene::Tower);
+    REQUIRE(crossing.tower_scopes > 0);
+    CHECK(crossing.tower_object_tools == 3);
+    CHECK(crossing.tower_part_wipes > 0);
+    CHECK(crossing.tower_void_without_wipe > 0);
+    config.set_deserialize_strict("wipe_only_crossing", "0,0");
+    const Result all = run_case(config, "off-object-tower-all", Scene::Tower);
+    CHECK(all.tower_scopes == crossing.tower_scopes);
+    CHECK(all.tower_void_with_wipe > 0);
+    CHECK(std::any_of(crossing.tower_void_scope_ids.begin(), crossing.tower_void_scope_ids.end(),
+        [&all](size_t id) { return std::find(all.tower_wiped_scope_ids.begin(), all.tower_wiped_scope_ids.end(), id) != all.tower_wiped_scope_ids.end(); }));
+    CHECK(all.volume == Approx(crossing.volume).margin(0.01));
 }
 
 // Compare explicit planner selection and activation fallbacks through STL, slicing and exported G-code.
@@ -508,7 +567,6 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const std::map<std::string, std::vector<std::string>> domains{
-        {"complete_objects", {"1"}}, {"parallel_objects_step", {"1"}},
         {"avoid_crossing_perimeters", {"0"}},
         {"avoid_crossing_not_first_layer", {"1"}},
         {"avoid_crossing_perimeters_max_detour", {"5", "200%"}},
@@ -654,7 +712,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         mesh.merge(bar);
     }
     CHECK(mesh.volume() == Approx(163.2).margin(0.001));
-    if (scene == Scene::Support || scene == Scene::SupportCrossing) {
+    if (scene == Scene::Support || scene == Scene::SupportCrossing || scene == Scene::Tower) {
         mesh = make_cube(4., 8., 2.);
         TriangleMesh post = make_cube(4., 8., 2.);
         post.translate(12., 0., 0.); mesh.merge(post);
@@ -662,7 +720,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         roof.translate(0., 0., 2.);
         mesh.merge(roof);
         CHECK(mesh.volume() == Approx(185.6).margin(0.001));
-        if (scene == Scene::SupportCrossing) {
+        if (scene == Scene::SupportCrossing || scene == Scene::Tower) {
             TriangleMesh second = mesh;
             second.translate(0., 20., 0.);
             mesh.merge(second);
@@ -673,6 +731,16 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     Model model;
     Print print;
     Test::init_print({mesh}, print, model, config);
+    if (scene == Scene::Tower) {
+        model.objects().front().instances.front()->set_offset(Vec3d(0., 0., 0.));
+        ModelObject *second = model.add_object();
+        second->add_volume(Test::PluginE2E::stl_fixture(make_cube(4., 4., 2.6)));
+        second->add_instance()->set_offset(Vec3d(60., 0., 0.));
+        DynamicPrintConfig regional;
+        regional.set_deserialize_strict({{"perimeter_extruder", "2"}, {"infill_extruder", "2"}, {"solid_infill_extruder", "2"}});
+        second->config.assign_config(regional);
+        print.apply(model, config);
+    }
     if (scene == Scene::Support || scene == Scene::SupportCrossing) {
         ModelObject &object = model.objects().front();
         object.add_instance()->set_offset(object.instances.front()->get_offset() + Vec3d(35., 0., 0.));
@@ -705,6 +773,10 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     REQUIRE(published_path == exported.string());
     REQUIRE(print.printing_plan() != nullptr);
     Result result;
+    slic3r_api::MutableExtrusionEntity previous_off_scope;
+    const Printing::PrintingLayerGroup *previous_off_layer = nullptr;
+    std::string previous_off_kind;
+    size_t tower_scope_id = 0;
     slic3r_api::MutableExtrusionEntity previous_support;
     const Printing::PrintingLayerGroup *previous_support_layer = nullptr;
     uint32_t previous_support_catalog = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
@@ -714,6 +786,69 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         for (const Printing::PrintingLayerGroup &layer : group.layers)
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
                 for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                    if (scene == Scene::Tower) {
+                        const bool tower = extrusion.printing_catalog_id < print.printing_plan()->object_instances.size() &&
+                            print.printing_plan()->object_instances[extrusion.printing_catalog_id].object == nullptr;
+                        const slic3r_api::LayerRegionIsland region = extrusion.region_island == nullptr ?
+                            slic3r_api::LayerRegionIsland() : slic3r_api::LayerRegionIsland(
+                                reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+                        const bool off_object = !region.valid() || region.region_count() == 0 ||
+                            slic3r_api::LayerExtrusionEdit::AvoidCrossing::is_off_object_layer(region.region(0).layer());
+                        const std::string kind = tower ? "tower" : extrusion.sregion_island_role.is_support() ? "support" : "skirt";
+                        if (!off_object && tool.extruder_id < 2) result.tower_object_tools |= 1u << tool.extruder_id;
+                        std::vector<slic3r_api::MutableExtrusionEntity> scopes;
+                        collect_scope_handles(slic3r_api::MutableExtrusionEntity(
+                            reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())), scopes);
+                        const auto key = slic3r_api::printing_extrusion_scope_property_key(reinterpret_cast<orchestrator_handle *>(&host));
+                        for (slic3r_api::MutableExtrusionEntity entity : scopes) {
+                            ++tower_scope_id;
+                            const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope target(entity, key);
+                            if (tower) ++result.tower_scopes;
+                            if (off_object && previous_off_scope.valid() && previous_off_layer == &layer &&
+                                (tower || previous_off_kind == "tower") && target.travel().valid() && target.travel().segment_count() > 0) {
+                                const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope source(previous_off_scope, key);
+                                const c_extrusion_segment first = target.travel().segment(0);
+                                const c_extrusion_segment last = target.travel().segment(target.travel().segment_count() - 1);
+                                const Polyline path(Points{Point(first.point_a.x, first.point_a.y), Point(last.point_b.x, last.point_b.y)});
+                                ExPolygons printed;
+                                for (const Printing::PrintingObjectInstance &instance : print.printing_plan()->object_instances) {
+                                    if (instance.object == nullptr) continue;
+                                    const Layer *below = nullptr;
+                                    for (const Layer &candidate : instance.object->layers()) {
+                                        if (candidate.scaled_print_z() >= layer.print_z + SCALED_EPSILON) break;
+                                        below = &candidate;
+                                    }
+                                    if (below == nullptr) continue;
+                                    for (ExPolygon area : below->lslices()) {
+                                        area.translate(instance.object->instances()[instance.object_instance_idx].shift);
+                                        printed.push_back(std::move(area));
+                                    }
+                                }
+                                printed = offset_ex(printed, scale_i(config.opt_float("nozzle_diameter", tool.extruder_id) * 0.75));
+                                const bool touches = !intersection_pl(Polylines{path}, printed).empty();
+                                bool inside = false;
+                                for (const ExPolygon &area : printed) inside |= area.contains(path.front()) || area.contains(path.back());
+                                const bool wiped = source.after().valid() && count_wipes(source.after().readonly()) > 0;
+                                if (wiped) result.tower_wiped_scope_ids.push_back(tower_scope_id);
+                                if (tower && previous_off_kind == "support" && touches && !inside && wiped)
+                                    ++result.tower_part_wipes;
+                                if (tower && previous_off_kind == "tower" && !touches && path.length() > scale_i(2.)) {
+                                    if (wiped) ++result.tower_void_with_wipe;
+                                    else {
+                                        ++result.tower_void_without_wipe;
+                                        result.tower_void_scope_ids.push_back(tower_scope_id);
+                                    }
+                                }
+                                std::cout << "tower gap " << previous_off_kind << " -> " << kind << " z=" << unscaled(layer.print_z)
+                                    << " touches=" << touches << " inside=" << inside << " wipe=" << wiped
+                                    << " from=" << unscaled(path.front().x()) << ',' << unscaled(path.front().y())
+                                    << " to=" << unscaled(path.back().x()) << ',' << unscaled(path.back().y()) << '\n';
+                            }
+                            previous_off_scope = off_object ? entity : slic3r_api::MutableExtrusionEntity();
+                            previous_off_kind = kind;
+                            previous_off_layer = &layer;
+                        }
+                    }
                     const size_t before = result.travels.size();
                     collect_travels(*extrusion.root, result);
                     if (extrusion.sregion_island_role.is_support()) {
