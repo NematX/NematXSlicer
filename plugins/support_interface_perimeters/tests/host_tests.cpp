@@ -259,7 +259,7 @@ void export_smoke(const std::filesystem::path &directory)
         process(print, model, configuration(count));
         print.set_status_default();
         const std::filesystem::path output = directory / ("native-" + std::to_string(count) + ".gcode");
-        Orchestrator::instance().export_gcode(print, output.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, output.string(), nullptr);
         require(std::filesystem::exists(output) && std::filesystem::file_size(output) > 0, "native export produced no G-code");
     }
 }
