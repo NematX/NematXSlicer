@@ -161,6 +161,7 @@ test_support_tree_family.cpp
     test_perimeter_only_one_perimeter_first_layer.cpp
     test_perimeter_only_one_perimeter_on_top.cpp
     test_perimeter_python_simple_generator.cpp
+    test_perimeter_region_groups.cpp
     test_perimeter_remove_gap_fill_on_overhangs.cpp
     test_perimeter_separate_hole_contour.cpp
     test_perimeter_simple_generator.cpp
