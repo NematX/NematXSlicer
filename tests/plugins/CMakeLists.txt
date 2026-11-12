@@ -82,6 +82,8 @@ add_executable(${_TEST_NAME}_tests
     test_native_thin_wall_flow.cpp
     test_smooth_pattern.cpp
     test_post_full_fill_volume.cpp
+    test_post_infill_gap_fill.cpp
+    test_residual_gap_fill.cpp
     test_rectilinear_connect.cpp
     test_rectilinear_fills.cpp
     test_rectilinear_sawtooth.cpp
@@ -125,6 +127,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_filled_family.cpp
     test_support_grid_family.cpp
     test_support_grid_legacy_compare.cpp
+    test_support_interface_gap_fill.cpp
     test_support_tree_dump.cpp
     test_support_tree_routing.cpp
     test_support_tree_settings.cpp
@@ -454,3 +457,23 @@ add_test(NAME plugins_exporter_child_timings
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_plugins_test_timings.py"
         "$<TARGET_FILE:${_TEST_NAME}_tests>" ExporterChildTimingTests)
 set_tests_properties(plugins_exporter_child_timings PROPERTIES TIMEOUT 780 LABELS "plugins;exporter;timings")
+
+# Keep the residual pass and its volume composition available as a focused gate.
+add_test(NAME infill_gap_fill COMMAND ${_TEST_NAME}_tests "[plugins][infill][gap-fill]")
+set_tests_properties(infill_gap_fill PROPERTIES LABELS "infill;gap-fill" TIMEOUT 180)
+add_test(NAME support_interface_gap_fill COMMAND ${_TEST_NAME}_tests "[support-gap-fill]")
+set_tests_properties(support_interface_gap_fill PROPERTIES LABELS "support;gap-fill" TIMEOUT 900)
+
+# The export gate uses the production registry and the host's default plugins.
+if(TARGET Slic3r_app_console)
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME infill_gap_fill_export
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_post_infill_gap_fill_export.py"
+                --host "$<TARGET_FILE:Slic3r_app_console>"
+                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+                --output "${CMAKE_BINARY_DIR}/temp/infill-gap-fill-export")
+        set_tests_properties(infill_gap_fill_export PROPERTIES LABELS "infill;gap-fill;plugin-e2e" TIMEOUT 300)
+    endif()
+endif()

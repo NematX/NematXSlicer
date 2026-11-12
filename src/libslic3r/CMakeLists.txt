@@ -264,6 +264,8 @@ set(SLIC3R_SOURCES
 	Plugins/Common/PluginEdgeGrid.cpp
 	Plugins/Common/PluginEdgeGrid.hpp
 	Plugins/Common/PolygonWorkBuffers.hpp
+	Plugins/Common/ResidualGapFill.cpp
+	Plugins/Common/ResidualGapFill.hpp
 	Plugins/Common/WorkBuffers.hpp
 	Plugins/GCode/Exporter/BambuGCodeExporter.cpp
 	Plugins/GCode/Exporter/BambuGCodeExporter.hpp
@@ -630,6 +632,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Toolpath/BranchSheathPaths.hpp
 	Plugins/Support/Toolpath/LegacySupportPaths.cpp
 	Plugins/Support/Toolpath/LegacySupportPaths.hpp
+	Plugins/Support/Toolpath/SupportInterfaceGapFill.cpp
+	Plugins/Support/Toolpath/SupportInterfaceGapFill.hpp
 	Plugins/Support/Toolpath/SupportToolpathBranch.cpp
 	Plugins/Support/Toolpath/SupportToolpathBranch.hpp
 	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp

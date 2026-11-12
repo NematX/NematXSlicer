@@ -864,7 +864,7 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
     const std::vector<std::string> seam_ids {"seam_placer.cost", "seam_placer.aligned", "seam_placer.contiguous", "seam_placer.fixed", "seam_placer.random"};
-    const std::vector<std::string> perimeter_ids {"perimeter.generator.simple", "perimeter.generator.classic", "perimeter.generator.arachne"};
+    const std::vector<std::string> perimeter_ids {"perimeter.generator.classic", "perimeter.generator.arachne", "perimeter.generator.simple"};
     for (const std::pair<slicing_step_t, std::vector<std::string>> &entry :
          std::vector<std::pair<slicing_step_t, std::vector<std::string>>>{{SEAM_PLACER, seam_ids}, {STEP_PERIMETER, perimeter_ids}}) {
         std::vector<std::pair<std::string, std::string>> reversed;

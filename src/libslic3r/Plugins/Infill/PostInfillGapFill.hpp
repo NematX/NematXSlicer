@@ -10,16 +10,10 @@
 
 namespace slic3r_api { namespace Infill { namespace PostInfillGapFillPlugin {
 
-// Placeholder STEP_POST_INFILL plugin for the future gap-fill pass.
-//
-// Gap fill used to be requested directly from some Fill implementations. The
-// new pipeline gives it a dedicated post-infill slot so it can inspect already
-// generated infill and create residual narrow extrusion as a separate pass.
-//
-// FIXME: publish future gap fill as a child of the source surface's infill
-// subtree so it inherits c_extrusion_property_infill, instead of the separate
-// GAP_FILL bucket. infill.post_process.full_fill_volume then measures fill and
-// gap fill together, like the legacy Fill accounting did.
+// Register this built-in with register_post_infill_gap_fill_plugin(). It completes
+// solid, non-bridge surface subtrees after the selected infill pattern has run.
+// The source recipe remains on their root, so full-fill volume correction sees
+// the original pattern and its gap fill as one surface.
 class PostInfillGapFill : public PluginBase
 {
 public:
@@ -34,6 +28,8 @@ private:
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
+    // Report the regional activation and geometry settings consumed by this pass.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     void run_impl(const plugin_run_context *run_ctx) const override;
 };
 
