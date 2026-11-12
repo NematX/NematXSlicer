@@ -28,6 +28,8 @@ The non-const external accessor gives routing its geometry.
 Boundary owns its rings and excluded top areas; grids borrow their point arrays.
 These arrays must not change after indexing. Neither Boundary nor TravelBoundary
 can be copied or moved, so their owners must keep them at a stable address.
+For caller-supplied geometry, build_boundary fills a stable Boundary directly;
+route_on_boundary in TravelRouter.hpp routes in the same coordinate system.
 */
 #include <map>
 
@@ -42,7 +44,7 @@ struct Boundary
     PluginCommon::polygon_work::Polygons boundaries;
     // For each ring, its island's contour index in boundaries; empty externally.
     std::vector<size_t> islands;
-    // Box of all rings, padded by two perimeter spacings plus epsilon; routing clips travels to it.
+    // Box of all rings, padded by the supplied extra space plus epsilon; TravelRouter::travel_to clips travels to it.
     PluginCommon::polygon_work::BoundingBoxf bbox;
     // Per-ring boxes, used to find which hole of an island encloses another island; empty externally.
     std::vector<PluginCommon::work::BoundingBox> bboxes;
@@ -71,6 +73,11 @@ struct Boundary
     // Release borrowed grids before clearing their owned geometry.
     void clear();
 };
+
+// Move islands into out and index their rings in the caller's coordinate system; pad boxes by extra_space plus epsilon.
+// Preserve supplied out.to_avoid areas even for empty islands. Keep out alive during routing; storage is only borrowed for this call.
+void build_boundary(storage_handle *storage, PluginCommon::polygon_work::ExPolygons &&islands,
+                    coord_t extra_space, Boundary &out);
 
 // Tests read these counts to identify reached inset branches; they never affect geometry.
 // Both init_layer and build_internal reset them; build_internal then fills them.

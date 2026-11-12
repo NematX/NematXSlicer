@@ -17,6 +17,8 @@ have decided that avoidance is active and routing is needed. Callers retain
 responsibility for crossing tests, path insertion and Z motion. This heuristic
 does not find a shortest path or guarantee that a returned path avoids every boundary.
 A detour budget may replace any computed detour with the direct segment.
+route_on_boundary exposes ring following on caller-built geometry in the caller's
+coordinates, without layer selection, box clipping or a detour budget.
 
 TravelBoundary.hpp provides internal rings in object-local coordinates and
 external rings in print coordinates. Internal rings follow insets of filled
@@ -49,7 +51,7 @@ length is checked against the absolute-mm or percentage detour budget.
     `-- TravelBoundary::init_layer: prepare the initial interior inset
     travel_to: choose local or print coordinates, rings and a working box; enforce the budget
     |-- TravelBoundary::build_internal or build_external: lazily prepare rings
-    `-- avoid_perimeters_inner: place endpoints and append a ring-following path
+    `-- route_on_boundary: place endpoints and follow the rings the segment crosses or nears
         |-- find_point_on_boundary: try the grid, then a containing island's inset
         |-- segment_intersections: collect crossings and accumulated distances
         |   `-- extend_for_closest_lines: protect nearby projected points
@@ -124,11 +126,6 @@ static std::vector<Intersection> segment_intersections(const Boundary &boundary,
 // Replace the crossing chain by the weighted bridge between distinct islands, lazily building their grids.
 static void jump_between_island(Boundary &boundary, Point start, Point end, std::vector<Intersection> &intersections,
                                 coord_t radius, double weight, RouterCounts &counts, const std::function<void()> &cancel);
-// Append a ring-following path to expected-empty out after endpoint placement; return the final intersection count.
-// Failed placement replaces out with two points and returns zero.
-static size_t avoid_perimeters_inner(Boundary &boundary, const Point &real_start, const Point &real_end, coord_t spacing,
-                                     const LayerInput &layer, std::vector<TravelPoint> &out, storage_handle *storage,
-                                     RouterCounts &counts, const std::function<void()> &cancel);
 
 struct AllIntersectionsVisitor
 {
@@ -705,16 +702,20 @@ static void jump_between_island(Boundary &boundary, Point start, Point end, std:
     intersections.insert(intersections.end(), tail.begin(), tail.end());
 }
 
-static size_t avoid_perimeters_inner(Boundary &boundary, const Point &real_start, const Point &real_end, coord_t spacing,
-                                     const LayerInput &layer, std::vector<TravelPoint> &out, storage_handle *storage,
-                                     RouterCounts &counts, const std::function<void()> &cancel)
+} // namespace
+
+Polyline route_on_boundary(Boundary &boundary, Point real_start, Point real_end, coord_t placement_spacing,
+                           coord_t segment_radius, bool island_jump, double jump_weight, storage_handle *storage,
+                           RouterCounts &counts, const std::function<void()> &cancel)
 {
+    if (boundary.boundaries.empty()) return Polyline{real_start, real_end};
+    std::vector<TravelPoint> out;
     Point start = real_start, end = real_end;
     // Internal routing first places endpoints in the insets; external routing leaves their placement unchanged.
-    if (spacing > 0) {
+    if (placement_spacing > 0) {
         if (!boundary.grid.bbox().contains(start) || !boundary.grid.bbox().contains(end) ||
-            !find_point_on_boundary(start, boundary, (spacing * 3) / 2, counts) ||
-            !find_point_on_boundary(end, boundary, (spacing * 3) / 2, counts)) {
+            !find_point_on_boundary(start, boundary, (placement_spacing * 3) / 2, counts) ||
+            !find_point_on_boundary(end, boundary, (placement_spacing * 3) / 2, counts)) {
             // Try farther projections up to half the direct distance when normal inset placement fails.
             const double distance = start.distance_to(end);
             const EdgeGrid::Grid::ClosestPointResult first = boundary.grid.closest_point_signed_distance(start, distance / 2);
@@ -763,21 +764,17 @@ static size_t avoid_perimeters_inner(Boundary &boundary, const Point &real_start
             };
             if (!better && first.contour_idx == size_t(-1) && last.contour_idx != size_t(-1)) better = search(last, start);
             if (!better && last.contour_idx == size_t(-1) && first.contour_idx != size_t(-1)) better = search(first, end);
-            if (!better) { out = {{start, -1}, {end, -1}}; return 0; }
+            if (!better) { cancel(); return Polyline{real_start, real_end}; }
         }
     }
+    // Far endpoint placement may leave one working point beyond the grid's indexed cells.
     cancel();
-    std::vector<Intersection> intersections = segment_intersections(boundary, start, end, 2 * layer.perimeter_spacing);
+    if (!boundary.grid.bbox().contains(start) || !boundary.grid.bbox().contains(end))
+        return Polyline{real_start, real_end};
+    std::vector<Intersection> intersections = segment_intersections(boundary, start, end, segment_radius);
     std::vector<TravelPoint> result{{start, -1}};
-    if (intersections.size() > 1 && !boundary.islands.empty()) {
-        for (const RegionInput &region : layer.regions) {
-            if (region.avoid_travel_island) {
-                jump_between_island(boundary, start, end, intersections, 2 * layer.perimeter_spacing,
-                    region.avoid_travel_island_weight, counts, cancel);
-                break;
-            }
-        }
-    }
+    if (intersections.size() > 1 && !boundary.islands.empty() && island_jump)
+        jump_between_island(boundary, start, end, intersections, segment_radius, jump_weight, counts, cancel);
     for (auto first = intersections.begin(); first != intersections.end(); ++first) {
         cancel();
         const Intersection &a = *first;
@@ -815,10 +812,8 @@ static size_t avoid_perimeters_inner(Boundary &boundary, const Point &real_start
     while (out.size() > 1 && out.back().point.coincides_with_epsilon(out[out.size() - 2].point)) out.erase(out.end() - 2);
     assert(out.size() > 1);
     for (size_t i = 1; i < out.size(); ++i) assert(!out[i - 1].point.coincides_with_epsilon(out[i].point));
-    return intersections.size();
+    return to_polyline(out);
 }
-
-} // namespace
 
 void TravelRouter::init_layer(storage_handle *storage, const Input &input, std::function<ExternalInput()> external_input,
                                std::function<void()> throw_if_canceled)
@@ -858,9 +853,17 @@ PluginCommon::work::Polyline TravelRouter::travel_to(const TravelContext &contex
         const BoundingBox box(to_point(boundary->bbox.min), to_point(boundary->bbox.max));
         if (!boundary->bbox.contains(to_vec2d(start))) { ++m_counts.outside_bbox; nearest_start = nearest_point(box, start); }
         if (!boundary->bbox.contains(to_vec2d(end))) { ++m_counts.outside_bbox; nearest_end = nearest_point(box, end); }
-        std::vector<TravelPoint> path;
-        avoid_perimeters_inner(*boundary, nearest_start, nearest_end, spacing, layer, path, m_storage, m_counts, m_throw_if_canceled);
-        result = to_polyline(path);
+        bool island_jump = false;
+        double jump_weight = 0.;
+        for (const RegionInput &region : layer.regions) {
+            if (region.avoid_travel_island) {
+                island_jump = true;
+                jump_weight = region.avoid_travel_island_weight;
+                break;
+            }
+        }
+        result = route_on_boundary(*boundary, nearest_start, nearest_end, spacing, 2 * layer.perimeter_spacing,
+                                   island_jump, jump_weight, m_storage, m_counts, m_throw_if_canceled);
         assert(result.size() > 1);
         for (size_t i = 1; i < result.size(); ++i) assert(!result.points[i - 1].coincides_with_epsilon(result.points[i]));
         result.points.front() = start; result.points.back() = end;

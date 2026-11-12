@@ -71,8 +71,8 @@ Indexing runs after construction, so grids point at the final ring arrays; those
 arrays, including the contours and holes of to_avoid, must not change afterwards.
 Internal rings are listed contour then holes, with each ring mapped to its island's
 contour index.
-Per-ring boxes identify enclosing holes. A global box, padded by two perimeter
-spacings plus epsilon, limits routing; a 1 mm edge grid finds crossings and nearest
+Per-ring boxes identify enclosing holes. A global box, padded by the construction's
+extra space plus epsilon, limits routing; a 1 mm edge grid finds crossings and nearest
 points. Cumulative float lengths let routing choose the shorter way around a ring.
 Selected-ring grids are created when an island jump first uses the ring: an island's
 contour or the hole enclosing the other island, keyed by its index in boundaries.
@@ -81,6 +81,8 @@ init_layer also insets perimeter slices by half an external perimeter width with
 a prior union, as the core does. Routing only tests whether this result is empty
 to leave travels direct when there is no interior; support bypasses that test.
 
+    build_boundary: index caller-supplied islands without changing their coordinates
+    `-- init_boundary (islands): flatten rings and build boxes, lengths and grids
     TravelBoundary
     |-- init_layer: reset caches and prepare the interior-presence test
     |   `-- offset_ex: inset concatenated perimeter slices without prior union
@@ -531,6 +533,12 @@ std::vector<float> contour_distance(const EdgeGrid::Grid &grid, const std::vecto
     }
     return out;
 }
+}
+
+void build_boundary(storage_handle *storage, PluginCommon::polygon_work::ExPolygons &&islands,
+                    coord_t extra_space, Boundary &out)
+{
+    init_boundary(storage, out, std::move(islands), extra_space);
 }
 
 void Boundary::clear()

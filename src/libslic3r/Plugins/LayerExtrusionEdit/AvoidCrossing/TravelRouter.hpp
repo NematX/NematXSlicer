@@ -9,6 +9,8 @@ have decided that avoidance is active and routing is needed. Callers retain
 responsibility for crossing tests, path insertion and Z motion. This heuristic
 does not find a shortest path or guarantee that a returned path avoids every boundary.
 A detour budget may replace any computed detour with the direct segment.
+route_on_boundary also exposes the ring-following operation without layer input
+or a detour budget. Use build_boundary first and pass endpoints in its coordinates.
 
 TravelBoundary.hpp provides internal rings in object-local coordinates and
 external rings in print coordinates. Internal rings follow insets of filled
@@ -78,6 +80,15 @@ struct RouterCounts
     size_t brute_force = 0;
     size_t epsilon_merge = 0;
 };
+
+// Return an owned path in boundary's coordinates that follows rings where the placed segment crosses or nears them;
+// otherwise the path is a direct chord, as for empty geometry or failed placement.
+// placement_spacing controls endpoint placement (zero disables it); segment_radius selects nearby edges.
+// Distinct endpoints are required; island_jump enables weighted bridges. Update counts and lazy grids; cancellation propagates.
+PluginCommon::work::Polyline route_on_boundary(Boundary &boundary, PluginCommon::work::Point start,
+    PluginCommon::work::Point end, coord_t placement_spacing, coord_t segment_radius,
+    bool island_jump, double jump_weight, storage_handle *storage, RouterCounts &counts,
+    const std::function<void()> &cancel);
 
 class TravelRouter
 {

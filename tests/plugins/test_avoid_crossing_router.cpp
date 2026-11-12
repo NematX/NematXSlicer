@@ -15,6 +15,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/TravelRouter.hpp"
 
 /*
@@ -38,6 +39,10 @@ absolute detour thresholds at adjacent floating-point values. A chord across top
 checks the fallback shortcut comparison against retained top areas. A square and
 distant island leave one endpoint without a nearby ring, exercising projection
 onto consecutive edges of the other endpoint's ring in both travel directions.
+The direct boundary case indexes sliced dumbbell geometry and checks that ring
+following preserves exact endpoints and stays inside the connected domain.
+Direct square cases check unchanged endpoints on failed placement and safe fallback
+outside the grid; two squares check that weighted island jumps remain optional.
 
     test cases: slice scenes and compare owned routes
     |-- compare_layer: sample endpoints with both boundary choices and budgets
@@ -47,7 +52,8 @@ onto consecutive edges of the other endpoint's ring in both travel directions.
     |   `-- compare_layer: compare each applicable layer/tool pair
     |-- epsilon/threshold case: compare near projections and measured budgets
     |-- endpoint-projection case: compare unmatched start and end edge scans
-    `-- top-shortcut case: compare fallback routing across retained tops
+    |-- top-shortcut case: compare fallback routing across retained tops
+    `-- direct boundary cases: build_boundary and route_on_boundary without a router
 
 Successful queries report aggregate counts. Catch retains endpoint context for
 ordered-coordinate failures; counters establish the explicitly asserted branches.
@@ -116,6 +122,105 @@ TEST_CASE("Plugin travel router sliced scene matrix", "[plugins][avoid-crossing-
     SECTION("island weight five") { check_scene(3); }
     SECTION("island avoidance disabled") { check_scene(4); }
     SECTION("dumbbells") { check_scene(5); }
+}
+
+// Route across a narrow bridge using caller-supplied rings, without layer-dependent routing setup.
+TEST_CASE("Plugin routes directly on a caller-built dumbbell boundary", "[plugins][avoid-crossing-router]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"skirts", "0"}, {"brim_width", "0"}});
+    Model model;
+    ModelObject *object = model.add_object();
+    object->add_volume(dumbbell(0.4), ModelVolumeType::MODEL_PART, false);
+    object->add_instance(); object->ensure_on_bed();
+    Print print;
+    print.apply(model, config); print.set_status_silent(); print.process();
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
+    const port::Input input = port::build_input(handle, view, {0, 0, false});
+    slic3r_api::PluginCommon::polygon_work::ExPolygons domain = input.target->perimeter_slices;
+    REQUIRE(domain.size() == 1);
+    port::Boundary boundary;
+    port::build_boundary(handle, slic3r_api::PluginCommon::polygon_work::ExPolygons(domain),
+                         2 * input.target->perimeter_spacing, boundary);
+    const Point minimum = get_extents(print.object(0).layers().front().lslices()).min;
+    const work::Point start(minimum.x() + scale_i(5.), minimum.y() + scale_i(2.));
+    const work::Point end(minimum.x() + scale_i(20.), minimum.y() + scale_i(8.));
+    port::RouterCounts counts;
+    const work::Polyline path = port::route_on_boundary(boundary, start, end, input.target->perimeter_spacing,
+        2 * input.target->perimeter_spacing, true, 0.4, handle, counts, []() {});
+    REQUIRE(path.size() > 2);
+    CHECK(path.points.front() == start);
+    CHECK(path.points.back() == end);
+    const slic3r_api::PluginCommon::polygon_work::Polylines outside =
+        slic3r_api::PluginCommon::clipper::diff_pl(handle, {path}, domain);
+    double outside_length = 0.;
+    for (const work::Polyline &part : outside) outside_length += part.length();
+    CHECK(outside_length <= SCALED_EPSILON);
+}
+
+// Return the requested segment when placement fails or leaves a working endpoint outside the indexed cells.
+TEST_CASE("Direct boundary routing preserves endpoints on placement fallback", "[plugins][avoid-crossing-router]")
+{
+    namespace pw = slic3r_api::PluginCommon::polygon_work;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    pw::ExPolygon square;
+    square.contour.points = {work::Point(0, 0), work::Point(scale_i(10.), 0),
+        work::Point(scale_i(10.), scale_i(10.)), work::Point(0, scale_i(10.))};
+    port::Boundary boundary;
+    port::build_boundary(handle, pw::ExPolygons{square}, scale_i(0.8), boundary);
+    const bool far = GENERATE(false, true);
+    const work::Point start(scale_i(far ? -20. : -0.1), scale_i(5.));
+    const work::Point end(scale_i(far ? -1. : 4.), scale_i(far ? 12. : 5.));
+    CAPTURE(far);
+    port::RouterCounts counts;
+    const work::Polyline path = port::route_on_boundary(boundary, start, end, scale_i(0.4),
+        scale_i(0.8), false, 0., handle, counts, []() {});
+    REQUIRE(path.size() == 2);
+    CHECK(path.points.front() == start);
+    CHECK(path.points.back() == end);
+}
+
+// Index disjoint islands directly and exercise both weighted bridging and ordinary ring following.
+TEST_CASE("Direct boundary routing selects optional island jumps", "[plugins][avoid-crossing-router]")
+{
+    namespace pw = slic3r_api::PluginCommon::polygon_work;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    pw::ExPolygons islands;
+    for (double x : {0., 20.}) {
+        pw::ExPolygon square;
+        square.contour.points = {work::Point(scale_i(x), 0), work::Point(scale_i(x + 10.), 0),
+            work::Point(scale_i(x + 10.), scale_i(10.)), work::Point(scale_i(x), scale_i(10.))};
+        islands.push_back(std::move(square));
+    }
+    port::Boundary boundary;
+    port::build_boundary(handle, std::move(islands), scale_i(0.8), boundary);
+    const bool island_jump = GENERATE(false, true);
+    CAPTURE(island_jump);
+    const work::Point start(scale_i(5.), scale_i(2.)), end(scale_i(25.), scale_i(8.));
+    port::RouterCounts counts;
+    const work::Polyline path = port::route_on_boundary(boundary, start, end, scale_i(0.4),
+        scale_i(0.8), island_jump, 0.4, handle, counts, []() {});
+    REQUIRE(path.size() >= 2);
+    CHECK(path.points.front() == start);
+    CHECK(path.points.back() == end);
+    if (island_jump) CHECK(counts.island_jumps > 0);
+    else CHECK(counts.island_jumps == 0);
+
+    // Empty routing geometry must not discard separately supplied top exclusions.
+    boundary.to_avoid = {pw::ExPolygon{}};
+    boundary.to_avoid.front().contour.points = {work::Point(0, 0), work::Point(scale_i(1.), 0),
+        work::Point(scale_i(1.), scale_i(1.)), work::Point(0, scale_i(1.))};
+    port::build_boundary(handle, pw::ExPolygons{}, scale_i(0.8), boundary);
+    CHECK(boundary.boundaries.empty());
+    CHECK(boundary.to_avoid.size() == 1);
 }
 
 TEST_CASE("Plugin travel router preserves epsilon merging and absolute detour thresholds", "[plugins][avoid-crossing-router]")
