@@ -823,11 +823,11 @@ void clean_forced_visits(PrintingPlan &plan, const PluginPropertyKey<ForcedVisit
 double max_layer_height_from_nozzle(const Config &print_config, const extruder_index_t extruder)
 {
     const double z_step = print_config.get("z_step").get_float();
+    const double nozzle = print_config.get("nozzle_diameter").get_float(uint32_t(extruder));
     const double minimum = check_z_step(
-        min_layer_height_mm(print_config.computed_float_or_default("min_layer_height", extruder, 0.)), z_step);
+        min_layer_height_mm(print_config.computed_float_or_default("min_layer_height", extruder, 0.), nozzle), z_step);
     const double maximum = print_config.computed_float_or_default("max_layer_height", extruder, 0.);
     const bool enabled = print_config.get("max_layer_height").is_enabled(uint32_t(extruder));
-    const double nozzle = print_config.get("nozzle_diameter").get_float(uint32_t(extruder));
     return check_z_step(std::max(minimum, max_layer_height_mm(maximum, enabled, nozzle)), z_step);
 }
 
