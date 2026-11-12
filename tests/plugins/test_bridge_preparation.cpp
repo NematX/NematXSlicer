@@ -785,6 +785,18 @@ TEST_CASE("Bridge preparation tolerates sub-epsilon slivers along nearly axial c
     CHECK(area(diff_ex(core,bridge))<double(SCALED_EPSILON)*SCALED_EPSILON);
 }
 
+// A sparse source surface of a sliced part reduced to a sliver: a triangle minus an almost
+// identical hole, thinner than the boolean precision, moved next to the bridge.
+TEST_CASE("Bridge preparation drops a degenerate source sliver outside every region intersection","[plugins][bridge-preparation]")
+{
+    Fixture fixture;
+    const ExPolygon sliver(Polygon(Points{{5010795,-6425},{4987188,6626},{4989156,4823}}),Polygon(Points{{4989156,4823},{4987188,6626},{5009807,-5911}}));
+    fixture.island().get_or_add_region_island(fixture.island().regions(),0).set_fill_surfaces().append(
+        ExPolygons{sliver},stPosInternal|stDensSparse);
+    REQUIRE_NOTHROW(fixture.prepare());
+    same_area(view(ExPolygons{fixture.bridge().expolygon}),ExPolygons{rectangle_expolygon(-3,-1,3,1)});
+}
+
 TEST_CASE("Uniform bridge expansion adds side area before axial anchors and clips detached receivers","[plugins][bridge-preparation][bridge-uniform]")
 {
     PluginStorage storage;storage_handle *handle=reinterpret_cast<storage_handle *>(&storage);

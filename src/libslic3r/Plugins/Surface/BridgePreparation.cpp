@@ -308,7 +308,11 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
                 pieces.push_back({surface,region,destination,std::move(part)});
             }
             StoredExPolygonCollection missing=subtract(storage,original.readonly(),covered.readonly());
-            if (!missing.empty())
+            // A degenerate source sliver, thinner than the boolean precision, can
+            // vanish from every region intersection. Tolerate the same defects as
+            // the overlap check above; such a sliver is then dropped.
+            StoredExPolygonCollection opened=clipper_offset2(clipper(missing.readonly()),-double(SCALED_EPSILON),double(SCALED_EPSILON)).to_expolygon_collection();
+            if (defect_area(opened.readonly())>partition_tolerance)
                 throw std::runtime_error("Bridge preparation cannot partition a source surface by its physical regions.");
         }
     }
