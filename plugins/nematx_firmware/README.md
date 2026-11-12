@@ -39,7 +39,7 @@ When objects are labelled (`gcode_label_objects` is not disabled), the file head
 - The controller reads lines of at most 4096 characters. A long outline continues on new comment lines starting with `; `: the JSON is the concatenation of the lines without that prefix. An object line is cut once it exceeds 3000 characters, a plater line once it exceeds 4000.
 - These lines go through the output settings like the G-code: they are numbered with `gcode_line_number` and removed with `gcode_no_comment`.
 
-At the end of the file, two more metadata lines are written: `; total layers count = <n>` and `; has_support = 0|1`.
+The controller also reads `; total layers count = <n>` and `; has_support = 0|1`. The host computes them for every firmware, and the exporter writes them with the other statistics after the G-code.
 
 ## Settings
 
@@ -50,7 +50,7 @@ The package defines these printer settings:
 - **gcode_line_number**: number every non-blank line, comments included (`N10`, `N20`...).
 - **gcode_no_comment**: remove all comments, including the preview markers. The preview then shows the moves without their extrusion types.
 
-The metadata lines at the end of the file keep their comment form and have no line number, as in the legacy slicer.
+The lines written by the exporter around the G-code (header, statistics, configuration) keep their comment form and have no line number.
 
 The export is rejected when the printer has more than two extruders (the NematX codes only address two tools) or uses firmware retraction.
 

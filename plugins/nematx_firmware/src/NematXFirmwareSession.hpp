@@ -102,8 +102,6 @@ private:
     bool m_object_metadata = false;
     OutputFilter m_filter;
     int m_filter_depth = 0;
-    uint32_t m_layer_count = 0;
-    bool m_has_support = false;
     // Commands created by a state hook, which cannot return text, and written
     // before the next command. mutable: encoders are const but must emit it.
     mutable std::string m_pending;

@@ -151,8 +151,6 @@ void NematXGCodeFirmwareSession::setup_firmware(const Config &config)
     m_object_metadata = config.enum_or_default("gcode_label_objects", 0) != 0;
     m_filter = OutputFilter(config.bool_or_default(k_no_comment_key, false),
                             config.bool_or_default(k_line_number_key, false));
-    m_layer_count = 0;
-    m_has_support = false;
     m_pending.clear();
 }
 
@@ -178,9 +176,6 @@ std::string NematXGCodeFirmwareSession::filtered(Write write)
 
 std::string NematXGCodeFirmwareSession::filter(std::string text)
 {
-    // Look for support in the unfiltered text: the TYPE comment may be removed below.
-    if (!m_has_support && text.find(";TYPE:Support material") != std::string::npos)
-        m_has_support = true;
     return m_filter.process(text + take_pending());
 }
 
@@ -207,7 +202,6 @@ std::string NematXGCodeFirmwareSession::begin_group(const ConstPrintingGroup &gr
 
 std::string NematXGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
-    ++m_layer_count;
     return filtered([&] { return Base::begin_layer(layer); });
 }
 
@@ -243,14 +237,9 @@ std::string NematXGCodeFirmwareSession::end_group()
 
 std::string NematXGCodeFirmwareSession::end_print()
 {
-    std::string output = filtered([&] { return Base::end_print(); });
-    output += m_filter.flush();
-    // Metadata read by the NematX controller and web interface. As in the
-    // legacy slicer, it is written after the filtered G-code: it keeps its
-    // comment form and has no line number even when those options are set.
-    output += "; total layers count = " + std::to_string(m_layer_count) + "\n";
-    output += std::string("; has_support = ") + (m_has_support ? "1" : "0") + "\n";
-    return output;
+    // The layer count and has_support lines read by the NematX controller come from
+    // the host statistics, which the exporter writes after the session output.
+    return filtered([&] { return Base::end_print(); }) + m_filter.flush();
 }
 
 std::string NematXGCodeFirmwareSession::take_pending() const

@@ -417,21 +417,24 @@ class NematXFirmwareIntegration(unittest.TestCase):
 
     def test_line_numbers_without_comments(self) -> None:
         text = self.outputs["numbered"].read_text(encoding="utf-8").splitlines()
-        metadata = [line for line in text if line.startswith("; ")]
-        self.assertEqual(metadata[-2:], [text[-2], text[-1]], "metadata at the end")
-        self.assertRegex(text[-2], r"^; total layers count = \d+$")
-        self.assertEqual(text[-1], "; has_support = 0")
-        numbered = text[:-2]
-        self.assertGreater(len(numbered), 100)
-        for index, line in enumerate(numbered):
-            self.assertTrue(line.startswith(f"N{(index + 1) * 10} "), f"line {index}: {line!r}")
+        # The session writes the G-code; the exporter's header and statistics
+        # around it stay comments without line numbers.
+        body = [index for index, line in enumerate(text) if line.strip() and not line.startswith(";")]
+        self.assertGreater(len(body), 100)
+        self.assertEqual(body, list(range(body[0], body[-1] + 1)), "the G-code is one block")
+        for count, index in enumerate(body):
+            line = text[index]
+            self.assertTrue(line.startswith(f"N{(count + 1) * 10} "), f"line {index}: {line!r}")
             self.assertNotIn(";", line, f"comment kept: {line!r}")
+        self.assertIn("; has_support = 0", text[body[-1] + 1:], "statistics after the G-code")
 
     def test_metadata(self) -> None:
+        """The controller reads the layer count and has_support once, in the statistics."""
         lines = self.outputs["relative"].read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[-1], "; has_support = 0")
-        layers = int(lines[-2].rsplit("=", 1)[1])
-        self.assertEqual(layers, sum(1 for line in lines if line == ";LAYER_CHANGE"))
+        counts = [line for line in lines if line.startswith("; total layers count = ")]
+        self.assertEqual(len(counts), 1)
+        self.assertEqual(int(counts[0].rsplit("=", 1)[1]), sum(1 for line in lines if line == ";LAYER_CHANGE"))
+        self.assertEqual([line for line in lines if line.startswith("; has_support = ")], ["; has_support = 0"])
 
     def test_object_metadata(self) -> None:
         """The cube is described for the controller before the start G-code."""
