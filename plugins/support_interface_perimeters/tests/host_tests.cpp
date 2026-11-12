@@ -95,8 +95,8 @@ void initialize(const std::filesystem::path &data, const std::filesystem::path &
     PrintConfigDef::instance_mutable().finalize();
     require(PrintConfigDef::instance().get(k_count) != nullptr, "perimeter setting not registered");
     require(PrintConfigDef::instance().get(k_count)->default_value->serialize() == "0", "perimeter default is not zero");
-    require(DynamicPrintConfig::full_print_config().option("gcode_flavor")->serialize() == "marlin2",
-        "the NematX firmware metadata changed the default firmware");
+    require(DynamicPrintConfig::full_print_config().option("gcode_flavor")->serialize() == "nematx",
+        "NematX is not the default firmware");
     const std::string layout = Orchestrator::instance().merged_ui_layout("print.ui",
         "page:Support material\ngroup:Options for support material and raft\nsetting:support_material_interface_contact_loops\n");
     require(layout.find(k_count) != std::string::npos, "interface perimeter setting is missing from the support layout");

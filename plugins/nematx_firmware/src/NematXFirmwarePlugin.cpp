@@ -112,8 +112,8 @@ private:
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     // The host requires one execution priority in an exclusive group: the built-in firmwares use 0.
     int32_t priority_impl() const noexcept override { return 0; }
-    // Prefer built-in Marlin 2 unless the profile explicitly selects NematX.
-    int32_t exclusive_group_priority_impl() const noexcept override { return 100; }
+    // Prefer NematX by default while preserving explicit firmware selections.
+    int32_t exclusive_group_priority_impl() const noexcept override { return -10; }
 
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
     {
