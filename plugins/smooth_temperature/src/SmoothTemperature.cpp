@@ -80,6 +80,7 @@ Call tree:
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
+#include "libslic3r/Api/plugin/cpp/TemperatureTargets.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.hpp"
@@ -342,7 +343,7 @@ std::pair<std::optional<int16_t>, uint32_t> general_target(const Print &print,
         temperature = setting("print_temperature", -1);
     const std::optional<int16_t> general = temperature >= 0 ?
         std::optional<int16_t>(int16_t(temperature)) :
-        filament_target(instance.context.print_config, tool, first_layer);
+        TemperatureTargets::filament_target(instance.context.print_config, tool, first_layer);
     return {general, uint32_t(std::max(setting(k_layers_key, 0), 0))};
 }
 

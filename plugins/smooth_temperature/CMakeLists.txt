@@ -3,10 +3,12 @@
 # metadata, documentation).
 
 # The plugin derives from the host's default layer temperature planner. The host
-# library exports only the C API, so the package also compiles the planner's two
-# host sources; they use only the plugin SDK headers.
+# library exports only the C API, so the package also compiles the planner's
+# host sources and the SDK temperature helpers they call; they use only the
+# plugin SDK headers.
 add_library(nematx_smooth_temperature SHARED
     src/SmoothTemperature.cpp
+    "${SUPERSLICER_SOURCE_DIR}/src/libslic3r/Api/plugin/cpp/TemperatureTargets.cpp"
     "${SUPERSLICER_SOURCE_DIR}/src/libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.cpp"
     "${SUPERSLICER_SOURCE_DIR}/src/libslic3r/Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.cpp"
 )
