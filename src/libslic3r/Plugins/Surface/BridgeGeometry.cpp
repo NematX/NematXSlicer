@@ -210,6 +210,18 @@ StoredExPolygonCollection axial_expand(storage_handle *storage, const ExPolygonC
                     break;
                 }
             if (containing==nullptr) {
+                // Rounding the crossing of nearly collinear core and domain edges
+                // can cut a thin sliver of the core out of the united domain. Extend
+                // such a seed within the domain interval it overlaps most; the exact
+                // core is retained below.
+                double overlap=0.;
+                for (const Interval &candidate : domains) {
+                    const double shared=std::min(candidate.right.at(middle),seed.right.at(middle))-
+                        std::max(candidate.left.at(middle),seed.left.at(middle));
+                    if (shared>overlap) { overlap=shared; containing=&candidate; }
+                }
+            }
+            if (containing==nullptr) {
                 // Polygon normalization may remove a sub-epsilon tip created
                 // by rotating integer vertices. Keep its core, without anchors.
                 if (hi-lo<=SCALED_EPSILON) continue;
