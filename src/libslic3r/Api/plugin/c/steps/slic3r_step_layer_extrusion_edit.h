@@ -18,11 +18,13 @@ extern "C" {
 /* Fan policies run after geometry/speed edits. Each plugin completes every
    layer before the next priority observes its published references. */
 enum layer_extrusion_edit_fan_priority {
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_REGIONAL = 18,
     LAYER_EXTRUSION_EDIT_PRIORITY_FAN_STANDARD = 20,
     LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING = 22,
     LAYER_EXTRUSION_EDIT_PRIORITY_FAN_PROGRAM = 23,
     LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS = 24,
-    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_DYNAMIC = 26
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_DYNAMIC = 26,
+    LAYER_EXTRUSION_EDIT_PRIORITY_FAN_TEMPORAL = 40
 };
 
 /*
