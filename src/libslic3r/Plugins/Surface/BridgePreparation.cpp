@@ -372,8 +372,14 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         StoredExPolygonCollection reconstructed=subtract(storage,expanded.readonly(),lower.readonly());
         StoredExPolygonCollection lost=subtract(storage,core.readonly(),reconstructed.readonly());
         StoredExPolygonCollection extra=subtract(storage,reconstructed.readonly(),core.readonly());
-        if (!invalid.empty() || !lost.empty() || !extra.empty())
-            throw std::runtime_error("A bridge anchor does not preserve its reconstructible core.");
+        // Clipper can add or drop sub-epsilon slivers along nearly parallel edges, as
+        // when a long core edge runs almost along the printing direction. Ignore the
+        // defects that vanish under the same opening as the island partition check.
+        for (const ExPolygonCollection defect : {invalid.readonly(),lost.readonly(),extra.readonly()}) {
+            StoredExPolygonCollection opened=clipper_offset2(clipper(defect),-double(SCALED_EPSILON),double(SCALED_EPSILON)).to_expolygon_collection();
+            if (defect_area(opened.readonly())>partition_tolerance)
+                throw std::runtime_error("A bridge anchor does not preserve its reconstructible core.");
+        }
         if (previous==claimed.end()) claimed.emplace(source.region.handle(),added.readonly().clone(storage));
         else previous->second.append_copy_from(added.readonly());
         size_t destination=outputs.size();
