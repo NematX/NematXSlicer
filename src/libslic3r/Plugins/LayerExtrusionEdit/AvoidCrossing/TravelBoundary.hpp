@@ -56,6 +56,7 @@ struct Boundary
     // Keyed by its index in boundaries; created when a jump first uses that ring.
     std::map<int, PluginCommon::EdgeGrid::Grid> island_to_grid;
     // Original island/inset pairs before top removal and tool clipping; empty externally.
+    // Domain callers fill {component, component} to keep interior endpoints in place.
     // Routing tests inset containment and uses the original island to find an inset edge beyond grid reach.
     std::vector<std::pair<PluginCommon::polygon_work::ExPolygon, PluginCommon::polygon_work::ExPolygon>> boundary_growth;
     // Unioned inset top areas, checked before shortcuts when an endpoint cannot reach a boundary.

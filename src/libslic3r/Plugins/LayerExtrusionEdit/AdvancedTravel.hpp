@@ -25,8 +25,11 @@ in its original island rather than at the beginning of the layer.
 Support obstacles forbid separate object components at or below travel Z only
 for travels touching support, using the instances in the plan catalog.
 Disabling a member
-removes only its zones; same-attractor legacy routing retains its own top
-avoidance. An inactive advanced provider blocks its dependent members even when
+removes only its zones. The advanced planner routes on withdrawn attractors minus
+expanded forbidden zones, validating all segments against original forbidden
+material; it does not inherit the legacy planner's own top avoidance. Its spacing
+and island-jump settings come from the shared worker layer-input cache.
+An inactive advanced provider blocks its dependent members even when
 their IDs are enabled in the profile.
 The connector owns insertion, Z interpolation and materialized travel flags.
 Travel group priorities select advanced (-2), then avoid-crossing (-1) when

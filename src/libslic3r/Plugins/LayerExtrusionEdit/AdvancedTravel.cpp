@@ -25,8 +25,13 @@ legacy for absent or unknown selections. Legacy preserves perimeter
 routing. The opt-in advanced planner summarizes eligible gaps, collects active
 attractors and forbidden tops, and routes in chronology order. Printed tops are
 opt-in and replace static forbidden tops when active; their dates start after
-the last arrival in each original island. Same-attractor legacy routing
-retains its own top avoidance.
+the last arrival in each original island. Attractors are withdrawn perimeter slices
+dated by source-or-target membership. The advanced planner routes on their union
+minus expanded forbidden zones and validates against the original forbidden zones.
+Blocked domain paths use obstacle routing. If it stays straight without failure,
+a chord clear of original forbidden material is accepted without a fallback or
+a domain-route count. Failed routing or an excessive detour returns a counted
+straight fallback; valid obstacle detours remain accepted routes.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
@@ -34,7 +39,7 @@ selection and global contributor activation. Active means present in the host
 activation set, configured by activated.ini. Computation objects are worker-local;
 the legacy planner owns its input cache. The private implementation checks each ID
 with orchestrator_find_plugin. Active contributors share
-a second input cache owned by advanced travel for boundary geometry, so a layer
+a second input cache owned by advanced travel for boundary geometry and routing settings, so a layer
 can be copied twice. Support obstacles copy slices directly without that cache.
 The incoming layer-entry travel has no source extrusion and remains straight.
 The connector inserts travels, interpolates Z and updates flags and progress.
@@ -53,7 +58,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: query dated zones and avoid forbidden zones
+            `-- ZonePlanner::path: follow crossed domain rings or an interior chord, validate, then use obstacle routing if blocked
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {
@@ -323,7 +328,7 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     if (orchestrator_find_plugin(m_orchestrator, k_support_obstacles_id) != nullptr)
         active.push_back(std::cref(support_obstacles));
     zones::TravelZoneView view(active, input);
-    zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx);
+    zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs);
     size_t t = 0;
     // apply calls this exactly once per PendingTravel, in chronology order.
     const TravelPathPlanner zone_route = [&zone_planner, &chronology, &t](

@@ -10,6 +10,7 @@
 #include "gcode_export_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "plugin_e2e_test_helpers.hpp"
+#include "avoid_crossing_test_helpers.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -54,8 +55,9 @@ and Advanced selected. One additional run omits the travel selector and verifies
 the implicit advanced provider preserves the explicit avoid-crossing baseline routes.
 For every baseline, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
-and checks that island weights change legacy routes while keeping their
-endpoints; the advanced planner's inter-island routes are independent of those weights.
+and checks that island weights change both planners' routes while keeping their
+endpoints. A separate dumbbell scene checks real travels through its thin bridge,
+segment containment in sliced material, and publication of those detours in G-code.
 It compares deposited volume except for settings that change extrusion geometry.
 For each case with deviations, at least one intermediate plan XY must occur in
 the published G0/G1 XY moves without an E word within 0.001 mm. This does not match every
@@ -85,7 +87,7 @@ them; an intermediate vertex of that detour must occur in published G-code.
 */
 namespace {
 using namespace Slic3r;
-enum class Scene { Ring, Support };
+enum class Scene { Ring, Support, Dumbbell };
 struct Result {
     // Planner selected by the host before processing; empty when no member is active.
     std::string selected_planner;
@@ -101,6 +103,10 @@ struct Result {
     std::vector<std::vector<coord_t>> support_crossings;
     // Routes with an intermediate vertex found among published travel moves.
     std::vector<std::vector<coord_t>> published_detours;
+    // Real routes joining the dumbbell's two lobes through its printed bridge.
+    std::vector<std::vector<coord_t>> bridge_travels;
+    // Bridge routes whose complete sequence after the departure appears in consecutive published XY travel moves.
+    size_t published_bridges = 0;
     // Extruded volume read back from the published G-code, in mm³.
     double volume = 0.;
 };
@@ -495,10 +501,34 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         CHECK(std::vector<coord_t>(zero.begin(), zero.begin() + 3) == std::vector<coord_t>(two.begin(), two.begin() + 3));
         CHECK(std::vector<coord_t>(zero.end() - 3, zero.end()) == std::vector<coord_t>(two.end() - 3, two.end()));
     }
-    if (use_zones)
-        CHECK(weight_zero.inter_island == weight_two.inter_island);
-    else
-        CHECK(weight_zero.inter_island != weight_two.inter_island);
+    CHECK(weight_zero.inter_island != weight_two.inter_island);
+}
+
+// Observe actual sliced-plan travels through a narrow connected bridge and find their detours in published text.
+TEST_CASE("Advanced domain bridge travels reach production G-code", "[plugins][plugin-e2e][advanced-router-e2e]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
+        {"thin_walls", "1"}, {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"}, {"ironing", "0"},
+        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
+        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const Result routed = run_case(config, "domain-dumbbell", Scene::Dumbbell);
+    REQUIRE_FALSE(routed.bridge_travels.empty());
+    CHECK(routed.published_bridges > 0);
+    config.set_deserialize_strict("avoid_crossing_perimeters", "0");
+    const Result straight = run_case(config, "domain-dumbbell-straight", Scene::Dumbbell);
+    CHECK(straight.volume == Approx(routed.volume).margin(0.01));
 }
 
 Result run_case(const DynamicPrintConfig &config, const std::string &name, const Scene scene)
@@ -525,6 +555,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         mesh.merge(roof);
         CHECK(mesh.volume() == Approx(185.6).margin(0.001));
     }
+    if (scene == Scene::Dumbbell) mesh = Test::Plugins::dumbbell(0.4);
     mesh = Test::PluginE2E::stl_fixture(mesh);
     Model model;
     Print print;
@@ -627,6 +658,39 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                     std::abs(point.y() - route[idx + 1]) <= scale_i(0.001))
                     emitted_detour = route_emitted = true;
         if (route_emitted) result.published_detours.push_back(route);
+        if (scene == Scene::Dumbbell && config.opt_bool("avoid_crossing_perimeters")) {
+            const Layer &layer = print.object(0).layers().back();
+            const Point shift = print.object(0).instances().front().shift;
+            const Point minimum = get_extents(layer.lslices()).min + shift;
+            const Point from(route[0], route[1]), to(route[last], route[last + 1]);
+            const coord_t left = minimum.x() + scale_i(10.), right = minimum.x() + scale_i(15.);
+            if ((from.x() < left && to.x() > right) || (to.x() < left && from.x() > right)) {
+                ExPolygons material = layer.lslices();
+                for (ExPolygon &area : material) area.translate(shift);
+                const ExPolygons bridge{ExPolygon(Polygon(Points{
+                    minimum + Point(scale_i(10.), scale_i(4.8)), minimum + Point(scale_i(15.), scale_i(4.8)),
+                    minimum + Point(scale_i(15.), scale_i(5.2)), minimum + Point(scale_i(10.), scale_i(5.2))}))};
+                bool through = false;
+                for (size_t p = 3; p < route.size(); p += 3) {
+                    const Polyline segment(Points{Point(route[p - 3], route[p - 2]), Point(route[p], route[p + 1])});
+                    CHECK(diff_pl(Polylines{segment}, material).empty());
+                    through |= !intersection_pl(Polylines{segment}, bridge).empty();
+                }
+                CHECK(through);
+                result.bridge_travels.push_back(route);
+                bool published = false;
+                for (size_t first = 0; first + route.size() / 3 - 1 <= emitted_travels.size(); ++first) {
+                    bool matches = true;
+                    for (size_t p = 3; p < route.size(); p += 3) {
+                        const Point &point = emitted_travels[first + p / 3 - 1];
+                        if (std::abs(point.x() - route[p]) > scale_i(0.001) ||
+                            std::abs(point.y() - route[p + 1]) > scale_i(0.001)) { matches = false; break; }
+                    }
+                    if (matches) { published = true; break; }
+                }
+                if (published && route.size() > 6) ++result.published_bridges;
+            }
+        }
     }
     if (result.deviated > 0)
         CHECK(emitted_detour);

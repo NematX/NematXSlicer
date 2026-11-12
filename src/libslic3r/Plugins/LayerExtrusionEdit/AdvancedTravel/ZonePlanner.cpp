@@ -8,10 +8,15 @@
 #include <limits>
 
 #include "../../Common/ClipperHelpers.hpp"
+#include "../AvoidCrossing/LayerInputCache.hpp"
 
 /*
-ZonePlanner chooses compatibility candidates inside one attractor and otherwise
-routes straight segments around forbidden material in platter coordinates.
+ZonePlanner routes on the union of active attractors minus expanded forbidden
+material, then routes around obstacles if the domain path crosses forbidden material.
+If obstacle routing stays straight without failure and its chord passes validation
+against all remaining original forbidden areas, that chord is accepted without
+counting a fallback or a domain route. A chord inside only the nozzle margin may
+still require a detour or fallback.
 Endpoint membership removes individual unexpanded zones before union and nozzle
 expansion, so overlapping margins do not erase unrelated obstacles. Cached areas
 belong to this worker. The Config view of print settings is copied, its configuration borrowed;
@@ -25,15 +30,18 @@ first component's first entry and last exit delimit the shorter contour arc.
 Scanning resumes strictly after the exit: the remaining line may meet another
 component. Progress retains the unrounded exit parameter on the original line;
 only output vertices are rounded. Inserted arcs are not classified as entries. The
-component bound, original-area validation and total detour budget reject unsafe
-or excessive routes with a counted straight fallback. A source or target in a
+component bound and original-area validation reject unsafe obstacle routes with
+a counted straight fallback; the total detour budget can reject either kind of
+route with the same fallback. A source or target in a
 hole whose route crosses the surrounding material cannot be connected through
 the outer contour and also produces a counted straight fallback. A source or
 target inside the expanded margin but outside the original material also causes
 a counted straight fallback when the route needs a missing contour entry or exit.
 Cancellation propagates.
 
-    path: filter zones, select candidate and route blocked segments
+    path: filter zones, cache the domain, route and validate all segments
+    |-- LayerInputCache::get: resolve spacing and island-jump settings
+    |-- build_boundary / route_on_boundary: index the domain and follow the rings a chord crosses
     |-- eligible: resolve regional and auxiliary activation
     |-- contains: test filled material, including its border
     |-- crossing: find first entry and last exit, ignoring contacts
@@ -170,9 +178,10 @@ work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const H
 } // namespace
 
 ZonePlanner::ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
-                         const Config &print_config, const bool auxiliary_avoidance, const plugin_run_context *context) :
+                         const Config &print_config, const bool auxiliary_avoidance, const plugin_run_context *context,
+                         const Print &print, AvoidCrossing::LayerInputCache &layer_inputs) :
     m_compatibility(compatibility), m_zones(zones), m_config(print_config),
-    m_auxiliary_avoidance(auxiliary_avoidance), m_context(context)
+    m_auxiliary_avoidance(auxiliary_avoidance), m_context(context), m_print(print), m_layer_inputs(layer_inputs)
 {}
 
 bool ZonePlanner::eligible(const travel::TravelEndpoint &source, const travel::TravelEndpoint &target) const
@@ -203,6 +212,23 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     if (!eligible(pending.source, pending.target)) return direct;
     const work::Point source(pending.source.position.x, pending.source.position.y);
     const work::Point target(pending.target.position.x, pending.target.position.y);
+    if (source.coincides_with_epsilon(target)) return direct;
+    coord_t spacing = scale_i(m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4));
+    bool island_jump = false;
+    double jump_weight = 0.;
+    for (const travel::TravelEndpoint *endpoint : {&pending.target, &pending.source}) {
+        if (!endpoint->region_island.valid() || endpoint->region_island.region_count() == 0) continue;
+        const AvoidCrossing::LayerInput &layer = *m_layer_inputs.get(
+            m_print, endpoint->region_island.region(0).layer(), m_context).target;
+        spacing = layer.perimeter_spacing;
+        for (const AvoidCrossing::RegionInput &region : layer.regions)
+            if (region.avoid_travel_island) {
+                island_jump = true;
+                jump_weight = region.avoid_travel_island_weight;
+                break;
+            }
+        break;
+    }
     const ActiveZones &active = m_zones.query(t, pending);
     std::vector<size_t> ignored;
     for (size_t index : active.forbidden_indexes) {
@@ -210,7 +236,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         const work::ExPolygons &area = m_zones.zone_area(index);
         if (contains(area, source) || contains(area, target)) ignored.push_back(index);
     }
-    const CacheKey key(active.id, pending.extruder_id, ignored);
+    const CacheKey key(active.id, pending.extruder_id, ignored, spacing);
     std::map<CacheKey, Obstacles>::iterator cached = m_obstacles.find(key);
     if (cached == m_obstacles.end()) {
         Obstacles obstacles;
@@ -226,25 +252,31 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                 "nozzle_diameter", pending.extruder_id, 0.4) * 0.5));
             obstacles.expanded = clipper::offset_ex(m_context->plugin_storage, obstacles.original, double(radius));
         }
+        // The same components serve as containment masks, so interior endpoints need no projection.
+        work::ExPolygons domain = obstacles.expanded.empty() ? active.attractors :
+            clipper::diff_ex(m_context->plugin_storage, active.attractors, obstacles.expanded);
+        if (!domain.empty()) {
+            obstacles.domain = std::make_unique<AvoidCrossing::Boundary>();
+            AvoidCrossing::build_boundary(m_context->plugin_storage, work::ExPolygons(domain), 2 * spacing, *obstacles.domain);
+            for (const work::ExPolygon &component : domain)
+                obstacles.domain->boundary_growth.emplace_back(component, component);
+        }
         throw_if_cancelled(m_context);
         cached = m_obstacles.emplace(key, std::move(obstacles)).first;
     }
     const Obstacles &obstacles = cached->second;
-    if (m_compatibility.avoidance_enabled(pending.source, pending.target)) {
-        for (const work::ExPolygon &attractor : active.attractors) {
-            throw_if_cancelled(m_context);
-            if (!attractor.contains(source) || !attractor.contains(target)) continue;
-            const std::vector<c_point> candidate = m_compatibility.path(pending.source, pending.target, pending.extruder_id);
-            work::Points points;
-            for (const c_point &point : candidate) points.emplace_back(point);
-            if (!blocked(points, obstacles.original, m_context)) { ++m_delegations; return candidate; }
-            break;
-        }
+    work::Points domain_points;
+    // Even a direct domain path is valid unless it crosses remaining original forbidden material.
+    if (obstacles.domain) {
+        domain_points = AvoidCrossing::route_on_boundary(*obstacles.domain, source, target, spacing,
+            2 * spacing, island_jump, jump_weight, m_context->plugin_storage, m_router_counts,
+            [this]() { throw_if_cancelled(m_context); }).points;
+        if (blocked(domain_points, obstacles.original, m_context)) domain_points.clear();
     }
     work::Points points{source};
     bool changed = false, failed = false;
     double progress = 0.;
-    for (size_t iteration = 0; iteration <= obstacles.expanded.size(); ++iteration) {
+    for (size_t iteration = 0; domain_points.empty() && iteration <= obstacles.expanded.size(); ++iteration) {
         size_t first = SIZE_MAX;
         Hit entry{}, exit{};
         entry.parameter = std::numeric_limits<double>::max();
@@ -263,9 +295,13 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         changed = true;
     }
     points.push_back(target);
+    const bool domain_route = !domain_points.empty();
+    if (domain_route) points = std::move(domain_points);
     points.erase(std::unique(points.begin(), points.end()), points.end());
-    if (!changed && !failed) return direct;
-    if (!failed) failed = blocked(points, obstacles.original, m_context);
+    const bool crosses_forbidden = !failed && blocked(points, obstacles.original, m_context);
+    // A rejected domain path does not make a validated, unchanged obstacle route a fallback.
+    if (!domain_route && !changed && !failed && !crosses_forbidden) return direct;
+    failed = failed || crosses_forbidden;
     double length = 0.;
     for (size_t i = 1; i < points.size(); ++i) length += work::Line(points[i - 1], points[i]).length();
     const c_float_or_percent budget = m_config.float_or_percent_or_default(
@@ -278,7 +314,8 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     if (failed) { ++m_fallbacks; return direct; }
     std::vector<c_point> result;
     for (const work::Point &point : points) result.push_back({point.x(), point.y()});
-    ++m_detours;
+    if (domain_route) ++m_domain_routes;
+    if (length > direct_length + SCALED_EPSILON) ++m_detours;
     return result;
 }
 }}}

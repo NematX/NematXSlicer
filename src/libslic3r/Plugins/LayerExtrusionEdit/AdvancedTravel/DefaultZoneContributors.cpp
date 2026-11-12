@@ -14,20 +14,23 @@
 #include "../AvoidCrossing/TravelBoundary.hpp"
 
 /*
-Default contributors copy boundary geometry for travels with a target region island (LayerRegionIsland)
+Top contributors copy boundary geometry for travels with a target region island (LayerRegionIsland)
 and a valid target instance. Each target layer builds one boundary using the
 worker-local input cache, reused for all its instances within one contributor call.
 Growth masks and excluded tops do
 not depend on the selected tool. Copies are shifted into platter coordinates;
 the boundaries and their borrowed grids are destroyed when the call ends.
 An original island is a layer perimeter slice before inset; for support targets,
-TravelBoundary also uses the object layer at or below the target. A membership
+TravelBoundary also uses the last object layer strictly below the support target's
+Z + SCALED_EPSILON. A membership
 mask is an area used to decide island membership, not a routing ring.
-The attractor contributor appends Attractor zones from these original islands,
-before inset, top removal and tool clipping. Support masks include the lower
-object layer and have no forbidden tops. The tops contributor appends Forbidden
-zones. No contributor replaces out. Each mask is dated by consecutive target membership, whereas
-static excluded tops apply throughout the layer, one zone per connected ExPolygon so
+The attractor contributor withdraws each perimeter slice with the shared thin-wall
+helper and appends one Attractor zone per source slice and instance. Source or
+target membership in that original slice dates consecutive runs on the same layer
+and instance. Its per-call cache owns local domains, reused across instances.
+Support domains include the lower object layer and have no forbidden tops.
+The tops contributor appends Forbidden zones. No contributor replaces out.
+Static excluded tops apply throughout the layer, one zone per connected ExPolygon so
 endpoint membership ignores only that top. Scope is per instance, not per object.
 Printed tops use the same components, but start after the last target in the
 original island containing the component. Target positions are unshifted before
@@ -39,11 +42,14 @@ per plan-catalog instance. Separate components let an endpoint ignore only the
 material it touches; all other components remain forbidden for support travels.
 The independent attractor_domain helper copies perimeter slices into SDK storage,
 withdraws each island with the shared thin-wall helper, then unions owned results.
-Its object-local result is not published by these contributors.
+Its unioned object-local result serves geometry consumers; publication keeps each
+source slice separate so withdrawal cannot change the dates.
 
     attractor_domain: withdraw slices and optional support lower slices, then union
-    `-- elephant_foot_compensation: limit withdrawal near the minimum wall width
-    DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute / PrintedTopsContributor::contribute
+    `-- withdrawn_slices: copy source slices and limit withdrawal near the minimum wall width
+    DefaultAttractorContributor::contribute: cache withdrawn slices, shift and date source-or-target runs
+    `-- withdrawn_slices: use elephant_foot_compensation to retain thin passages
+    DefaultForbiddenTopsContributor::contribute / PrintedTopsContributor::contribute
     `-- contribute_zones: select target layer/instance pairs and copy areas
         |-- LayerInputCache::get: borrow immutable worker-local layer input
         |-- TravelBoundary::init_layer / build_internal: build temporary geometry
@@ -60,12 +66,16 @@ polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCr
 namespace {
 namespace AC = AvoidCrossing;
 
+using WithdrawnSlices = std::vector<std::pair<polygon_work::ExPolygon, polygon_work::ExPolygons>>;
+// Copy source slices and withdraw each through SDK thin-wall compensation, returning owned source/parts pairs; a null target returns empty.
+// Include lower object slices for support; nonempty input requires valid storage and a positive minimum wall width; geometry errors propagate.
+WithdrawnSlices withdrawn_slices(storage_handle *storage, const AC::Input &input);
 // Copy local contours and holes with the instance shift; the source geometry remains unchanged.
 polygon_work::ExPolygons shifted_area(polygon_work::ExPolygons area, c_point shift);
-// Append masks or tops for valid target pairs, optionally dating tops after their island's last arrival; cancellation and geometry errors propagate.
-void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, ZoneRole role, bool printed = false);
+// Append tops for valid target pairs, optionally dating them after their island's last arrival; cancellation and geometry errors propagate.
+void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, bool printed = false);
 
-void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, const ZoneRole role, const bool printed)
+void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone> &out, const bool printed)
 {
     std::set<std::pair<const layer_handle *, uint32_t>> visited;
     std::map<const layer_handle *, std::unique_ptr<AC::TravelBoundary>> boundaries;
@@ -92,51 +102,28 @@ void contribute_zones(const ZoneContributorInput &input, std::vector<TravelZone>
             throw_if_cancelled(&input.run_context);
         }
         const ZoneScope scope{EXTRUDER_ID_UNKNOWN, target.printing_catalog_id, false};
-        if (role == ZoneRole::Forbidden) {
-            for (const polygon_work::ExPolygon &top : boundary->internal_boundary().to_avoid) {
-                throw_if_cancelled(&input.run_context);
-                size_t begin = printed ? SIZE_MAX : 0;
-                if (printed) {
-                    // Each inset top belongs to the original island containing its contour.
-                    for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygon> &growth : boundary->internal_boundary().boundary_growth) {
-                        if (!growth.first.contains(top.contour.points.front()))
-                            continue;
-                        for (size_t t = 0; t < input.travels.size(); ++t) {
-                            throw_if_cancelled(&input.run_context);
-                            const TravelConnection::TravelEndpoint &endpoint = input.travels[t].target;
-                            if (endpoint.printing_catalog_id == target.printing_catalog_id &&
-                                endpoint.region_island.valid() && endpoint.region_island.region_count() != 0 &&
-                                endpoint.region_island.region(0).layer().handle() == layer.handle() &&
-                                growth.first.contains({endpoint.position.x - shift.x, endpoint.position.y - shift.y}))
-                                begin = t + 1;
-                        }
-                        break;
-                    }
-                }
-                if (begin != SIZE_MAX)
-                    out.push_back({role, shifted_area({top}, shift), begin, SIZE_MAX, scope});
-            }
-            continue;
-        }
-        for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygon> &growth : boundary->internal_boundary().boundary_growth) {
+        for (const polygon_work::ExPolygon &top : boundary->internal_boundary().to_avoid) {
             throw_if_cancelled(&input.run_context);
-            size_t begin = SIZE_MAX;
-            // A different target pair interrupts membership even when its coordinates overlap this mask.
-            for (size_t t = 0; t <= input.travels.size(); ++t) {
-                bool member = false;
-                if (t < input.travels.size()) {
-                    const TravelConnection::TravelEndpoint &endpoint = input.travels[t].target;
-                    member = endpoint.printing_catalog_id == target.printing_catalog_id &&
-                        endpoint.region_island.valid() && endpoint.region_island.region_count() != 0 &&
-                        endpoint.region_island.region(0).layer().handle() == layer.handle() &&
-                        growth.first.contains({endpoint.position.x - shift.x, endpoint.position.y - shift.y});
-                }
-                if (member && begin == SIZE_MAX) begin = t;
-                if (!member && begin != SIZE_MAX) {
-                    out.push_back({role, shifted_area({growth.first}, shift), begin, t, scope});
-                    begin = SIZE_MAX;
+            size_t begin = printed ? SIZE_MAX : 0;
+            if (printed) {
+                // Each inset top belongs to the original island containing its contour.
+                for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygon> &growth : boundary->internal_boundary().boundary_growth) {
+                    if (!growth.first.contains(top.contour.points.front()))
+                        continue;
+                    for (size_t t = 0; t < input.travels.size(); ++t) {
+                        throw_if_cancelled(&input.run_context);
+                        const TravelConnection::TravelEndpoint &endpoint = input.travels[t].target;
+                        if (endpoint.printing_catalog_id == target.printing_catalog_id &&
+                            endpoint.region_island.valid() && endpoint.region_island.region_count() != 0 &&
+                            endpoint.region_island.region(0).layer().handle() == layer.handle() &&
+                            growth.first.contains({endpoint.position.x - shift.x, endpoint.position.y - shift.y}))
+                            begin = t + 1;
+                    }
+                    break;
                 }
             }
+            if (begin != SIZE_MAX)
+                out.push_back({ZoneRole::Forbidden, shifted_area({top}, shift), begin, SIZE_MAX, scope});
         }
     }
 }
@@ -150,43 +137,88 @@ polygon_work::ExPolygons shifted_area(polygon_work::ExPolygons area, const c_poi
     }
     return area;
 }
-} // namespace
 
-polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input)
+WithdrawnSlices withdrawn_slices(storage_handle *storage, const AC::Input &input)
 {
     if (!input.target)
         return {};
-    const AvoidCrossing::LayerInput &layer = *input.target;
+    const AC::LayerInput &layer = *input.target;
     polygon_work::ExPolygons slices = layer.perimeter_slices;
     if (layer.support)
         slices.insert(slices.end(), input.lower_perimeter_slices.begin(), input.lower_perimeter_slices.end());
     if (slices.empty())
         return {};
     const StoredExPolygonCollection stored = PluginCommon::clipper::to_stored_expolygons(storage, slices);
-    polygon_work::ExPolygons withdrawn;
+    WithdrawnSlices withdrawn;
+    size_t index = 0;
     for (const ExPolygon island : stored.readonly()) {
         const StoredExPolygonCollection inset = XYSizeCompensationPlugin::detail::elephant_foot_compensation(
             storage, island, unscaled(layer.external_perimeter_width + layer.perimeter_spacing),
             coord_t(1.5 * layer.perimeter_spacing));
-        polygon_work::ExPolygons parts = PluginCommon::clipper::from_expolygon_collection_view(inset.readonly());
-        withdrawn.insert(withdrawn.end(), parts.begin(), parts.end());
+        withdrawn.emplace_back(std::move(slices[index++]), PluginCommon::clipper::from_expolygon_collection_view(inset.readonly()));
     }
-    return PluginCommon::clipper::union_ex(storage, withdrawn);
+    return withdrawn;
+}
+} // namespace
+
+polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input)
+{
+    polygon_work::ExPolygons parts;
+    for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygons> &slice : withdrawn_slices(storage, input))
+        parts.insert(parts.end(), slice.second.begin(), slice.second.end());
+    if (parts.empty()) return {};
+    return PluginCommon::clipper::union_ex(storage, parts);
 }
 
 void DefaultAttractorContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
-    contribute_zones(input, out, ZoneRole::Attractor);
+    std::set<std::pair<const layer_handle *, uint32_t>> visited;
+    std::map<const layer_handle *, WithdrawnSlices> domains;
+    for (const PendingTravel &travel : input.travels)
+        for (const TravelConnection::TravelEndpoint *endpoint : {&travel.source, &travel.target}) {
+            throw_if_cancelled(&input.run_context);
+            if (!endpoint->region_island.valid() || endpoint->region_island.region_count() == 0 ||
+                endpoint->printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
+                endpoint->printing_catalog_id >= input.plan.object_instance_count()) continue;
+            const Layer layer = endpoint->region_island.region(0).layer();
+            const Object object = layer.object();
+            const uint64_t instance = input.plan.object_instance(endpoint->printing_catalog_id).object_instance_idx();
+            if (instance >= object.instance_count() || !visited.emplace(layer.handle(), endpoint->printing_catalog_id).second) continue;
+            const c_point shift = object.instance_shift(static_cast<size_t>(instance));
+            if (domains.find(layer.handle()) == domains.end()) {
+                const AC::Input &layer_input = input.layer_inputs.get(input.print, layer, &input.run_context);
+                domains.emplace(layer.handle(), withdrawn_slices(input.run_context.plugin_storage, layer_input));
+            }
+            const ZoneScope scope{EXTRUDER_ID_UNKNOWN, endpoint->printing_catalog_id, false};
+            for (const std::pair<polygon_work::ExPolygon, polygon_work::ExPolygons> &slice : domains[layer.handle()]) {
+                size_t begin = SIZE_MAX;
+                for (size_t t = 0; t <= input.travels.size(); ++t) {
+                    throw_if_cancelled(&input.run_context);
+                    bool member = false;
+                    if (t < input.travels.size())
+                        for (const TravelConnection::TravelEndpoint *candidate : {&input.travels[t].source, &input.travels[t].target})
+                            if (candidate->printing_catalog_id == endpoint->printing_catalog_id &&
+                                candidate->region_island.valid() && candidate->region_island.region_count() != 0 &&
+                                candidate->region_island.region(0).layer().handle() == layer.handle() &&
+                                slice.first.contains({candidate->position.x - shift.x, candidate->position.y - shift.y}, true)) member = true;
+                    if (member && begin == SIZE_MAX) begin = t;
+                    if (!member && begin != SIZE_MAX) {
+                        if (!slice.second.empty()) out.push_back({ZoneRole::Attractor, shifted_area(slice.second, shift), begin, t, scope});
+                        begin = SIZE_MAX;
+                    }
+                }
+            }
+        }
 }
 
 void DefaultForbiddenTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
-    contribute_zones(input, out, ZoneRole::Forbidden);
+    contribute_zones(input, out);
 }
 
 void PrintedTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
-    contribute_zones(input, out, ZoneRole::Forbidden, true);
+    contribute_zones(input, out, true);
 }
 
 void SupportObstacleContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const

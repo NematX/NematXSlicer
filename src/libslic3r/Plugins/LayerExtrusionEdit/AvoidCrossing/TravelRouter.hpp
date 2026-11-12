@@ -83,6 +83,7 @@ struct RouterCounts
 
 // Return an owned path in boundary's coordinates that follows rings where the placed segment crosses or nears them;
 // otherwise the path is a direct chord, as for empty geometry or failed placement.
+// A direct path is also a valid interior route; callers must validate forbidden material, not infer failure from its point count.
 // placement_spacing controls endpoint placement (zero disables it); segment_radius selects nearby edges.
 // Distinct endpoints are required; island_jump enables weighted bridges. Update counts and lazy grids; cancellation propagates.
 PluginCommon::work::Polyline route_on_boundary(Boundary &boundary, PluginCommon::work::Point start,

@@ -16,8 +16,9 @@ Travel-zone tests give contributors small owned rectangles and query their
 dated, scoped unions without a production consumer. A direct connector check
 uses the shared transition helpers to publish real scopes and entry state, then
 checks pair owners before apply. All views borrow locally owned prints or PEs.
-Sliced frames and separate islands compare default zones with the core boundary
-cache, including shifted instances, dated membership and excluded support tops.
+Sliced frames and separate islands compare withdrawn domains with per-slice
+withdrawal and excluded tops with the core boundary cache, including shifted
+instances and source-or-target dates on the original slices.
 Printed tops are compared with that same core geometry and dated by the last
 arrival in each containing original island; removing all such arrivals omits it.
 The tools are simulated by alternating tool ids on a single-extruder slice;
@@ -38,6 +39,7 @@ namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
 namespace travel = slic3r_api::LayerExtrusionEdit::TravelConnection;
 namespace helpers = Slic3r::Test::TransitionPipeline;
 namespace work = slic3r_api::PluginCommon::polygon_work;
+namespace ac = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
 
 // Convert millimeter dimensions into one owned counter-clockwise rectangle; no API storage is borrowed.
 work::ExPolygons rectangle(coord_t x, coord_t width);
@@ -203,8 +205,8 @@ TEST_CASE("Attractor domain keeps a one-perimeter bridge and withdraws wide area
     CHECK(zones::attractor_domain(owner.context.plugin_storage, empty).empty());
 }
 
-// Slice two islands and two instances, then compare masks, dates and tops against the core cache.
-TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[plugins][travel-zones]")
+// Slice two islands and two instances, then compare source-or-target domain dates and unchanged core top geometry.
+TEST_CASE("Default travel zones publish withdrawn slices and excluded tops", "[plugins][travel-zones]")
 {
     const bool tops = GENERATE(false, true);
     const bool support = GENERATE(false, true);
@@ -249,7 +251,7 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
     REQUIRE(expected.to_avoid.empty() == (!tops || support));
     REQUIRE_FALSE(expected.boundary_growth.front().first.holes.empty());
     std::vector<c_point> shifts;
-    // Two runs for the first island are separated by the second island and an invalid target.
+    // The source keeps the first slice active through its departure; the invalid travel ends both runs.
     for (size_t instance = 0; instance < 2; ++instance) {
         const uint32_t id = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), instance);
         const c_point shift = owner.print_view.object(0).instance_shift(instance);
@@ -310,7 +312,7 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
     printed.contribute(owner.input(), absent);
     CHECK(absent.empty());
     owner.chronology.travels = saved;
-    REQUIRE(masks.size() == (support ? 12 : 6));
+    REQUIRE(masks.size() == (support ? 8 : 4));
     REQUIRE(excluded.size() == 2 * expected.to_avoid.size());
     for (const zones::TravelZone &zone : masks) {
         CHECK(zone.role == zones::ZoneRole::Attractor);
@@ -322,33 +324,33 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
     }
     for (size_t instance = 0; instance < 2; ++instance) {
         const uint32_t id = owner.chronology.travels[instance * 5].target.printing_catalog_id;
-        const size_t starts[] = {0, 3, 2};
-        const size_t ends[] = {2, 4, 3};
-        const size_t islands[] = {0, 0, 1};
-        for (size_t run = 0; run < 3; ++run) {
-            const zones::TravelZone &zone = masks[instance * (support ? 6 : 3) + run];
+        const ac::Input &copied = owner.cache.get(owner.print_view, layer_view, &owner.context);
+        work::ExPolygons slices = copied.target->perimeter_slices;
+        if (support) slices.insert(slices.end(), copied.lower_perimeter_slices.begin(), copied.lower_perimeter_slices.end());
+        for (size_t slice = 0; slice < slices.size(); ++slice) {
+            const zones::TravelZone &zone = masks[instance * slices.size() + slice];
             CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
             CHECK(zone.scope.printing_catalog_id == id);
             CHECK_FALSE(zone.scope.support_travels_only);
-            CHECK(zone.begin == instance * 5 + starts[run]);
-            CHECK(zone.end == instance * 5 + ends[run]);
-            check_shifted_area(zone.area, {expected.boundary_growth[islands[run]].first}, shifts[instance]);
-        }
-        if (support) {
-            size_t index = instance * 6 + 3;
-            for (size_t g = 2; g < 4; ++g) {
-                const Slic3r::ExPolygon &mask = expected.boundary_growth[g].first;
-                const bool first = mask.contains(expected.boundary_growth[0].first.contour.points.front());
-                for (size_t run = 0; run < (first ? 2 : 1); ++run) {
-                    const zones::TravelZone &zone = masks[index++];
-                    CHECK(zone.begin == instance * 5 + (first ? (run == 0 ? 0 : 3) : 2));
-                    CHECK(zone.end == instance * 5 + (first ? (run == 0 ? 2 : 4) : 3));
-                    CHECK(zone.scope.printing_catalog_id == id);
-                    CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
-                    check_shifted_area(zone.area, {mask}, shifts[instance]);
-                }
+            const travel::TravelEndpoint &first_target = owner.chronology.travels[instance * 5].target;
+            const bool first = slices[slice].contains({first_target.position.x - shifts[instance].x,
+                                                      first_target.position.y - shifts[instance].y});
+            CHECK(zone.begin == instance * 5 + (first ? 0 : 2));
+            CHECK(zone.end == instance * 5 + 4);
+            ac::LayerInput single = *copied.target;
+            single.support = false;
+            single.perimeter_slices = {slices[slice]};
+            ac::Input one;
+            one.target = std::make_unique<const ac::LayerInput>(std::move(single));
+            work::ExPolygons domain = zones::attractor_domain(owner.context.plugin_storage, one);
+            work::ExPolygons local = zone.area;
+            for (work::ExPolygon &area : local) {
+                for (work::Point &point : area.contour.points) point -= work::Point(shifts[instance]);
+                for (work::Polygon &hole : area.holes)
+                    for (work::Point &point : hole.points) point -= work::Point(shifts[instance]);
             }
-            CHECK(index == (instance + 1) * 6);
+            CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, local, domain).empty());
+            CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, domain, local).empty());
         }
         if (!excluded.empty()) {
             for (size_t top = 0; top < expected.to_avoid.size(); ++top) {
@@ -366,15 +368,15 @@ TEST_CASE("Default travel zones copy dated core islands and excluded tops", "[pl
         const travel::PendingTravel &pending = owner.chronology.travels[t];
         const zones::ActiveZones &active = view.query(t, pending);
         if (t % 5 == 4) { CHECK(active.attractors.empty()); continue; }
-        REQUIRE(active.attractors.size() == 1);
-        CHECK(active.attractors.front().contains({pending.target.position.x, pending.target.position.y}));
-        if (t % 5 == 2 || t % 5 == 3)
-            CHECK_FALSE(active.attractors.front().contains({pending.source.position.x, pending.source.position.y}));
+        REQUIRE(active.attractors.size() == (t % 5 < 2 ? 1 : 2));
+        // Dates use original slice borders even though the withdrawn routing domain excludes those endpoints.
+        for (const work::ExPolygon &domain : active.attractors)
+            CHECK_FALSE(domain.contains({pending.target.position.x, pending.target.position.y}));
     }
     owner.cancel_at = owner.checks + 1;
     CHECK_THROWS_AS(attractors.contribute(owner.input(), masks), slic3r_api::PluginCancelled);
     CHECK_THROWS_AS(forbidden.contribute(owner.input(), excluded), slic3r_api::PluginCancelled);
-    // Input is already cached: the second check follows boundary construction, the third starts mask dating.
+    // The input is already cached: slice withdrawal follows the cache lookup, then cancellation checks resume during dating.
     for (size_t delay : {size_t(2), size_t(3)}) {
         owner.cancel_at = owner.checks + delay;
         CHECK_THROWS_AS(attractors.contribute(owner.input(), masks), slic3r_api::PluginCancelled);

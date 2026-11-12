@@ -1032,7 +1032,7 @@ TEST_CASE("Advanced travel follows the connected attractor through a one-perimet
     CHECK(through_bridge);
 }
 
-// Check layer entry and optional same-island or inter-island gaps with contributor sets and straight or advanced travel.
+// Keep layer entry straight; domain attachments may add collinear points, while forbidden tops require a detour.
 TEST_CASE("Advanced zones keep layer entry straight while later travels avoid tops", "[plugins][travel][travel-zones]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1115,7 +1115,7 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     CHECK(first.travel().point(1).x == target.x());
     if (following_gap)
         CHECK((ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2) ==
-            (advanced && (contributors & (same_attractor ? 1 : 2)) != 0));
+            (advanced && ((contributors & 1) != 0 || (!same_attractor && (contributors & 2) != 0))));
 }
 
 // Compare inter-island crossings before and after the middle island's arrival, with both static-top activation states.
@@ -1197,14 +1197,18 @@ TEST_CASE("Printed tops start avoiding a third island only after its last arriva
         for (size_t index : {size_t(1), size_t(4)}) {
             const slic3r_api::ExtrusionEntity route = ordered_scope(*tool.extrusions[instance * 5 + index].root).travel();
             const bool detour = printed_tops ? index == 4 : static_tops;
-            CHECK((route.point_count() > 2) == detour);
+            double length = 0.;
             bool crosses = false;
             for (size_t p = 1; p < route.point_count(); ++p) {
                 const c_point a = route.point(p - 1), b = route.point(p);
                 const Polyline segment(Points{Point(a.x - shift.x, a.y - shift.y), Point(b.x - shift.x, b.y - shift.y)});
+                length += segment.length();
                 crosses |= !intersection_pl(Polylines{segment}, middle_tops).empty();
             }
             CHECK(crosses == !detour);
+            const c_point first = route.point(0), last = route.point(route.point_count() - 1);
+            const double direct = Point(first.x, first.y).distance_to(Point(last.x, last.y));
+            CHECK((length > direct + SCALED_EPSILON) == detour);
         }
     }
 }

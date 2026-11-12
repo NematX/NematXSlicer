@@ -15,7 +15,9 @@ orchestrator for this worker, never shared between workers,
 then construct TravelZoneView with the contributors in execution order. They
 run immediately; query() lazily unions the applicable active areas by role.
 T must not decrease between queries.
-An attractor is a membership mask, not a guarantee of a route within it.
+Attractors are routing domains; the planner may use straight endpoint attachments
+or island jumps outside them. Default attractors are dated by source-or-target
+membership in their original perimeter slice, not in the withdrawn domain.
 The view owns zones and cached unions; returned references remain valid until
 its destruction. Ids identify applicable zone-index sets within this view only.
 Keep run_context and its storage alive for queries; use one view per worker.
