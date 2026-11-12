@@ -149,7 +149,7 @@ TEST_CASE("Direct jagged island matches core after a split inset", "[plugins][av
         PluginStorage storage;
         storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
         const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-        const port::Input input = port::build_input(handle, view, {0, index++, false});
+        const port::Input input = port::build_input(handle, view, {0, index++, false}, nullptr);
         std::cout << "jagged spacing=" << input.target->perimeter_spacing << std::endl;
         port::TravelBoundary actual;
         AvoidCrossingPerimeters expected;
@@ -198,7 +198,7 @@ TEST_CASE("Support marker omits real top surfaces from travel boundaries", "[plu
         PluginStorage storage;
         storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
         const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-        const port::Input input = port::build_input(handle, view, {0, index, false});
+        const port::Input input = port::build_input(handle, view, {0, index, false}, nullptr);
         REQUIRE(input.target->support == support);
         size_t tops = 0;
         REQUIRE_FALSE(input.target->regions.empty());
@@ -415,7 +415,7 @@ void compare(const Print &print, const Layer &layer, port::LayerIdentity identit
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-    const port::Input input = port::build_input(handle, view, identity);
+    const port::Input input = port::build_input(handle, view, identity, nullptr);
     const port::ExternalInput external = port::build_external_input(view, identity);
     ++coverage.layers;
     if (input.target->support) {

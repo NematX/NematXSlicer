@@ -1151,7 +1151,15 @@ Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &p
         entry->init_layer(layer);
     }
     AvoidCrossingPerimeters &router = *entry;
-    const std::vector<const Layer *> printed_layers{&layer};
+    std::vector<const Layer *> printed_layers;
+    if (layer.get_property<LayerSupportProperty>() != nullptr) {
+        for (const Layer &candidate : layer.object()->layers()) {
+            if (candidate.scaled_print_z() >= layer.scaled_print_z() + SCALED_EPSILON)
+                break;
+            printed_layers = {&candidate};
+        }
+    } else
+        printed_layers = {&layer};
     router.prepare_crossing_test({layer, printed_layers, target.owner->printing_catalog_id,
         target.tool, std::max<coord_t>(1, scale_i(print.config().nozzle_diameter.get_at(target.tool) * 0.5)), []() {}});
     if (!router.can_cross_perimeter(Polyline(from, to), true))

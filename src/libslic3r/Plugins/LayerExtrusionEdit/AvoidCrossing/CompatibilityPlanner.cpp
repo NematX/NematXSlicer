@@ -29,6 +29,9 @@ through public API views, then
 subtracts the target instance shift from both endpoints. PerimeterCrossing tests
 the direct path against boundaries of prepared interior areas, not extrusion
 centerlines. Without a crossing, the planner keeps the straight path.
+For support targets, copied object areas below the target height provide the
+crossing boundaries. Per-object plans retain only the target catalog instance;
+other plans retain all instances. Routing geometry remains the owner's boundary.
 
 TravelRouter uses internal boundaries for travel within one object instance and
 external boundaries for travel between instances or objects. The external input
@@ -125,7 +128,7 @@ bool CompatibilityPlanner::endpoint_has_object_instance(const TravelEndpoint &en
 
 const AC::Input &CompatibilityPlanner::input_for(const Layer &layer)
 {
-    return m_inputs.get(m_print, layer, m_run_ctx);
+    return m_inputs.get(m_print, layer, m_run_ctx, &m_plan);
 }
 
 CompatibilityPlanner::RoutingState &CompatibilityPlanner::router_for(
@@ -201,7 +204,11 @@ std::vector<c_point> CompatibilityPlanner::path(const TravelEndpoint &source,
     const coord_t nozzle_radius = std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5));
     throw_if_cancelled(m_run_ctx);
     state.crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id, nozzle_radius,
-                           [this]() { throw_if_cancelled(m_run_ctx); });
+                           [this]() { throw_if_cancelled(m_run_ctx); }, input.support_object_slices,
+                           target.printing_catalog_id, {target_shift.x, target_shift.y},
+                           // Keep this predicate aligned with DefaultPlanBuilder::use_object_plan.
+                           m_print_config.bool_or_default("complete_objects", false) ||
+                           m_print_config.float_or_default("parallel_objects_step", 0.) > 0.);
     throw_if_cancelled(m_run_ctx);
 
     Work::Polyline direct;
@@ -275,7 +282,7 @@ bool CompatibilityPlanner::crosses(const TravelEndpoint &source,
         m_perimeter_crossings[{RouterKey{target_layer.handle(), extruder_id}, exclude_top_surfaces}];
     crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
                      std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5)),
-                     [this]() { throw_if_cancelled(m_run_ctx); }, exclude_top_surfaces);
+                     [this]() { throw_if_cancelled(m_run_ctx); }, {}, 0, {}, false, exclude_top_surfaces);
     return crossing.touches_top_surface(m_run_ctx->plugin_storage, local) ||
         crossing.can_cross_perimeter(local, true);
 }

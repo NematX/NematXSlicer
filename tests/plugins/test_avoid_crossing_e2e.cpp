@@ -77,17 +77,32 @@ chords cross an object slice component containing neither endpoint. Slice copies
 are shifted using the plan catalog. With other contributors disabled, the same
 endpoints must have a detour with support obstacles and a straight route without
 them; an intermediate vertex of that detour must occur in published G-code.
+The support-crossing matrix selects the compatible provider and independently
+varies crossing-only wipe, avoidance and both per-object planning settings. It
+counts support wipe leaves, checks straight versus deviated routes and preserves
+deposited volume for settings that do not change extrusion geometry. It validates
+the declarations of both travel providers and crossing wipe against independent
+variation domains, so a newly read setting requires an effective variation.
+Within a support extrusion, successive scopes identify support-to-support gaps.
+previous_support also pairs the last scope of the preceding support extrusion
+with the first scope of the next one when layer, tool and instance are unchanged.
+With avoidance disabled, intersection with expanded printed-object areas witnesses
+a wiped gap across the part. Two separate overhangs supply distinct support islands;
+an unwiped gap over void must join different islands and exceed wipe_min.
 
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
     `-- run_case: process the ring and central island, publish text, copy observations
         |-- collect_travels: visit ordered scopes and copy their reserved travel phases
         |   `-- append_points: join geometric leaves without consecutive duplicate vertices
+        |-- count_wipes: count support wipe leaves with inherited roles
+        |-- collect_scope_handles: gather scopes for inspecting outgoing wipes and incoming travels
+        |   `-- previous_support: join the last and first scopes across support extrusions in the same layer, tool and instance
         `-- GCodeReader::parse_buffer: measure deposited volume and collect emitted travel XY
 */
 namespace {
 using namespace Slic3r;
-enum class Scene { Ring, Support, Dumbbell };
+enum class Scene { Ring, Support, SupportCrossing, Dumbbell };
 struct Result {
     // Planner selected by the host before processing; empty when no member is active.
     std::string selected_planner;
@@ -99,6 +114,11 @@ struct Result {
     size_t deviated = 0;
     // Reserved travel phases found in actual support printing extrusions.
     size_t support_travels = 0;
+    // Wipe leaves belonging to support printing extrusions.
+    size_t support_wipes = 0;
+    // Same-extrusion support gaps with a returning wipe over object material, or no wipe over void.
+    size_t support_part_wipes = 0;
+    size_t support_void_without_wipe = 0;
     // Support routes whose endpoint chord intersects an object component containing neither endpoint.
     std::vector<std::vector<coord_t>> support_crossings;
     // Routes with an intermediate vertex found among published travel moves.
@@ -138,13 +158,100 @@ struct TravelActivation {
     }
 };
 // Slice and process the selected scene, checking the stored provider or implicit advanced default; publish text G-code under file names built from name,
-// and return copied routes, support chords crossing object slices, published detour matches and deposited volume.
+// and return copied routes, support crossing/wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
 // Copy reserved travel phases without changing the plan; skip routes below two vertices and count those above two.
 void collect_travels(const ExtrusionEntity &entity, Result &result);
 // Append geometric leaves in child order, skipping consecutive duplicate XY and Z-offset triples.
 void append_points(const ExtrusionEntity &entity, std::vector<coord_t> &points);
+// Count marked wipe leaves in a borrowed extrusion tree without retaining its views.
+size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role = RAW_EXTRUSION_ROLE_NONE);
+// Copy ordered scope handles for immediate inspection while their owning Print remains alive.
+void collect_scope_handles(slic3r_api::MutableExtrusionEntity entity,
+                          std::vector<slic3r_api::MutableExtrusionEntity> &scopes);
+
+// Vary support crossing settings independently through slicing, routing, wiping and text publication.
+TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin-e2e][support-crossing-e2e]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.wipe.default", true));
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.wipe.crossing", true));
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+    baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
+        {"avoid_crossing_top", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"}, {"fill_density", "20%"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"support_material", "1"}, {"support_material_style", "grid"},
+        {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
+        {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"},
+        {"wipe", "1"}, {"wipe_only_crossing", "1"}, {"wipe_min", "2"}, {"wipe_inside_end", "0"},
+        {"wipe_return", "0"}, {"retract_before_travel", "0"}, {"retract_length", "2"},
+        {"retract_before_wipe", "20%"}, {"retract_lift", "0"}, {"wipe_lift", "0"},
+        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
+        {"nozzle_diameter", "0.4,0.4"}, {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"},
+        {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1,1"},
+        {"avoid_travel_island", "0"}, {"avoid_travel_island_weight", "1"}, {"ironing", "0"},
+        {"wipe_speed", "20"}, {"travel_speed", "130"}, {"retract_speed", "40"}, {"wipe_extra_perimeter", "0"},
+        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"}, {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    const std::vector<Test::PluginE2E::Domain> domains{
+        {{"wipe_only_crossing"}, {{"all-wipes", {{"wipe_only_crossing", "0"}}}}},
+        {{"avoid_crossing_perimeters"}, {{"straight", {{"avoid_crossing_perimeters", "0"}}}}},
+        {{"complete_objects"}, {{"complete-objects", {{"complete_objects", "1"}}}}},
+        {{"parallel_objects_step"}, {{"parallel-objects", {{"parallel_objects_step", "1"}}}}},
+        {{"avoid_crossing_not_first_layer"}, {{"skip-first", {{"avoid_crossing_not_first_layer", "1"}}}}},
+        {{"avoid_crossing_perimeters_max_detour"}, {{"detour-limit", {{"avoid_crossing_perimeters_max_detour", "5"}}}}},
+        {{"nozzle_diameter"}, {{"nozzle", {{"nozzle_diameter", "0.6,0.4"}}}}},
+        {{"avoid_crossing_top"}, {{"tops", {{"avoid_crossing_top", "1"}}}}},
+        {{"avoid_travel_island"}, {{"island", {{"avoid_travel_island", "1"}}}}},
+        {{"avoid_travel_island_weight"}, {{"island-weight", {{"avoid_travel_island_weight", "2"}}}}},
+        // Keep all material roles together so the crossing mask never sees a solid-only tool.
+        {{"infill_extruder", "perimeter_extruder", "solid_infill_extruder"},
+            {{"tools", {{"infill_extruder", "2"}, {"perimeter_extruder", "2"}, {"solid_infill_extruder", "2"}}}}},
+        {{"ironing"}, {{"ironing", {{"ironing", "1"}}}}},
+        {{"perimeters"}, {{"perimeters", {{"perimeters", "3"}}}}},
+        {{"wipe"}, {{"no-wipe", {{"wipe", "0"}}}}},
+        {{"wipe_speed"}, {{"wipe-speed", {{"wipe_speed", "30"}}}}},
+        {{"travel_speed"}, {{"travel-speed", {{"travel_speed", "100"}}}}},
+        {{"wipe_min"}, {{"wipe-length", {{"wipe_min", "3"}}}}},
+        {{"wipe_extra_perimeter"}, {{"extra-wipe", {{"wipe_extra_perimeter", "1"}}}}},
+        {{"retract_speed"}, {{"retract-speed", {{"retract_speed", "50"}}}}},
+        {{"retract_before_wipe"}, {{"before-wipe", {{"retract_before_wipe", "100%"}}}}}
+    };
+    const std::vector<Test::PluginE2E::Case> cases = Test::PluginE2E::linear_cases(host,
+        {"layer_extrusion_edit.travel.avoid_crossing_perimeters", "layer_extrusion_edit.travel.advanced",
+         "layer_extrusion_edit.wipe.crossing"}, baseline, domains);
+    double volume = 0.;
+    size_t baseline_wipes = 0;
+    for (const Test::PluginE2E::Case &test : cases) {
+        INFO(test.name);
+        const Result result = run_case(Test::PluginE2E::apply_case(baseline, test), "support-crossing-" + test.name, Scene::SupportCrossing);
+        REQUIRE(result.support_travels > 0);
+        if (test.name == "no-wipe") CHECK(result.support_wipes == 0);
+        else REQUIRE(result.support_wipes > 0);
+        if (test.settings.empty()) {
+            volume = result.volume;
+            baseline_wipes = result.support_wipes;
+            CHECK(result.deviated > 0);
+            CHECK(std::any_of(result.support_crossings.begin(), result.support_crossings.end(),
+                [](const std::vector<coord_t> &route) { return route.size() > 6; }));
+        } else {
+            if (test.name != "nozzle" && test.name != "tools" && test.name != "ironing" && test.name != "perimeters")
+                CHECK(result.volume == Approx(volume).margin(0.01));
+            if (test.name == "straight") {
+                CHECK(result.deviated == 0);
+                CHECK(result.support_part_wipes > 0);
+                CHECK(result.support_void_without_wipe > 0);
+            }
+            if (test.name == "all-wipes")
+                CHECK(result.support_wipes > baseline_wipes);
+        }
+    }
+}
 
 // Compare explicit planner selection and activation fallbacks through STL, slicing and exported G-code.
 TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[plugins][plugin-e2e][travel][travel-zones]")
@@ -401,6 +508,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const std::map<std::string, std::vector<std::string>> domains{
+        {"complete_objects", {"1"}}, {"parallel_objects_step", {"1"}},
         {"avoid_crossing_perimeters", {"0"}},
         {"avoid_crossing_not_first_layer", {"1"}},
         {"avoid_crossing_perimeters_max_detour", {"5", "200%"}},
@@ -546,7 +654,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         mesh.merge(bar);
     }
     CHECK(mesh.volume() == Approx(163.2).margin(0.001));
-    if (scene == Scene::Support) {
+    if (scene == Scene::Support || scene == Scene::SupportCrossing) {
         mesh = make_cube(4., 8., 2.);
         TriangleMesh post = make_cube(4., 8., 2.);
         post.translate(12., 0., 0.); mesh.merge(post);
@@ -554,13 +662,18 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
         roof.translate(0., 0., 2.);
         mesh.merge(roof);
         CHECK(mesh.volume() == Approx(185.6).margin(0.001));
+        if (scene == Scene::SupportCrossing) {
+            TriangleMesh second = mesh;
+            second.translate(0., 20., 0.);
+            mesh.merge(second);
+        }
     }
     if (scene == Scene::Dumbbell) mesh = Test::Plugins::dumbbell(0.4);
     mesh = Test::PluginE2E::stl_fixture(mesh);
     Model model;
     Print print;
     Test::init_print({mesh}, print, model, config);
-    if (scene == Scene::Support) {
+    if (scene == Scene::Support || scene == Scene::SupportCrossing) {
         ModelObject &object = model.objects().front();
         object.add_instance()->set_offset(object.instances.front()->get_offset() + Vec3d(35., 0., 0.));
         print.apply(model, config);
@@ -592,6 +705,10 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     REQUIRE(published_path == exported.string());
     REQUIRE(print.printing_plan() != nullptr);
     Result result;
+    slic3r_api::MutableExtrusionEntity previous_support;
+    const Printing::PrintingLayerGroup *previous_support_layer = nullptr;
+    uint32_t previous_support_catalog = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
+    extruder_index_t previous_support_tool = EXTRUDER_ID_UNKNOWN;
     if (selected_planner != nullptr) result.selected_planner = selected_planner->get_id();
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers)
@@ -600,6 +717,72 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                     const size_t before = result.travels.size();
                     collect_travels(*extrusion.root, result);
                     if (extrusion.sregion_island_role.is_support()) {
+                        result.support_wipes += count_wipes(slic3r_api::ExtrusionEntity(
+                            reinterpret_cast<const extrusion_entity_handle *>(extrusion.root.get())));
+                        // Consecutive support scopes in one layer, tool and instance cannot wipe because of a material change.
+                        ExPolygons printed;
+                        for (const Printing::PrintingObjectInstance &instance : print.printing_plan()->object_instances) {
+                            if (instance.object == nullptr) continue;
+                            const Layer *below = nullptr;
+                            for (const Layer &candidate : instance.object->layers()) {
+                                if (candidate.scaled_print_z() >= layer.print_z + SCALED_EPSILON) break;
+                                below = &candidate;
+                            }
+                            if (below == nullptr) continue;
+                            const Point shift = instance.object->instances()[instance.object_instance_idx].shift;
+                            for (ExPolygon area : below->lslices()) {
+                                area.translate(shift);
+                                printed.push_back(std::move(area));
+                            }
+                        }
+                        printed = offset_ex(printed, scale_i(config.opt_float("nozzle_diameter", 0) * 0.75));
+                        std::vector<slic3r_api::MutableExtrusionEntity> scopes;
+                        collect_scope_handles(slic3r_api::MutableExtrusionEntity(
+                            reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())), scopes);
+                        if (previous_support.valid() && previous_support_layer == &layer &&
+                            previous_support_catalog == extrusion.printing_catalog_id && previous_support_tool == tool.extruder_id)
+                            scopes.insert(scopes.begin(), previous_support);
+                        if (!scopes.empty()) previous_support = scopes.back();
+                        previous_support_layer = &layer;
+                        previous_support_catalog = extrusion.printing_catalog_id;
+                        previous_support_tool = tool.extruder_id;
+                        const slic3r_api::LayerRegionIsland support_region(
+                            reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
+                        REQUIRE(support_region.valid());
+                        REQUIRE(support_region.region_count() > 0);
+                        REQUIRE(extrusion.printing_catalog_id < print.printing_plan()->object_instances.size());
+                        REQUIRE(print.printing_plan()->object_instances[extrusion.printing_catalog_id].object != nullptr);
+                        const Layer &support_layer = *reinterpret_cast<const Layer *>(support_region.region(0).layer().handle());
+                        const Point support_shift = print.printing_plan()->object_instances[extrusion.printing_catalog_id].object->
+                            instances()[print.printing_plan()->object_instances[extrusion.printing_catalog_id].object_instance_idx].shift;
+                        const auto scope_key = slic3r_api::printing_extrusion_scope_property_key(
+                            reinterpret_cast<orchestrator_handle *>(&host));
+                        for (size_t i = 1; i < scopes.size(); ++i) {
+                            const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope source(scopes[i - 1], scope_key);
+                            const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope target(scopes[i], scope_key);
+                            if (!target.travel().valid()) continue;
+                            std::vector<coord_t> points;
+                            append_points(*reinterpret_cast<const ExtrusionEntity *>(target.travel().handle()), points);
+                            if (points.size() < 6) continue;
+                            Points path;
+                            for (size_t p = 0; p < points.size(); p += 3)
+                                path.emplace_back(points[p], points[p + 1]);
+                            const bool wiped = source.after().valid() && count_wipes(source.after().readonly()) > 0;
+                            const bool touches = !intersection_pl(Polylines{Polyline(path)}, printed).empty();
+                            bool endpoints_inside = false;
+                            for (const ExPolygon &area : printed)
+                                endpoints_inside |= area.contains(path.front()) || area.contains(path.back());
+                            if (touches && !endpoints_inside && wiped) ++result.support_part_wipes;
+                            // Only a retractable jump between distinct support islands witnesses the void rule.
+                            size_t from_island = SIZE_MAX, to_island = SIZE_MAX;
+                            for (size_t s = 0; s < support_layer.lslices().size(); ++s) {
+                                if (support_layer.lslices()[s].contains(path.front() - support_shift)) from_island = s;
+                                if (support_layer.lslices()[s].contains(path.back() - support_shift)) to_island = s;
+                            }
+                            if (!touches && !wiped && from_island != SIZE_MAX && to_island != SIZE_MAX &&
+                                from_island != to_island && Polyline(path).length() > scale_i(print.config().wipe_min.get_at(tool.extruder_id).value))
+                                ++result.support_void_without_wipe;
+                        }
                         result.support_travels += result.travels.size() - before;
                         for (size_t r = before; r < result.travels.size(); ++r) {
                             const std::vector<coord_t> &route = result.travels[r];
@@ -622,7 +805,8 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                             }
                             if (crosses) result.support_crossings.push_back(route);
                         }
-                    }
+                    } else
+                        previous_support = {};
                 }
     REQUIRE(result.travels.size() > 10);
     REQUIRE(result.travels.size() < 10000);
@@ -698,6 +882,33 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     Test::GCode::remove_output_pair(path);
     Test::GCode::remove_output_pair(exported);
     return result;
+}
+
+size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role)
+{
+    size_t count = 0;
+    const slic3r_api::EPropertyAttributes *attributes = entity.get(slic3r_api::EPropertyAttributes::key);
+    if (attributes != nullptr)
+        role = attributes->extrusion_role();
+    if (entity.child_count() == 0 && entity.segment_count() > 0 &&
+        RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_WIPE))
+        ++count;
+    for (uint32_t i = 0; i < entity.child_count(); ++i)
+        count += count_wipes(entity.child(i), role);
+    return count;
+}
+
+void collect_scope_handles(slic3r_api::MutableExtrusionEntity entity,
+                          std::vector<slic3r_api::MutableExtrusionEntity> &scopes)
+{
+    const auto key = slic3r_api::printing_extrusion_scope_property_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    if (entity.get(key) != nullptr) {
+        scopes.push_back(entity);
+        return;
+    }
+    for (uint32_t i = 0; i < entity.child_count(); ++i)
+        collect_scope_handles(entity.child_mutable(i), scopes);
 }
 
 void collect_travels(const ExtrusionEntity &entity, Result &result)

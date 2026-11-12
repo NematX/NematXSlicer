@@ -6,6 +6,7 @@
 
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
@@ -27,8 +28,12 @@ layers at that exact height also qualify, while owners without normal layers do 
 Regional flow spacing and external width are averaged
 over regions with raw slices, with the nozzle average as fallback.
 
-For support targets build_input also copies the object-layer perimeter slices
-strictly below target Z + SCALED_EPSILON. build_external_input independently reads
+For support targets build_input also copies the owner's object-layer perimeter slices
+strictly below target Z + SCALED_EPSILON for routing. With a plan it separately
+copies each object's last lslices below that height, shifted for each catalog
+instance by its XY shift only for crossing tests. Instance rotation is not applied,
+as in SupportObstacleContributor. Without a plan, support has no crossing blockers.
+build_external_input independently reads
 each object's exact-Z layer for holes and the global perimeter-spacing average.
 For support it appends holes from the last object layer strictly below target Z +
 SCALED_EPSILON, even when that layer is at the target Z and repeats the exact-Z
@@ -99,7 +104,7 @@ bool is_first_layer(const Object &object, const Layer &layer)
     return object.layer_count() != 0 && layer.print_z() == object.layer(0).print_z();
 }
 
-Input build_input(storage_handle *storage, const Print &print, LayerIdentity target)
+Input build_input(storage_handle *storage, const Print &print, LayerIdentity target, const PrintingPlan *plan)
 {
     Input input;
     // Keep the target at a stable address shared by its extruder-specific consumers.
@@ -114,6 +119,31 @@ Input build_input(storage_handle *storage, const Print &print, LayerIdentity tar
             for (uint32_t i = 0; i < lower.island_count(); ++i) {
                 const pw::ExPolygons slices = clipper::from_expolygon_collection_view(lower.island(i).perimeter_slices());
                 input.lower_perimeter_slices.insert(input.lower_perimeter_slices.end(), slices.begin(), slices.end());
+            }
+        }
+    }
+    // Crossing areas are independent of the owner's perimeter-based routing boundary.
+    if (input.target->support && plan != nullptr) {
+        for (uint32_t oi = 0; oi < print.object_count(); ++oi) {
+            const Object object = print.object(oi);
+            const std::optional<uint32_t> below = first_layer_below_print_z(object, input.target->print_z + SCALED_EPSILON);
+            if (!below)
+                continue;
+            const pw::ExPolygons slices = clipper::from_expolygon_collection_view(object.layer(*below).slices());
+            for (uint32_t ii = 0; ii < plan->object_instance_count(); ++ii) {
+                const PrintingObjectInstance instance = plan->object_instance(ii);
+                if (!instance.has_object() || instance.object().handle() != object.handle())
+                    continue;
+                const c_point shift = object.instance_shift(instance.object_instance_idx());
+                SupportObjectInput area{ii, slices};
+                for (pw::ExPolygon &polygon : area.slices) {
+                    for (pw::Point &point : polygon.contour.points)
+                        point += pw::Point(shift.x, shift.y);
+                    for (pw::Polygon &hole : polygon.holes)
+                        for (pw::Point &point : hole.points)
+                            point += pw::Point(shift.x, shift.y);
+                }
+                input.support_object_slices.push_back(std::move(area));
             }
         }
     }

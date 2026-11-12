@@ -219,7 +219,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     for (const travel::TravelEndpoint *endpoint : {&pending.target, &pending.source}) {
         if (!endpoint->region_island.valid() || endpoint->region_island.region_count() == 0) continue;
         const AvoidCrossing::LayerInput &layer = *m_layer_inputs.get(
-            m_print, endpoint->region_island.region(0).layer(), m_context).target;
+            m_print, endpoint->region_island.region(0).layer(), m_context, nullptr).target;
         spacing = layer.perimeter_spacing;
         for (const AvoidCrossing::RegionInput &region : layer.regions)
             if (region.avoid_travel_island) {

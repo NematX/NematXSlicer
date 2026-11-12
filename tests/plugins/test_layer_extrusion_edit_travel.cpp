@@ -324,8 +324,15 @@ TEST_CASE("Avoid-crossing travel ranks second in the travel group",
     CHECK(plugin->get_dependencies()[1] == ENTRY_STATE_PLUGIN);
 
     const std::vector<Plugin::UsedConfigKey> keys = plugin->get_used_config_keys();
+    REQUIRE(keys.size() == 14);
     CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
         return key.key == "avoid_crossing_perimeters" && key.type == RAW_CO_BOOL;
+    }));
+    CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
+        return key.key == "complete_objects" && key.type == RAW_CO_BOOL;
+    }));
+    CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
+        return key.key == "parallel_objects_step" && key.type == RAW_CO_FLOAT;
     }));
 }
 

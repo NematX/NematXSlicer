@@ -140,7 +140,7 @@ TEST_CASE("Plugin routes directly on a caller-built dumbbell boundary", "[plugin
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-    const port::Input input = port::build_input(handle, view, {0, 0, false});
+    const port::Input input = port::build_input(handle, view, {0, 0, false}, nullptr);
     slic3r_api::PluginCommon::polygon_work::ExPolygons domain = input.target->perimeter_slices;
     REQUIRE(domain.size() == 1);
     port::Boundary boundary;
@@ -243,7 +243,7 @@ TEST_CASE("Plugin travel router preserves epsilon merging and absolute detour th
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
     const port::LayerIdentity identity{0, 0, false};
-    const port::Input input = port::build_input(handle, view, identity);
+    const port::Input input = port::build_input(handle, view, identity, nullptr);
     port::TravelRouter actual;
     actual.init_layer(handle, input, [&view, identity]() { return port::build_external_input(view, identity); });
     AvoidCrossingPerimeters expected;
@@ -336,7 +336,7 @@ TEST_CASE("Plugin travel router projects an unmatched endpoint onto the core bou
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
     const port::LayerIdentity identity{0, 0, false};
-    const port::Input input = port::build_input(handle, view, identity);
+    const port::Input input = port::build_input(handle, view, identity, nullptr);
     port::TravelRouter actual;
     actual.init_layer(handle, input, [&view, identity]() { return port::build_external_input(view, identity); });
     AvoidCrossingPerimeters expected;
@@ -377,7 +377,7 @@ TEST_CASE("Plugin travel router compares fallback shortcuts across top surfaces"
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
     const port::LayerIdentity identity{0, layer_index, false};
-    const port::Input input = port::build_input(handle, view, identity);
+    const port::Input input = port::build_input(handle, view, identity, nullptr);
     port::TravelRouter actual;
     actual.init_layer(handle, input, [&view, identity]() { return port::build_external_input(view, identity); });
     AvoidCrossingPerimeters expected;
@@ -495,7 +495,7 @@ static size_t compare_layer(const Print &print, const Layer &layer, port::LayerI
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const slic3r_api::Print view(reinterpret_cast<const print_handle *>(&print));
-    const port::Input input = port::build_input(handle, view, identity);
+    const port::Input input = port::build_input(handle, view, identity, nullptr);
     port::TravelRouter actual;
     actual.init_layer(handle, input, [&view, identity]() { return port::build_external_input(view, identity); });
     AvoidCrossingPerimeters expected;

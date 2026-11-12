@@ -79,9 +79,11 @@ This is only a gate for adding a wipe; it never routes the gap around objects.
 
 PerimeterCrossing prepares two versions of the target's filled areas. For an
 object it clips to the selected tool's areas, insets one version by 1.5 nozzle
-radii, and removes top surfaces from both. For support it expands the support
-layer's own slices by 1.5 radii, without tool clipping or top removal; it does
-not collect object layers already printed at that height. Both versions are
+radii, and removes top surfaces from both. For support it uses each object's last
+slices below target Z plus epsilon, expanded by 1.5 radii without tool clipping
+or top removal. All catalog instances count unless complete_objects or positive
+parallel_objects_step selects a per-object plan; then only the target counts.
+An empty collection crosses nothing. Support without a region is skipped. Both versions are
 simplified with the nozzle radius. The wipe gate queries the offset version's
 boundaries, not extrusion centre lines; a false result does not prove that
 the gap lies inside material.
@@ -972,18 +974,21 @@ bool WipeCrossingChecker::crosses(
     const Key cache_key{layer_view.handle(), extruder_id};
     // Keep copied geometry stable while the per-tool crossing cache borrows it.
     const AC::Input &input = m_inputs.get(
-        Print(plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->print), layer_view, m_run_ctx);
+        Print(plugin_ctx_as_layer_extrusion_edition(m_run_ctx)->print), layer_view, m_run_ctx, &m_plan);
     AC::PerimeterCrossing &crossing = m_crossings[cache_key];
 
     const double nozzle_diameter = m_print_config.vector_float_or_default(
         "nozzle_diameter", extruder_id, 0.4);
     const coord_t nozzle_radius = std::max<coord_t>(
         1, scale_i(nozzle_diameter * 0.5));
-    crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
-        nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); });
-
     // Crossing areas use target-local XY; global auxiliary paths have a zero shift.
     const c_point shift = m_plan.object_instance_shift(target_scope.printing_extrusion);
+    crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
+        nozzle_radius, [this]() { throw_if_cancelled(m_run_ctx); }, input.support_object_slices,
+        target_scope.printing_extrusion.printing_catalog_id(), {shift.x, shift.y},
+        // Keep this predicate aligned with DefaultPlanBuilder::use_object_plan.
+        m_print_config.bool_or_default("complete_objects", false) ||
+        m_print_config.float_or_default("parallel_objects_step", 0.) > 0.);
     PluginCommon::work::Polyline polyline;
     const c_point first = travel.front().entity.segment(0).point_a;
     polyline.points.push_back({first.x - shift.x, first.y - shift.y});
@@ -1408,6 +1413,8 @@ int32_t CreateCrossingWipe::priority_impl() const noexcept
 int32_t CreateCrossingWipe::used_config_keys(raw_used_config_key *keys) const noexcept
 {
     static const raw_used_config_key used_keys[] = {
+        {"complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe_only_crossing", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"wipe_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},

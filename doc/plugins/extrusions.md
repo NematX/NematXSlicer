@@ -693,16 +693,24 @@ perimeters or infill to a tool other than the current one, object interiors are
 clipped to the current tool so its material does not ooze over another tool's
 area. Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
 then removes top surfaces from both. The provider tests the inset version.
-Support uses its own
-slices expanded by 1.5 radii, without tool clipping or top removal; this does not
-test the object layers already printed at that height. A path that does not
+Support uses slices from each object's last layer strictly below target Z plus `SCALED_EPSILON`,
+expanded by 1.5 radii without tool clipping or top removal. Every catalog instance
+counts, except in per-object plans (`complete_objects` or positive
+`parallel_objects_step`), which retain only the target instance. No object below
+means no crossing. Support itself is not a blocker. A path that does not
 cross those boundaries remains straight.
 
 Within one object instance, the router uses internal rings around inset object
 interiors. Between objects or instances, it uses external rings: holes placed
 at instance positions, rather than outer obstacle outlines. The support boundary
 uses object slices at or below the target height; its purpose is undocumented,
-and it does not route support travels around objects. The router places endpoints near usable rings, follows
+and it does not route support travels around objects. Detection can see another
+instance while the support routing boundary still belongs to the owner; such a
+crossing may remain straight when no detour is available. Object areas are translated
+by each instance's XY shift only; instance rotation is not applied, matching
+`SupportObstacleContributor`. Per-object detection
+does not include previously finished instances. Support without regions stays
+straight and does not request a crossing wipe. The router places endpoints near usable rings, follows
 ring arcs and tries shortcuts. It may keep a direct path and does not guarantee
 a shortest path or the removal of every crossing.
 
@@ -896,7 +904,9 @@ Complete source loops no longer than the configured wipe use whole turns rounded
 up to the required length; longer loops and open paths go halfway out and return
 over the same path. `wipe_return` and inside-end settings do not apply. Wipe and
 retraction settings belong to the source tool; crossing preparation and nozzle
-diameter belong to the target tool. Support uses the same crossing test.
+diameter belong to the target tool. Support uses the printed-object crossing rule
+described above, so a support-to-support gap crossing the part can wipe while a
+gap between support islands over void does not wipe for crossing alone.
 
 Before editing, each target layer worker publishes its first travel's exact start
 and crossing result as plain values. Source workers can thus handle inter-layer

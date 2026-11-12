@@ -24,7 +24,7 @@ No contributor replaces existing output.
 The attractor_domain helper unions the same withdrawn object-local slices for geometry consumers.
 Pass the AvoidCrossing::Input returned by LayerInputCache::get; it also holds
 the lower object slices needed for support:
-    const AvoidCrossing::Input &input = cache.get(print, layer, &context);
+    const AvoidCrossing::Input &input = cache.get(print, layer, &context, nullptr);
     auto domain = attractor_domain(storage, input);
 SupportObstacleContributor copies object slices at or below the group's Z for
 only the instances in the plan catalog. Each connected component is a separate

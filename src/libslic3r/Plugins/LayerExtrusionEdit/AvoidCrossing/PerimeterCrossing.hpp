@@ -3,15 +3,17 @@
 // coordinates. For objects, when any region assigns a perimeter or infill role to
 // another tool, preparation clips the slices to the selected tool's area.
 // Objects use an inset of 1.5 nozzle radii in the offset version and, by default,
-// no tops in either version. Support uses its own slices and
-// an expansion of 1.5 radii, with neither tool clipping nor top removal; already
-// printed object layers are not included. Both versions are simplified by radius.
+// no tops in either version. Support uses the last object areas below its Z plus epsilon,
+// expanded by 1.5 radii, with neither tool clipping nor top removal. All catalog
+// instances count, or only the target in a per-object plan. Empty areas cross nothing.
+// Both versions are simplified by radius.
 // A false result is not proof of containment: paths wholly outside or in a hole
 // can miss all boundaries. This class does not route or insert travels.
 // Keep the immutable LayerInput alive until preparing another input. The cache key
-// is its address, the tool and radius; edits at that address do not refresh it.
+// is its address, the tool and radius, plus support target id, shift and plan mode;
+// edits at that address do not refresh it. Keep support areas unchanged too.
 // Each worker owns an instance because queries populate cached hole boxes.
-// Example (storage, input and path already supplied by the caller):
+// Example for an object target (storage, input and path already supplied by the caller):
 //   PerimeterCrossing crossing;
 //   crossing.prepare(storage, *input.target, 0, radius);
 //   bool crosses = crossing.can_cross_perimeter(path, true);
@@ -37,6 +39,9 @@ class PerimeterCrossing
         size_t extruder = 0;
         coord_t radius = 0;
         bool exclude_top_surfaces = true;
+        uint32_t target_instance = 0;
+        PluginCommon::work::Point target_shift;
+        bool per_object = false;
         std::vector<SliceIsland> slices;
         std::vector<SliceIsland> offset_slices;
         // Object tops removed from both versions; empty when tops are kept.
@@ -46,11 +51,15 @@ class PerimeterCrossing
 public:
     // Cache simplified interiors for this layer, zero-based tool and scaled nozzle radius.
     // Travel routing removes object tops, which crossing could mark; a retraction filter
-    // keeps them to test only real perimeter contours. Support considers the target
-    // layer's own geometry. cancel may throw; it runs once per object region before top
-    // subtraction during preparation and per queried hole.
+    // keeps them to test only real perimeter contours.
+    // Support areas are shifted object slices and are moved into target-local coordinates.
+    // cancel may throw: object preparation calls it per region before top subtraction;
+    // support preparation does not call it, and queries call it per examined hole.
     void prepare(storage_handle *storage, const LayerInput &layer, size_t extruder,
-                 coord_t radius, std::function<void()> cancel = {}, bool exclude_top_surfaces = true);
+                 coord_t radius, std::function<void()> cancel = {},
+                 const std::vector<SupportObjectInput> &support_areas = {},
+                 uint32_t target_instance = 0, PluginCommon::work::Point target_shift = {},
+                 bool per_object = false, bool exclude_top_surfaces = true);
     // Return whether an object-local path crosses an outer contour or hole of the prepared interiors.
     bool can_cross_perimeter(const PluginCommon::work::Polyline &travel, bool offset);
     // Return whether an object-local path runs over a removed top surface, even wholly inside it without

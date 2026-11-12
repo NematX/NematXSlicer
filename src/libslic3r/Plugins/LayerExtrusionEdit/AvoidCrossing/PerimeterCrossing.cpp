@@ -11,10 +11,13 @@ prepare builds a base version and an offset version of the layer slices. For
 objects, when any region assigns a perimeter or infill role to another tool,
 preparation clips the slices to the selected tool's area so that tool does not
 ooze its material over another tool's area. It then insets the offset version by
-1.5 nozzle radii. Tops are removed from both versions. For support the base is the support
-layer's own slices; the offset version expands them by 1.5 radii, without tool
-clipping or top removal. Already printed object layers are not included in that
-support test. Both versions are simplified using the scaled nozzle radius.
+1.5 nozzle radii. Tops are removed from both versions. For support the base unions
+the supplied last object areas below its Z plus epsilon. The offset version expands
+them by 1.5 radii, without tool clipping or top removal. Per-object plans retain only
+the target catalog instance; other plans retain all instances. Areas are moved from
+the translated object-slice coordinates to target-local coordinates by subtracting
+the target instance shift. Instance shifts apply translation only, not rotation.
+Empty areas cross nothing. Both versions are simplified using the scaled nozzle radius.
 
 Queries first reject distant islands with contour boxes, compare inclusive
 endpoint containment, and test every path segment against the outer contour.
@@ -24,18 +27,20 @@ edges are tested. Large holes use boxes to avoid unnecessary edge scans.
     prepare: reuse or rebuild the two versions for a layer, tool and radius
     |-- object: union slices, clip if any region assigns a role to another tool,
     |           inset, then subtract regional tops
-    `-- support: union own slices and union their expansion
+    `-- support: select object instances, move to local coordinates and union their areas and expansion
         Both branches simplify rings and retain unsimplified contour boxes.
     can_cross_perimeter: choose base or offset version
     |-- reject by contour box, then compare endpoint containment
     |-- first_intersection: test path segments against the outer contour
     `-- build hole boxes lazily, then test path segments against hole edges
 
-The cache key is the LayerInput address, zero-based tool and scaled radius.
+The cache key is the LayerInput address, zero-based tool and scaled radius, plus
+the target catalog id, shift and per-object mode for support only.
 The caller keeps that input alive and unchanged until preparation with another
 input; owned cached rings do not borrow temporary storage. One worker owns each
 instance because queries populate hole boxes. Cancellation may throw: prepare
-calls it per object region before top subtraction, queries once per examined hole.
+calls it per region before top subtraction for object layers, not during support
+preparation; queries call it once per examined hole.
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
 namespace pw = PluginCommon::polygon_work;
@@ -43,22 +48,44 @@ namespace clipper = PluginCommon::clipper;
 
 void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer,
                                 size_t extruder, coord_t radius, std::function<void()> cancel,
+                                const std::vector<SupportObjectInput> &support_areas,
+                                uint32_t target_instance, PluginCommon::work::Point target_shift, bool per_object,
                                 bool exclude_top_surfaces)
 {
     m_cancel = cancel ? std::move(cancel) : []() {};
     if (m_cache.layer == &layer && m_cache.extruder == extruder && m_cache.radius == radius &&
-        m_cache.exclude_top_surfaces == exclude_top_surfaces)
+        m_cache.exclude_top_surfaces == exclude_top_surfaces &&
+        (!layer.support || (m_cache.target_instance == target_instance &&
+         m_cache.target_shift == target_shift && m_cache.per_object == per_object)))
         return;
     m_cache.layer = &layer;
     m_cache.extruder = extruder;
     m_cache.radius = radius;
     m_cache.exclude_top_surfaces = exclude_top_surfaces;
     m_cache.top_surfaces.clear();
-    pw::ExPolygons slices = clipper::union_ex(storage, layer.lslices);
+    m_cache.target_instance = target_instance;
+    m_cache.target_shift = target_shift;
+    m_cache.per_object = per_object;
+    pw::ExPolygons slices;
     pw::ExPolygons offset_slices;
     if (layer.support) {
-        offset_slices = clipper::union_ex(storage, clipper::offset_ex(storage, layer.lslices, radius * 1.5f));
+        pw::ExPolygons retained;
+        for (const SupportObjectInput &area : support_areas) {
+            if (per_object && area.printing_catalog_id != target_instance)
+                continue;
+            for (pw::ExPolygon polygon : area.slices) {
+                for (pw::Point &point : polygon.contour.points)
+                    point -= target_shift;
+                for (pw::Polygon &hole : polygon.holes)
+                    for (pw::Point &point : hole.points)
+                        point -= target_shift;
+                retained.push_back(std::move(polygon));
+            }
+        }
+        slices = clipper::union_ex(storage, retained);
+        offset_slices = clipper::union_ex(storage, clipper::offset_ex(storage, retained, radius * 1.5f));
     } else {
+        slices = clipper::union_ex(storage, layer.lslices);
         bool multiple_extruders = false;
         for (const RegionInput &region : layer.regions) {
             multiple_extruders = multiple_extruders || region.perimeter_extruder != extruder + 1 ||
