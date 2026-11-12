@@ -754,15 +754,16 @@ The exclusive group `layer_extrusion_edit.travel.advanced.planner` selects
 after the group ID. Legacy uses the same routes as
 `travel.avoid_crossing_perimeters`. The host resolves the selector among active
 members; if only Advanced is active, it selects Advanced. The advanced provider uses
-Legacy only when the resolved plugin is null or is not the Advanced member.
+Legacy when the resolved plugin is null or is not the Advanced member, or when
+Advanced is selected but no gap after layer entry is eligible.
 Planner members expose selection; the advanced provider performs the routing itself.
 
 A dated zone has an attractor or forbidden role, polygon geometry in platter XY
 coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
 means an open end for the rest of the layer. Scope can restrict the tool, require
 either endpoint to match an instance in the plan catalog, or require either
-endpoint extrusion to be support. An attractor is a membership area, not a
-promise that the route stays inside it.
+endpoint extrusion to be support. Attractors form a routing domain; endpoint
+attachments and inter-island jumps may leave it.
 
 `TravelZoneView` collects contributor geometry once per worker, rejects reversed
 dates and drops empty areas and intervals. Queries advance through dated events
@@ -773,9 +774,16 @@ layer entry.
 Contributors are independently activated plugins under
 `layer_extrusion_edit.travel.advanced.zones.`:
 
-- `island_attractors` is active by default. It copies original island membership
-  areas before inset, top removal and tool clipping, shifted for each target
-  instance. Each area is active over consecutive runs of target membership.
+- `island_attractors` is active by default. It withdraws each perimeter slice by
+  1.5 perimeter spacings with `elephant_foot_compensation`
+  (`Plugins/ElephantFootCompensation.hpp`), shared with first-layer XY
+  compensation. It withdraws material while keeping thin walls, limiting
+  withdrawal near a minimum width of external perimeter width plus
+  perimeter spacing. Support also includes slices from the last object layer
+  below the support target's Z plus `SCALED_EPSILON`. Withdrawn parts are shifted
+  per instance and dated by consecutive travels whose source
+  or target belongs to the original slice on that layer and instance, including
+  its border, not by membership in the withdrawn parts.
 - `forbidden_tops` is active by default. It copies the boundary's excluded top
   components as separate forbidden zones for the whole layer, scoped per instance.
 - `printed_tops` is opt-in and replaces `forbidden_tops` when active. It uses the
@@ -792,8 +800,8 @@ contributor with `orchestrator_find_plugin`. It checks `forbidden_tops` only whe
 `printed_tops` is inactive: disabling `printed_tops` restores static tops if
 `forbidden_tops` is active, while disabling `forbidden_tops` changes nothing when
 `printed_tops` is active. Otherwise, disabling a contributor removes only its
-zones. Legacy routing delegated inside an attractor still performs its
-own top avoidance.
+zones. With `printed_tops` inactive, disabling `forbidden_tops` removes top
+avoidance from Advanced. Legacy routing and its own top avoidance are unchanged.
 
 The advanced planner uses the regional check described above, but an endpoint
 without an object instance does not veto the other endpoint. When neither has
@@ -803,22 +811,40 @@ The incoming layer-entry travel has no source extrusion and stays straight.
 
 For an eligible gap, individual forbidden zones containing either endpoint in
 their unexpanded filled area are ignored before union and expansion; other zones
-remain obstacles. If both endpoints belong to one active attractor and
-legacy avoidance is enabled, the planner tries the legacy route.
-It accepts that candidate only if no segment enters the remaining original
-forbidden material.
+remain obstacles. The planner expands their union by the target tool's nozzle
+radius and subtracts it from the active attractor union. When the domain is
+non-empty, every eligible XY travel tries it through `build_boundary` and
+`route_on_boundary`. ZonePlanner never delegates its routes to Legacy. Initial
+placement keeps interior endpoints in place; the far-projection fallback may
+move the working points. Nearby endpoints attach to the domain, ring arcs guide
+the route, and `avoid_travel_island` enables
+inter-island bridges scored by bridge length and endpoint approaches weighted
+with `avoid_travel_island_weight`. Spacing and jump settings come from the target
+layer input, or the source layer when the target endpoint has no valid region
+island; spacing otherwise falls back to the target tool's nozzle diameter.
+Straight endpoint attachments and island jumps are allowed outside the domain.
+The worker caches obstacle geometry and domain rings per active zone set, tool,
+ignored zones and perimeter spacing. Z-only moves stay straight without a
+fallback count.
 
-Otherwise, the planner expands the remaining forbidden union by the target
-tool's nozzle radius and follows the shorter outer-contour arc between the first
-entry and last exit of each crossed component. Holes, tangencies and collinear
-contacts are not filled material. It validates the resulting segments against
-the original forbidden areas and applies
-`avoid_crossing_perimeters_max_detour` to extra length, with zero unlimited.
-A missing contour route, exhausted component bound, failed validation or excess
-detour produces a counted straight fallback. This includes an endpoint in an
-obstacle hole, or only in its expanded margin, when a required outer-contour
-entry or exit is missing. The planner does not guarantee a shortest or
-obstacle-free result: a fallback remains straight.
+Every domain path, including a direct segment, is validated against all remaining
+original forbidden material. A placement failure returns the chord; if it crosses
+no original forbidden area, it is accepted and counted as a domain route without
+a fallback. An absent or blocked domain path uses obstacle
+routing: follow the shorter outer-contour arc between the first entry and last
+exit of each crossed expanded component, then validate again against the original
+material. A segment that crosses only a hole, touches a vertex or runs along an
+edge is not blocked. If
+obstacle routing needs no detour and the straight chord passes validation, it is
+accepted without a fallback or domain-route count. When a required outer-contour
+entry or exit is missing, the component bound is exhausted, validation fails or
+the detour limit is exceeded, the result is a
+counted straight fallback. An endpoint in a hole or only in an expanded margin
+can cause a missing entry or exit. `avoid_crossing_perimeters_max_detour` limits
+extra length in millimetres or as a percentage of direct distance; zero is
+unlimited. All routes are heuristic, with no shortest-path guarantee; validation
+checks original forbidden material, not the nozzle margin. A fallback remains
+straight.
 
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
@@ -828,7 +854,10 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- TravelZoneView: collect active contributors and cache dated role unions
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
     |-- CompatibilityPlanner::path: use perimeter routing
-    `-- ZonePlanner::path: validate a same-attractor candidate or route around forbidden areas
+    `-- ZonePlanner::path: filter endpoint zones and cache the domain
+        |-- build_boundary: index the domain rings
+        |-- route_on_boundary: attach endpoints and follow rings
+        `-- validate all segments: accept the domain path or try obstacle routing
 ```
 
 ### Crossing wipes and lift
