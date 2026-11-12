@@ -16,9 +16,20 @@
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
 
+/* PrintObjectSupportMaterial generates native raft and support geometry and paths
+   for a sliced object. Construct it with the object and its slicing parameters,
+   then call generate(); support layers are editable before toolpath generation. contours_simplified()
+   exposes the same raster boundary extraction independently of object generation. */
 namespace Slic3r {
 
 class PrintObject;
+
+// Chain cell rings and filter corners into owned closed polygons without a repeated first vertex.
+// The borrowed row-major grid has grid_size.x() columns and grid_size.y() rows, including a zero border.
+// pixel_size, left_bottom and offset use scaled coordinates; require |2*offset| < pixel_size - 10.
+// fill_holes fills empty cells with filled opposite neighbours (left/right or up/down) in the input grid.
+Polygons contours_simplified(const Vec2i32 &grid_size, double pixel_size, Point left_bottom,
+    const std::vector<unsigned char> &grid, coord_t offset, bool fill_holes);
 
 // This class manages raft and supports for a single PrintObject.
 // Instantiated by Slic3r::Print::Object->_support_material()

@@ -66,6 +66,22 @@
 
 using namespace Slic3r::FFFSupport;
 
+/* Native support generation reads object slices and support settings, projects
+   contact areas towards the bed, separates their vertical spans, then trims and
+   fills the resulting support layers. The object owns the published layers.
+   Raster extraction chains cell edges before converting them to scaled points;
+   only then can polygon endpoint normalization use its scaled tolerance.
+
+   Representative calls through the generation phases:
+       PrintObjectSupportMaterial::generate(): publish support geometry and paths
+           |-- top_contact_layers(): find areas requiring support
+           |-- bottom_contact_layers_and_layer_support_areas(): project towards the bed
+           |   `-- SupportGridPattern::extract_support(): extract projected raster areas
+           |       `-- contours_simplified(): chain, scale and filter raster boundaries
+           |-- generate_base_layers(): trim and populate sparse support spans
+           |-- generate_support_layers(): publish the support layers
+           `-- generate_support_toolpaths(): fill the published support geometry
+*/
 namespace Slic3r {
 
 static bool dont_support_bridges_or_default(const ConfigBase &config)
@@ -123,8 +139,7 @@ static std::vector<unsigned char> rasterize_polygons(const Vec2i32 &grid_size, c
     agg::render_scanlines(rasterizer, scanline, renderer);
     return data;
 }
-// Grid has to have the boundary pixels unset.
-static Polygons contours_simplified(const Vec2i32 &grid_size, const double pixel_size, Point left_bottom, const std::vector<unsigned char> &grid, coord_t offset, bool fill_holes)
+Polygons contours_simplified(const Vec2i32 &grid_size, const double pixel_size, Point left_bottom, const std::vector<unsigned char> &grid, coord_t offset, bool fill_holes)
 {
     assert(std::abs(2 * offset) < pixel_size - 10);
 
@@ -216,7 +231,8 @@ static Polygons contours_simplified(const Vec2i32 &grid_size, const double pixel
             poly.points.push_back(lines[i_line_current].b);
         }
     end_of_poly:
-        out.push_back(std::move(poly));
+        // Cell coordinates must retain every corner until scaling, without Polygon's epsilon normalization.
+        out.push_back(poly);
     }
 
     // 3) Scale the polygons back into world, shrink slightly and remove collinear points.

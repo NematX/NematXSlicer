@@ -5,6 +5,7 @@
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
+#include "libslic3r/Support/SupportMaterial.hpp"
 
 /*
 Grid-family tests inspect geometric output before toolpath generation. A
@@ -14,10 +15,13 @@ These tests exercise the real STEP_SUPPORT dispatcher and API publication.
 Variable-height cantilevers additionally check temporary slab placement and
 the published support tops before a complete G-code export. Separate roof bays
 exercise coplanar contact ordering through geometry, publication and export.
+Direct raster checks compare both production extractors with exact cell areas,
+corner counts and winding. Rotated capped frames exercise the complete pipeline.
 
 Representative direct calls (branches are not a timeline):
 
     TEST_CASE
+        |-- raster_contours() / contours_simplified(): extract scaled corner rings
         |-- make_cube()
         |-- mesh.merge()
         |-- SG::init_print_with_profile()
@@ -28,6 +32,77 @@ Representative direct calls (branches are not a timeline):
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
+
+// Check both production raster extractors against exact cell areas and winding, without clipping their output.
+TEST_CASE("Grid raster contours retain every real corner", "[plugins][support-grid][grid-contours][legacy-compare]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int shape = GENERATE(0, 1, 2, 3, 4, 5, 6);
+    const bool fill_holes = GENERATE(false, true);
+    CAPTURE(shape, fill_holes);
+    const int widths[] = {1, 3, 2, 3, 1, 10, 2};
+    const int heights[] = {1, 3, 1, 1, 2, 10, 2};
+    const int width = widths[shape], height = heights[shape], stride = width + 2;
+    std::vector<unsigned char> pixels(stride * (height + 2), 0);
+    for (int y = 1; y <= height; ++y)
+        for (int x = 1; x <= width; ++x)
+            pixels[y * stride + x] = !((shape == 1 && x == 2 && y == 2) || (shape == 6 && x == 2 && y == 2));
+    const double pixel = 1000000.;
+    PluginStorage storage;
+    const slic3r_api::StoredPolygonCollection plugin = slic3r_api::Support::Grid::raster_contours(
+        reinterpret_cast<storage_handle *>(&storage), stride, height + 2, pixel, {0, 0}, pixels, 0, fill_holes);
+    const Polygons native = contours_simplified(Vec2i32(stride, height + 2), pixel, Point(0, 0), pixels, 0, fill_holes);
+    const bool hole = shape == 1 && !fill_holes;
+    const double expected_area = (width * height - (hole || shape == 6 ? 1 : 0)) * pixel * pixel;
+    for (const Polygons *rings : {&SG::native(plugin), &native}) {
+        REQUIRE(rings->size() == (hole ? 2 : 1));
+        double area = 0.;
+        size_t clockwise = 0;
+        for (const Polygon &ring : *rings) {
+            REQUIRE(ring.size() >= 3);
+            CHECK(ring.size() == (shape == 6 ? 6 : 4));
+            area += ring.area();
+            clockwise += ring.is_clockwise();
+            CHECK(std::abs(ring.area()) == Approx((ring.is_clockwise() ? width * height - (shape == 6 ? 1 : 0) : 1.) * pixel * pixel));
+        }
+        CHECK(clockwise == 1);
+        CHECK(area == Approx(-expected_area));
+    }
+}
+
+// Process a rotated capped frame with wide classic perimeters and require printable support geometry.
+TEST_CASE("Grid support completes on a thin capped frame", "[plugins][support-grid][grid-contours]")
+{
+    const int count = GENERATE(1, 2);
+    CAPTURE(count);
+    DynamicPrintConfig config = SG::config();
+    config.set_deserialize_strict({{"step_perimeter_plugin", "perimeter.generator.classic"},
+        {"perimeters", std::to_string(count)}, {"perimeter_extrusion_width", "0.9"}, {"external_perimeter_extrusion_width", "0.9"},
+        {"thin_walls", "1"}, {"gap_fill_enabled", "1"}, {"thin_perimeters", "80%"},
+        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"}});
+    TriangleMesh mesh = make_cube(12., 0.8, 0.6);
+    TriangleMesh left = make_cube(0.8, 11.2, 0.6);
+    left.translate(Vec3f(0.f, 0.8f, 0.f));
+    mesh.merge(left);
+    TriangleMesh top = make_cube(11.2, 0.8, 0.6);
+    top.translate(Vec3f(0.8f, 11.2f, 0.f));
+    mesh.merge(top);
+    TriangleMesh right = make_cube(0.8, 10.4, 0.6);
+    right.translate(Vec3f(11.2f, 0.8f, 0.f));
+    mesh.merge(right);
+    TriangleMesh cap = make_cube(12., 12., 0.2);
+    cap.translate(Vec3f(0.f, 0.f, 0.6f));
+    mesh.merge(cap);
+    mesh.rotate_z(float(17. * M_PI / 180.));
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, config);
+    print.process();
+    double area = 0.;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        for (const ExPolygon &slice : layer.lslices()) area += slice.area();
+    CHECK(area > 0.);
+}
 
 // Slice four separate cantilevers with borrowed production helpers, inspect their owned slabs, then process and export them.
 // Roof demand below the first layer is dropped, near it is snapped, and higher roofs retain the configured gap relative to

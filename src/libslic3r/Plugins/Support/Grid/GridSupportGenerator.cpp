@@ -64,7 +64,11 @@
     same. The AGG raster works on plain point copies. Contact lists keep their
     print-Z order while base slabs are trimmed, so that invariant is checked
     once before the slab loop; overlap checks remain specific to each slab.
+   raster_contours() chains cell edges into open rings, scales their points and
+   retains corners before publishing closed polygons without a repeated endpoint.
 
+        Grid::extract(): extract areas for contacts and projected columns
+        `-- raster_contours(): chain, scale and filter the raster boundaries
         base_layers()
         |-- validate contact print-Z order
         |-- select and trim each base slab
@@ -153,8 +157,6 @@ bool border_is_clear(const Run &run, const Common::GeneratorLayer &border, const
 bool same_area(const ClipperContext &clipper, const Polys &lhs, const Polys &rhs);
 // Rasterize polygons into a zero-bordered grayscale image using AGG's winding fill.
 std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_point origin, const Polys &polys);
-// Chain raster boundary edges into scaled contours, optionally closing single-pixel holes.
-Polys contours(const Grid &grid, coord_t offset, bool fill_holes);
 } // namespace
 
 // Runs geometric phases with borrowed sliced inputs and print-Z-ordered contacts; out owns slabs, the object receives no layers
@@ -735,23 +737,25 @@ Grid::Grid(const Run &run, const Polys &src, const Polys &trim)
         }
 }
 
-// Convert the zero-bordered raster to closed contours; offset must be less than half a pixel and adjusts only corners so repeated projection does not grow columns.
-Polys contours(const Grid &grid, coord_t offset, bool fill_holes)
+} // namespace
+
+StoredPolygonCollection raster_contours(storage_handle *storage, int size_x, int size_y, double pixel_size,
+    c_point origin, const std::vector<unsigned char> &input_pixels, coord_t offset, bool fill_holes)
 {
-    assert(std::abs(2 * offset) < grid.pixel_size - 10);
+    assert(std::abs(2 * offset) < pixel_size - 10);
     struct Edge { c_point a, b; };
-    std::vector<unsigned char> pixels = grid.pixels;
-    const int stride = grid.size_x;
+    std::vector<unsigned char> pixels = input_pixels;
+    const int stride = size_x;
     if (fill_holes)
-        for (int r = 1; r + 1 < grid.size_y; ++r)
-            for (int c = 1; c + 1 < grid.size_x; ++c) {
+        for (int r = 1; r + 1 < size_y; ++r)
+            for (int c = 1; c + 1 < size_x; ++c) {
                 const int addr = r * stride + c;
-                if ((grid.pixels[addr - 1] && grid.pixels[addr + 1]) || (grid.pixels[addr - stride] && grid.pixels[addr + stride])) pixels[addr] = 1;
+                if ((input_pixels[addr - 1] && input_pixels[addr + 1]) || (input_pixels[addr - stride] && input_pixels[addr + stride])) pixels[addr] = 1;
             }
     std::vector<Edge> lines;
     std::vector<std::pair<c_point, int>> starts;
-    for (int r = 1; r < grid.size_y; ++r)
-        for (int c = 1; c < grid.size_x; ++c) {
+    for (int r = 1; r < size_y; ++r)
+        for (int c = 1; c < size_x; ++c) {
             const int addr = r * stride + c;
             const bool left = pixels[addr - 1] != 0, top = pixels[addr - stride] != 0, current = pixels[addr] != 0;
             if (left != current) {
@@ -794,17 +798,12 @@ Polys contours(const Grid &grid, coord_t offset, bool fill_holes)
             current = next;
             ring.push_back(lines[current].b);
         }
-        // The native generator stores each ring as a moved Polygon while its points are still grid
-        // cells, and that move drops a last point lying within SCALED_EPSILON / 2 of the first one.
-        if (ring.size() > 1 && std::abs(ring.front().x - ring.back().x) < SCALED_EPSILON / 2 &&
-            std::abs(ring.front().y - ring.back().y) < SCALED_EPSILON / 2)
-            ring.pop_back();
         rings.push_back(std::move(ring));
     }
-    Polys out(grid.run.storage);
+    Polys out(storage);
     for (std::vector<c_point> &ring : rings) {
         for (c_point &point : ring)
-            point = c_point{coord_t(point.x * grid.pixel_size), coord_t(point.y * grid.pixel_size)} + grid.bbox.min;
+            point = c_point{coord_t(point.x * pixel_size), coord_t(point.y * pixel_size)} + origin;
         std::vector<c_point> corners;
         for (size_t i = 0; i < ring.size(); ++i) {
             const c_point v = ring[(i + 1) % ring.size()] - ring[i == 0 ? ring.size() - 1 : i - 1];
@@ -815,16 +814,14 @@ Polys contours(const Grid &grid, coord_t offset, bool fill_holes)
                 corners.push_back(point);
             }
         }
-        // A one-pixel island keeps a single corner once its closing point is dropped above. Like any ring
-        // with fewer than three corners it has no area, and Clipper would ignore it in the native generator.
-        if (corners.size() < 3) continue;
-        StoredPolygon polygon(grid.run.storage);
-        polygon.insert_array(0, corners.data(), uint32_t(corners.size()));
+        StoredPolygon polygon(storage);
+        if (!corners.empty()) polygon.insert_array(0, corners.data(), uint32_t(corners.size()));
         out.push_back_move(std::move(polygon));
     }
     return out;
 }
 
+namespace {
 // Closes borrowed snug contours with the configured radius and smooths outward by base spacing, returning storage-owned rings without using a mask; empty input returns empty and geometry/allocation failures propagate.
 Polys snug_contours(const Run &run, const Polys &source)
 {
@@ -839,7 +836,7 @@ Polys Grid::extract(coord_t offset, bool fill_holes) const
 {
     const ClipperContext &clipper = run.clipper;
     if (source.empty()) return Polys(run.storage);
-    const Polys rings = contours(*this, offset, fill_holes);
+    const Polys rings = raster_contours(run.storage, size_x, size_y, pixel_size, bbox.min, pixels, offset, fill_holes);
     const ExPolys islands = Common::native_expolygons(clipper_diff(clipper(rings), clipper(rotated_mask)));
     const ExPolys sample_source = offset > 0 ? Common::native_expolygons(clipper_union(clipper(rotated_source))) :
         Common::native_expolygons(clipper_intersection(clipper(rotated_source), clipper(islands)));

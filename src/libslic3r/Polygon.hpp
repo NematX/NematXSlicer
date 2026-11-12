@@ -23,6 +23,9 @@
 #include "Point.hpp"
 #include "Polyline.hpp"
 
+/* Polygon provides owned closed rings to slicing geometry. Construct a ring from
+   scaled points without a repeated endpoint, then query its area, winding or edges.
+   The move and temporary-point constructors normalize near-coincident endpoints. */
 namespace Slic3r {
 
 class Polygon;
@@ -45,11 +48,13 @@ public:
         if (points.size() > 1 && this->front().coincides_with(this->back()))
             this->points.pop_back();
     }
+    // Drop a last point within SCALED_EPSILON / 2 of the first; input coordinates must be scaled.
     explicit Polygon(Points &&points) : MultiPoint(points) {
         assert(points.size() != 1);
         if (points.size() > 1 && this->front().coincides_with_epsilon(this->back()))
             this->points.pop_back();
     }
+    // Drop a last point within SCALED_EPSILON / 2 of the first; input coordinates must be scaled.
     Polygon(std::initializer_list<Point> points) : MultiPoint(points) {
         assert(this->size() != 1);
         assert(this->empty() || !this->front().coincides_with(this->back()));
@@ -59,6 +64,7 @@ public:
     Polygon(const Polygon &other) : MultiPoint(other.points) {
         assert(this->empty() || !this->front().coincides_with(this->back()));
     }
+    // Drop a last point within SCALED_EPSILON / 2 of the first; input coordinates must be scaled.
     Polygon(Polygon &&other) : MultiPoint(std::move(other.points)) {
         assert(this->size() != 1);
         assert(this->empty() || !this->front().coincides_with(this->back()));
