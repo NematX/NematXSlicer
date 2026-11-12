@@ -1,10 +1,13 @@
 ///|/ Copyright (c) SuperSlicer 2026 Durand Rémi @supermerill
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 
-#ifndef nematx_wipetower_copy_work_buffers_hpp_
-#define nematx_wipetower_copy_work_buffers_hpp_
+#ifndef nematx_wipetower_copy_common_work_buffers_hpp_
+#define nematx_wipetower_copy_common_work_buffers_hpp_
 
-// Private mutable paths retain core Point/MultiPoint rounding and simplification semantics outside the read-only API.
+// Mutable paths for plugin algorithms, including infill, retain core Point/MultiPoint
+// rounding and simplification semantics outside the read-only API. Copy API points
+// into a work::Polyline, then transform its owned points before publishing a result.
+// Example: work::Polyline path; path.points.emplace_back(0, 0);
 #include <algorithm>
 #include <cassert>
 #include <cmath>

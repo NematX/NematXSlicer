@@ -4,7 +4,7 @@
 
 add_library(nematx_wipetower SHARED
     src/WipeTowerManager.cpp src/WipeTowerLayout.cpp src/TowerFootprints.cpp src/FilamentSections.cpp
-    src/rectilinear/RectilinearFills.cpp src/rectilinear/RectilinearEdgeGrid.cpp)
+    src/rectilinear/RectilinearFills.cpp src/rectilinear/PluginEdgeGrid.cpp)
 target_include_directories(nematx_wipetower PRIVATE src src/rectilinear)
 target_compile_definitions(nematx_wipetower PRIVATE SLIC3R_PLUGIN_EXPORTS)
 if(WIN32)
