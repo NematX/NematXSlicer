@@ -171,6 +171,7 @@ test_support_tree_family.cpp
     test_polyholes.cpp
     test_output_filename.cpp
     test_printing_plan.cpp
+    test_print_plan_islands.cpp
     test_print_status_queue.cpp
     test_retraction_wipe_e2e.cpp
     test_skirt_brim_default_generator.cpp
