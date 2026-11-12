@@ -1675,10 +1675,11 @@ TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins
     // The path types of the configuration definitions were appended after the former last value, in the C and C++ enums.
     REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_CONFIG_DEF));
     CHECK(host[SLIC3R_PLUGIN_API_CONFIG_DEF].version.major == 1);
-    CHECK(host[SLIC3R_PLUGIN_API_CONFIG_DEF].version.minor == 6);
+    CHECK(host[SLIC3R_PLUGIN_API_CONFIG_DEF].version.minor == 7);
     CHECK(manifest_is_compatible("slic3r_config_def.h=1.5\n"));
     CHECK(manifest_is_compatible("slic3r_config_def.h=1.6\n"));
-    CHECK_FALSE(manifest_is_compatible("slic3r_config_def.h=1.7\n"));
+    CHECK(manifest_is_compatible("slic3r_config_def.h=1.7\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_config_def.h=1.8\n"));
     CHECK(int(RAW_GUI_TYPE_SELECT_CLOSE) == 7);
     CHECK(int(RAW_GUI_TYPE_SAVE_PATH) == 8);
     CHECK(int(RAW_GUI_TYPE_OPEN_PATH) == 9);

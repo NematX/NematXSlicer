@@ -253,7 +253,7 @@ TEST_CASE("Plugin steps declare the selector of their exclusive groups",
     CHECK(orchestrator_register_exclusive_group(handle, step, nullptr) == -1);
     CHECK(orchestrator_register_exclusive_group(nullptr, step, &definition) == -1);
     raw_exclusive_group_def invalid = definition;
-    invalid.struct_size = sizeof(definition) - 1;
+    invalid.struct_size = offsetof(raw_exclusive_group_def, value_when_absent) + sizeof(definition.value_when_absent) - 1;
     CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
     CHECK(orchestrator_register_exclusive_group(handle, STEP_NONE, &definition) == -1);
     CHECK(orchestrator_register_exclusive_group(handle, STEP_ANY, &definition) == -1);
@@ -296,6 +296,8 @@ TEST_CASE("Plugin steps declare the selector of their exclusive groups",
     invalid.value_when_absent = nullptr;
     CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
     definition.label = "Complete descriptor";
+    definition.has_mode = 1;
+    definition.mode = RAW_CONFIG_OPTION_MODE_SUSI;
     definition.tooltip = "Complete tooltip";
     definition.option_key = "slic3r_test_complete_descriptor";
     definition.has_invalidates_step = 1;
@@ -318,7 +320,11 @@ TEST_CASE("Plugin steps declare the selector of their exclusive groups",
     invalid.declaring_plugin_id = b.id();
     CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -2);
     invalid.option_key = "slic3r_test_descriptor_unclaimed";
+    invalid.struct_size = offsetof(raw_exclusive_group_def, has_mode);
     CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) >= 0);
+    host.elect_exclusive_group_definition(step, "descriptor.b");
+    const Steps::StepExclusiveGroup legacy = Steps::plugin_exclusive_group_definition(host, step, "descriptor.b", *host.get_plugin(b.id()));
+    CHECK(legacy.option_def.mode == (RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI));
     struct FutureDescriptor { raw_exclusive_group_def definition; uint64_t unknown; } future {definition, 42};
     future.definition.struct_size = sizeof(future);
     CHECK(orchestrator_register_exclusive_group(handle, step, &future.definition) == 0);
@@ -342,6 +348,42 @@ TEST_CASE("Plugin steps declare the selector of their exclusive groups",
     Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "descriptor.a", *host.get_plugin(a.id()));
     CHECK(local.option_key_storage == "slic3r_test_complete_descriptor");
     CHECK(local.option_def.invalidates_step == STEP_NONE);
+    CHECK(local.option_def.mode == RAW_CONFIG_OPTION_MODE_SUSI);
+    invalid = definition;
+    invalid.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP;
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -2);
+}
+
+// Build selectors from copied C descriptions with and without visibility flags; no application setting is inserted.
+TEST_CASE("Exclusive group selector visibility is optional", "[plugins][step-selector][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.selector_mode", STEP_INFILL);
+    static SingletonSelectorProbe simple(handle, step, "slic3r.test.selector_mode.simple", "mode.simple");
+    static SingletonSelectorProbe fallback(handle, step, "slic3r.test.selector_mode.default", "mode.default");
+    Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+    for (SingletonSelectorProbe *probe : {&simple, &fallback}) {
+        if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+        REQUIRE(host.set_plugin_active(probe->id(), false));
+    }
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = "mode.simple";
+    definition.declaring_plugin_id = simple.id();
+    definition.has_mode = 1;
+    definition.mode = RAW_CONFIG_OPTION_MODE_SUSI;
+    REQUIRE(orchestrator_register_exclusive_group(handle, step, &definition) >= 0);
+    host.elect_exclusive_group_definition(step, "mode.simple");
+    CHECK(Steps::plugin_exclusive_group_definition(host, step, "mode.simple", *host.get_plugin(simple.id())).option_def.mode ==
+          RAW_CONFIG_OPTION_MODE_SUSI);
+    definition.exclusive_group = "mode.default";
+    definition.declaring_plugin_id = fallback.id();
+    definition.has_mode = 0;
+    REQUIRE(orchestrator_register_exclusive_group(handle, step, &definition) >= 0);
+    host.elect_exclusive_group_definition(step, "mode.default");
+    CHECK(Steps::plugin_exclusive_group_definition(host, step, "mode.default", *host.get_plugin(fallback.id())).option_def.mode ==
+          (RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI));
 }
 
 // Read default group text and application-supplied descriptions through the same accessor and test-owned builders.
@@ -408,6 +450,7 @@ TEST_CASE("Exclusive group priority chooses the active selector default independ
     std::vector<Plugin *> candidates {host.get_plugin(high.id()), preferred};
     CHECK(Steps::default_provider_from_group(candidates) == preferred);
     Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "priority", *preferred);
+    CHECK(local.option_def.mode == (RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI));
     local.set_enum_plugins(host, {{high.id(), "High"}, {low.id(), "Low"}}, low.id());
     CHECK((local.enum_values == std::vector<std::string>{low.id(), high.id()}));
     local.refresh_storage_pointers();
