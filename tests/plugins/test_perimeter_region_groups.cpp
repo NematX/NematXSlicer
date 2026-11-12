@@ -18,7 +18,8 @@ publishes one LayerRegionIsland per group, and each group uses the extruder and
 perimeter count of its own regions. Regions that agree stay one group, whose
 output equals the output of the same island with a single region.
 
-The island is a 20 x 20 mm square; one modifier region covers its right half.
+The island is a 20 x 20 mm square; one modifier region covers its right half,
+or a central band that cuts the default region into two pieces of one group.
 
     TEST_CASE
     |-- run_perimeter_region_islands_case(): one capture per published region island
@@ -167,6 +168,31 @@ TEST_CASE("Perimeter generators give each region group its own settings",
         CHECK(single.front().region_count == 1);
         CHECK(agreeing.front().region_count == 2);
         CHECK(printed_leaves(agreeing) == printed_leaves(single));
+    }
+}
+
+TEST_CASE("A region group cut into several pieces keeps the perimeters of every piece",
+          "[plugins][perimeter][perimeter-region-groups]")
+{
+    // A central band with another extruder cuts the default region in two
+    // pieces. Both pieces belong to one region group and one region island,
+    // which must hold the perimeters of the left and of the right piece.
+    const DynamicPrintConfig config = perimeter_config({{"perimeters", "2"}, {"nozzle_diameter", "0.4,0.4"}});
+    const std::vector<PerimeterRegionOverride> band{
+        {rectangle_expolygon(-3., -10., 3., 10.), {{"perimeter_extruder", "2"}}}};
+    for (const char *generator : {CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR}) {
+        INFO(generator);
+        const std::vector<GroupSummary> groups = group_summaries(run_perimeter_region_islands_case(
+            config, {generator}, rectangle_expolygon(-10., -10., 10., 10.), 1, band));
+        REQUIRE(groups.size() == 2);
+        const GroupSummary &outer = groups[0].extruder_id == 0 ? groups[0] : groups[1];
+        const GroupSummary &inner = groups[0].extruder_id == 0 ? groups[1] : groups[0];
+        CHECK(outer.extruder_id == 0);
+        CHECK(inner.extruder_id == 1);
+        CHECK(outer.min_x < scale_i(-3.));
+        CHECK(outer.max_x > scale_i(3.));
+        CHECK(inner.min_x > scale_i(-3.));
+        CHECK(inner.max_x < scale_i(3.));
     }
 }
 
