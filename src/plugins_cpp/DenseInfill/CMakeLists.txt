@@ -26,6 +26,7 @@ set_target_properties(dense_infill_plugin PROPERTIES
 slic3r_package_plugin(
     dense_infill_plugin
     dense_infill
+    USER_PACKAGE
     VERSION 1.0.2
     CHANGELOG changelog.json
     NAME "Dense infill"

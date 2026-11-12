@@ -19,6 +19,7 @@ add_custom_target(slic3r_rest_resources
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
         "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini"
+    ${_remove_user_plugin_archive_commands}
     COMMENT "Preparing headless REST resources"
     VERBATIM
 )

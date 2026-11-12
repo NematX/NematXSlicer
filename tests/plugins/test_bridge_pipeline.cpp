@@ -1018,7 +1018,7 @@ TEST_CASE("Fresh profiles activate the complete bridge feature with compensation
     contents << input.rdbuf();
     for (const char *id : {"surface.bridge_preparation", "infill.recipe.bridge_preparation", "bridge.finalize_surface_volume", "bridge_detector.default"})
         CHECK(contents.str().find(std::string(id) + " = 1") != std::string::npos);
-    CHECK(contents.str().find("bridge.finalize_volume = 0") != std::string::npos);
+    CHECK(contents.str().find("bridge.finalize_volume = 1") != std::string::npos);
     const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     REQUIRE(config.optptr("bridge_volume_compensation") != nullptr);
     CHECK(config.optptr("bridge_volume_compensation")->serialize() == "bridge.finalize_surface_volume");

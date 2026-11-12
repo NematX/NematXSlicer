@@ -417,7 +417,7 @@ raw_plugin_execution_status run_serpentine(Print &print)
 } // namespace
 
 // Read registered ordering descriptions without mutation and check execution priority separately from the XY algorithm's preference.
-TEST_CASE("XY-serpentine ordering is an inactive alternative provider",
+TEST_CASE("XY-serpentine ordering is enabled without becoming the default provider",
           "[plugins][ordering][xy-serpentine]")
 {
     ensure_plugins_registered();
@@ -436,7 +436,7 @@ TEST_CASE("XY-serpentine ordering is an inactive alternative provider",
     contents << stream.rdbuf();
     CHECK(contents.str().find("ordering.extrusion_tree.advanced = 1") !=
           std::string::npos);
-    CHECK(contents.str().find("ordering.extrusion_tree.xy_serpentine = 1") ==
+    CHECK(contents.str().find("ordering.extrusion_tree.xy_serpentine = 1") !=
           std::string::npos);
 }
 

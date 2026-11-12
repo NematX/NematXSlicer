@@ -26,6 +26,7 @@ set_target_properties(flat_area_layer_height_plugin PROPERTIES
 slic3r_package_plugin(
     flat_area_layer_height_plugin
     flat_area_layer_height
+    USER_PACKAGE
     VERSION 2.7.63.1
     CHANGELOG changelog.json
     NAME "Flat area layer height"

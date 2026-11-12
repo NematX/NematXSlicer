@@ -26,6 +26,7 @@ set_target_properties(extra_perimeter_overhang_wave_plugin PROPERTIES
 slic3r_package_plugin(
     extra_perimeter_overhang_wave_plugin
     extra_perimeter_overhang_wave
+    USER_PACKAGE
     VERSION 1.0.1
     CHANGELOG changelog.json
     NAME "Extra perimeter overhang wave"

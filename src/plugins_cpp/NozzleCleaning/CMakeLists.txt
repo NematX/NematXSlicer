@@ -26,6 +26,7 @@ set_target_properties(nozzle_cleaning_plugin PROPERTIES
 slic3r_package_plugin(
     nozzle_cleaning_plugin
     nozzle_cleaning
+    USER_PACKAGE
     VERSION 2.7.63.0
     CHANGELOG changelog.json
     NAME "Nozzle cleaning"

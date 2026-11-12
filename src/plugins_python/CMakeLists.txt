@@ -184,6 +184,7 @@ if (TARGET Python3::Python)
         python_example_noop_package
         python.example.noop
         examples/example_python_plugin.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG examples/example_python_plugin.changelog.json
         NAME "Python no-op example"
@@ -193,6 +194,7 @@ if (TARGET Python3::Python)
         python_polyholes_package
         python.polyholes
         polyholes/polyholes_low_level.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG polyholes/polyholes_low_level.changelog.json
         NAME "Python polyholes"
@@ -202,6 +204,7 @@ if (TARGET Python3::Python)
         python_polyholes_high_level_package
         python.polyholes.high_level
         polyholes/polyholes_high_level.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG polyholes/polyholes_high_level.changelog.json
         NAME "Python polyholes high-level"
@@ -211,6 +214,7 @@ if (TARGET Python3::Python)
         python_simple_perimeter_generator_package
         python.perimeter.generator.simple
         perimeter/simple_perimeter_generator.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG perimeter/simple_perimeter_generator.changelog.json
         NAME "Python simple perimeter generator"
@@ -220,6 +224,7 @@ if (TARGET Python3::Python)
         python_hairy_object_package
         python.perimeter.post_process.hairy_object
         perimeter/hairy_object.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG perimeter/hairy_object.changelog.json
         NAME "HairyObject"
@@ -229,6 +234,7 @@ if (TARGET Python3::Python)
         python_initial_typed_surface_builder_package
         python.surface.initial_typed_surface_builder
         surface/initial_typed_surface_builder.py
+        USER_PACKAGE
         VERSION 1.0.0
         CHANGELOG surface/initial_typed_surface_builder.changelog.json
         NAME "Python initial typed surface builder"

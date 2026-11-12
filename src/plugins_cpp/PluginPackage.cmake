@@ -3,12 +3,14 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
-# Build one external plugin into a self-contained directory, then archive its
-# direct contents in the build tree's resources/plugins directory. Both package
-# and slicer versions are embedded in the filename and version.ini because a
-# plugin may evolve independently from the application that can load it. On
-# Windows the same values are also embedded into the DLL VERSIONINFO, so the
-# repository can recover a package version even when version.ini is missing.
+# Build one plugin into a self-contained directory and archive its direct
+# contents. Bundled packages go into resources/plugins; USER_PACKAGE archives
+# stay in the separate build/plugin-packages/<config> directory and are not
+# listed as installed defaults. Both package and slicer versions are embedded
+# in the filename and version.ini because a plugin may evolve independently
+# from the application that can load it. On Windows the same values are also
+# embedded into the DLL VERSIONINFO, so the repository can recover a package
+# version even when version.ini is missing.
 #
 # A plugin with its own release cycle declares everything in its CMakeLists:
 # slic3r_package_plugin(my_target my_id VERSION 1.2.0
@@ -62,7 +64,7 @@ function(_slic3r_plugin_quoted_string output_variable input_value)
 endfunction()
 
 function(slic3r_package_plugin target package_name)
-    cmake_parse_arguments(PACKAGE "INTERNAL;BUNDLED_EXACT" "VERSION;UPDATE_REST;NAME;FULL_NAME;DESCRIPTION;CHANGELOG" "FILES" ${ARGN})
+    cmake_parse_arguments(PACKAGE "INTERNAL;BUNDLED_EXACT;USER_PACKAGE" "VERSION;UPDATE_REST;NAME;FULL_NAME;DESCRIPTION;CHANGELOG" "FILES" ${ARGN})
     get_target_property(_plugin_source_directory ${target} SOURCE_DIR)
     get_target_property(_plugin_binary_directory ${target} BINARY_DIR)
     set(_description "${_plugin_binary_directory}/${package_name}-$<CONFIG>-description.ini")
@@ -96,7 +98,31 @@ function(slic3r_package_plugin target package_name)
     else()
         set(_package_bundled_exact 0)
     endif()
-    set(_archive "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/${package_name}_${_package_version}_${_slicer_version}.zip")
+    if (PACKAGE_USER_PACKAGE)
+        if (NOT SLIC3R_USER_PLUGIN_ARCHIVE_DIR)
+            message(FATAL_ERROR "SLIC3R_USER_PLUGIN_ARCHIVE_DIR must be set for user plugin packages")
+        endif()
+        set(_package_archive_directory "${SLIC3R_USER_PLUGIN_ARCHIVE_DIR}")
+        set_property(GLOBAL APPEND PROPERTY SLIC3R_USER_PLUGIN_PACKAGE_NAMES "${package_name}")
+        set(_package_output_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_package_archive_directory}")
+        set(_package_cleanup_commands
+            COMMAND "${CMAKE_COMMAND}"
+                "-DPLUGIN_RESOURCE_DIRECTORY=${SLIC3R_BUILD_RESOURCES_DIR}/plugins"
+                "-DPLUGIN_PACKAGE_NAME=${package_name}"
+                -P "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/RemoveUserPluginArchives.cmake")
+    else()
+        set(_package_archive_directory "${SLIC3R_BUILD_RESOURCES_DIR}/plugins")
+        set_property(GLOBAL APPEND PROPERTY SLIC3R_DEFAULT_PLUGIN_PACKAGES
+            "${package_name}|${_package_version}|${_slicer_version}")
+        set(_package_output_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_package_archive_directory}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
+                "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini")
+        set(_package_cleanup_commands)
+    endif()
+    set(_archive "${_package_archive_directory}/${package_name}_${_package_version}_${_slicer_version}.zip")
     set(_package_contents "$<TARGET_FILE_NAME:${target}>" "description.ini" "version.ini" ${PACKAGE_FILES} ${PACKAGE_UNPARSED_ARGUMENTS})
     set(_changelog_commands)
     set(PLUGIN_BINARY_CHANGELOG_SHA256 "none")
@@ -112,10 +138,6 @@ function(slic3r_package_plugin target package_name)
             COMMAND "${Python3_EXECUTABLE}" "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/package_plugin_changelog.py"
                 --source "${_changelog}" --output "$<TARGET_FILE_DIR:${target}>/changelog.json")
     endif()
-    # Keep the generated default profile aligned with the packages built by
-    # this CMake configuration. Package and slicer versions are independent.
-    set_property(GLOBAL APPEND PROPERTY SLIC3R_DEFAULT_PLUGIN_PACKAGES
-        "${package_name}|${_package_version}|${_slicer_version}")
     set(_locale_commands)
     if (EXISTS "${_plugin_source_directory}/locale")
         list(APPEND _locale_commands
@@ -181,7 +203,7 @@ function(slic3r_package_plugin target package_name)
     set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS
         "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/write_plugin_abi_manifest.py")
     add_custom_command(TARGET ${target} POST_BUILD
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SLIC3R_BUILD_RESOURCES_DIR}/plugins"
+        ${_package_output_commands}
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${_description}"
             "$<TARGET_FILE_DIR:${target}>/description.ini"
@@ -189,13 +211,11 @@ function(slic3r_package_plugin target package_name)
             --base "${_version_file}" --binary "$<TARGET_FILE:${target}>"
             ${_abi_extra_args}
             --output "$<TARGET_FILE_DIR:${target}>/version.ini"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
-            "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini"
         ${_locale_commands}
         ${_changelog_commands}
         COMMAND "${CMAKE_COMMAND}" -E tar cf "${_archive}" --format=zip --
             ${_package_contents}
+        ${_package_cleanup_commands}
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:${target}>"
         COMMENT "Packaging plugin ${package_name}"
         VERBATIM
@@ -208,7 +228,7 @@ endfunction()
 # package remains independently installable, removable and visible to the
 # updater without embedding it inside the bridge DLL.
 function(slic3r_package_python_plugin target package_name entry_file)
-    cmake_parse_arguments(PACKAGE "INTERNAL;BUNDLED_EXACT" "VERSION;UPDATE_REST;NAME;FULL_NAME;DESCRIPTION;CHANGELOG" "" ${ARGN})
+    cmake_parse_arguments(PACKAGE "INTERNAL;BUNDLED_EXACT;USER_PACKAGE" "VERSION;UPDATE_REST;NAME;FULL_NAME;DESCRIPTION;CHANGELOG" "" ${ARGN})
     get_filename_component(_entry_file "${entry_file}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
     if (NOT EXISTS "${_entry_file}")
         message(FATAL_ERROR "Python plugin '${package_name}' entry '${_entry_file}' does not exist")
@@ -260,7 +280,33 @@ function(slic3r_package_python_plugin target package_name entry_file)
             COMMAND "${Python3_EXECUTABLE}" "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/package_plugin_changelog.py"
                 --source "${_changelog}" --output "${_package_directory}/changelog.json")
     endif()
-    set(_archive "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/${package_name}_${_package_version}_${_slicer_version}.zip")
+    if (PACKAGE_USER_PACKAGE)
+        if (NOT SLIC3R_USER_PLUGIN_ARCHIVE_DIR)
+            message(FATAL_ERROR "SLIC3R_USER_PLUGIN_ARCHIVE_DIR must be set for user plugin packages")
+        endif()
+        set(_package_archive_directory "${SLIC3R_USER_PLUGIN_ARCHIVE_DIR}")
+        set_property(GLOBAL APPEND PROPERTY SLIC3R_USER_PLUGIN_PACKAGE_NAMES "${package_name}")
+        set(_package_output_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_package_archive_directory}")
+        set(_package_default_activation_commands)
+        set(_package_cleanup_commands
+            COMMAND "${CMAKE_COMMAND}"
+                "-DPLUGIN_RESOURCE_DIRECTORY=${SLIC3R_BUILD_RESOURCES_DIR}/plugins"
+                "-DPLUGIN_PACKAGE_NAME=${package_name}"
+                -P "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/RemoveUserPluginArchives.cmake")
+    else()
+        set(_package_archive_directory "${SLIC3R_BUILD_RESOURCES_DIR}/plugins")
+        set_property(GLOBAL APPEND PROPERTY SLIC3R_DEFAULT_PLUGIN_PACKAGES
+            "${package_name}|${_package_version}|${_slicer_version}")
+        set(_package_output_commands
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_package_archive_directory}")
+        set(_package_default_activation_commands
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
+                "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini")
+        set(_package_cleanup_commands)
+    endif()
+    set(_archive "${_package_archive_directory}/${package_name}_${_package_version}_${_slicer_version}.zip")
     file(GENERATE OUTPUT "${_description}" CONTENT
         "[plugin]\nid = ${package_name}\nname = ${_package_display_name}\nfull_name = ${_package_full_name}\ndescription = ${PACKAGE_DESCRIPTION}\nconfig_update_rest = ${PACKAGE_UPDATE_REST}\nslicer = SuperSlicer\ninternal = ${_package_internal}\nbundled_exact = ${_package_bundled_exact}\n")
     file(GENERATE OUTPUT "${_version_file}" CONTENT
@@ -271,7 +317,7 @@ function(slic3r_package_python_plugin target package_name entry_file)
     add_custom_target(${target} ALL
         COMMAND "${CMAKE_COMMAND}" -E remove_directory "${_package_directory}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${_package_directory}"
-        COMMAND "${CMAKE_COMMAND}" -E make_directory "${SLIC3R_BUILD_RESOURCES_DIR}/plugins"
+        ${_package_output_commands}
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_entry_file}" "${_package_directory}/plugin.py"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_description}" "${_package_directory}/description.ini"
         COMMAND "${Python3_EXECUTABLE}" "${SLIC3R_PYTHON_API_DIR}/generate_python_plugin_abi.py"
@@ -283,13 +329,12 @@ function(slic3r_package_python_plugin target package_name entry_file)
         COMMAND "${Python3_EXECUTABLE}" "${_SLIC3R_PLUGIN_PACKAGE_CMAKE_DIRECTORY}/write_plugin_abi_manifest.py"
             --base "${_version_file}" --abi "${_python_abi_file}"
             --output "${_package_directory}/version.ini"
-        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
-            "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini"
+        ${_package_default_activation_commands}
         ${_changelog_commands}
         COMMAND "${CMAKE_COMMAND}" -E chdir "${_package_directory}"
             "${CMAKE_COMMAND}" -E tar cf "${_archive}" --format=zip --
                 plugin.py description.ini version.ini ${_changelog_contents}
+        ${_package_cleanup_commands}
         COMMENT "Packaging Python plugin ${package_name}"
         DEPENDS
             "${_entry_file}"
@@ -308,6 +353,4 @@ function(slic3r_package_python_plugin target package_name entry_file)
         SLIC3R_PLUGIN_SLICER_VERSION "${_slicer_version}"
         SLIC3R_PLUGIN_PACKAGE_DIRECTORY "${_package_directory}"
     )
-    set_property(GLOBAL APPEND PROPERTY SLIC3R_DEFAULT_PLUGIN_PACKAGES
-        "${package_name}|${_package_version}|${_slicer_version}")
 endfunction()

@@ -158,13 +158,25 @@ target_link_libraries(Slic3r PRIVATE libslic3r libcereal)
 
 set(SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE
     "${CMAKE_CURRENT_BINARY_DIR}/generated-resources/plugins/default_activated.ini")
+set(SLIC3R_USER_PLUGIN_ARCHIVE_DIR "${CMAKE_BINARY_DIR}/plugin-packages/$<CONFIG>")
 
 add_subdirectory(plugins_cpp)
 add_subdirectory(plugins_python)
 
+get_property(_user_plugin_package_names GLOBAL PROPERTY SLIC3R_USER_PLUGIN_PACKAGE_NAMES)
+list(REMOVE_DUPLICATES _user_plugin_package_names)
+set(_remove_user_plugin_archive_commands)
+foreach(_user_plugin_package_name IN LISTS _user_plugin_package_names)
+    list(APPEND _remove_user_plugin_archive_commands
+        COMMAND "${CMAKE_COMMAND}"
+            "-DPLUGIN_RESOURCE_DIRECTORY=${SLIC3R_BUILD_RESOURCES_DIR}/plugins"
+            "-DPLUGIN_PACKAGE_NAME=${_user_plugin_package_name}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/plugins_cpp/RemoveUserPluginArchives.cmake")
+endforeach()
+
 # A new data directory copies this file before the plugin loader runs. Build
-# its [installed] section from the actual external package list while keeping
-# the independently maintained [activated] plugin ids in the template.
+# its [installed] section from packages shipped in resources/plugins while
+# keeping the independently maintained [activated] plugin ids in the template.
 get_property(_default_plugin_packages GLOBAL PROPERTY SLIC3R_DEFAULT_PLUGIN_PACKAGES)
 set(SLIC3R_DEFAULT_INSTALLED_PLUGIN_ENTRIES "")
 foreach(_default_plugin_package IN LISTS _default_plugin_packages)
@@ -342,6 +354,7 @@ add_custom_command(TARGET Slic3r POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}"
         "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini"
+    ${_remove_user_plugin_archive_commands}
     COMMAND "${CMAKE_COMMAND}" -E remove_directory
         "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/descriptions"
     COMMENT "Copying the resources directory into the build tree"
