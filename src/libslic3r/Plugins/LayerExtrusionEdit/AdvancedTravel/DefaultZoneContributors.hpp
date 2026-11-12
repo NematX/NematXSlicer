@@ -21,6 +21,12 @@ island membership, not a route. Support masks include that lower object layer;
 support targets have no forbidden tops. DefaultAttractorContributor appends
 Attractor zones to out; both top contributors append Forbidden zones.
 No contributor replaces existing output.
+The independent attractor_domain helper withdraws object-local perimeter slices
+without removing thin walls. It does not change the contributors' membership masks.
+Pass the AvoidCrossing::Input returned by LayerInputCache::get; it also holds
+the lower object slices needed for support:
+    const AvoidCrossing::Input &input = cache.get(print, layer, &context);
+    auto domain = attractor_domain(storage, input);
 SupportObstacleContributor copies object slices at or below the group's Z for
 only the instances in the plan catalog. Each connected component is a separate
 whole-layer forbidden zone for travels touching support, with no tool or instance
@@ -33,8 +39,13 @@ restriction. It reads slices directly, without the boundary cache.
 #define slic3r_plugins_default_zone_contributors_hpp_
 
 #include "TravelZones.hpp"
+#include "../AvoidCrossing/AvoidCrossingInput.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
+
+// Return owned disjoint object-local components, one per attractor; a null target returns empty. Include lower slices for support.
+// Withdraw 1.5 * LayerInput::perimeter_spacing, limited near LayerInput::external_perimeter_width + perimeter_spacing; thinner walls remain unchanged.
+polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input);
 
 class DefaultAttractorContributor : public ZoneContributor
 {

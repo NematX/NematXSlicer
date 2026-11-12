@@ -11,8 +11,9 @@
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
 /*
-The XY compensation plugin uses this SDK-only helper to withdraw first-layer
-material without erasing narrow walls. The returned polygons belong to the
+First-layer XY compensation and the AdvancedTravel attractor domain use this
+SDK-only helper to withdraw material without erasing narrow walls. Callers supply
+the withdrawal distance and minimum width. The returned polygons belong to the
 caller storage and the input remains borrowed and unchanged. For example:
 
     auto result = elephant_foot_compensation(storage, island, width_mm, scale_d(0.1));
@@ -23,7 +24,7 @@ positive scaled distance. See the implementation for its native-parity rules.
 
 namespace slic3r_api { namespace XYSizeCompensationPlugin { namespace detail {
 
-// Plugin-private SDK implementation of the active native ElephantFoot path.
+// Shared SDK helper implementing the active native ElephantFoot path.
 // compensation_scaled is a positive distance in scaled coordinate units.
 StoredExPolygonCollection elephant_foot_compensation(storage_handle *storage,
                                                      const ExPolygon &input,

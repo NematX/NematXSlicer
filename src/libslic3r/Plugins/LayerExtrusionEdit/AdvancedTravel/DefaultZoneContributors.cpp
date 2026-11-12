@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "../../Common/ClipperHelpers.hpp"
+#include "../../ElephantFootCompensation.hpp"
 #include "../AvoidCrossing/LayerInputCache.hpp"
 #include "../AvoidCrossing/TravelBoundary.hpp"
 
@@ -36,7 +37,12 @@ Cancellation and geometry failures propagate; output may already contain zones.
 Support obstacles instead copy slices directly at or below the group's Z, once
 per plan-catalog instance. Separate components let an endpoint ignore only the
 material it touches; all other components remain forbidden for support travels.
+The independent attractor_domain helper copies perimeter slices into SDK storage,
+withdraws each island with the shared thin-wall helper, then unions owned results.
+Its object-local result is not published by these contributors.
 
+    attractor_domain: withdraw slices and optional support lower slices, then union
+    `-- elephant_foot_compensation: limit withdrawal near the minimum wall width
     DefaultAttractorContributor::contribute / DefaultForbiddenTopsContributor::contribute / PrintedTopsContributor::contribute
     `-- contribute_zones: select target layer/instance pairs and copy areas
         |-- LayerInputCache::get: borrow immutable worker-local layer input
@@ -47,6 +53,10 @@ material it touches; all other components remain forbidden for support travels.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
+// Copy object-local slices through SDK thin-wall withdrawal and union owned results; a null target or empty slices return empty.
+// Nonempty input requires valid storage and strictly positive minimum width; non-compensable islands reach the final union without withdrawal.
+// That union normalizes the result and may drop degenerate contours.
+polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input);
 namespace {
 namespace AC = AvoidCrossing;
 
@@ -141,6 +151,28 @@ polygon_work::ExPolygons shifted_area(polygon_work::ExPolygons area, const c_poi
     return area;
 }
 } // namespace
+
+polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input)
+{
+    if (!input.target)
+        return {};
+    const AvoidCrossing::LayerInput &layer = *input.target;
+    polygon_work::ExPolygons slices = layer.perimeter_slices;
+    if (layer.support)
+        slices.insert(slices.end(), input.lower_perimeter_slices.begin(), input.lower_perimeter_slices.end());
+    if (slices.empty())
+        return {};
+    const StoredExPolygonCollection stored = PluginCommon::clipper::to_stored_expolygons(storage, slices);
+    polygon_work::ExPolygons withdrawn;
+    for (const ExPolygon island : stored.readonly()) {
+        const StoredExPolygonCollection inset = XYSizeCompensationPlugin::detail::elephant_foot_compensation(
+            storage, island, unscaled(layer.external_perimeter_width + layer.perimeter_spacing),
+            coord_t(1.5 * layer.perimeter_spacing));
+        polygon_work::ExPolygons parts = PluginCommon::clipper::from_expolygon_collection_view(inset.readonly());
+        withdrawn.insert(withdrawn.end(), parts.begin(), parts.end());
+    }
+    return PluginCommon::clipper::union_ex(storage, withdrawn);
+}
 
 void DefaultAttractorContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {

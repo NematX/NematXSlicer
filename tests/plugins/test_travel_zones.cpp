@@ -1,6 +1,8 @@
 #include <catch2/catch.hpp>
 
+#include "avoid_crossing_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
+#include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/LayerInputCache.hpp"
@@ -20,6 +22,8 @@ Printed tops are compared with that same core geometry and dated by the last
 arrival in each containing original island; removing all such arrivals omits it.
 The tools are simulated by alternating tool ids on a single-extruder slice;
 the support target is simulated by marking a sliced top layer as support.
+Attractor-domain checks slice a dumbbell, a square and disjoint squares, compare uniform withdrawal,
+and reuse copied slices as a support target's lower object layer.
 
     rectangle: build a counter-clockwise work area
     ZoneTestInput: keep borrowed contributor input and polygon storage alive
@@ -114,6 +118,89 @@ void check_shifted_area(const work::ExPolygons &actual, const Slic3r::ExPolygons
             }
         }
     }
+}
+
+// Slice a square, a dumbbell and two disjoint squares; check thin-wall withdrawal, component splitting, support lower slices and empty input.
+TEST_CASE("Attractor domain keeps a one-perimeter bridge and withdraws wide areas", "[plugins][attractor-domain]")
+{
+    namespace clipper = slic3r_api::PluginCommon::clipper;
+    namespace ac = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
+    const int scene = GENERATE(0, 1, 2);
+    const bool bridge = scene == 1;
+    ZoneTestInput owner;
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"skirts", "0"}, {"brim_width", "0"}});
+    Slic3r::Model model;
+    Slic3r::ModelObject *object = model.add_object();
+    Slic3r::TriangleMesh mesh = bridge ? Slic3r::Test::Plugins::dumbbell(0.4) : Slic3r::make_cube(20., 20., 0.6);
+    if (scene == 2) {
+        Slic3r::TriangleMesh second = Slic3r::make_cube(20., 20., 0.6);
+        second.translate(30., 0., 0.);
+        mesh.merge(second);
+    }
+    object->add_volume(mesh, Slic3r::ModelVolumeType::MODEL_PART, false);
+    object->add_instance(); object->ensure_on_bed();
+    owner.print.apply(model, config); owner.print.set_status_silent(); owner.print.process();
+    const ac::Input input = ac::build_input(owner.context.plugin_storage, owner.print_view, {0, 0, false});
+    const ac::LayerInput &layer = *input.target;
+    REQUIRE(layer.perimeter_slices.size() == (scene == 2 ? 2 : 1));
+    const work::ExPolygons uniform = clipper::offset_ex(owner.context.plugin_storage, layer.perimeter_slices,
+                                                      -1.5 * layer.perimeter_spacing);
+    const work::ExPolygons domain = zones::attractor_domain(owner.context.plugin_storage, input);
+    REQUIRE(domain.size() == (scene == 2 ? 2 : 1));
+    const double mm2 = double(Slic3r::scale_i(1.)) * Slic3r::scale_i(1.);
+    double uniform_area = 0.;
+    for (const work::ExPolygon &part : uniform) uniform_area += part.area();
+    double original_area_mm2 = 0.;
+    for (const work::ExPolygon &part : layer.perimeter_slices) original_area_mm2 += part.area() / mm2;
+    const double uniform_area_mm2 = uniform_area / mm2;
+    double domain_area_mm2 = 0.;
+    for (const work::ExPolygon &part : domain) domain_area_mm2 += part.area() / mm2;
+    CAPTURE(scene, original_area_mm2, uniform_area_mm2, domain_area_mm2);
+    if (bridge) {
+        REQUIRE(uniform.size() == 2);
+        const Slic3r::Point minimum = Slic3r::get_extents(owner.print.object(0).layers().front().lslices()).min;
+        const work::Point middle{minimum.x() + Slic3r::scale_i(12.5), minimum.y() + Slic3r::scale_i(5.)};
+        CHECK(domain.front().contains(middle));
+        CHECK(domain_area_mm2 < original_area_mm2);
+        CHECK(domain.front().contains({middle.x(), middle.y() + Slic3r::scale_i(0.1)}, false));
+        work::Polyline through_bridge;
+        through_bridge.points = {{minimum.x() + Slic3r::scale_i(5.), middle.y()},
+                                 {minimum.x() + Slic3r::scale_i(20.), middle.y()}};
+        CHECK(clipper::diff_pl(owner.context.plugin_storage, {through_bridge}, domain).empty());
+    } else if (scene == 0) {
+        REQUIRE(uniform.size() == 1);
+        // Rounded local withdrawal can differ by 0.02 mm at square corners; allow 1 mm2 overall.
+        CHECK(domain.front().area() / mm2 == Approx(uniform_area / mm2).margin(1.));
+        const work::BoundingBox actual = domain.front().contour.bounding_box();
+        const work::BoundingBox expected = uniform.front().contour.bounding_box();
+        CHECK(actual.min.x() == Approx(expected.min.x()).margin(Slic3r::scale_i(0.02)));
+        CHECK(actual.max.x() == Approx(expected.max.x()).margin(Slic3r::scale_i(0.02)));
+        CHECK(actual.min.y() == Approx(expected.min.y()).margin(Slic3r::scale_i(0.02)));
+        CHECK(actual.max.y() == Approx(expected.max.y()).margin(Slic3r::scale_i(0.02)));
+    } else {
+        CHECK(uniform.size() == 2);
+        CHECK(domain_area_mm2 == Approx(uniform_area_mm2).margin(2.));
+    }
+    ac::LayerInput support_layer = layer;
+    support_layer.support = true;
+    support_layer.perimeter_slices.clear();
+    ac::Input support;
+    support.target = std::make_unique<const ac::LayerInput>(support_layer);
+    CHECK(zones::attractor_domain(owner.context.plugin_storage, support).empty());
+    support.lower_perimeter_slices = layer.perimeter_slices;
+    const work::ExPolygons lower = zones::attractor_domain(owner.context.plugin_storage, support);
+    REQUIRE(lower.size() == domain.size());
+    CHECK(lower.front().area() == domain.front().area());
+    CHECK(clipper::diff_ex(owner.context.plugin_storage, lower, domain).empty());
+    CHECK(clipper::diff_ex(owner.context.plugin_storage, domain, lower).empty());
+    // A normal target ignores lower slices and empty geometry needs no width settings.
+    ac::Input empty;
+    CHECK(zones::attractor_domain(owner.context.plugin_storage, empty).empty());
+    empty.target = std::make_unique<const ac::LayerInput>();
+    empty.lower_perimeter_slices = layer.perimeter_slices;
+    CHECK(zones::attractor_domain(owner.context.plugin_storage, empty).empty());
 }
 
 // Slice two islands and two instances, then compare masks, dates and tops against the core cache.
