@@ -1011,22 +1011,24 @@ void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& obje
         for (const Layer &support_layer : object->auxiliary_layers()) {
             if (support_layer.get_property<LayerSupportProperty>() == nullptr)
                 continue;
-            ExPolygons polys;
+            // The widened support paths form contours and, between crossing or looping paths, clockwise holes:
+            // collect them as polygons and let the union rebuild the holes.
+            Polygons covered;
             for (const LayerSliceIsland &island : support_layer.islands()) {
                 for (const LayerRegionIsland &region_island : island.regions_islands()) {
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                 }
             }
-            polys = union_ex(polys);
+            ExPolygons polys = union_ex(covered);
             for (ExPolygon& poly : polys) {
                 if (brim_offset == 0) {
                     object_islands.push_back(std::move(poly));
@@ -1203,22 +1205,24 @@ void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs&
         for (const Layer &support_layer : object->auxiliary_layers()) {
             if (support_layer.get_property<LayerSupportProperty>() == nullptr)
                 continue;
-            ExPolygons polys;
+            // The widened support paths form contours and, between crossing or looping paths, clockwise holes:
+            // collect them as polygons and let the union rebuild the holes.
+            Polygons covered;
             for (const LayerSliceIsland &island : support_layer.islands()) {
                 for (const LayerRegionIsland &region_island : island.regions_islands()) {
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                 }
             }
-            polys = union_ex(polys);
+            ExPolygons polys = union_ex(covered);
             //put ears over supports unless it's more than 30% fill
             if (object->config().raft_first_layer_density.get_effective_value(1.) > 0.3) {
                 for (ExPolygon& poly : polys) {
@@ -1515,22 +1519,24 @@ void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectP
             if (support_layer.get_property<LayerSupportProperty>() == nullptr)
                 continue;
             spacing = scale_d(object->config().support_material_interface_spacing.value) + support_material_flow(object, float(print.get_min_first_layer_height())).scaled_width() * 1.5;
-            ExPolygons polys;
+            // The widened support paths form contours and, between crossing or looping paths, clockwise holes:
+            // collect them as polygons and let the union rebuild the holes.
+            Polygons covered;
             for (const LayerSliceIsland &island : support_layer.islands()) {
                 for (const LayerRegionIsland &region_island : island.regions_islands()) {
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                     if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                        expolygons_append(polys,
+                        polygons_append(covered,
                                region_island.extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
                                    .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
                     }
                 }
             }
-            polys = closing_ex(union_ex(polys), spacing);
+            ExPolygons polys = closing_ex(union_ex(covered), spacing);
             for (ExPolygon& poly : polys) {
                 if (brim_offset == 0) {
                     object_islands.push_back(std::move(poly));

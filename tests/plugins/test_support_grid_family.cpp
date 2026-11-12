@@ -592,6 +592,32 @@ TEST_CASE("Synchronized support shares close top and bottom contacts without a s
     CHECK(bottom_contact);
 }
 
+// Process the slab with a crossing support pattern and a brim: the widened first-layer support paths enclose holes, which
+// the default, ear and interior brims must take with the union of these paths instead of as separate contours. The interior
+// brim reads the support even on this slab without holes; the outer brim keeps the published brim observable.
+TEST_CASE("Brims take the support paths of the first layer with their holes", "[plugins][support-grid][brim]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *brim = GENERATE("default", "ears", "interior");
+    CAPTURE(brim);
+    DynamicPrintConfig config = SG::config();
+    config.set_deserialize_strict({{"support_material_pattern", "rectilinear-grid"}, {"support_material_spacing", "0.5"},
+        {"brim_width", "3"}, {"brim_width_interior", std::string(brim) == "interior" ? "1" : "0"},
+        {"brim_ears", std::string(brim) == "ears" ? "1" : "0"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE_FALSE(print.object(0).auxiliary_layers().empty());
+    // The brim is published on the object or, when shared by the print, on its auxiliary object.
+    size_t brim_layers = 0;
+    for (const PrintObject *owner : std::initializer_list<const PrintObject *>{&print.object(0), print.auxiliary_object()})
+        if (owner != nullptr)
+            for (const Layer &layer : owner->auxiliary_layers())
+                if (LayerAdhesionProperty::layer_is_brim(layer)) ++brim_layers;
+    CHECK(brim_layers > 0);
+}
+
 // Process a rotated cube at two first-layer heights; check one bed layer, unique Z/thickness pairs and minimum spacing between distinct Z groups.
 TEST_CASE("Grid first-layer and height limits cover the cube-with-hole support case", "[plugins][support-grid]")
 {
