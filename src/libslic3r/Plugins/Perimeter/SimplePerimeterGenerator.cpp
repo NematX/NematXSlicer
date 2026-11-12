@@ -16,17 +16,27 @@
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PerimeterStepViews.hpp"
+#include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 
 /*
 Simple perimeter generation
 ===========================
 
 This plugin provides the fixed-width implementation of STEP_PERIMETER. The
-host invokes it for one LayerIsland and supplies a callback that traverses the
-region group and calls generate_node() for each perimeter node. The plugin
-uses the first region's external- and internal-perimeter flows and requested
-perimeter count as the shared generation parameters for that island. The first
-loop gets the external role and flow, the following loops the internal ones.
+host invokes it for one LayerIsland and supplies a callback that traverses one
+region group and calls generate_node() for each perimeter node.
+
+One perimeter tree uses one external flow, one internal flow, one perimeter
+count and one extruder, and the host publishes each region group in a
+LayerRegionIsland keyed by its extruder. Regions of the island that disagree on
+these settings therefore must not share a group. RegionSettings cuts the
+island slice into the largest areas whose regions agree on the perimeter
+count, the perimeter extruder and every setting the two perimeter flows read.
+Each connected piece of such an area becomes the root of one region group,
+which takes its flows from its first region and its perimeter count from the
+shared values. When all regions agree, the island stays one group rooted at
+its whole slice. The first loop gets the external role and flow, the
+following loops the internal ones.
 
 generate_node() first applies the requested perimeter count to the node. If no
 additional perimeter is needed, it publishes the node area and fill area
@@ -45,27 +55,27 @@ The normal call flow is:
     `-- reserve one progress unit for the island
 
     SimplePerimeterGenerator::run_impl()
-    `-- validate the perimeter context and collect island regions
-        |-- external_perimeter_flow(island)
-        |-- internal_perimeter_flow(island)
-        |-- perimeter_count(island)
-        `-- run_region_group(..., &generate_node)
-            `-- generate_node() for each perimeter node
-                |-- apply the requested perimeter count
-                |-- no more perimeters needed?
-                |   `-- publish the existing inner and fill areas
-                `-- otherwise
-                    |-- make_perimeter_extrusion()
-                    |   |-- offset the node area
-                    |   |-- create contour and hole loops
-                    |   `-- attach perimeter and extrusion attributes
-                    |-- move the extrusion into the node
-                    |-- compute inner perimeter area
-                    `-- compute fill/anchor area
+    `-- validate the perimeter context
+        |-- RegionSettings::segregate(): areas whose regions agree on the settings
+        `-- for each area and each connected piece of it
+            |-- the group's flows and perimeter count
+            `-- run_region_group(group regions, piece, &generate_node)
+                `-- generate_node() for each perimeter node
+                    |-- apply the requested perimeter count
+                    |-- no more perimeters needed?
+                    |   `-- publish the existing inner and fill areas
+                    `-- otherwise
+                        |-- make_perimeter_extrusion()
+                        |   |-- offset the node area
+                        |   |-- create contour and hole loops
+                        |   `-- attach perimeter and extrusion attributes
+                        |-- move the extrusion into the node
+                        |-- compute inner perimeter area
+                        `-- compute fill/anchor area
 
-Only the perimeter geometry conversion is implemented here. Region traversal,
-node ownership, and publication of the resulting area collections remain the
-responsibility of the perimeter step context.
+Only the region grouping and the perimeter geometry conversion are implemented
+here. Region traversal, node ownership, and publication of the resulting area
+collections remain the responsibility of the perimeter step context.
 */
 
 namespace slic3r_api { namespace Perimeter { namespace SimplePerimeterGeneratorPlugin {
@@ -81,8 +91,6 @@ void append_perimeter_loop(StoredExtrusionEntity &dst, const Polygon &polygon, c
 StoredExtrusionEntity make_perimeter_extrusion(storage_handle *storage, const ExPolygon &area,
     const c_flow &flow, raw_extrusion_role role, uint16_t perimeter_idx, double line_offset,
     const plugin_run_context *run_ctx);
-// Return the first region's internal flow, or an empty flow for a regionless island.
-c_flow internal_perimeter_flow(const LayerIsland &island);
 // Publish one shell using external flow at depth zero and internal flow below it.
 // Return zero for an incomplete context; geometry failures reach the plugin runner.
 int32_t generate_node(void *generator_context, perimeter_generation_context *context, perimeter_node *node,
@@ -92,14 +100,28 @@ const char *k_simple_perimeter_generator_id = "perimeter.generator.simple";
 const char *k_no_dependencies[] = { nullptr };
 
 const char *k_perimeters_key = "perimeters";
+const char *k_perimeter_extruder_key = "perimeter_extruder";
+const char *k_external_perimeter_width_key = "external_perimeter_extrusion_width";
+const char *k_perimeter_width_key = "perimeter_extrusion_width";
+const char *k_external_perimeter_spacing_key = "external_perimeter_extrusion_spacing";
+const char *k_external_perimeter_odd_layers_key = "external_perimeter_extrusion_change_odd_layers";
+const char *k_external_perimeter_overlap_key = "external_perimeter_overlap";
+const char *k_perimeter_spacing_key = "perimeter_extrusion_spacing";
+const char *k_perimeter_odd_layers_key = "perimeter_extrusion_change_odd_layers";
+const char *k_perimeter_overlap_key = "perimeter_overlap";
 
 // used_config_keys is the plugin declaration: the host activates these settings
 // while this implementation is selected and invalidates its caches when they
-// change. The simple generator reads the wall count directly; the other
-// generator settings are shared with the core or with the other
-// implementations.
+// change. The simple generator reads the wall count, and splits islands by the
+// extruder and the widths, like the classic generator, which declares the same
+// keys. The spacing, odd-layer and overlap flow settings are only compared:
+// declaring them here alone would give them selector activation rules that the
+// other perimeter generators do not have.
 const raw_used_config_key k_used_config_keys[] = {
-    { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
+    { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_perimeter_extruder_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_external_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
 };
 
 constexpr uint16_t k_perimeter_flags_loop = uint16_t(C_EXTRUSION_PERIMETER_FLAG_LOOP);
@@ -235,24 +257,6 @@ int32_t generate_node(void *generator_context,
     return 1;
 }
 
-c_flow external_perimeter_flow(const LayerIsland &island)
-{
-    return island.region_count() > 0 ? island.region(0).flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER) : c_flow{};
-}
-
-c_flow internal_perimeter_flow(const LayerIsland &island)
-{
-    return island.region_count() > 0 ? island.region(0).flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER) : c_flow{};
-}
-
-uint32_t perimeter_count(const LayerIsland &island)
-{
-    if (island.region_count() == 0)
-        return 0;
-    const int32_t count = island.region(0).print_region().config().get("perimeters").get_int();
-    return count <= 0 ? 0 : uint32_t(count);
-}
-
 } // namespace
 
 SimplePerimeterGenerator &
@@ -316,23 +320,52 @@ void SimplePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) const
     if (island.region_count() == 0)
         return;
 
-    std::vector<const layer_region_handle *> regions;
-    regions.reserve(island.region_count());
-    for (uint32_t region_idx = 0; region_idx < island.region_count(); ++region_idx)
-        regions.push_back(island.region(region_idx).handle());
+    // The flows read the widths, spacings, odd-layer changes and overlaps of
+    // both perimeter roles, and the extruder gives their nozzle. Regions that
+    // agree on all of them share one tree; an accept-all clip keeps the whole
+    // slice when every region agrees.
+    RegionSettings settings(run_ctx->plugin_storage,
+                            island,
+                            {{ k_perimeters_key,
+                               k_perimeter_extruder_key,
+                               k_external_perimeter_width_key,
+                               k_external_perimeter_spacing_key,
+                               k_external_perimeter_odd_layers_key,
+                               k_external_perimeter_overlap_key,
+                               k_perimeter_width_key,
+                               k_perimeter_spacing_key,
+                               k_perimeter_odd_layers_key,
+                               k_perimeter_overlap_key }});
+    settings.segregate(island.slice());
 
-    SimpleGeneratorState state;
-    state.flow = external_perimeter_flow(island);
-    state.internal_flow = internal_perimeter_flow(island);
-    state.perimeter_count = perimeter_count(island);
-    throw_if_cancelled(run_ctx);
-    ctx->run_region_group(ctx,
-                          regions.empty() ? nullptr : regions.data(),
-                          uint32_t(regions.size()),
-                          island.slice().handle(),
-                          &state,
-                          &generate_node);
-    throw_if_cancelled(run_ctx);
+    for (const auto &[values, clip] : settings.get_areas(k_perimeters_key)) {
+        const std::vector<LayerRegion> &regions = settings.get_regions(k_perimeters_key, values);
+        if (regions.empty())
+            continue;
+
+        std::vector<const layer_region_handle *> handles;
+        handles.reserve(regions.size());
+        for (const LayerRegion &region : regions)
+            handles.push_back(region.handle());
+
+        SimpleGeneratorState state;
+        state.flow = regions.front().flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
+        state.internal_flow = regions.front().flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER);
+        const int32_t count = values.get_int(k_perimeters_key);
+        state.perimeter_count = count <= 0 ? 0 : uint32_t(count);
+
+        StoredExPolygonCollection root_areas = clip.intersections(island.slice());
+        for (ExPolygon root_area : root_areas) {
+            throw_if_cancelled(run_ctx);
+            ctx->run_region_group(ctx,
+                                  handles.data(),
+                                  uint32_t(handles.size()),
+                                  root_area.handle(),
+                                  &state,
+                                  &generate_node);
+            throw_if_cancelled(run_ctx);
+        }
+    }
 
     progress().increment();
 }

@@ -31,8 +31,11 @@ collections.
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
+#include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
+#include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -50,11 +53,19 @@ Arachne perimeter generation
 ============================
 
 This plugin provides the Arachne implementation of STEP_PERIMETER. The host
-invokes it for one LayerSliceIsland. The plugin prepares the generation state
-from the island's first region, including external and internal perimeter
-flows, then gives the complete region list to the host callback
-run_region_group(). The callback owns the traversal of the perimeter tree and
-calls generate_node() for each node that needs to be produced.
+invokes it for one LayerSliceIsland and supplies the callback
+run_region_group(), which owns the traversal of one region group's perimeter
+tree and calls generate_node() for each node that needs to be produced.
+
+One perimeter tree uses the flows, perimeter count, extruder, loop direction
+and Arachne wall settings of a single region, and the host publishes each
+region group in a LayerRegionIsland keyed by its extruder. Regions of the
+island that disagree on these settings therefore must not share a group.
+RegionSettings, read through the public LayerIsland view of the island, cuts
+the island slice into the largest areas whose regions agree on them. Each
+connected piece of such an area becomes the root of one region group, whose
+generation state comes from the group's first region. When all regions agree,
+the island stays one group rooted at its whole slice.
 
 generate_node() converts one node area into variable-width Arachne wall paths.
 It applies the configured perimeter count, selects external or internal flow,
@@ -74,18 +85,20 @@ The normal call flow is:
 
     ArachnePerimeterGenerator::run_impl()
     `-- validate and unwrap the perimeter context
-        |-- find the first region and build ArachneGeneratorState
-        |   `-- resolve layer, print, flows, and requested perimeter count
-        `-- run_region_group(..., &generate_node)
-            `-- generate_node() for each perimeter tree node
-                |-- build Arachne::WallToolPaths from the node area
-                |-- make_arachne_extrusions()
-                |   |-- convert variable-width lines to paths
-                |   `-- append generic closed contours or open sequences
-                |       `-- make_path_sequence(): transfer attributed leaves and set parent permissions
-                |-- move generated extrusion into the node
-                |-- compute inner areas and fill areas
-                `-- publish both area collections to the host
+        |-- RegionSettings::segregate(): areas whose regions agree on the settings
+        `-- for each area and each connected piece of it
+            |-- build ArachneGeneratorState from the group's first region
+            |   `-- resolve layer, print, flows, and requested perimeter count
+            `-- run_region_group(group regions, piece, &generate_node)
+                `-- generate_node() for each perimeter tree node
+                    |-- build Arachne::WallToolPaths from the node area
+                    |-- make_arachne_extrusions()
+                    |   |-- convert variable-width lines to paths
+                    |   `-- append generic closed contours or open sequences
+                    |       `-- make_path_sequence(): transfer attributed leaves and set parent permissions
+                    |-- move generated extrusion into the node
+                    |-- compute inner areas and fill areas
+                    `-- publish both area collections to the host
 
 Closed-loop direction follows the configured contour and hole direction,
 including the optional odd-layer reversal. Loop endpoints that are only
@@ -106,18 +119,42 @@ const char *k_arachne_perimeter_generator_id = "perimeter.generator.arachne";
 const char *k_no_dependencies[] = { nullptr };
 
 const char *k_perimeters_key = "perimeters";
+const char *k_perimeter_reverse_key = "perimeter_reverse";
+const char *k_perimeter_extruder_key = "perimeter_extruder";
+const char *k_external_perimeter_width_key = "external_perimeter_extrusion_width";
+const char *k_perimeter_width_key = "perimeter_extrusion_width";
+const char *k_external_perimeter_spacing_key = "external_perimeter_extrusion_spacing";
+const char *k_external_perimeter_odd_layers_key = "external_perimeter_extrusion_change_odd_layers";
+const char *k_external_perimeter_overlap_key = "external_perimeter_overlap";
+const char *k_perimeter_spacing_key = "perimeter_extrusion_spacing";
+const char *k_perimeter_odd_layers_key = "perimeter_extrusion_change_odd_layers";
+const char *k_perimeter_overlap_key = "perimeter_overlap";
+const char *k_perimeter_direction_key = "perimeter_direction";
+const char *k_min_bead_width_key = "min_bead_width";
+const char *k_min_feature_size_key = "min_feature_size";
+const char *k_wall_distribution_count_key = "wall_distribution_count";
+const char *k_wall_transition_angle_key = "wall_transition_angle";
+const char *k_wall_transition_filter_deviation_key = "wall_transition_filter_deviation";
+const char *k_wall_transition_length_key = "wall_transition_length";
 
 // used_config_keys is the plugin declaration: the host activates these settings
 // while this implementation is selected and invalidates its caches when they
-// change. Arachne reads the wall count directly; the other generator settings
-// are shared with the core or with the other perimeter implementations.
+// change. Arachne reads the wall count and the reversal directly, and splits
+// islands by the extruder and the widths, like the classic generator, which
+// declares the same keys. The other flow settings, the loop direction and the
+// Arachne wall settings are compared but not declared: a selector rule of
+// this generator would enable them even where their core activation rules
+// disable them.
 const raw_used_config_key k_used_config_keys[] = {
     { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "perimeter_reverse", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
+    { k_perimeter_reverse_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_perimeter_extruder_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_external_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { k_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
 };
 
 const char *const k_defined_config_keys[] = {
-    "perimeter_reverse"
+    k_perimeter_reverse_key
 };
 
 // Transfer constructive path values into generic owned leaves with explicit parent permissions.
@@ -189,14 +226,9 @@ const Slic3r::Print *to_print(const print_handle *handle)
     return reinterpret_cast<const Slic3r::Print *>(handle);
 }
 
-const Slic3r::LayerSliceIsland *to_layer_island(const layer_island_handle *handle)
+const Slic3r::LayerRegion *to_layer_region(const layer_region_handle *handle)
 {
-    return reinterpret_cast<const Slic3r::LayerSliceIsland *>(handle);
-}
-
-const Slic3r::LayerRegion *first_region(const Slic3r::LayerSliceIsland &island)
-{
-    return island.regions().empty() ? nullptr : *island.regions().begin();
+    return reinterpret_cast<const Slic3r::LayerRegion *>(handle);
 }
 
 Slic3r::Flow perimeter_flow(const Slic3r::LayerRegion &region, const bool external)
@@ -532,39 +564,72 @@ void ArachnePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) cons
 
     throw_if_cancelled(run_ctx);
 
-    const Slic3r::LayerSliceIsland *island = to_layer_island(ctx->island);
+    const LayerIsland island(ctx->island);
     const Slic3r::Layer *layer = to_layer(ctx->layer);
     const Slic3r::Print *print = to_print(ctx->print);
-    if (island == nullptr || layer == nullptr || print == nullptr)
+    if (island.region_count() == 0 || layer == nullptr || print == nullptr)
         return;
 
-    const Slic3r::LayerRegion *region = first_region(*island);
-    if (region == nullptr)
-        return;
+    // The flows read the widths, spacings, odd-layer changes and overlaps of
+    // both perimeter roles, the extruder gives their nozzle, the loops follow
+    // the direction and reversal settings, and WallToolPaths reads the wall
+    // settings. Regions that agree on all of them share one tree; an
+    // accept-all clip keeps the whole slice when every region agrees.
+    RegionSettings settings(run_ctx->plugin_storage,
+                            island,
+                            {{ k_perimeters_key,
+                               k_perimeter_extruder_key,
+                               k_external_perimeter_width_key,
+                               k_external_perimeter_spacing_key,
+                               k_external_perimeter_odd_layers_key,
+                               k_external_perimeter_overlap_key,
+                               k_perimeter_width_key,
+                               k_perimeter_spacing_key,
+                               k_perimeter_odd_layers_key,
+                               k_perimeter_overlap_key,
+                               k_perimeter_direction_key,
+                               k_perimeter_reverse_key,
+                               k_min_bead_width_key,
+                               k_min_feature_size_key,
+                               k_wall_distribution_count_key,
+                               k_wall_transition_angle_key,
+                               k_wall_transition_filter_deviation_key,
+                               k_wall_transition_length_key }});
+    settings.segregate(island.slice());
 
-    std::vector<const layer_region_handle *> region_handles;
-    region_handles.reserve(island->regions().size());
-    for (const Slic3r::LayerRegion *island_region : island->regions())
-        region_handles.push_back(reinterpret_cast<const layer_region_handle *>(island_region));
+    for (const auto &[values, clip] : settings.get_areas(k_perimeters_key)) {
+        const std::vector<LayerRegion> &regions = settings.get_regions(k_perimeters_key, values);
+        if (regions.empty())
+            continue;
 
-    ArachneGeneratorState state;
-    state.layer = layer;
-    state.print = print;
-    state.region = region;
-    state.external_flow = perimeter_flow(*region, true);
-    state.internal_flow = perimeter_flow(*region, false);
-    state.perimeter_count = region->region().config().perimeters.value <= 0 ?
-        size_t(0) :
-        size_t(region->region().config().perimeters.value);
+        std::vector<const layer_region_handle *> handles;
+        handles.reserve(regions.size());
+        for (const LayerRegion &group_region : regions)
+            handles.push_back(group_region.handle());
 
-    throw_if_cancelled(run_ctx);
-    ctx->run_region_group(ctx,
-                          region_handles.empty() ? nullptr : region_handles.data(),
-                          uint32_t(region_handles.size()),
-                          nullptr,
-                          &state,
-                          &generate_node);
-    throw_if_cancelled(run_ctx);
+        const Slic3r::LayerRegion *region = to_layer_region(regions.front().handle());
+        ArachneGeneratorState state;
+        state.layer = layer;
+        state.print = print;
+        state.region = region;
+        state.external_flow = perimeter_flow(*region, true);
+        state.internal_flow = perimeter_flow(*region, false);
+        state.perimeter_count = region->region().config().perimeters.value <= 0 ?
+            size_t(0) :
+            size_t(region->region().config().perimeters.value);
+
+        StoredExPolygonCollection root_areas = clip.intersections(island.slice());
+        for (ExPolygon root_area : root_areas) {
+            throw_if_cancelled(run_ctx);
+            ctx->run_region_group(ctx,
+                                  handles.data(),
+                                  uint32_t(handles.size()),
+                                  root_area.handle(),
+                                  &state,
+                                  &generate_node);
+            throw_if_cancelled(run_ctx);
+        }
+    }
 
     progress().increment();
 }
