@@ -45,7 +45,9 @@ guarantee for nonuniform patterns. With void below, the reach is one solid spaci
 An enabled `bridge_angle`, including zero, is authoritative. An undetectable
 internal angle uses lower sparse's configured layer direction +90 degrees,
 including template, increment and alternating-layer settings; without a usable
-lower density it uses the current normal fill direction +90 degrees.
+lower density it uses the current normal fill direction +90 degrees. An
+undetectable external angle uses the current normal fill direction itself and
+reports a warning.
 
 The recipe retains the native transport convention: width and spacing are scaled
 coordinates, while height is rounded to the layer Z grid. For prepared bridges,

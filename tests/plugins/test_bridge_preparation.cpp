@@ -1230,6 +1230,32 @@ TEST_CASE("Bridge preparation detects its direction and respects explicit zero a
     }
 }
 
+// Without any anchor, no bridge direction can be detected: the external bridge
+// follows the fill direction of its layer instead of stopping the slicing.
+TEST_CASE("An external bridge without a detectable direction follows the fill direction of its layer","[plugins][bridge-preparation]")
+{
+    Fixture fixture({{"bridge_angle","!0"},{"fill_angle","30"},{"fill_angle_template",""},
+        {"fill_angle_increment","0"},{"fill_angle_cross","0"}});
+    // Keep a single lower support, far from the bridge core spanning x = -2..2.
+    PrintObject &object=fixture.prepared.print.object(0);
+    for (Layer &layer : object.layers()) for (LayerSliceIsland &island : layer.islands()) {
+        island.overlaps_above.clear();island.overlaps_below.clear();
+    }
+    const ExPolygons lower{rectangle_expolygon(-8,-1,-6,1)};
+    Layer &first=object.layer(0);
+    ApiInternal::LayerRegionAccess::slices_mutable(first.region(0))=lower;
+    ApiInternal::LayerAccess::set_islands(first,ExPolygons(lower));
+    for (LayerSliceIsland &island : first.islands()) {
+        island.fill_regions(first);ApiInternal::LayerIslandAccess::set_infill_areas(island,ExPolygons{island.get_slice()});
+    }
+    Layer::build_up_down_graph(object.layer(0),object.layer(1));
+    fixture.prepare();
+    const Surface &bridge=fixture.bridge();
+    CHECK(std::abs(std::remainder(bridge.bridge_angle-30.*PI/180.,PI))<1e-5);
+    REQUIRE(bridge.get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr);
+    CHECK_FALSE(bool(bridge.get_property<slic3r_api::BridgeSurfaceInfo>()->angle_from_user));
+}
+
 TEST_CASE("Three connected bridge seeds are consumed once with stable grouping","[plugins][bridge-preparation]")
 {
     uint64_t key=0;
