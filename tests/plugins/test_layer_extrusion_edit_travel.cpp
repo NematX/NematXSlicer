@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "plugin_test_helpers.hpp"
+#include "avoid_crossing_test_helpers.hpp"
 #include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -30,6 +31,7 @@
 #include "libslic3r/Plugins/LayerExtrusionEdit/TravelConnectionHelpers.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/CompatibilityPlanner.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp"
 #include "libslic3r/Plugins/PrintingPlan/PrintingExtrusionScopeProperty.h"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
@@ -58,9 +60,14 @@ member alone enables delegation to the compatibility top detour.
 The dated-top scene crosses a third island between two distinct attractors
 before and after that island's last arrival, in two shifted instances. Every
 segment of the later detour is checked against the third island's core top.
+The narrow-bridge scene checks its sliced and printed connection separately
+from expected routing. A controlled gap has a chord outside the material;
+active attractors and every routed segment are checked in platter coordinates.
 
     controlled scene: slice region masks, attach ordered paths, select active members
         `-- StepLayerExtrusionEdition::run_step: insert travels for point-count checks
+    narrow_bridge_scene: verify printed bridge, prepare eligible gap, query default zones
+        `-- StepLayerExtrusionEdition::run_step: route the controlled gap with advanced travel
 */
 
 namespace {
@@ -78,6 +85,19 @@ constexpr const char *AVOID_CROSSING_TRAVEL_PLUGIN =
 void setup_connector(Print &print,
     slic3r_api::LayerExtrusionEdit::TravelConnection::ScopeTravelConnector &connector,
     slic3r_api::PluginProgress &progress);
+
+struct NarrowBridgeResult
+{
+    ExPolygons slices;
+    ExPolygons bridge;
+    Point source;
+    Point target;
+    slic3r_api::PluginCommon::polygon_work::ExPolygons attractors;
+    Polyline route;
+};
+
+// Slice a one-line bridge, require its printed connection and eligible gap, then copy active zones and the production route.
+NarrowBridgeResult narrow_bridge_scene();
 
 class ScopedActivePlugins
 {
@@ -863,6 +883,153 @@ TEST_CASE("Semantic continuous transitions keep the travel slot empty",
     CHECK_FALSE(slic3r_api::printing_extrusion_scope_has_flag(
         *target_property,
         slic3r_api::PRINTING_EXTRUSION_SCOPE_INCOMING_TRAVEL_MATERIALIZED));
+}
+
+namespace {
+NarrowBridgeResult narrow_bridge_scene()
+{
+    namespace travel = slic3r_api::LayerExtrusionEdit::TravelConnection;
+    namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
+    namespace avoidance = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
+        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "1"},
+        {"external_perimeter_extrusion_width", "0.4"}, {"perimeter_extrusion_width", "0.4"},
+        {"thin_walls", "1"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"fill_density", "0%"}, {"skirts", "0"}, {"brim_width", "0"}});
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({Test::Plugins::dumbbell(0.4)}, print, model, config);
+    print.set_status_silent();
+    print.process();
+    Layer &layer = print.object(0).layers()[1];
+    REQUIRE(layer.lslices().size() == 1);
+    const Point minimum = get_extents(layer.lslices()).min;
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const c_point shift = print_view.object(0).instance_shift(0);
+    const Point origin = minimum + Point(shift.x, shift.y);
+    NarrowBridgeResult result;
+    result.slices = layer.lslices();
+    for (ExPolygon &slice : result.slices) slice.translate(shift.x, shift.y);
+    result.bridge = {ExPolygon(Polygon(Points{
+        origin + Point(scale_i(10.), scale_i(4.8)), origin + Point(scale_i(15.), scale_i(4.8)),
+        origin + Point(scale_i(15.), scale_i(5.2)), origin + Point(scale_i(10.), scale_i(5.2))}))};
+    result.source = origin + Point(scale_i(5.), scale_i(2.));
+    result.target = origin + Point(scale_i(20.), scale_i(2.));
+    REQUIRE(result.slices.front().contains(result.source));
+    REQUIRE(result.slices.front().contains(result.target));
+    REQUIRE(diff_ex(result.bridge, result.slices).empty());
+    REQUIRE_FALSE(diff_pl(Polylines{Polyline(Points{result.source, result.target})}, result.slices).empty());
+
+    // Inspect actual deposited paths before replacing their ordering with a controlled gap.
+    bool printed_bridge = false;
+    std::vector<const ExtrusionEntity *> deposited;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const auto &[role, bucket] : region.extrusion_buckets())
+                collect_geometric_leaves(bucket, deposited);
+    for (const ExtrusionEntity *leaf : deposited) {
+        const ExtrusionAttributes *attributes = leaf->get_property<ExtrusionAttributes>();
+        if (attributes == nullptr || !attributes->extrusion_role().is_perimeter()) continue;
+        Polyline path = leaf->polyline_ref().to_polyline();
+        path.translate(shift.x, shift.y);
+        for (const Polyline &part : intersection_pl(Polylines{path}, result.bridge)) {
+            const BoundingBox bounds = get_extents(part);
+            if (bounds.min.x() <= origin.x() + scale_i(10.1) && bounds.max.x() >= origin.x() + scale_i(14.9))
+                printed_bridge = true;
+        }
+    }
+    REQUIRE(printed_bridge);
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+    const LayerRegionIsland *region = reinterpret_cast<const LayerRegionIsland *>(
+        layer_view.island(0).get_or_create_full_region_island(0).handle());
+    PrintingPlan &plan = print.mutable_printing_plan();
+    const uint32_t catalog = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.clear(); plan.groups.resize(1); plan.groups[0].layers.resize(1);
+    PrintingLayerGroup &current = plan.groups[0].layers[0];
+    current.print_z = layer.scaled_print_z(); current.tool_groups.resize(1);
+    PrintingToolGroup &tool = current.tool_groups[0]; tool.extruder_id = 0;
+    append_extrusion(tool, make_path(result.source - Point(scale_i(0.1), 0), result.source), region, catalog);
+    append_extrusion(tool, make_path(result.target, result.target + Point(scale_i(0.1), 0)), region, catalog);
+    print.pipeline_progress().reset();
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN});
+    travel::ScopeTravelConnector connector(reinterpret_cast<orchestrator_handle *>(&host));
+    slic3r_api::PluginProgress progress;
+    setup_connector(print, connector, progress);
+    slic3r_api::PrintingLayerGroup current_view(reinterpret_cast<printing_layer_group_handle *>(&current));
+    travel::LayerTravelChronology chronology = connector.prepare(current_view, 0, 0);
+    REQUIRE(chronology.travels.size() == 1);
+    PluginStorage storage;
+    plugin_run_context context{};
+    context.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    avoidance::CompatibilityPlanner eligibility(print_view, plan_view, &context);
+    const travel::PendingTravel &pending = chronology.travels.front();
+    REQUIRE(eligibility.avoidance_enabled(pending.source, pending.target));
+    REQUIRE(pending.source.position.x == result.source.x());
+    REQUIRE(pending.source.position.y == result.source.y());
+    REQUIRE(pending.target.position.x == result.target.x());
+    REQUIRE(pending.target.position.y == result.target.y());
+    const zones::ChronologySummary summary = zones::summarize(chronology,
+        [&eligibility](const travel::PendingTravel &gap) { return eligibility.avoidance_enabled(gap.source, gap.target); });
+    avoidance::LayerInputCache cache;
+    const zones::ZoneContributorInput input{print_view, plan_view, context, current.print_z, cache, chronology.travels, summary};
+    zones::DefaultAttractorContributor attractors;
+    zones::DefaultForbiddenTopsContributor tops;
+    zones::TravelZoneView zone_view({std::cref(attractors), std::cref(tops)}, input);
+    result.attractors = zone_view.query(0, pending).attractors;
+
+    print.pipeline_progress().reset();
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
+        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors",
+        "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
+    const slic3r_api::ExtrusionEntity route = ordered_scope(*tool.extrusions[1].root).travel();
+    REQUIRE(route.point_count() >= 2);
+    for (size_t p = 0; p < route.point_count(); ++p) {
+        const c_point point = route.point(p);
+        result.route.points.emplace_back(point.x, point.y);
+    }
+    REQUIRE(result.route.points.front() == result.source);
+    REQUIRE(result.route.points.back() == result.target);
+    return result;
+}
+} // namespace
+
+// Keep scene validity visible independently of expected routing failures.
+TEST_CASE("Advanced narrow bridge scene has connected printed material and an eligible travel", "[plugins][advanced-router]")
+{
+    narrow_bridge_scene();
+}
+
+// A route between the squares must use their printed neck, not the empty chord below it.
+TEST_CASE("Advanced travel follows the connected attractor through a one-perimeter bridge", "[plugins][advanced-router]")
+{
+    const NarrowBridgeResult result = narrow_bridge_scene();
+    size_t connected_attractors = 0;
+    for (const slic3r_api::PluginCommon::polygon_work::ExPolygon &area : result.attractors) {
+        if (area.contains({result.source.x(), result.source.y()}) &&
+            area.contains({result.target.x(), result.target.y()}) &&
+            area.contains({(result.source.x() + result.target.x()) / 2, result.source.y() + scale_i(3.)}))
+            ++connected_attractors;
+    }
+    CAPTURE(result.attractors.size(), connected_attractors, result.route.points.size());
+    CHECK(connected_attractors == 1);
+    bool through_bridge = false;
+    for (size_t p = 1; p < result.route.points.size(); ++p) {
+        const Polyline segment(Points{result.route.points[p - 1], result.route.points[p]});
+        through_bridge |= !intersection_pl(Polylines{segment}, result.bridge).empty();
+        CAPTURE(p, segment.points.front(), segment.points.back());
+        CHECK(diff_pl(Polylines{segment}, result.slices).empty());
+    }
+    CHECK(through_bridge);
 }
 
 // Check layer entry and optional same-island or inter-island gaps with contributor sets and straight or advanced travel.

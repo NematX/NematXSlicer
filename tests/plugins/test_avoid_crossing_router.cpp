@@ -4,6 +4,7 @@
 #include <limits>
 #include <vector>
 #include "plugin_test_helpers.hpp"
+#include "avoid_crossing_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
@@ -58,8 +59,7 @@ namespace work = slic3r_api::PluginCommon::work;
 
 // Build a shallow rectangular frame with a disconnected island.
 static TriangleMesh frame();
-// Join two shallow squares with a narrow neck of the requested width.
-static TriangleMesh dumbbell(double width);
+using Test::Plugins::dumbbell;
 // Slice one independent setting or geometry variation and compare all applicable layers and tools.
 static void check_scene(int scene);
 // Compare deterministic ordered routes on one layer, retaining both router caches across queries.
@@ -371,14 +371,6 @@ static void check_scene(int scene)
               << " outside=" << counts.outside_bbox << " rejected=" << counts.detour_rejected
               << " arrival_epsilon=" << counts.arrival_epsilon << " brute_force=" << counts.brute_force << std::endl;
     REQUIRE(routes > 0);
-}
-
-static TriangleMesh dumbbell(double width)
-{
-    TriangleMesh mesh = make_cube(10., 10., 0.6);
-    TriangleMesh right = make_cube(10., 10., 0.6); right.translate(15., 0., 0.); mesh.merge(right);
-    TriangleMesh neck = make_cube(7., width, 0.6); neck.translate(9., 5. - width / 2., 0.); mesh.merge(neck);
-    return mesh;
 }
 
 static TriangleMesh frame()
