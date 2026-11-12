@@ -627,8 +627,11 @@ Polys contours(const Grid &grid, coord_t offset, bool fill_holes)
                 corners.push_back(point);
             }
         }
+        // A one-pixel island keeps a single corner once its closing point is dropped above. Like any ring
+        // with fewer than three corners it has no area, and Clipper would ignore it in the native generator.
+        if (corners.size() < 3) continue;
         StoredPolygon polygon(grid.run.storage);
-        if (!corners.empty()) polygon.insert_array(0, corners.data(), uint32_t(corners.size()));
+        polygon.insert_array(0, corners.data(), uint32_t(corners.size()));
         out.push_back_move(std::move(polygon));
     }
     return out;

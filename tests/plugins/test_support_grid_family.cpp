@@ -374,6 +374,31 @@ TEST_CASE("Grid family publishes top bottom and base surfaces without extrusions
     CHECK(sparse);
 }
 
+// Slice a roof above a platform with a 0.4 mm square hole: the support column through the hole keeps a single raster pixel,
+// whose contour has only one corner. Such a ring has no area and must be skipped without stopping the generation.
+TEST_CASE("Grid columns through a one-pixel hole skip their degenerate contour", "[plugins][support-grid]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double hole = 0.4;
+    TriangleMesh mesh = SG::slab();
+    // Four platform blocks around the hole, below the overhanging part of the roof.
+    const auto add = [&mesh](double x, double y, double size_x, double size_y) {
+        TriangleMesh block = make_cube(size_x, size_y, 0.8);
+        block.translate(float(x), float(y), 0.f);
+        mesh.merge(block);
+    };
+    add(0., 0., 6., 8.);
+    add(6. + hole, 0., 6. - hole, 8.);
+    add(6., 0., hole, 4.);
+    add(6., 4. + hole, hole, 4. - hole);
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, SG::config("grid"));
+    SG::prefix(print);
+    REQUIRE_NOTHROW(SG::family(print));
+    CHECK_FALSE(print.object(0).auxiliary_layers().empty());
+}
+
 // Slice two roofs whose columns share an island and check separate work regions for different tools or one unknown-tool region when both settings are zero.
 TEST_CASE("Grid family shares work regions only for equal support extruders", "[plugins][support-grid]")
 {
