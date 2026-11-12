@@ -34,14 +34,14 @@ Representative direct calls (branches are not a timeline):
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
 // Print data is unchanged; allocation failures or rejected descriptions throw.
-void register_default_plan_builder_plugin(orchestrator_handle *orch);
+void register_by_layer_plan_builder_plugin(orchestrator_handle *orch);
 
 namespace {
 
 using namespace PlanBuilderCommon;
 
 /*
-DefaultPlanBuilder is the first plugin in the ordering chain.
+ByLayerPlanBuilder is the first plugin in the ordering chain.
 
 It creates the mutable PrintingPlan from the read-only Print through plugin
 views and the shared PlanBuilderCommon construction helpers. The source data tree
@@ -301,20 +301,24 @@ void build_plan_by_object(
     }
 }
 
-class DefaultPlanBuilder : public PluginBase
+class ByLayerPlanBuilder : public PluginBase
 {
 public:
-    static DefaultPlanBuilder &instance(orchestrator_handle *orch)
+    // Borrow the permanent builder associated with the application orchestrator; initialization failures propagate.
+    static ByLayerPlanBuilder &instance(orchestrator_handle *orch)
     {
-        static DefaultPlanBuilder s_instance(orch);
+        static ByLayerPlanBuilder s_instance(orch);
         return s_instance;
     }
 
-    explicit DefaultPlanBuilder(orchestrator_handle *orch) : PluginBase(orch) {}
+    // Bind the borrowed orchestrator without changing print data.
+    explicit ByLayerPlanBuilder(orchestrator_handle *orch) : PluginBase(orch) {}
 
 private:
-    const char *id_impl() const noexcept override { return "ordering.plan_builder.default"; }
-    const char *name_impl() const noexcept override { return "Default printing-plan builder"; }
+    // Return the permanent provider id without changing state or transferring ownership.
+    const char *id_impl() const noexcept override { return "ordering.plan_builder.by_layer"; }
+    // Return the permanent display name without effects or failures.
+    const char *name_impl() const noexcept override { return "By layer"; }
     const char *description_impl() const noexcept override
     {
         return "Creates the initial ordering work plan from the generated layer-region-island extrusions.";
@@ -323,6 +327,8 @@ private:
     slicing_step_t step_impl() const noexcept override { return STEP_ORDERING; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }
+    // Prefer this builder by default without changing its execution order or application state.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
 
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
     {
@@ -359,16 +365,26 @@ private:
 
 } // namespace
 
-void register_default_plan_builder_plugin(orchestrator_handle *orch)
+void register_by_layer_plan_builder_plugin(orchestrator_handle *orch)
 {
-    orchestrator_register_plugin(orch, DefaultPlanBuilder::instance(orch).c_instance());
-    const plugin_instance member = DefaultPlanBuilder::instance(orch).c_instance();
+    orchestrator_register_plugin(orch, ByLayerPlanBuilder::instance(orch).c_instance());
+    const plugin_instance member = ByLayerPlanBuilder::instance(orch).c_instance();
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
     definition.category = RAW_OPTION_CATEGORY_OUTPUT;
-    definition.label = "Printing-plan builder";
-    definition.tooltip = "Selects how STEP_ORDERING creates the initial printing plan.";
-    DefaultPlanBuilder::instance(orch).register_exclusive_group(STEP_ORDERING, definition);
+    definition.option_key = "print_plan_builder";
+    definition.label = "Print sequence";
+    definition.tooltip = "Chooses whether the print is built layer by layer or object by object.";
+    definition.show_with_one_provider = 1;
+    // Keep complete_objects and the parallel-object controls governed by their existing GUI rules.
+    definition.provider_settings_rules = 0;
+    definition.has_mode = 1;
+    definition.mode = RAW_CONFIG_OPTION_MODE_SIM_ADV_EXP | RAW_CONFIG_OPTION_MODE_PRUSA;
+    definition.has_invalidates_step = 1;
+    definition.invalidates_step = STEP_SKIRT_BRIM;
+    definition.ui_page = "Output options";
+    definition.ui_group = "Sequential printing";
+    ByLayerPlanBuilder::instance(orch).register_exclusive_group(STEP_ORDERING, definition);
 }
 
 }}} // namespace slic3r_api::Ordering::DefaultOrderingPlugin

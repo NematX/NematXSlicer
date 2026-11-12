@@ -322,7 +322,7 @@ void run_step(Orchestrator &orchestrator, Print &print)
     std::vector<PrintObject *> objects;
     for (size_t idx = 0; idx < print.objects().size(); ++idx)
         objects.push_back(&print.object(idx));
-    // Printed object by object: the same criterion as DefaultPlanBuilder::use_object_plan (Plugins/Ordering/DefaultPlanBuilder.cpp, local to that file)
+    // Printed object by object: the same criterion as ByLayerPlanBuilder::use_object_plan (Plugins/Ordering/ByLayerPlanBuilder.cpp, local to that file)
     // and Print.cpp:1565. Both options invalidate STEP_SUPPORT (complete_objects through STEP_SKIRT_BRIM, which replays from the same checkpoint),
     // so the scope of the pass is always rebuilt when one of them changes.
     // The Z step is read like the support plugins do (SupportParams: the z_step option of the print config, in mm).

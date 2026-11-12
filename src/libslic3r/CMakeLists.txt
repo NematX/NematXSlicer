@@ -467,7 +467,7 @@ set(SLIC3R_SOURCES
 	Plugins/Ordering/KDTreeOrderingEngine.hpp
 	Plugins/Ordering/NearestNeighborOrderingEngine.cpp
 	Plugins/Ordering/NearestNeighborOrderingEngine.hpp
-	Plugins/Ordering/DefaultPlanBuilder.cpp
+	Plugins/Ordering/ByLayerPlanBuilder.cpp
 	Plugins/Ordering/ObjectInstanceCatalog.hpp
 	Plugins/Ordering/ObjectInstanceCatalog.cpp
 	Plugins/Ordering/DefaultToolGroupOrdering.cpp

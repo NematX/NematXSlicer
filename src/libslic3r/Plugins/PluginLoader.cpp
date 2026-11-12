@@ -1230,6 +1230,9 @@ void load_plugins()
             {"layer_extrusion_edit.fan.default", "layer_extrusion_edit.fan.cooling",
              "layer_extrusion_edit.fan.first_layers", "layer_extrusion_edit.fan.dynamic"})) ||
             activation_config_changed;
+        activation_config_changed = (user_configuration_available && migrate_plugin_activation_id(
+            plugin_config, "ordering.plan_builder.default", {"ordering.plan_builder.by_layer"})) ||
+            activation_config_changed;
         if (ensure_plugin_activation_config(boost::filesystem::path(), default_plugin_config,
                                             ignored_from_user_config, plugin_config_error)) {
             default_plugin_config_available = true;

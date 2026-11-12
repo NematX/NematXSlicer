@@ -2448,7 +2448,7 @@ TEST_CASE("STEP_ORDERING runs default plugin chain on a shared PrintingPlan", "[
     const std::vector<Plugin *> plugins =
         Steps::selected_or_active_plugins_for_step(orchestrator, STEP_ORDERING, &print.full_print_config());
     REQUIRE(plugins.size() >= 7);
-    CHECK(plugins[0]->get_id() == "ordering.plan_builder.default");
+    CHECK(plugins[0]->get_id() == "ordering.plan_builder.by_layer");
     CHECK(plugins[1]->get_id() == "ordering.object_instance_catalog");
     CHECK(plugins[2]->get_id() == "ordering.custom_gcode_tool_overrides");
     CHECK(plugins[3]->get_id() == "ordering.tool_groups.default");

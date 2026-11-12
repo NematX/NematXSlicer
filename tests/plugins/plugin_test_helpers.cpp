@@ -1059,7 +1059,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "dense_infill.surface_marker");
         activate_plugin_or_fail(orchestrator, "dense_infill.recipe_modifier");
         activate_plugin_or_fail(orchestrator, "dense_infill.post_infill_order");
-        activate_plugin_or_fail(orchestrator, "ordering.plan_builder.default");
+        activate_plugin_or_fail(orchestrator, "ordering.plan_builder.by_layer");
         activate_plugin_or_fail(orchestrator, "ordering.object_instance_catalog");
         activate_plugin_or_fail(orchestrator, "ordering.custom_gcode_tool_overrides");
         activate_plugin_or_fail(orchestrator, "ordering.tool_groups.default");

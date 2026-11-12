@@ -435,7 +435,7 @@ Sources: `src/libslic3r/Printing/PrintingPlan.hpp:46`, `src/libslic3r/Printing/P
 
 Printable extrusions are expected in bed coordinates. The builder clones then applies the instance shift; the low-level append only clones what it is given. The copy is not a promise of automatic translation of all geometry passed to the API.
 
-Sources: `src/libslic3r/Printing/PrintingPlan.cpp:472`, `src/libslic3r/Print.cpp:233`, `src/libslic3r/Plugins/Ordering/DefaultPlanBuilder.cpp:508`.
+Sources: `src/libslic3r/Printing/PrintingPlan.cpp:472`, `src/libslic3r/Print.cpp:233`, `src/libslic3r/Plugins/Ordering/PlanBuilderCommon.cpp:437`.
 
 ## 6. Extrusions, geometry and extrusion properties
 
