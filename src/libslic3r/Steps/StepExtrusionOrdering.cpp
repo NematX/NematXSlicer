@@ -106,6 +106,8 @@ void register_selector_traits(Orchestrator &orchestrator)
     ordering.traits.exclusive_group = "ordering.extrusion_tree";
     ordering.traits.category = RAW_OPTION_CATEGORY_OUTPUT;
     ordering.traits.invalidates_step = STEP_ORDERING;
+    ordering.traits.ui_page = "Output options";
+    ordering.traits.ui_group = "Advanced";
     ordering.label = "Extrusion-tree ordering";
     ordering.tooltip = "Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.";
     ordering.translation_domain = "Slic3r";

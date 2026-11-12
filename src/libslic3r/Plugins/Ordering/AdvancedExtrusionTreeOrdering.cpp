@@ -15,7 +15,6 @@
 #include <utility>
 #include <vector>
 
-#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_ordering.h"
 #include "libslic3r/Api/plugin/cpp/ParallelFor.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -1654,16 +1653,6 @@ void register_advanced_extrusion_tree_ordering_plugin(
     const plugin_instance member =
         AdvancedExtrusionTreeOrdering::instance(orchestrator).c_instance();
     orchestrator_register_plugin(orchestrator, member);
-    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
-    definition.label = "Extrusion-tree ordering";
-    definition.tooltip = "Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.";
-    definition.category = RAW_OPTION_CATEGORY_OUTPUT;
-    definition.ui_target_file = "print.ui";
-    definition.ui_page = "Output options";
-    definition.ui_group = "Advanced";
-    AdvancedExtrusionTreeOrdering::instance(orchestrator).register_exclusive_group(
-        STEP_ORDERING, definition);
 }
 
 }}} // namespace slic3r_api::Ordering::DefaultOrderingPlugin
