@@ -58,8 +58,6 @@ public:
 
 protected:
     void setup_firmware(const slic3r_api::Config &config) override;
-    std::string write_post_thumbnail(const slic3r_api::Print &print,
-                                     const slic3r_api::ConstPrintingPlan &plan) override;
     std::string write_pre_start(const std::string &resolved_script) override;
     std::string write_post_start() override;
     void synchronize_selected_extruder_state(const slic3r_api::GCodeGeneration::DefaultExtruder *previous,

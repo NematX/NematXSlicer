@@ -186,8 +186,18 @@ std::string NematXGCodeFirmwareSession::filter(std::string text)
 
 std::string NematXGCodeFirmwareSession::begin_print(const Print &print, const ConstPrintingPlan &plan)
 {
-    // setup_firmware() runs inside Base::begin_print(), so the filter is ready afterwards.
-    return filtered([&] { return Base::begin_print(print, plan); });
+    return filtered([&] {
+        // setup_firmware() runs inside Base::begin_print(), so the filter and the
+        // metadata option are ready afterwards.
+        std::string body = Base::begin_print(print, plan);
+        // The session output starts after the file header that the exporter writes.
+        // The object and plater descriptions read by the NematX controller (see
+        // NematXObjectMetadata.hpp) come first, before the start G-code. As in the
+        // legacy slicer, they go through the output filter like the G-code.
+        if (!m_object_metadata)
+            return body;
+        return format_objects_metadata(collect_object_metadata(print, plan)) + body;
+    });
 }
 
 std::string NematXGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
@@ -251,17 +261,6 @@ std::string NematXGCodeFirmwareSession::take_pending() const
 }
 
 // ---- Startup ------------------------------------------------------------------
-
-// After the file header and the notes, before the start G-code: the object and
-// plater descriptions read by the NematX controller (see NematXObjectMetadata.hpp).
-// As in the legacy slicer, they go through the output filter like the G-code.
-std::string NematXGCodeFirmwareSession::write_post_thumbnail(const Print &print, const ConstPrintingPlan &plan)
-{
-    std::string output = Base::write_post_thumbnail(print, plan);
-    if (m_object_metadata)
-        output += format_objects_metadata(collect_object_metadata(print, plan));
-    return output;
-}
 
 std::string NematXGCodeFirmwareSession::write_pre_start(const std::string &resolved_script)
 {
