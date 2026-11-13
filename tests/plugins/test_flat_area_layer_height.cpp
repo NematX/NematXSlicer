@@ -514,9 +514,12 @@ TEST_CASE("Layer height limits apply the floor and the unset default", "[plugins
 {
     // The SDK helpers alone: 0 takes an eighth of the nozzle, any value below the floor is raised, other values are kept;
     // a zero or disabled maximum falls back to 75% of the nozzle.
+    CHECK(slic3r_api::k_min_layer_height_floor_mm == 0.001);
     CHECK(slic3r_api::min_layer_height_mm(0., 0.4) == Approx(0.05));
-    CHECK(slic3r_api::min_layer_height_mm(0., 0.05) == slic3r_api::k_min_layer_height_floor_mm);
-    CHECK(slic3r_api::min_layer_height_mm(0.005, 0.4) == slic3r_api::k_min_layer_height_floor_mm);
+    CHECK(slic3r_api::min_layer_height_mm(0., 0.05) == Approx(0.00625));
+    CHECK(slic3r_api::min_layer_height_mm(0., 0.004) == slic3r_api::k_min_layer_height_floor_mm);
+    CHECK(slic3r_api::min_layer_height_mm(0.005, 0.4) == 0.005);
+    CHECK(slic3r_api::min_layer_height_mm(0.0005, 0.4) == slic3r_api::k_min_layer_height_floor_mm);
     CHECK(slic3r_api::min_layer_height_mm(0.03, 0.05) == 0.03);
     CHECK(slic3r_api::max_layer_height_mm(0., true, 0.05) == Approx(0.0375));
     CHECK(slic3r_api::max_layer_height_mm(0.04, false, 0.05) == Approx(0.0375));
@@ -587,10 +590,10 @@ TEST_CASE("Resolved layer height limits retain percentages disabled maxima and z
         double expected_maximum;
     };
     const LimitsCase cases[] = {
-        {"0", "0", "0", 0.01, 0.0375},
-        {"10%", "75%", "0", 0.01, 0.0375},
-        {"0.0005", "!0.04", "0", 0.01, 0.0375},
-        {"10%", "0", "0.001", 0.01, 0.038},
+        {"0", "0", "0", 0.00625, 0.0375},
+        {"10%", "75%", "0", 0.005, 0.0375},
+        {"0.0005", "!0.04", "0", 0.001, 0.0375},
+        {"10%", "0", "0.001", 0.005, 0.038},
         {"0.03", "0.02", "0", 0.03, 0.03}
     };
     for (const LimitsCase &test : cases) {
@@ -605,7 +608,7 @@ TEST_CASE("Resolved layer height limits retain percentages disabled maxima and z
 TEST_CASE("Small nozzles get the same layer height limits on the host and plugin paths", "[plugins][layer-height]")
 {
     // A 0.05 mm nozzle with an unset, small or too small min_layer_height: the host slicing parameters and both layer-height generators keep the 0.025 mm layer height, and the layer-height validation, which compares them in Debug builds, accepts the print.
-    const std::pair<const char *, double> minimums[] = {{"0", 0.01}, {"0.02", 0.02}, {"0.0005", 0.01}};
+    const std::pair<const char *, double> minimums[] = {{"0", 0.00625}, {"0.02", 0.02}, {"0.0005", 0.001}};
     const char *plugin_ids[] = {"standard_layer_height_generator", "flat_area_layer_height"};
     for (const std::pair<const char *, double> &minimum : minimums) {
         for (const char *plugin_id : plugin_ids) {
@@ -636,27 +639,28 @@ TEST_CASE("Small nozzles get the same layer height limits on the host and plugin
     }
 }
 
-TEST_CASE("A variable layer height profile at the floor reaches the layer descriptors", "[plugins][layer-height]")
+TEST_CASE("A variable layer height profile below the former floor reaches the layer descriptors", "[plugins][layer-height]")
 {
-    // A variable layer height profile of 0.01 mm layers, at the floor, reaches the layer descriptors unchanged.
+    // A variable layer height profile of 0.005 mm layers, below the former 0.01 mm floor, reaches the layer descriptors
+    // unchanged when min_layer_height allows them (an unset minimum would be an eighth of the 0.05 mm nozzle).
     Model model;
     Print print;
     ModelObject *object = model.add_object();
     object->add_volume(make_cube(2., 2., 0.29));
-    object->layer_height_profile.set(std::vector<coordf_t>{0., 0.01, 0.29, 0.01});
+    object->layer_height_profile.set(std::vector<coordf_t>{0., 0.005, 0.29, 0.005});
     object->add_instance();
     model.center_instances_around_point({100, 100});
     object->ensure_on_bed();
     print.auto_assign_extruders(object);
-    print.apply(model, small_nozzle_config("0", "standard_layer_height_generator"));
+    print.apply(model, small_nozzle_config("0.002", "standard_layer_height_generator"));
 
     run_layer_height_plugin(print, "standard_layer_height_generator");
     const std::vector<coord_t> &profile = print.object(0).layer_profile();
     require_valid_layer_descriptors(profile);
     CHECK(unscaled(profile[1]) == Approx(0.04));
     const std::vector<double> heights = heights_above_first_layer(profile);
-    CHECK(heights.size() == 25);
-    // Layer tops sit on the integer coordinate grid, so a height may differ from 0.01 by a few nanometres.
+    CHECK(heights.size() == 50);
+    // Layer tops sit on the integer coordinate grid, so a height may differ from 0.005 by a few nanometres.
     for (const double height : heights)
-        CHECK(height == Approx(0.01).margin(1e-5));
+        CHECK(height == Approx(0.005).margin(1e-5));
 }

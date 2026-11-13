@@ -31,8 +31,8 @@ different units.
 
 namespace slic3r_api {
 
-// Smallest layer height accepted for any extruder, in mm; a smaller minimum is raised to it.
-constexpr double k_min_layer_height_floor_mm = 0.01;
+// Smallest layer height accepted for any extruder, in mm (1 um); a smaller minimum is raised to it.
+constexpr double k_min_layer_height_floor_mm = 0.001;
 // Fraction of the nozzle diameter used when min_layer_height is 0 (not set).
 constexpr double k_min_layer_height_unset_nozzle_ratio = 1. / 8.;
 
