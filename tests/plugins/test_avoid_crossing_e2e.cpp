@@ -96,7 +96,10 @@ with tool two. WipeTowerManager generates its own tower and scopes; no paths or
 plan entries are inserted by the test. Consecutive off-object scopes in one layer
 are inspected when at least one belongs to the synthetic tower entry. Copied,
 translated normal object slices independently classify their straight travel chords.
-A support-to-tower chord across a part must wipe; a long tower-to-tower chord over
+A support-to-tower chord with positive lengths both inside and outside the
+expanded printed areas crosses a contour and must wipe, including when its source
+is inside. This check does not classify crossings from endpoint containment.
+A long tower-to-tower chord over
 void must not. The corresponding scope in the unconditional-wipe run must wipe,
 so the void witness is not explained by an ineligible source. Only those two runs
 share a volume comparison. Diagnostics name both endpoint kinds and their XY.
@@ -826,12 +829,18 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                                     }
                                 }
                                 printed = offset_ex(printed, scale_i(config.opt_float("nozzle_diameter", tool.extruder_id) * 0.75));
-                                const bool touches = !intersection_pl(Polylines{path}, printed).empty();
+                                const Polylines interior = intersection_pl(Polylines{path}, printed);
+                                const bool touches = !interior.empty();
+                                // Positive portions on both sides witness a contour crossing even with an interior source.
+                                double inside_length = 0., outside_length = 0.;
+                                for (const Polyline &part : interior) inside_length += part.length();
+                                for (const Polyline &part : diff_pl(Polylines{path}, printed)) outside_length += part.length();
+                                const bool crosses = inside_length > SCALED_EPSILON && outside_length > SCALED_EPSILON;
                                 bool inside = false;
                                 for (const ExPolygon &area : printed) inside |= area.contains(path.front()) || area.contains(path.back());
                                 const bool wiped = source.after().valid() && count_wipes(source.after().readonly()) > 0;
                                 if (wiped) result.tower_wiped_scope_ids.push_back(tower_scope_id);
-                                if (tower && previous_off_kind == "support" && touches && !inside && wiped)
+                                if (tower && previous_off_kind == "support" && crosses && wiped)
                                     ++result.tower_part_wipes;
                                 if (tower && previous_off_kind == "tower" && !touches && path.length() > scale_i(2.)) {
                                     if (wiped) ++result.tower_void_with_wipe;
@@ -841,7 +850,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                                     }
                                 }
                                 std::cout << "tower gap " << previous_off_kind << " -> " << kind << " z=" << unscaled(layer.print_z)
-                                    << " touches=" << touches << " inside=" << inside << " wipe=" << wiped
+                                    << " touches=" << touches << " inside=" << inside << " crosses=" << crosses << " wipe=" << wiped
                                     << " from=" << unscaled(path.front().x()) << ',' << unscaled(path.front().y())
                                     << " to=" << unscaled(path.back().x()) << ',' << unscaled(path.back().y()) << '\n';
                             }
