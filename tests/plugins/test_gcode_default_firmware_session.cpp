@@ -23,6 +23,8 @@ SEMM startup probes count concrete plan tools, not configured tool slots, while
 retaining the rejection of inactive-tool heater events in multi-filament plans.
 Group-entry probes inspect both fallback and explicit travel across tool frames;
 XY corrections must retain clearance before a separate descent to printing Z.
+Role-label tests compare bridged thin-wall modifiers with the core's overhang
+precedence, with and without the external flag.
 
 Representative direct calls (branches are not a timeline):
 
@@ -80,6 +82,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config/ConfigSnapshotSerialization.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -2318,6 +2321,24 @@ TEST_CASE("Default firmware deduplicates identical consecutive printable markers
     CHECK(count_occurrences(output, ";TYPE:Perimeter\n") == 1);
     CHECK(count_occurrences(output, ";WIDTH:0.4\n") == 1);
     CHECK(count_occurrences(output, ";HEIGHT:0.2\n") == 1);
+}
+
+// Compare the bitmask precedence used for Classic's bridged thin walls with the native role conversion.
+TEST_CASE("Raw role labels preserve core overhang precedence for thin walls", "[plugins][gcode][role-labels]")
+{
+    for (raw_extrusion_role modifiers : {raw_extrusion_role(0), raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL),
+        raw_extrusion_role(RAW_EXTRUSION_ROLE_THIN), raw_extrusion_role(RAW_EXTRUSION_ROLE_THIN | RAW_EXTRUSION_ROLE_EXTERNAL)}) {
+        const raw_extrusion_role role = RAW_EXTRUSION_ROLE_PERIMETER | RAW_EXTRUSION_ROLE_BRIDGE | modifiers;
+        CAPTURE(role);
+        const Slic3r::ExtrusionRole native(static_cast<Slic3r::ExtrusionRoleModifier>(role));
+        const Slic3r::GCodeExtrusionRole expected = Slic3r::extrusion_role_to_gcode_extrusion_role(native);
+        CHECK(expected == Slic3r::GCodeExtrusionRole::OverhangPerimeter);
+        CHECK(slic3r_api::extrusion_role_to_string(role) == Slic3r::gcode_extrusion_role_to_string(expected));
+        CHECK(slic3r_api::extrusion_role_to_string(role) == "Overhang perimeter");
+    }
+    CHECK(slic3r_api::extrusion_role_to_string(RAW_EXTRUSION_ROLE_THIN_WALL) == "Thin wall");
+    CHECK(slic3r_api::extrusion_role_to_string(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER) == "External perimeter");
+    CHECK(slic3r_api::extrusion_role_to_string(RAW_EXTRUSION_ROLE_BRIDGE_INFILL) == "Bridge infill");
 }
 
 TEST_CASE("Default firmware maps raw extrusion roles to G-code labels")

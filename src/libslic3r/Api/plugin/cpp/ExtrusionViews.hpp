@@ -10,6 +10,10 @@ Developer guides:
 
     [Using Plugin Properties](/doc/plugins/properties.md)
     [Using Unified Extrusion Entities](/doc/plugins/extrusions.md)
+
+extrusion_role_to_string supplies G-code labels for raw extrusion roles. A
+perimeter with the bridge flag is an overhang regardless of its thin or external
+flags, matching the core's role precedence. Unsupported roles assert in Debug.
 */
 
 #include <algorithm>
@@ -39,8 +43,12 @@ Developer guides:
 
 namespace slic3r_api {
 
+// Return the G-code role label, giving bridged perimeters precedence over thin-wall modifiers; reject unsupported roles.
 inline std::string extrusion_role_to_string(raw_extrusion_role role)
 {
+    const raw_extrusion_role overhang = RAW_EXTRUSION_ROLE_PERIMETER | RAW_EXTRUSION_ROLE_BRIDGE;
+    if ((role & overhang) == overhang)
+        return "Overhang perimeter";
     switch (role) {
     case RAW_EXTRUSION_ROLE_NONE:
         return "Unknown";
@@ -48,9 +56,6 @@ inline std::string extrusion_role_to_string(raw_extrusion_role role)
         return "Perimeter";
     case RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER:
         return "External perimeter";
-    case RAW_EXTRUSION_ROLE_OVERHANG_PERIMETER:
-    case RAW_EXTRUSION_ROLE_OVERHANG_EXTERNAL_PERIMETER:
-        return "Overhang perimeter";
     case RAW_EXTRUSION_ROLE_INFILL:
         return "Internal infill";
     case RAW_EXTRUSION_ROLE_SOLID_INFILL:
