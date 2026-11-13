@@ -5,7 +5,8 @@ then exercise height-limited volumes, old names, true copies, rotated instances
 and a linear matrix of all three declared cost settings in one small scene.
 The oracle reads actual XY extrusion starts, not external-only seam comments.
 Each export owns its datadir, profile, G-code and log, so the plugin exports run in
-parallel, then the host exports that need the saved selector name.
+parallel, then the host exports that need the saved selector name. A passed export
+drops its datadir; a passed run is removed, a failed one is kept.
 
     main -> two parallel waves of export -> write_project -> bounded host process
                    -> read_starts -> per-layer internal/external assertions
@@ -22,11 +23,13 @@ import signal
 import struct
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 from zipfile import ZIP_DEFLATED, ZipFile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tests' / 'common'))
+from test_outputs import finish_run, new_run, remove_data  # noqa: E402
 
 FIELDS = re.compile(r"([A-Z])([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
 LABEL = re.compile(r"; printing object (.*?) id:(\d+) copy (\d+)$")
@@ -166,9 +169,8 @@ def main() -> int:
     parser.add_argument('--budget-seconds', type=float, default=90)
     args = parser.parse_args()
     started = time.monotonic()
-    results = args.build_dir / 'test-results/seam'
-    results.mkdir(parents=True, exist_ok=True)
-    root = Path(tempfile.mkdtemp(prefix='run-', dir=results))
+    # The two variants share the results directory under different prefixes.
+    root = new_run(args.build_dir / 'test-results/seam', 'builtin-' if args.builtin else 'run-')
     staged = None
     if not args.builtin:
         staged = args.build_dir / 'test-data/seam/plugins'
@@ -236,7 +238,9 @@ def main() -> int:
                             if "exclusive group 'gcode_flavor' has incompatible execution priorities" not in line)
         assert not any(word in checked for word in ('[error]', 'will be disabled', 'unknown option')), case / 'host.log'
         lines = (case / 'result.gcode').read_text(encoding='utf-8').splitlines()
-        return lines, read_starts(lines)
+        starts = read_starts(lines)
+        remove_data(data)
+        return lines, starts
 
     try:
         neutral = [{'name': 'neutral', 'x': 10, 'attractor': False}]
@@ -298,6 +302,7 @@ def main() -> int:
                   'domains': DOMAINS, 'budget_seconds': args.budget_seconds}
         (root / 'timings.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         print(f'Internal seam exports: {report["seconds"]:.3f}s; calls: {len(calls)}; success: {success}', flush=True)
+        finish_run(root, success)
 
 
 if __name__ == '__main__':

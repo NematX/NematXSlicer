@@ -93,10 +93,12 @@ failure, not a skip or a retry. CTest safety limits are 2 seconds for the kernel
 performance measurements; the complete package must also pass below one minute
 on the reference Debug machine.
 
-Each invocation keeps an isolated datadir, all model/config/G-code/log files and
-`timings.json` under `.build/test-results/smooth-temperature/run-*`. The report
-separates host command durations from fixture creation and parsing. Runs do not
-overwrite each other's inputs or reuse previous exports.
+Each invocation writes its isolated datadirs, model/config/G-code/log files and
+`timings.json` under `.build/test-results/smooth-temperature/run-*` (`builtin-*`
+with `--builtin`). The report separates host command durations from fixture
+creation and parsing. Runs do not overwrite each other's inputs or reuse previous
+exports. A passed export drops its datadir, a passed run is removed and a failed
+one is kept, with at most two runs per variant.
 
 ### Embedded-provider qualification
 

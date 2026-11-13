@@ -1,7 +1,8 @@
 """End-to-end checks for the external second-layer flow plugin.
 
 setUpClass exports every scene once, in parallel, each with its own copy of the
-host-only or plugin datadir; the tests then compare the resulting G-code.
+host-only or plugin datadir; the tests then compare the resulting G-code. A copy
+is removed once its export succeeded; the G-code and the log stay.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ import unittest
 from dataclasses import dataclass, field
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests" / "common"))
+from test_outputs import remove_data  # noqa: E402
 
 
 PROJECT = Path(__file__).resolve().parents[2]
@@ -343,6 +347,8 @@ def run_export(
     result = subprocess.run(command, cwd=HOST_BUILD, capture_output=True, timeout=180)
     log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
     log_path.write_text(log, encoding="utf-8")
+    if result.returncode == 0:
+        remove_data(datadir)
     return output, log, result.returncode
 
 

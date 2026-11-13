@@ -3,9 +3,10 @@
 Every declared input has a variation domain, checked against the C++ key lists.
 Cases change one input from an enabled baseline, not a Cartesian product. Other
 comparisons cover zero-count parity, explicit legacy selection, sparse paths and
-standalone versus built-in delivery. Each run owns its datadir and keeps logs,
-so exports run in parallel; only the legacy and reloaded cases wait for the
-settings saved by the first wave.
+standalone versus built-in delivery. Each export owns its datadir, so exports
+run in parallel; only the legacy and reloaded cases wait for the settings saved
+by the first wave. A passed export drops its datadir and keeps its log and
+G-code; a passed run is removed, a failed one is kept.
 
     main -> checked_domains
          -> Gate.run_all -> Gate.export -> write_roof / host CLI -> read_moves
@@ -22,8 +23,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests" / "common"))
+from test_outputs import finish_run, new_run, remove_data  # noqa: E402
 
 COUNT = "support_material_interface_perimeters"
 IDS = ("nematx.support.bottom_contact", "nematx.support.bottom_interface",
@@ -233,8 +238,7 @@ class Gate:
 
     def __init__(self, args):
         self.args = args
-        self.root = args.output.resolve() / str(time.time_ns())
-        self.root.mkdir(parents=True, exist_ok=False)
+        self.root = new_run(args.output.resolve(), "run-")
         self.started = time.monotonic()
         self.results = []
         self.environment = dict(os.environ)
@@ -276,6 +280,7 @@ class Gate:
         moves = read_moves(output.read_text(encoding="utf-8"))
         self.results.append({"case": name, "changes": changes, "standalone": standalone,
                              "seconds": time.monotonic() - started, "deposited_moves": len(moves)})
+        remove_data(datadir)
         return moves
 
     def run_all(self, cases: dict[str, tuple]) -> dict[str, list[tuple]]:
@@ -300,7 +305,9 @@ def main() -> None:
     args = parser.parse_args()
     domains = checked_domains(args.host_source)
     gate = Gate(args)
+    print(f"Support interface artifacts: {gate.root}", flush=True)
     raft_contact = {}
+    passed = False
     try:
         catalogue = {f"domain-{key}-{index}": ({key: value} | COUPLED_DOMAINS.get((key, value), {}), {})
                      for key, values in domains.items() for index, value in enumerate(values)}
@@ -350,12 +357,14 @@ def main() -> None:
                         "status": "verified" if contact_emitted else "not_emitted_by_host"}
         if contact_emitted and (not enabled_contact or enabled_contact == zero_contact):
             raise AssertionError("interface perimeters did not affect the emitted raft contact")
+        passed = True
     finally:
         (gate.root / "report.json").write_text(json.dumps({"tag": "plugin-e2e", "domains": domains,
             "raft_contact": raft_contact,
             "coupled_domains": [{"setting": key, "value": value, "changes": changes} for (key, value), changes in COUPLED_DOMAINS.items()],
             "results": gate.results, "seconds": time.monotonic() - gate.started}, indent=2), encoding="utf-8")
-    print(f"Support interface gate passed: {len(gate.results)} exports, {len(domains)} input domains; {gate.root}")
+        finish_run(gate.root, passed)
+    print(f"Support interface gate passed: {len(gate.results)} exports, {len(domains)} input domains")
 
 
 if __name__ == "__main__":

@@ -49,8 +49,10 @@ ctest --test-dir build -C Debug -R '^seam_' --output-on-failure
 On the reference Windows workspace, compilation uses the local build wrapper
 instead of direct `cmake --build`; configure `SEAM_RUNTIME_PATH` for dependency
 DLL directories. The export runner has one 45-second budget, shorter per-command
-deadlines, process-tree cleanup, no retries and isolated retained artifacts under
-`build/test-results/seam/run-*`. CTest caps it at 50 seconds and the reader at 3.
+deadlines, process-tree cleanup and no retries. Its artifacts go to
+`build/test-results/seam/run-*` (`builtin-*` with `--builtin`): a passed export drops
+its datadir, a passed run is removed and a failed one is kept, with at most two runs
+per variant. CTest caps it at 50 seconds and the reader at 3.
 On Windows, the runner passes `--sw-renderer` so the console wrapper does not
 probe a windowed hardware OpenGL context before a headless export. Slicing and
 all G-code assertions are unchanged.

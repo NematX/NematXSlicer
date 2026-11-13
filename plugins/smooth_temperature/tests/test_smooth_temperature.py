@@ -7,6 +7,7 @@ Expected sequences are written explicitly; the C++ tests cover the large
 arithmetic matrix without slicing it. The first export also saves the default
 catalogue for all scenes; the six others then run in parallel, each with its own
 datadir copy, before the tests read their cached results. All share one budget.
+A passed export drops its datadir; a passed run is removed, a failed one is kept.
 
     main -> prefetch -> immediate_result, then *_result in parallel
                      -> export -> write_project / HostRunner.run -> parse_gcode
@@ -22,7 +23,6 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import time
 import unittest
 from dataclasses import dataclass, field
@@ -32,6 +32,9 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from gcode_reader import Result, parse_gcode
 from host_runner import HostRunner
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests" / "common"))
+from test_outputs import finish_run, new_run, remove_data  # noqa: E402
 
 PROJECT = Path(__file__).resolve().parents[3]
 HOST_EXECUTABLE: Path
@@ -200,6 +203,7 @@ def export(name: str, options: tuple[str, ...], objects: list[Object], save_defa
         raise AssertionError(f"{name}: no object extrusion was read")
     STAGES.append({"case": name, "fixture_seconds": prepared - start, "parse_seconds": time.monotonic() - parsing})
     RUNNER.remaining()
+    remove_data(datadir)
     return result
 
 
@@ -389,9 +393,8 @@ def main() -> int:
     key = "PATH" if os.name == "nt" else "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
     env[key] = os.pathsep.join(runtime + [env.get(key, "")])
     RUNNER = HostRunner(args.budget_seconds, env)
-    results = build / "test-results" / "smooth-temperature"
-    results.mkdir(parents=True, exist_ok=True)
-    OUTPUT_ROOT = Path(tempfile.mkdtemp(prefix="run-", dir=results))
+    # The two variants share the results directory under different prefixes.
+    OUTPUT_ROOT = new_run(build / "test-results" / "smooth-temperature", "builtin-" if args.builtin else "run-")
     PLUGIN_DATADIR = OUTPUT_ROOT / "datadir"
     PLUGIN_DATADIR.mkdir()
     if not args.builtin:
@@ -412,6 +415,7 @@ def main() -> int:
         report = {"success": succeeded, "seconds": time.monotonic() - RUNNER.started, "budget_seconds": args.budget_seconds,
                   "exports": len(STAGES), "calls": RUNNER.calls, "stages": STAGES, "builtin": args.builtin}
         (OUTPUT_ROOT / "timings.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        finish_run(OUTPUT_ROOT, succeeded)
         print(f"SmoothTemperature total: {report['seconds']:.3f}s; host calls: {len(RUNNER.calls)}", flush=True)
 
 

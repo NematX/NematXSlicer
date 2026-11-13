@@ -15,10 +15,12 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tests" / "common"))
+from test_outputs import finish_run, new_run, remove_data  # noqa: E402
 
 
 PROJECT = Path(__file__).resolve().parents[3]
@@ -259,12 +261,12 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
         )
         builtins = ("marlin", "marlin2", "prusa", "reprapfirmware", "sprinter", "klipper")
         nematx = "nematx"
-        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         # Each run gets a new datadir: an earlier successful process must not
         # leave a saved activation/configuration that conceals missing ownership.
-        root = Path(tempfile.mkdtemp(prefix="cold-calibration-", dir=OUTPUT_ROOT))
-        for firmware, mixed in ((builtins[0], False), (builtins[-1], False),
-                                (nematx, False), (nematx, True)):
+        root = new_run(OUTPUT_ROOT, "cold-calibration-")
+        cases = ((builtins[0], False), (builtins[-1], False), (nematx, False), (nematx, True))
+        passed = []
+        for firmware, mixed in cases:
             with self.subTest(firmware=firmware, mixed=mixed):
                 case = root / (firmware + ("-mixed" if mixed else "-only"))
                 plugins = case / "datadir" / "plugins"
@@ -315,6 +317,10 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
                                   saved.read_text(encoding="utf-8").splitlines() if " = " in line)
                     self.assertEqual(values["fan_printer_min_speed"], "35")
                     self.assertEqual(values["gcode_flavor"], firmware)
+                # Reached only when every check of this case passed.
+                remove_data(case / "datadir")
+                passed.append(case)
+        finish_run(root, len(passed) == len(cases))
 
 
 class NematXFirmwareIntegration(unittest.TestCase):
