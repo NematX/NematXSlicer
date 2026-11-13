@@ -147,12 +147,14 @@ public:
                               const TravelEndpoint &target,
                               extruder_index_t extruder_id);
 
-    // Classify a print-space route against the perimeter contours of the target layer, keeping
-    // its tops. Missing or different object provenance counts as a crossing.
+    // Classify a print-space route against the perimeter contours of the target layer. With
+    // exclude_top_surfaces, its tops count as exposed: a route over a top crosses even without
+    // reaching a contour. Missing or different object provenance counts as a crossing.
     bool crosses(const TravelEndpoint &source,
                  const TravelEndpoint &target,
                  extruder_index_t extruder_id,
-                 const std::vector<c_point> &path);
+                 const std::vector<c_point> &path,
+                 bool exclude_top_surfaces);
 
 private:
     // Resolve regional activation only for valid object instances, probing inside on a boundary.
@@ -178,8 +180,9 @@ private:
     const plugin_run_context *m_run_ctx = nullptr;
     AC::LayerInputCache m_inputs;
     std::map<RouterKey, std::unique_ptr<RoutingState>> m_routers;
-    // Retraction filtering keeps tops, so it uses its own crossing cache per layer and tool.
-    std::map<RouterKey, AC::PerimeterCrossing> m_perimeter_crossings;
+    // Retraction filtering chooses whether tops are exposed, so it uses its own crossing caches
+    // per layer, tool and top choice.
+    std::map<std::pair<RouterKey, bool>, AC::PerimeterCrossing> m_perimeter_crossings;
 };
 
 class AvoidCrossingPerimetersTravel : public PluginBase
@@ -392,7 +395,8 @@ std::vector<c_point> LayerTravelPlanner::path(const TravelEndpoint &source,
 bool LayerTravelPlanner::crosses(const TravelEndpoint &source,
                                  const TravelEndpoint &target,
                                  const extruder_index_t extruder_id,
-                                 const std::vector<c_point> &path)
+                                 const std::vector<c_point> &path,
+                                 const bool exclude_top_surfaces)
 {
     throw_if_cancelled(m_run_ctx);
     if (!source.region_island.valid() || !target.region_island.valid() ||
@@ -417,11 +421,13 @@ bool LayerTravelPlanner::crosses(const TravelEndpoint &source,
 
     const AC::Input &input = input_for(target_layer);
     const double nozzle_diameter = m_print_config.vector_float_or_default("nozzle_diameter", extruder_id, 0.4);
-    AC::PerimeterCrossing &crossing = m_perimeter_crossings[RouterKey{target_layer.handle(), extruder_id}];
+    AC::PerimeterCrossing &crossing =
+        m_perimeter_crossings[{RouterKey{target_layer.handle(), extruder_id}, exclude_top_surfaces}];
     crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
                      std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5)),
-                     [this]() { throw_if_cancelled(m_run_ctx); }, false);
-    return crossing.can_cross_perimeter(local, true);
+                     [this]() { throw_if_cancelled(m_run_ctx); }, exclude_top_surfaces);
+    return crossing.touches_top_surface(m_run_ctx->plugin_storage, local) ||
+        crossing.can_cross_perimeter(local, true);
 }
 
 AvoidCrossingPerimetersTravel &AvoidCrossingPerimetersTravel::instance(orchestrator_handle *orchestrator)
@@ -577,9 +583,9 @@ std::vector<c_point> PerimeterTravelPlanner::path(const TravelEndpoint &source,
 }
 
 bool PerimeterTravelPlanner::crosses(const TravelEndpoint &source, const TravelEndpoint &target,
-    extruder_index_t tool, const std::vector<c_point> &path)
+    extruder_index_t tool, const std::vector<c_point> &path, bool exclude_top_surfaces)
 {
-    return m_impl->planner.crosses(source, target, tool, path);
+    return m_impl->planner.crosses(source, target, tool, path, exclude_top_surfaces);
 }
 
 void register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle *orchestrator)

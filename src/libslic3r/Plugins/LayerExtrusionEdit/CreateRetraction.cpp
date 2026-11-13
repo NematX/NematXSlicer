@@ -37,6 +37,7 @@ explicit requests, tool changes and configured layer changes are not suppressed.
 
 #include "ExtrusionScopeHelpers.hpp"
 #include "PerimeterTravelPlanner.hpp"
+#include "libslic3r/Api/plugin/cpp/properties/RetractionCrossingPolicy.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_extrusion_edit.h"
@@ -136,6 +137,7 @@ struct BoundaryState
     TravelConnection::TravelEndpoint travel;
     bool first_object_layer = false;
     bool has_hidden_interior = false;
+    bool exclude_top_surfaces = false;
 };
 
 /* Immutable values published by one setup_run worker. */
@@ -218,7 +220,8 @@ BoundaryState boundary_state(const ScopeEntity &scope,
                              const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
                              bool first,
                              bool resolve_normal_target,
-                             const plugin_run_context *run_ctx);
+                             const plugin_run_context *run_ctx,
+                             const PluginPropertyKey<RetractionCrossingPolicy> *policy_key = nullptr);
 
 /* Return direct XY distance for discontinuity checks and unknown providers. */
 double planar_gap_mm(const BoundaryState &source,
@@ -301,6 +304,7 @@ private:
         size_t flat_idx, const plugin_run_context *run_ctx) const;
 
     PluginPropertyKey<PrintingExtrusionScopeProperty> m_scope_property;
+    PluginPropertyKey<RetractionCrossingPolicy> m_crossing_policy;
     mutable bool m_setup_valid = false;
     mutable std::vector<std::vector<size_t>> m_flat_indices;
     mutable std::vector<LayerBoundarySummary> m_layers;
@@ -561,7 +565,8 @@ BoundaryState boundary_state(
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const bool first,
     const bool resolve_normal_target,
-    const plugin_run_context *run_ctx)
+    const plugin_run_context *run_ctx,
+    const PluginPropertyKey<RetractionCrossingPolicy> *policy_key)
 {
     throw_if_cancelled(run_ctx);
     const GeometricEndpoint endpoint = scope_endpoint(scope, key, first, run_ctx);
@@ -570,6 +575,10 @@ BoundaryState boundary_state(
     state.position = endpoint.position;
     state.modifier = endpoint.modifier;
     state.extruder_id = scope.tool_group.extruder_id();
+    if (policy_key != nullptr) {
+        const RetractionCrossingPolicy *policy = policy_key->get(scope.printing_extrusion.root());
+        state.exclude_top_surfaces = policy != nullptr && policy->exclude_top_surfaces != 0;
+    }
     // Immutable sliced provenance may be read by either side of a layer edge;
     // no extrusion-tree handle escapes this endpoint snapshot.
     state.travel.position = {endpoint.position.x, endpoint.position.y, endpoint.position.z, true};
@@ -661,7 +670,7 @@ RetractionDecision decide_boundary(const Config &print_config,
     // Explicit requests and tool/layer transitions retain their own semantics.
     // Only an ordinary XY-travel request may be suppressed as hidden interior.
     if (!forced && crossing_only && target.has_hidden_interior && known_travel_provider &&
-        !planner.crosses(source.travel, target.travel, retracting_extruder, route))
+        !planner.crosses(source.travel, target.travel, retracting_extruder, route, target.exclude_top_surfaces))
         return RetractionDecision{};
 
     decision.target = decision.toolchange_retraction ?
@@ -779,7 +788,8 @@ CreateRetraction &CreateRetraction::instance(orchestrator_handle *orchestrator)
 
 CreateRetraction::CreateRetraction(orchestrator_handle *orchestrator) :
     PluginBase(orchestrator),
-    m_scope_property(printing_extrusion_scope_property_key(orchestrator))
+    m_scope_property(printing_extrusion_scope_property_key(orchestrator)),
+    m_crossing_policy(retraction_crossing_policy_key(orchestrator))
 {}
 
 const char *CreateRetraction::id_impl() const noexcept
@@ -947,14 +957,14 @@ void CreateRetraction::setup_run_impl(const plugin_run_context *run_ctx) const
             throw_if_cancelled(run_ctx);
             if (previous == nullptr && next != nullptr) {
                 summary.first = boundary_state(
-                    *next, print_config, plan, m_scope_property, true, false, run_ctx);
+                    *next, print_config, plan, m_scope_property, true, false, run_ctx, &m_crossing_policy);
                 summary.first_incoming_toolchange = printing_extrusion_scope_has_flag(
                     *next->property,
                     PRINTING_EXTRUSION_SCOPE_INCOMING_TOOLCHANGE);
             }
             if (previous != nullptr && next == nullptr) {
                 summary.last = boundary_state(
-                    *previous, print_config, plan, m_scope_property, false, true, run_ctx);
+                    *previous, print_config, plan, m_scope_property, false, true, run_ctx, &m_crossing_policy);
                 summary.last_outgoing_toolchange = printing_extrusion_scope_has_flag(
                     *previous->property,
                     PRINTING_EXTRUSION_SCOPE_OUTGOING_TOOLCHANGE);
@@ -1012,7 +1022,7 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                         throw std::runtime_error(
                             "Inter-layer scopes disagree about their tool-change transition.");
                     const BoundaryState target = boundary_state(
-                        *next, print_config, plan, m_scope_property, true, false, run_ctx);
+                        *next, print_config, plan, m_scope_property, true, false, run_ctx, &m_crossing_policy);
                     const RetractionDecision decision = decide_boundary(
                         print_config, preceding->last, target, true,
                         incoming_toolchange, planner, known_travel_provider, perimeter_avoiding);
@@ -1034,9 +1044,9 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                         "Adjacent scopes disagree about their retraction transition.");
                 if (outgoing_transition) {
                     const BoundaryState source = boundary_state(
-                        *previous, print_config, plan, m_scope_property, false, true, run_ctx);
+                        *previous, print_config, plan, m_scope_property, false, true, run_ctx, &m_crossing_policy);
                     const BoundaryState target = boundary_state(
-                        *next, print_config, plan, m_scope_property, true, false, run_ctx);
+                        *next, print_config, plan, m_scope_property, true, false, run_ctx, &m_crossing_policy);
                     const RetractionDecision decision = decide_boundary(
                         print_config, source, target, false,
                         boundary_toolchange(*previous->property, *next->property),
@@ -1056,7 +1066,7 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                     throw std::runtime_error(
                         "Inter-layer scopes disagree about their tool-change transition.");
                 const BoundaryState source = boundary_state(
-                    *previous, print_config, plan, m_scope_property, false, true, run_ctx);
+                    *previous, print_config, plan, m_scope_property, false, true, run_ctx, &m_crossing_policy);
                 const RetractionDecision decision = decide_boundary(
                     print_config, source, following->first, true,
                     outgoing_toolchange, planner, known_travel_provider, perimeter_avoiding);

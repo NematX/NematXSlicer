@@ -103,6 +103,9 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
         PLUGIN_IDS nematx.support.bottom_contact nematx.support.bottom_interface
             nematx.support.top_contact nematx.support.top_interface)
     message(STATUS "NematX plugins embedded from ${NEMATX_PLUGINS_SOURCE_DIR}")
+    nematx_add_builtin_module(top_surface_retraction
+        SOURCES plugins/top_surface_retraction/src/TopSurfaceRetraction.cpp
+        PLUGIN_IDS nematx_top_surface_retraction)
 elseif(SLIC3R_APP_KEY STREQUAL "NematXSlicer")
     message(STATUS "NematX built-in plugins disabled; standalone packages remain supported")
 endif()

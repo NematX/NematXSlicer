@@ -6,7 +6,7 @@
 #define slic3r_step_layer_extrusion_edit_h_
 
 #define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MINOR 1u
+#define SLIC3R_PLUGIN_API_STEP_LAYER_EXTRUSION_EDIT_MINOR 2u
 
 #include "slic3r_step_common.h"
 #include "../slic3r_printing_plan.h"
@@ -15,7 +15,9 @@
 extern "C" {
 #endif
 
-/* Fan policies run after geometry/speed edits. Each plugin completes every
+/* Version 1.2 consumes the shared retraction crossing policy on printing roots
+   before planning ordinary retractions (RetractionCrossingPolicy.hpp).
+   Fan policies run after geometry/speed edits. Each plugin completes every
    layer before the next priority observes its published references. */
 enum layer_extrusion_edit_fan_priority {
     LAYER_EXTRUSION_EDIT_PRIORITY_FAN_REGIONAL = 18,

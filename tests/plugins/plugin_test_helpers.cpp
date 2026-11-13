@@ -173,6 +173,11 @@ Representative direct calls (branches are not a timeline):
 #include "plugins_cpp/Polyholes/Polyholes.hpp"
 
 namespace Slic3r::Test::Plugins {
+
+#ifdef SLIC3R_TEST_TOP_SURFACE_RETRACTION
+// Register the policy before the focused runtime finalizes configuration caches.
+extern "C" void nematx_builtin_register_top_surface_retraction(orchestrator_handle *);
+#endif
 // Borrow immutable startup identity sets after shared initialization; later test registrations are excluded and startup/allocation failures propagate.
 const PluginTestStartupSets &plugin_test_startup_sets();
 // Complete shared startup and borrow its saved report for the lower or upper signed-32-bit priority error.
@@ -794,6 +799,10 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator_handle *orchestrator_handle_value =
             reinterpret_cast<orchestrator_handle *>(&orchestrator);
         Orchestrator::PluginRegistrationScope builtin_scope = orchestrator.plugin_registration_scope({}, false);
+#ifdef SLIC3R_TEST_TOP_SURFACE_RETRACTION
+        nematx_builtin_register_top_surface_retraction(orchestrator_handle_value);
+        activate_plugin_or_fail(orchestrator, "nematx_top_surface_retraction");
+#endif
         register_config_introspection_fixture(orchestrator_handle_value);
         register_plugin_option_list_fixtures(orchestrator_handle_value);
         slic3r_api::StandardLayerHeightGeneratorPlugin::register_standard_layer_height_generator_plugin(

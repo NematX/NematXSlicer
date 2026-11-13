@@ -53,6 +53,7 @@ void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer
     m_cache.extruder = extruder;
     m_cache.radius = radius;
     m_cache.exclude_top_surfaces = exclude_top_surfaces;
+    m_cache.top_surfaces.clear();
     pw::ExPolygons slices = clipper::union_ex(storage, layer.lslices);
     pw::ExPolygons offset_slices;
     if (layer.support) {
@@ -93,6 +94,7 @@ void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer
             m_cancel();
             offset_slices = clipper::diff_ex(storage, offset_slices, region.top_surfaces);
             slices = clipper::diff_ex(storage, slices, region.top_surfaces);
+            m_cache.top_surfaces.insert(m_cache.top_surfaces.end(), region.top_surfaces.begin(), region.top_surfaces.end());
         }
     }
     // Preserve the unsimplified contour box, as used by the crossing rejection.
@@ -108,6 +110,17 @@ void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer
         for (pw::ExPolygon &simplified : clipper::simplify(storage, polygon, radius))
             m_cache.offset_slices.push_back({std::move(simplified), box, {}});
     }
+}
+
+bool PerimeterCrossing::touches_top_surface(storage_handle *storage, const PluginCommon::work::Polyline &travel) const
+{
+    if (travel.size() < 2 || m_cache.top_surfaces.empty())
+        return false;
+    // Removing the tops shortens the path exactly when some part of it lies on a top.
+    double remaining = 0.;
+    for (const pw::Polyline &part : clipper::diff_pl(storage, pw::Polylines{travel}, m_cache.top_surfaces))
+        remaining += part.length();
+    return remaining < travel.length() - double(SCALED_EPSILON);
 }
 
 bool PerimeterCrossing::can_cross_perimeter(const PluginCommon::work::Polyline &travel, bool offset)

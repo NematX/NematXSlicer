@@ -35,9 +35,9 @@ public:
     // Select the same path as the built-in perimeter-avoiding travel provider.
     std::vector<c_point> path(const TravelConnection::TravelEndpoint &,
         const TravelConnection::TravelEndpoint &, extruder_index_t);
-    // Classify every segment of a proposed path without excluding top surfaces.
+    // Classify the path, optionally treating top surfaces as exposed interior.
     bool crosses(const TravelConnection::TravelEndpoint &, const TravelConnection::TravelEndpoint &,
-        extruder_index_t, const std::vector<c_point> &);
+        extruder_index_t, const std::vector<c_point> &, bool exclude_top_surfaces = false);
 private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;

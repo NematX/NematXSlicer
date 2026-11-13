@@ -519,6 +519,25 @@ add_test(NAME support_interface_gap_fill COMMAND ${_TEST_NAME}_tests "[support-g
 set_tests_properties(support_interface_gap_fill PROPERTIES LABELS "support;gap-fill" TIMEOUT 900)
 
 # Retraction filtering has its own gate, independent of unrelated plan fixtures.
+if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
+    set_property(SOURCE plugin_test_helpers.cpp APPEND PROPERTY COMPILE_DEFINITIONS SLIC3R_TEST_TOP_SURFACE_RETRACTION)
+    target_sources(${_TEST_NAME}_tests PRIVATE test_top_surface_retraction.cpp)
+    add_executable(nematx_top_surface_retraction_host_tests
+        "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/top_surface_retraction/tests/host_tests.cpp")
+    target_link_libraries(nematx_top_surface_retraction_host_tests PRIVATE libslic3r)
+    set_target_properties(nematx_top_surface_retraction_host_tests PROPERTIES FOLDER "tests")
+    if(WIN32)
+        prusaslicer_copy_dlls(nematx_top_surface_retraction_host_tests)
+        set_target_properties(nematx_top_surface_retraction_host_tests PROPERTIES ENABLE_EXPORTS ON)
+    endif()
+    add_test(NAME top_surface_retraction_replay COMMAND nematx_top_surface_retraction_host_tests
+        "${CMAKE_BINARY_DIR}/temp/f21/replay"
+        "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+        "${CMAKE_SOURCE_DIR}/resources")
+    set_tests_properties(top_surface_retraction_replay PROPERTIES LABELS "retraction" TIMEOUT 180)
+    add_test(NAME top_surface_retraction_policy COMMAND ${_TEST_NAME}_tests "[plugins][top-surface-retraction]")
+    set_tests_properties(top_surface_retraction_policy PROPERTIES LABELS "retraction" TIMEOUT 180)
+endif()
 add_test(NAME retraction_crossing_policy COMMAND ${_TEST_NAME}_tests "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
 set_tests_properties(retraction_crossing_policy PROPERTIES LABELS "retraction" TIMEOUT 180)
 
@@ -540,5 +559,13 @@ if(TARGET Slic3r_app_console)
                 --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
                 --output "${CMAKE_BINARY_DIR}/temp/f21/retraction-exports")
         set_tests_properties(retraction_crossing_export PROPERTIES LABELS "retraction;plugin-e2e" TIMEOUT 900)
+        add_test(NAME top_surface_retraction_export
+            COMMAND "${Python3_EXECUTABLE}" -B
+                "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/top_surface_retraction/tests/test_exports.py"
+                --host "$<TARGET_FILE:Slic3r_app_console>"
+                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+                --output "${CMAKE_BINARY_DIR}/temp/f21/top-surface-exports")
+        set_tests_properties(top_surface_retraction_export PROPERTIES LABELS "retraction;plugin-e2e" TIMEOUT 900)
     endif()
 endif()

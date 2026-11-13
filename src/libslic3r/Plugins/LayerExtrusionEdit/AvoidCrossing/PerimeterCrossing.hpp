@@ -39,6 +39,8 @@ class PerimeterCrossing
         bool exclude_top_surfaces = true;
         std::vector<SliceIsland> slices;
         std::vector<SliceIsland> offset_slices;
+        // Object tops removed from both versions; empty when tops are kept.
+        PluginCommon::polygon_work::ExPolygons top_surfaces;
     } m_cache;
     std::function<void()> m_cancel;
 public:
@@ -51,6 +53,9 @@ public:
                  coord_t radius, std::function<void()> cancel = {}, bool exclude_top_surfaces = true);
     // Return whether an object-local path crosses an outer contour or hole of the prepared interiors.
     bool can_cross_perimeter(const PluginCommon::work::Polyline &travel, bool offset);
+    // Return whether an object-local path runs over a removed top surface, even wholly inside it without
+    // crossing a boundary. Always false when tops are kept or for support.
+    bool touches_top_surface(storage_handle *storage, const PluginCommon::work::Polyline &travel) const;
 };
 
 }}}

@@ -9,6 +9,27 @@ using namespace Slic3r;
 
 extern "C" int test_plugin_api_headers_c(void);
 
+// Require a host that consumes the policy, while keeping earlier layer editors compatible.
+TEST_CASE("Retraction crossing policies publish layer-edit API 1.2",
+          "[plugins][abi][top-surface-retraction]")
+{
+    const auto &contracts = host_plugin_api_contracts();
+    const auto found = std::find_if(contracts.begin(), contracts.end(),
+        [](const PluginApiRequirement &entry) { return entry.header == "steps/slic3r_step_layer_extrusion_edit.h"; });
+    REQUIRE(found != contracts.end());
+    CHECK(found->version.major == 1);
+    CHECK(found->version.minor == 2);
+    for (const char *version : {"1.1", "1.2", "1.3"}) {
+        PluginPackageMetadata metadata;
+        std::string error;
+        REQUIRE(parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
+            "[abi]\nslic3r_plugin_types.h=") + std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR) + "." +
+            std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR) +
+            "\nsteps/slic3r_step_layer_extrusion_edit.h=" + version + "\n", metadata, error));
+        CHECK(metadata.compatibility.compatible() == (std::string(version) != "1.3"));
+    }
+}
+
 // Check the additive extrusion contract without changing public structure sizes or the two legacy flag bits.
 TEST_CASE("Extrusion entity publishes minor 1.2 and refuses later requirements",
           "[plugins][abi][rotation]")
