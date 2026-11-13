@@ -28,10 +28,11 @@ plugin implementing GCODE_READER. It uses only the generic orchestrator API:
 there is no special Reader callback supplied by the host.
 
     firmware session
-        `-- GCodeReaderService::read(reader id, initial state, source)
+        `-- GCodeReaderService::read(reader id, initial state, source[, observer])
               |-- find the active Reader through OrchestratorView
               |-- execute it with a temporary run_ctx_gcode_reader
               |-- lend chunks and validate every emitted event
+              |-- synchronously notify the optional observer after validation
               `-- copy and return the final state
 
 The orchestrator and optional Print are borrowed and must outlive this helper.
@@ -39,7 +40,15 @@ Every callback context and raw state is local to read(); the returned tracker
 owns its data. Calls through one helper are serialized because the generic
 plugin execution contract does not permit concurrent execution of one provider
 instance. Detection by file contents remains a host responsibility: this
-helper always executes one exact identifier.
+helper always executes one exact identifier. Each read owns its observer callable
+until execution ends; resources captured by reference remain the caller's
+responsibility. Events and their item arrays are borrowed only during the
+observer call and must be copied if retained. The service does not copy events.
+The observer runs under this helper's non-recursive mutex and must not reenter
+read() on the same helper. Its exceptions become Reader errors through the
+existing C callback boundary and may cancel the current plugin execution.
+Observation may already be partial on failure; discard accumulated data rather
+than treating it as a completed read. There is no rollback or automatic resume.
 */
 
 namespace slic3r_api {
@@ -49,6 +58,10 @@ inline constexpr const char *DEFAULT_GCODE_READER_PLUGIN_ID = "gcode.reader.defa
 // Return the next non-empty borrowed chunk, or an empty view for end-of-stream.
 // The bytes must remain valid until the source is called again.
 using GCodeReaderChunkSource = std::function<std::string_view()>;
+
+// Observe a validated event synchronously; copy borrowed items before returning
+// if they are needed later. The read owns the callable, not referenced captures.
+using GCodeReaderEventObserver = std::function<void(const raw_gcode_reader_event &)>;
 
 class GCodeReaderService
 {
@@ -78,10 +91,15 @@ public:
 
     // Consume a streaming source and return an owned copy of the final state.
     // A single helper serializes reads so its selected provider is never
-    // entered concurrently through this client.
+    // entered concurrently through this client. The optional observer receives
+    // borrowed events after validation, under the same non-recursive mutex;
+    // it must not reenter this helper. Exceptions become Reader errors through
+    // the C callback boundary and may cancel the current plugin execution.
+    // On failure no successful final state is returned; discard partial observations.
     GCodeStateTracker read(std::string_view reader_plugin_id,
                            const raw_gcode_reader_state &initial_state,
-                           GCodeReaderChunkSource source) const
+                           GCodeReaderChunkSource source,
+                           GCodeReaderEventObserver observer = {}) const
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
         const std::string id = validated_reader_id(reader_plugin_id);
@@ -90,7 +108,7 @@ public:
             throw std::runtime_error("G-code reader plugin '" + id +
                                      "' left the host activation set before execution.");
 
-        Invocation invocation(std::move(source), m_print, initial_state);
+        Invocation invocation(std::move(source), m_print, initial_state, std::move(observer));
         run_ctx_gcode_reader context = invocation.context();
         const raw_plugin_execution_status status =
             m_orchestrator.execute(plugin, m_print, context);
@@ -106,9 +124,14 @@ public:
 
     // Present a small in-memory fragment through the same pull protocol. Large
     // inputs should use the chunk-source overload to avoid retaining them.
+    // The forwarded observer has the same borrowed lifetime, non-reentrance and
+    // error rules as the streaming overload; copy retained items. Observer
+    // exceptions become Reader errors and may cancel plugin execution;
+    // discard partial observations on failure.
     GCodeStateTracker read(std::string_view reader_plugin_id,
                            const raw_gcode_reader_state &initial_state,
-                           std::string_view text) const
+                           std::string_view text,
+                           GCodeReaderEventObserver observer = {}) const
     {
         bool supplied = false;
         GCodeReaderChunkSource source = [text, &supplied]() mutable -> std::string_view {
@@ -117,7 +140,7 @@ public:
             supplied = true;
             return text;
         };
-        return read(reader_plugin_id, initial_state, std::move(source));
+        return read(reader_plugin_id, initial_state, std::move(source), std::move(observer));
     }
 
 private:
@@ -131,14 +154,18 @@ private:
 
     // Own every adapter used during one execution. The initial and event
     // trackers validate input and emitted deltas independently; only the copied
-    // final tracker is returned to the caller.
+    // final tracker is returned to the caller. The observer callable is owned
+    // here until read ends and receives borrowed events after validation.
     class Invocation
     {
     public:
+        // Own the source and observer and copy the initial state for validation.
+        // Referenced captures remain borrowed; an empty source is rejected.
         Invocation(GCodeReaderChunkSource source,
                    const print_handle *print,
-                   const raw_gcode_reader_state &initial_state)
-            : m_source(std::move(source)), m_print(print),
+                   const raw_gcode_reader_state &initial_state,
+                   GCodeReaderEventObserver observer)
+            : m_source(std::move(source)), m_observer(std::move(observer)), m_print(print),
               m_initial_state(initial_state), m_event_state(initial_state)
         {
             if (!m_source)
@@ -258,12 +285,17 @@ private:
             chunk.byte_count = static_cast<uint64_t>(m_active_chunk.size());
         }
 
+        // Validate and apply the borrowed delta before notifying the observer.
+        // Exceptions reach the noexcept C callback's error channel; no rollback
+        // undoes earlier observations and no event storage is retained here.
         void emit_event(const raw_gcode_reader_event &event)
         {
             if (m_final_state)
                 throw std::logic_error(
                     "The G-code reader emitted an event after its final state.");
             m_event_state.apply(event);
+            if (m_observer)
+                m_observer(event);
         }
 
         void emit_final_state(const raw_gcode_reader_state &state)
@@ -297,6 +329,7 @@ private:
         }
 
         GCodeReaderChunkSource m_source;
+        GCodeReaderEventObserver m_observer;
         const print_handle *m_print;
         GCodeStateTracker m_initial_state;
         GCodeStateTracker m_event_state;

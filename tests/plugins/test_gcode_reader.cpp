@@ -66,6 +66,19 @@ Representative direct calls (branches are not a timeline):
         |-- print.config()
         |-- config.nozzle_diameter.set()
         `-- execute_reader()
+
+The C++ client observer tests copy borrowed events before callbacks return,
+compare them with direct provider execution, and replay their deltas. RepRap
+fragments check that private state survives observation and continuation.
+An invalid-event provider bypasses provider-side validation to exercise the
+client's validation order. Error tests clear orchestrator messages and
+cancellation before and after execution so independent reads remain isolated.
+
+    observer tests
+        |-- execute_default_reader: capture the independent provider output
+        |-- GCodeReaderService::read: copy validated borrowed events
+        |-- check_reader_items: compare every owned scalar after execution
+        `-- ReaderErrorCleanup: clear shared error state even on assertion failure
 */
 
 
@@ -78,6 +91,40 @@ using slic3r_api::GCodeGeneration::Reader::RepRapGCodeReaderState;
 using slic3r_api::GCodeGeneration::Reader::RepRapToolState;
 
 const char *const k_no_dependencies[] = {nullptr};
+
+// Bypass publish() to send a malformed event directly to the client callback.
+class InvalidEventTestReader final : public slic3r_api::GCodeReaderPluginBase
+{
+public:
+    // Bind this test provider to the borrowed orchestrator.
+    explicit InvalidEventTestReader(orchestrator_handle *orchestrator);
+private:
+    // Return the unique service identifier used for explicit test execution.
+    const char *id_impl() const noexcept override;
+    // Return the displayed provider name.
+    const char *name_impl() const noexcept override;
+    // Describe the direct callback rejection exercised by this provider.
+    const char *description_impl() const noexcept override;
+    // Declare that this provider has no dependencies.
+    const char *const *dependencies_impl() const noexcept override;
+    // Use neutral priority because this provider is selected only by identifier.
+    int32_t priority_impl() const noexcept override;
+    // Opt out of content detection for every input.
+    uint32_t probe_impl(std::string_view) const override;
+    // Consume all chunks, then lend an event without LINE_NUMBER directly to
+    // the callback and ignore its result; normal return still sends final state.
+    void read_impl(const plugin_run_context &run_context,
+                   const run_ctx_gcode_reader &context,
+                   slic3r_api::GCodeStateTracker &) const override;
+};
+
+struct ReaderErrorCleanup
+{
+    // Clear earlier messages and cancellation before an independent error test.
+    ReaderErrorCleanup();
+    // Clear messages and cancellation on every exit, including failed assertions.
+    ~ReaderErrorCleanup();
+};
 
 class ProbeTestReader final : public slic3r_api::GCodeReaderPluginBase
 {
@@ -395,6 +442,69 @@ std::map<std::pair<uint32_t, uint32_t>, double> machine_items(
 // in one state and absent from the other is a failure.
 void check_same_machine_state(const slic3r_api::GCodeStateTracker &before,
                               const slic3r_api::GCodeStateTracker &after);
+
+// Compare all owned scalar items in order after callbacks have returned,
+// including provider-private keys; assertions never run on a provider thread.
+void check_reader_items(const raw_gcode_reader_event_item *actual, uint32_t actual_count,
+                        const raw_gcode_reader_event_item *expected, uint32_t expected_count);
+
+InvalidEventTestReader::InvalidEventTestReader(orchestrator_handle *orchestrator)
+    : GCodeReaderPluginBase(orchestrator)
+{}
+
+const char *InvalidEventTestReader::id_impl() const noexcept
+{ return "gcode.reader.test.invalid_event"; }
+
+const char *InvalidEventTestReader::name_impl() const noexcept
+{ return "Invalid event test Reader"; }
+
+const char *InvalidEventTestReader::description_impl() const noexcept
+{ return "Sends an event without its required line number."; }
+
+const char *const *InvalidEventTestReader::dependencies_impl() const noexcept
+{ return k_no_dependencies; }
+
+int32_t InvalidEventTestReader::priority_impl() const noexcept
+{ return 0; }
+
+uint32_t InvalidEventTestReader::probe_impl(std::string_view) const
+{ return 0u; }
+
+void InvalidEventTestReader::read_impl(const plugin_run_context &run_context,
+                                     const run_ctx_gcode_reader &context,
+                                     slic3r_api::GCodeStateTracker &) const
+{
+    std::string_view chunk;
+    while (next_chunk(run_context, context, chunk)) {}
+    const raw_gcode_reader_event_item item = {RAW_GCODE_READER_ITEM_X, 0, 7.0};
+    const raw_gcode_reader_event event = {RAW_GCODE_READER_EVENT_STATE_UPDATE, &item, 1};
+    raw_gcode_reader_result result = {};
+    context.emit_event(context.callback_context, &event, &result);
+}
+
+ReaderErrorCleanup::ReaderErrorCleanup()
+{
+    Orchestrator::instance().consume_plugin_messages();
+    Orchestrator::instance().reset_plugin_cancel();
+}
+
+ReaderErrorCleanup::~ReaderErrorCleanup()
+{
+    Orchestrator::instance().consume_plugin_messages();
+    Orchestrator::instance().reset_plugin_cancel();
+}
+
+void check_reader_items(const raw_gcode_reader_event_item *actual, uint32_t actual_count,
+                        const raw_gcode_reader_event_item *expected, uint32_t expected_count)
+{
+    REQUIRE(actual_count == expected_count);
+    for (uint32_t index = 0; index < actual_count; ++index) {
+        CAPTURE(index);
+        CHECK(actual[index].type == expected[index].type);
+        CHECK(actual[index].target == expected[index].target);
+        CHECK(actual[index].value == expected[index].value);
+    }
+}
 
 void supply_chunk(void *context,
                   raw_gcode_reader_chunk *chunk,
@@ -2297,6 +2407,172 @@ TEST_CASE("G-code reader C++ plugin helper executes the requested Reader synchro
 
     REQUIRE(state.x());
     CHECK(*state.x() == Approx(5.0));
+}
+
+TEST_CASE("C++ Reader observers match provider events and replay the final state",
+          "[plugins][gcode][reader][service][reader-observer]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    // End with an event-producing command and no final newline so replay also matches LINE_NUMBER.
+    const std::string text = "G1 X5 F600\nM9999\nG92 X1 Y2 Z3 E0\nG1 X9 E1";
+    ReaderProbe oracle;
+    oracle.chunks = {text};
+    REQUIRE(execute_default_reader(oracle, initial) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE_FALSE(oracle.observed.empty());
+    REQUIRE(oracle.final_state);
+    slic3r_api::GCodeReaderService service(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    ReaderProbe observed;
+    // Copy inside the borrowed lifetime; all Catch assertions run after read.
+    const slic3r_api::GCodeReaderEventObserver observer = [&observed](const raw_gcode_reader_event &event) {
+        raw_gcode_reader_result result = {};
+        collect_event(&observed, &event, &result);
+    };
+    std::optional<slic3r_api::GCodeStateTracker> final;
+    SECTION("in-memory overload") {
+        final.emplace(service.read("", initial, text, observer));
+    }
+    SECTION("stream overload splits a command across chunks") {
+        size_t next = 0;
+        const std::vector<std::string_view> chunks = {
+            std::string_view(text).substr(0, 4), std::string_view(text).substr(4, 13),
+            std::string_view(text).substr(17)
+        };
+        // The views stay valid throughout synchronous execution.
+        slic3r_api::GCodeReaderChunkSource source = [&chunks, &next]() -> std::string_view {
+            return next < chunks.size() ? chunks[next++] : std::string_view();
+        };
+        final.emplace(service.read("", initial, std::move(source), observer));
+        CHECK(next == chunks.size());
+    }
+    REQUIRE(final);
+    REQUIRE(observed.observed.size() == oracle.observed.size());
+    bool diagnostic_seen = false;
+    bool invalidation_seen = false;
+    slic3r_api::GCodeStateTracker replay(initial);
+    for (size_t index = 0; index < oracle.observed.size(); ++index) {
+        CAPTURE(index);
+        const ObservedEvent &actual = observed.observed[index];
+        const ObservedEvent &expected = oracle.observed[index];
+        CHECK(actual.kind == expected.kind);
+        CHECK(actual.line_number == expected.line_number);
+        check_reader_items(actual.items.data(), static_cast<uint32_t>(actual.items.size()),
+                           expected.items.data(), static_cast<uint32_t>(expected.items.size()));
+        diagnostic_seen |= actual.kind == RAW_GCODE_READER_EVENT_DIAGNOSTIC && actual.line_number == 1;
+        invalidation_seen |= actual.kind == RAW_GCODE_READER_EVENT_INVALIDATE && actual.line_number == 1;
+        const raw_gcode_reader_event event = {
+            actual.kind, actual.items.data(), static_cast<uint32_t>(actual.items.size())
+        };
+        replay.apply(event);
+    }
+    CHECK(diagnostic_seen);
+    CHECK(invalidation_seen);
+    check_reader_items(final->state().items, final->state().item_count,
+                       oracle.final_state->state().items, oracle.final_state->state().item_count);
+    check_reader_items(replay.state().items, replay.state().item_count,
+                       final->state().items, final->state().item_count);
+}
+
+TEST_CASE("C++ Reader observation preserves RepRap private state across fragments",
+          "[plugins][gcode][reader][service][reader-observer]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items, reprap_reader_state_id());
+    const std::vector<raw_gcode_reader_event_item> initial_copy = initial_items;
+    slic3r_api::GCodeReaderService service(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    const std::string first = "M572 D1 S0.03\nG1 X5\n";
+    const std::string second = "G1 X9 E1\n";
+    slic3r_api::GCodeStateTracker reference = service.read("gcode.reader.reprap", initial, first);
+    const std::optional<double> pressure = reference.value(
+        slic3r_api::GCodeGeneration::Reader::RRF_ITEM_PRESSURE_ADVANCE, 1);
+    REQUIRE(pressure);
+    CHECK(*pressure == Approx(0.03));
+    ReaderProbe observed;
+    slic3r_api::GCodeReaderEventObserver observer;
+    bool passive = false;
+    bool absent = false;
+    SECTION("observer absent") { absent = true; }
+    SECTION("observer explicitly empty") {}
+    SECTION("passive observer copies borrowed items") {
+        passive = true;
+        observer = [&observed](const raw_gcode_reader_event &event) {
+            raw_gcode_reader_result result = {};
+            collect_event(&observed, &event, &result);
+        };
+    }
+    slic3r_api::GCodeStateTracker actual = absent ?
+        service.read("gcode.reader.reprap", initial, first) :
+        service.read("gcode.reader.reprap", initial, first, observer);
+    check_reader_items(actual.state().items, actual.state().item_count,
+                       reference.state().items, reference.state().item_count);
+    check_reader_items(initial.items, initial.item_count, initial_copy.data(),
+                       static_cast<uint32_t>(initial_copy.size()));
+    if (passive)
+        CHECK_FALSE(observed.observed.empty());
+    // Each fragment uses its own zero-based source lines, retaining all other keys.
+    reference.set_line_number(0);
+    actual.set_line_number(0);
+    const slic3r_api::GCodeStateTracker expected_final = service.read(
+        "gcode.reader.reprap", reference.state(), second);
+    const slic3r_api::GCodeStateTracker actual_final = absent ?
+        service.read("gcode.reader.reprap", actual.state(), second) :
+        service.read("gcode.reader.reprap", actual.state(), second, observer);
+    check_reader_items(actual_final.state().items, actual_final.state().item_count,
+                       expected_final.state().items, expected_final.state().item_count);
+    CHECK(actual_final.value(slic3r_api::GCodeGeneration::Reader::RRF_ITEM_PRESSURE_ADVANCE, 1) == pressure);
+}
+
+TEST_CASE("C++ Reader observer exceptions become Reader errors and permit a clean later read",
+          "[plugins][gcode][reader][service][reader-observer]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    slic3r_api::GCodeReaderService service(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    ReaderProbe partial;
+    {
+        const ReaderErrorCleanup cleanup;
+        // Throw only after copying the first event; no assertion crosses the C boundary.
+        const slic3r_api::GCodeReaderEventObserver observer = [&partial](const raw_gcode_reader_event &event) {
+            raw_gcode_reader_result result = {};
+            collect_event(&partial, &event, &result);
+            throw std::runtime_error("Deliberate Reader observer failure.");
+        };
+        CHECK_THROWS_WITH(service.read("", initial, "G1 X5\nG1 X9\n", observer),
+                          "Deliberate Reader observer failure.");
+        CHECK(partial.observed.size() == 1);
+    }
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+    const slic3r_api::GCodeStateTracker recovered = service.read("", initial, "G1 X7\n");
+    CHECK(recovered.x() == 7.0);
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+}
+
+TEST_CASE("C++ Reader rejects invalid events before observer notification",
+          "[plugins][gcode][reader][service][reader-observer]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    size_t observer_calls = 0;
+    {
+        const ReaderErrorCleanup cleanup;
+        slic3r_api::GCodeReaderService service(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+        // Count only; a malformed event must never reach this observer.
+        const slic3r_api::GCodeReaderEventObserver observer = [&observer_calls](const raw_gcode_reader_event &) {
+            ++observer_calls;
+        };
+        CHECK_THROWS_WITH(service.read("gcode.reader.test.invalid_event", initial, "G1 X5\n", observer),
+                          "A G-code reader event has no line number.");
+        CHECK(observer_calls == 0);
+    }
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
 }
 
 TEST_CASE("Host G-code reader builds viewer movements and derived statistics",
@@ -4340,6 +4616,10 @@ TEST_CASE("G-code reader checks cancellation within one borrowed chunk",
 
 namespace Slic3r::Test::Plugins {
 
+// Register persistent test providers with the borrowed orchestrator and activate
+// the direct invalid-event sender, which never participates in content detection.
+void register_gcode_reader_test_providers(orchestrator_handle *orchestrator);
+
 void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
 {
     static ProbeTestReader lexical_first(orchestrator, "gcode.reader.test.a", 10, false);
@@ -4351,6 +4631,7 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     static RepRapHandlerOverrideReader reprap_handlers(orchestrator);
     static MarlinHandlerOverrideReader marlin_handlers(orchestrator);
     static KlipperHandlerOverrideReader klipper_handlers(orchestrator);
+    static InvalidEventTestReader invalid_event(orchestrator);
     // Register lexical_second first so the tie-break test also proves that
     // discovery order cannot change the selected id.
     orchestrator_register_plugin(orchestrator, lexical_second.c_instance());
@@ -4362,6 +4643,9 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, reprap_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, marlin_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, klipper_handlers.c_instance());
+    orchestrator_register_plugin(orchestrator, invalid_event.c_instance());
+    reinterpret_cast<Orchestrator *>(orchestrator)->set_plugin_active(
+        "gcode.reader.test.invalid_event", true);
 }
 
 } // namespace Slic3r::Test::Plugins
