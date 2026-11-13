@@ -1,6 +1,7 @@
 ///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #include <catch2/catch.hpp>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -25,6 +26,10 @@ The Print owns the source regions and plan throughout export and inspection.
 Multiple extrusion entries for one island are collapsed within one plan layer, so a repeated
 layer in another group still fails the coverage check. Emitted Z markers must
 match every plan layer in order before island scheduling is checked.
+Two-copy checks reconstruct each instance independently; height-limit checks also
+require a shared final group in increasing Z and no upper layers in island stacks.
+Stack groups advance through the copies in order, so no copy leads by more than
+one stack before the shared by-layer tail.
 
     TEST_CASE: select clearance shape and expected scheduling
     `-- check_scene: build boxes, process and export with the production host
@@ -46,11 +51,12 @@ enum class Expect { Alternate, Invariants, LayerByLayer };
 // Shape 0 uses the default graph, 1 is wide and 2 is flat. Close places tower
 // centers 6 mm apart rather than 40 mm. Every expectation checks all invariants;
 // Alternate also checks stack run lengths, and LayerByLayer checks ascending global Z.
-void check_scene(const std::string &name, int shape, double step, bool close, Expect expectation);
+void check_scene(const std::string &name, int shape, double step, bool close, Expect expectation,
+                 uint32_t copies = 1, double max_z = 0.);
 
 // Require the alternating stack sizes for a nozzle that clears the distant towers.
 TEST_CASE("Parallel islands alternate with intermediate nozzle clearance",
-          "[plugins][printing-plan][parallel-islands][!shouldfail]")
+          "[plugins][printing-plan][parallel-islands]")
 {
     check_scene("intermediate", 0, 1., false, Expect::Alternate);
 }
@@ -72,12 +78,21 @@ TEST_CASE("Parallel islands remain grouped without nozzle clearance",
     SECTION("nearby towers") { check_scene("close", 0, 1., true, Expect::LayerByLayer); }
 }
 
-void check_scene(const std::string &name, int shape, double step, bool close, Expect expectation)
+// Each physical copy must retain complete source coverage, including the by-layer tail.
+TEST_CASE("Island stacks print every instance and retain layers above the height limit",
+          "[plugins][printing-plan][parallel-islands]")
+{
+    for (const double limit : {0., 0.1, 0.8, 1.5, 10.})
+        check_scene("copies-limit", 0, 1., false, Expect::Invariants, 2, limit);
+}
+
+void check_scene(const std::string &name, int shape, double step, bool close, Expect expectation,
+                 uint32_t copies, double max_z)
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{whole_objects_key, "ordering.plan_builder.by_object"}, {step_key, std::to_string(step)},
-        {limit_key, "0"}, {islands_key, "1"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {limit_key, std::to_string(max_z)}, {islands_key, "1"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"seam_visibility", "0"}, {"skirts", "0"}, {"brim_width", "0"}, {"perimeters", "1"},
         {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
         {"start_gcode", ""}, {"end_gcode", ""}, {"binary_gcode", "0"}});
@@ -97,6 +112,11 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
     Model model;
     Print print;
     Test::init_print({mesh}, print, model, config);
+    if (copies == 2) {
+        model.objects().front().instances.front()->set_offset(Vec3d(30., 30., 0.));
+        model.objects().front().add_instance(*model.objects().front().instances.front())->set_offset(Vec3d(110., 30., 0.));
+        print.apply(model, config);
+    }
     print.set_status_silent();
     print.process();
     Test::GCode::select_printing_plan_firmware(print);
@@ -128,54 +148,90 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
     std::string line;
     while (std::getline(lines, line))
         if (line.rfind(";Z:", 0) == 0) markers.push_back(std::stod(line.substr(3)));
-    std::vector<std::pair<int, int>> visits;
+    std::vector<std::vector<std::pair<int, int>>> visits_by_instance(copies);
     size_t marker = 0;
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers) {
             REQUIRE(marker < markers.size());
             const double marker_z = markers.at(marker++);
             CHECK(marker_z == Approx(unscaled(layer.print_z)).margin(0.00001));
-            std::set<int> seen;
+            std::set<std::pair<uint32_t, int>> seen;
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
                 for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
                     if (extrusion.region_island == nullptr) continue;
                     REQUIRE(identities.count(extrusion.region_island) == 1);
                     const std::pair<int, int> source = identities.at(extrusion.region_island);
                     CHECK(source.first * 0.2 == Approx(unscaled(layer.print_z)).margin(0.00001));
-                    if (seen.insert(source.second).second) visits.push_back(source);
+                    REQUIRE(extrusion.printing_catalog_id < print.printing_plan()->object_instances.size());
+                    const uint32_t instance = print.printing_plan()->object_instances[extrusion.printing_catalog_id].object_instance_idx;
+                    REQUIRE(instance < copies);
+                    if (seen.insert({instance, source.second}).second) visits_by_instance[instance].push_back(source);
                 }
         }
     CHECK(marker == markers.size());
-    std::set<std::pair<int, int>> actual;
-    std::array<int, 3> highest{{0, 0, 0}};
-    std::vector<int> runs;
-    int previous_id = 0;
-    int previous_z = 0;
-    int first_tower = 0;
-    for (const std::pair<int, int> &visit : visits) {
-        const int z = visit.first, id = visit.second;
-        CAPTURE(name, z, id);
-        CHECK(actual.insert(visit).second);
-        CHECK(z > highest[id]);
-        if (id != 0) {
-            if (first_tower == 0) first_tower = id;
-            CHECK(highest[0] == 5);
-            CHECK(highest[3 - id] * 0.2 <= z * 0.2 + step + 0.00001);
-            if (runs.empty() || previous_id != id) runs.push_back(0);
-            ++runs.back();
-        }
-        if (expectation == Expect::LayerByLayer) CHECK(z >= previous_z);
-        highest[id] = z;
-        previous_id = id;
-        previous_z = z;
+    // Skip first-pass groups and the shared tail when checking stack-major progress.
+    std::vector<size_t> completed_stacks(copies, 0);
+    size_t next_instance = 0;
+    for (size_t idx = copies; idx < print.printing_plan()->groups.size(); ++idx) {
+        const Printing::PrintingGroup &group = print.printing_plan()->groups[idx];
+        if (max_z > 0. && max_z <= 5. && idx + 1 == print.printing_plan()->groups.size())
+            break;
+        REQUIRE(group.printing_catalog_ids.size() == 1);
+        const uint32_t instance = print.printing_plan()->object_instances[group.printing_catalog_ids.front()].object_instance_idx;
+        REQUIRE(instance < copies);
+        CHECK(instance == next_instance);
+        next_instance = (next_instance + 1) % copies;
+        ++completed_stacks[instance];
+        const std::pair<std::vector<size_t>::const_iterator, std::vector<size_t>::const_iterator> bounds =
+            std::minmax_element(completed_stacks.cbegin(), completed_stacks.cend());
+        CHECK(*bounds.second - *bounds.first <= 1);
     }
-    CHECK(actual == expected);
-    if (expectation == Expect::Alternate) {
-        INFO("Intermediate clearance must build alternating stacks, not a layer-by-layer plan");
-        REQUIRE(runs.size() == 5);
-        const std::vector<int> expected_runs = first_tower == 1 ?
-            std::vector<int>{6, 12, 12, 7, 2} : std::vector<int>{6, 12, 12, 8, 1};
-        CHECK(runs == expected_runs);
+    CHECK(next_instance == 0);
+    if (max_z > 0. && max_z <= 5.) {
+        const Printing::PrintingGroup &tail = print.printing_plan()->groups.back();
+        REQUIRE(tail.printing_catalog_ids.size() == copies);
+        coord_t previous = 0;
+        for (const Printing::PrintingLayerGroup &layer : tail.layers) {
+            CHECK(unscaled(layer.print_z) >= max_z - 0.00001);
+            CHECK(layer.print_z > previous);
+            previous = layer.print_z;
+        }
+        for (size_t idx = copies; idx + 1 < print.printing_plan()->groups.size(); ++idx)
+            for (const Printing::PrintingLayerGroup &layer : print.printing_plan()->groups[idx].layers)
+                CHECK(unscaled(layer.print_z) < max_z);
+    }
+    for (const std::vector<std::pair<int, int>> &visits : visits_by_instance) {
+        std::set<std::pair<int, int>> actual;
+        std::array<int, 3> highest{{0, 0, 0}};
+        std::vector<int> runs;
+        int previous_id = 0;
+        int previous_z = 0;
+        int first_tower = 0;
+        for (const std::pair<int, int> &visit : visits) {
+            const int z = visit.first, id = visit.second;
+            CAPTURE(name, z, id);
+            CHECK(actual.insert(visit).second);
+            CHECK(z > highest[id]);
+            if (id != 0) {
+                if (first_tower == 0) first_tower = id;
+                CHECK(highest[0] == 5);
+                CHECK(highest[3 - id] * 0.2 <= z * 0.2 + step + 0.00001);
+                if (runs.empty() || previous_id != id) runs.push_back(0);
+                ++runs.back();
+            }
+            if (expectation == Expect::LayerByLayer) CHECK(z >= previous_z);
+            highest[id] = z;
+            previous_id = id;
+            previous_z = z;
+        }
+        CHECK(actual == expected);
+        if (expectation == Expect::Alternate) {
+            INFO("Intermediate clearance must build alternating stacks, not a layer-by-layer plan");
+            REQUIRE(runs.size() == 5);
+            const std::vector<int> expected_runs = first_tower == 1 ?
+                std::vector<int>{6, 12, 12, 7, 2} : std::vector<int>{6, 12, 12, 8, 1};
+            CHECK(runs == expected_runs);
+        }
     }
 }
 }

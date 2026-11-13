@@ -2770,6 +2770,8 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
 
 // Export small STL copies while varying every object-builder setting independently,
 // then compare its groups, layers and extrusion sources with the native builder.
+// Island schedules instead compare all source roles and translated clones across
+// groups, since the native builder does not implement stack scheduling.
 TEST_CASE("By object builder preserves source plans through the STL export catalogue", "[plugins][printing-plan][print-sequence][plugin-e2e]")
 {
     using namespace Slic3r;
@@ -2784,6 +2786,10 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
         {"complete_objects_one_skirt", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"},
         {"fill_density", "0%"}, {"support_material", "0"}, {"support_material_enforce_layers", "0"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const ConfigOptionGraphs flat_clearance({GraphData(0, 2, GraphData::GraphType::LINEAR,
+        {{0., 0.}, {2., 0.1}})});
+    const ConfigOptionGraphs wide_clearance({GraphData(0, 3, GraphData::GraphType::LINEAR,
+        {{0., 0.}, {50., 0.1}, {51., 1.9}})});
     const std::vector<E2E::Domain> domains = {
         E2E::enum_domain("complete_objects_sort"),
         {{"complete_objects_step", "extruder_clearance_height", "complete_objects_step_max_z", "skirts", "skirt_height", "complete_objects_one_skirt"}, {
@@ -2794,7 +2800,12 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
             {"height-limit-above", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "100"}}},
             {"height-limit-local-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}}},
             {"height-limit-global-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}, {"complete_objects_one_skirt", "1"}}}}},
-        {{"complete_islands"}, {{"separate-islands", {{"complete_islands", "1"}}}}}
+        {{"complete_islands", "complete_objects_step", "complete_objects_step_max_z", "extruder_clearance"}, {
+            {"separate-islands", {{"complete_islands", "1"}}},
+            {"island-stacks", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}}},
+            {"island-limit", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"complete_objects_step_max_z", "0.6"}}},
+            {"flat-clearance", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance", flat_clearance.serialize()}}},
+            {"wide-clearance", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance", wide_clearance.serialize()}}}}}
     };
     TriangleMesh mesh = E2E::stl_fixture(false);
     mesh.scale(2.);
@@ -2833,7 +2844,54 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
                 ++extruding_moves;
         });
         CHECK(extruding_moves > 0);
-        check_sequence_builder(print, true);
+        if (config.opt_bool("complete_islands") && config.opt_float("complete_objects_step") > 0.) {
+            // Stack boundaries differ from whole-object groups, but every source
+            // role must still have one clone at its own instance's translation.
+            const Printing::PrintingPlan expected = Printing::build_printing_plan_by_object(print);
+            using Key = std::tuple<const LayerRegionIsland *, ExtrusionRole, size_t>;
+            std::map<Key, const Printing::PrintingExtrusion *> sources;
+            for (const Printing::PrintingGroup &group : expected.groups)
+                for (const Printing::PrintingLayerGroup &layer : group.layers)
+                    for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                        for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                            REQUIRE(extrusion.printing_catalog_id < expected.object_instances.size());
+                            const size_t instance = expected.object_instances[extrusion.printing_catalog_id].object_instance_idx;
+                            REQUIRE(sources.emplace(Key{extrusion.region_island, extrusion.sregion_island_role, instance}, &extrusion).second);
+                        }
+            REQUIRE_FALSE(sources.empty());
+            Plugin *builder = host.get_plugin("ordering.plan_builder.by_object");
+            REQUIRE(builder != nullptr);
+            run_ctx_extrusion_ordering payload = {};
+            payload.print = reinterpret_cast<const print_handle *>(&print);
+            payload.plan = reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan());
+            plugin_host_context context = host.prepare_plugin_host_context(STEP_ORDERING, builder, &print);
+            plugin_run_context run = host.prepare_plugin_run_context(STEP_ORDERING, builder, &context);
+            run.data = &payload;
+            builder->setup(run, 1);
+            builder->setup_run(run);
+            builder->run(run);
+            REQUIRE(print.printing_plan() != nullptr);
+            const Printing::PrintingPlan &actual = *print.printing_plan();
+            std::set<Key> visits;
+            for (const Printing::PrintingGroup &group : actual.groups)
+                for (const Printing::PrintingLayerGroup &layer : group.layers)
+                    for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                        for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                            REQUIRE(extrusion.printing_catalog_id < actual.object_instances.size());
+                            const size_t instance = actual.object_instances[extrusion.printing_catalog_id].object_instance_idx;
+                            const Key key{extrusion.region_island, extrusion.sregion_island_role, instance};
+                            REQUIRE(sources.count(key) == 1);
+                            CHECK(visits.insert(key).second);
+                            REQUIRE(extrusion.root != nullptr);
+                            const ExtrusionEntity &source = *sources.at(key)->root;
+                            CHECK(extrusion.root->total_volume() == Approx(source.total_volume()));
+                            CHECK(extrusion.root->first_point() == source.first_point());
+                            CHECK(extrusion.root->last_point() == source.last_point());
+                        }
+            CHECK(visits.size() == sources.size());
+        } else {
+            check_sequence_builder(print, true);
+        }
         if (config.opt_float("complete_objects_step") > 0. && config.opt_float("complete_objects_step_max_z") == 0.6) {
             REQUIRE(print.object(0).layer_count() > 1);
             CHECK(print.object(0).layer(0).scaled_print_z() < scale_to_layer_coord(0.6));

@@ -40,6 +40,7 @@
 #include "libslic3r/PointUtils.hpp"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/Plugins/Ordering/PlanBuilderCommon.hpp"
+#include "libslic3r/Plugins/Ordering/IslandStacks.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Printing/PrintingPlanValidation.hpp"
@@ -61,6 +62,14 @@ Native-reader probes preserve warmed child-pointer views and stable identities
 through ordering, and compare extents using inherited widths across siblings.
 Common-builder probes select source islands and half-open Z intervals, then check
 the cloned roots and source context for the selected object instance.
+Island-stack probes construct ordered source islands directly to exercise bridge
+merges, tool compatibility, lower links and empty extrusion selections.
+
+    Island-stack tests -> build synthetic layers and clearance graphs
+        add_stack_test_extrusion() -> give selected islands printable tool buckets
+        IslandStacks::separate_islands() -> inspect borrowed stack membership
+    Owned-auxiliary test -> compare baseline stacks and owner-only cloned paths
+        run_builder() -> invoke the By object provider without later orderers
 */
 namespace {
 using namespace Slic3r;
@@ -2613,6 +2622,300 @@ TEST_CASE("Common plan builder filters layer extrusions for one instance",
     }
     for (const LayerRegionIsland *region : source_regions)
         CHECK_FALSE(region->extrusion(LayerRegionIsland::PERIMETERS).empty());
+}
+
+// Own a synthetic layer whose islands retain the supplied order for stack tests.
+struct IslandStackTestLayer : Layer
+{
+    // Own the supplied polygons as islands at Z, without slicing or region settings.
+    IslandStackTestLayer(double z, const ExPolygons &slices)
+        : Layer(1, nullptr, scale_to_layer_coord(0.2), scale_to_layer_coord(z), z - 0.1, true)
+    {
+        for (const ExPolygon &slice : slices)
+            m_islands.emplace_back(new LayerSliceIsland(slice));
+    }
+};
+
+// Add one printable tool bucket to a synthetic island; its layer owns the path.
+void add_stack_test_extrusion(LayerSliceIsland &island, extruder_index_t tool);
+
+// Compare stack membership rather than extrusion count: one island may have several roles.
+TEST_CASE("Island stacks group clearance bridges and preserve tool compatibility",
+          "[plugins][printing-plan][parallel-islands][island-stacks]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    IslandStackTestLayer layer(1., {rectangle_expolygon(0., 0., 1., 1.),
+        rectangle_expolygon(8., 0., 9., 1.), rectangle_expolygon(4., 0., 5., 1.)});
+    IslandStackTestLayer support(1., {rectangle_expolygon(4., 0., 5., 1.)});
+    bool different_tools = false, low_graph = false, empty_bridge = false, support_bridge = false;
+    SECTION("A third island merges two clearance groups") {}
+    SECTION("Different tools cannot merge") { different_tools = true; }
+    SECTION("A graph below the step keeps all islands grouped") { low_graph = true; }
+    SECTION("An island without extrusions is ignored") { empty_bridge = true; }
+    SECTION("Support islands take part in the same clearance grouping") { support_bridge = true; }
+    add_stack_test_extrusion(layer.island(0), 0);
+    add_stack_test_extrusion(layer.island(1), different_tools ? 1 : 0);
+    if (!empty_bridge && !support_bridge)
+        add_stack_test_extrusion(layer.island(2), 0);
+    if (support_bridge)
+        add_stack_test_extrusion(support.island(0), 0);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const GraphData graph(0, 2, GraphData::GraphType::LINEAR,
+        {{0., 0.}, {3.5, low_graph ? 0.1 : 0.4}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({graph, graph}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{
+        view.get("extruder_clearance").graph(0).value(), view.get("extruder_clearance").graph(1).value()};
+    PluginStorage storage;
+    ObjectLayerToPrint input;
+    input.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&layer));
+    if (support_bridge)
+        input.auxiliary_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&support));
+    const std::vector<ObjectsLayerToPrint> stacks = separate_islands({input}, 0,
+        scale_to_layer_coord(0.4), graphs, EXTRUDER_ID_UNKNOWN,
+        reinterpret_cast<storage_handle *>(&storage));
+    REQUIRE(stacks.size() == ((different_tools || empty_bridge) ? 2 : 1));
+    size_t selected = 0;
+    for (const ObjectsLayerToPrint &stack : stacks) {
+        REQUIRE(stack.size() == 1);
+        selected += stack.front().islands.size();
+    }
+    CHECK(selected == (empty_bridge ? 2 : 3));
+    if (support_bridge)
+        CHECK(stacks.front().front().auxiliary_layer.handle() == input.auxiliary_layer.handle());
+}
+
+// Lower links join stacks across layers; a multi-tool stack cannot be extended.
+TEST_CASE("Island stacks follow lower islands and close multi-tool stacks",
+          "[plugins][printing-plan][parallel-islands][island-stacks]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    IslandStackTestLayer lower(1., {rectangle_expolygon(0., 0., 1., 1.), rectangle_expolygon(8., 0., 9., 1.)});
+    IslandStackTestLayer upper(1.2, {rectangle_expolygon(0., 0., 9., 1.)});
+    bool multiple = false;
+    SECTION("Bridge island follows both lower stacks") {}
+    SECTION("Multi-tool lower island is closed") { multiple = true; }
+    add_stack_test_extrusion(lower.island(0), 0);
+    add_stack_test_extrusion(lower.island(1), 0);
+    add_stack_test_extrusion(upper.island(0), 0);
+    if (multiple)
+        add_stack_test_extrusion(lower.island(0), 1);
+    upper.island(0).overlaps_below = {{&lower.island(0), 1.f}, {&lower.island(1), 1.f}};
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const GraphData graph(0, 2, GraphData::GraphType::LINEAR, {{0., 0.}, {1., 0.4}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({graph, graph}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{
+        view.get("extruder_clearance").graph(0).value(), view.get("extruder_clearance").graph(1).value()};
+    PluginStorage storage;
+    ObjectLayerToPrint low, high;
+    low.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&lower));
+    high.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&upper));
+    const std::vector<ObjectsLayerToPrint> stacks = separate_islands({low, high}, 0,
+        scale_to_layer_coord(0.4), graphs, EXTRUDER_ID_UNKNOWN,
+        reinterpret_cast<storage_handle *>(&storage));
+    REQUIRE(stacks.size() == 2);
+    if (multiple) {
+        CHECK(stacks.front().size() == 1);
+        CHECK(stacks.front().front().allow_wipe_tower);
+    }
+    CHECK(stacks.back().size() == 2);
+    CHECK(stacks.back().back().islands.count(reinterpret_cast<const layer_island_handle *>(&upper.island(0))) == 1);
+}
+
+// The MMU exit tool must precede the current tool when all its tools are lower.
+TEST_CASE("Island stacks choose the previous MMU exit tool below the current tool",
+          "[plugins][printing-plan][parallel-islands][island-stacks]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    IslandStackTestLayer lower(1., {rectangle_expolygon(0., 0., 1., 1.)});
+    IslandStackTestLayer upper(1.2, {rectangle_expolygon(0., 0., 1., 1.)});
+    add_stack_test_extrusion(lower.island(0), 2);
+    add_stack_test_extrusion(upper.island(0), 0);
+    add_stack_test_extrusion(upper.island(0), 1);
+    upper.island(0).overlaps_below = {{&lower.island(0), 1.f}};
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const GraphData graph(0, 2, GraphData::GraphType::LINEAR, {{0., 0.}, {1., 0.4}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({graph, graph, graph}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{view.get("extruder_clearance").graph(0).value(),
+        view.get("extruder_clearance").graph(1).value(), view.get("extruder_clearance").graph(2).value()};
+    PluginStorage storage;
+    ObjectLayerToPrint low, high;
+    low.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&lower));
+    high.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&upper));
+    const std::vector<ObjectsLayerToPrint> stacks = separate_islands({low, high}, 0,
+        scale_to_layer_coord(0.4), graphs, EXTRUDER_ID_UNKNOWN,
+        reinterpret_cast<storage_handle *>(&storage));
+    REQUIRE(stacks.size() == 2);
+    REQUIRE(stacks[0].size() == 1);
+    REQUIRE(stacks[1].size() == 1);
+    CHECK(stacks[0][0].islands == std::set<const layer_island_handle *>{
+        reinterpret_cast<const layer_island_handle *>(&lower.island(0))});
+    CHECK(stacks[1][0].islands == std::set<const layer_island_handle *>{
+        reinterpret_cast<const layer_island_handle *>(&upper.island(0))});
+    REQUIRE_FALSE(stacks[0][0].extruders_order.empty());
+    CHECK(stacks[0][0].extruders_order.back() == 2);
+    CHECK((stacks[1][0].extruders_order == std::vector<extruder_index_t>{2, 0, 1}));
+}
+
+// Every island appended to an already-closed MMU stack is finished before parent lookup.
+TEST_CASE("Island stacks remove later MMU islands from pending parents",
+          "[plugins][printing-plan][parallel-islands][island-stacks]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    IslandStackTestLayer lower(1., {rectangle_expolygon(0., 0., 2., 2.), rectangle_expolygon(20., 0., 21., 1.)});
+    IslandStackTestLayer upper(1.2, {rectangle_expolygon(20., 0., 21., 1.)});
+    for (size_t idx = 0; idx < 2; ++idx) {
+        add_stack_test_extrusion(lower.island(idx), 0);
+        add_stack_test_extrusion(lower.island(idx), 1);
+    }
+    add_stack_test_extrusion(upper.island(0), 0);
+    upper.island(0).overlaps_below = {{&lower.island(1), 1.f}};
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const GraphData graph(0, 2, GraphData::GraphType::LINEAR, {{0., 0.}, {1., 0.4}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({graph, graph}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{
+        view.get("extruder_clearance").graph(0).value(), view.get("extruder_clearance").graph(1).value()};
+    PluginStorage storage;
+    ObjectLayerToPrint low, high;
+    low.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&lower));
+    high.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&upper));
+    const std::vector<ObjectsLayerToPrint> stacks = separate_islands({low, high}, 0,
+        scale_to_layer_coord(0.4), graphs, EXTRUDER_ID_UNKNOWN,
+        reinterpret_cast<storage_handle *>(&storage));
+    REQUIRE(stacks.size() == 2);
+    REQUIRE(stacks.front().size() == 2);
+    REQUIRE(stacks.back().size() == 1);
+    std::map<const layer_island_handle *, size_t> visits;
+    for (const ObjectsLayerToPrint &stack : stacks)
+        for (const ObjectLayerToPrint &selection : stack)
+            for (const layer_island_handle *island : selection.islands)
+                ++visits[island];
+    CHECK(visits.size() == 3);
+    CHECK(visits[reinterpret_cast<const layer_island_handle *>(&lower.island(0))] == 1);
+    CHECK(visits[reinterpret_cast<const layer_island_handle *>(&lower.island(1))] == 1);
+    CHECK(visits[reinterpret_cast<const layer_island_handle *>(&upper.island(0))] == 1);
+}
+
+void add_stack_test_extrusion(LayerSliceIsland &island, extruder_index_t tool)
+{
+    LayerRegionIsland &region = island.add_region_island({}, tool);
+    region.mutable_extrusion(LayerRegionIsland::PERIMETERS).append(
+        test_path({Point(0, 0), Point(scale_i(1.), 0)}));
+}
+
+// Owned auxiliaries must not change shared stacks or leak to the other copy.
+// Baseline ranges supply an independent expected destination in print order.
+// A limit between the first two object layers leaves only first-pass destinations.
+TEST_CASE("Island stacks place owned auxiliaries by range for their instance only",
+          "[plugins][printing-plan][parallel-islands][island-stacks]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::pair<double, double> cases[] = {{0.3, 0.}, {0.8, 0.}, {1.6, 0.}, {0.25, 0.3}};
+    for (const std::pair<double, double> &test : cases) {
+        const double z = test.first, limit = test.second;
+        CAPTURE(z, limit);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"complete_objects_step", "0.5"}, {"complete_islands", "1"}, {"layer_height", "0.2"},
+            {"complete_objects_step_max_z", std::to_string(limit)},
+            {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
+        Model model;
+        Print print;
+        TriangleMesh mesh = make_cube(3., 3., 1.2);
+        TriangleMesh second = make_cube(3., 3., 1.2);
+        second.translate(Vec3f(20.f, 0.f, 0.f));
+        mesh.merge(second);
+        Test::init_print({mesh}, print, model, config);
+        model.objects().front().instances.front()->set_offset(Vec3d(30., 30., 0.));
+        model.objects().front().add_instance(*model.objects().front().instances.front())->set_offset(Vec3d(100., 30., 0.));
+        print.apply(model, config);
+        print.process();
+        Orchestrator &host = Orchestrator::instance();
+        Plugin *plugin = host.get_plugin("ordering.plan_builder.by_object");
+        REQUIRE(plugin != nullptr);
+        // Invoke just the builder so later ordering stages cannot hide its placement.
+        const auto run_builder = [&]() {
+            run_ctx_extrusion_ordering payload = {};
+            payload.print = reinterpret_cast<const print_handle *>(&print);
+            payload.plan = reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan());
+            plugin_host_context context = host.prepare_plugin_host_context(STEP_ORDERING, plugin, &print);
+            plugin_run_context run = host.prepare_plugin_run_context(STEP_ORDERING, plugin, &context);
+            run.data = &payload;
+            plugin->setup(run, 1);
+            plugin->setup_run(run);
+            plugin->run(run);
+        };
+        run_builder();
+        const PrintingPlan &baseline = *print.printing_plan();
+        const size_t group_count = baseline.groups.size();
+        if (limit == 0.)
+            REQUIRE(group_count > 4);
+        else
+            REQUIRE(group_count == 3);
+        std::vector<size_t> owner_groups;
+        for (size_t idx = 2; idx < group_count; ++idx)
+            if (baseline.object_instances[baseline.groups[idx].printing_catalog_ids.front()].object_instance_idx == 1)
+                owner_groups.push_back(idx);
+        if (limit == 0.)
+            REQUIRE(owner_groups.size() > 1);
+        else
+            REQUIRE(owner_groups.empty());
+        size_t expected_group = owner_groups.empty() ? 1 : owner_groups.back();
+        const coord_t owned_z = scale_to_layer_coord(z);
+        bool contains = false;
+        for (const size_t idx : owner_groups) {
+            const PrintingGroup &group = baseline.groups[idx];
+            if (owned_z >= group.layers.front().print_z &&
+                owned_z <= group.layers.back().print_z) {
+                expected_group = idx;
+                contains = true;
+                break;
+            }
+        }
+        if (!contains)
+            for (const size_t idx : owner_groups)
+                if (baseline.groups[idx].layers.front().print_z > owned_z) {
+                    expected_group = idx;
+                    break;
+                }
+        PluginStorage storage;
+        const ExPolygons subject{rectangle_expolygon(0., 0., 1., 1.)};
+        const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+            reinterpret_cast<storage_handle *>(&storage), print_view(print), print_view(print).object(0),
+            expolygons_view(subject), scale_i(0.2), owned_z, scale_i(z - 0.1));
+        REQUIRE(built.created);
+        built.layer.mutable_properties().get_or_add(slic3r_api::LayerInstanceProperty::key).object_instance_idx = 1;
+        const slic3r_api::LayerRegionIsland region = built.layer.island(0).get_or_create_full_region_island(0);
+        extrusion_entity_handle *root_handle = layer_region_island_get_mutable_extrusion(
+            const_cast<layer_region_island_handle *>(region.handle()), RAW_EXTRUSION_ROLE_PERIMETER);
+        REQUIRE(root_handle != nullptr);
+        reinterpret_cast<ExtrusionEntityCollection *>(root_handle)->append(test_path({Point(0, 0), Point(scale_i(1.), 0)}));
+        run_builder();
+        const PrintingPlan &actual = *print.printing_plan();
+        REQUIRE(actual.groups.size() == group_count);
+        size_t visits = 0;
+        for (size_t idx = 0; idx < actual.groups.size(); ++idx)
+            for (const PrintingLayerGroup &layer : actual.groups[idx].layers)
+                for (const PrintingToolGroup &tool : layer.tool_groups)
+                    for (const PrintingExtrusion &extrusion : tool.extrusions)
+                        if (extrusion.region_island == reinterpret_cast<const LayerRegionIsland *>(region.handle())) {
+                            ++visits;
+                            CHECK(idx == expected_group);
+                            CHECK(layer.print_z == owned_z);
+                            const PrintingObjectInstance &instance = actual.object_instances[extrusion.printing_catalog_id];
+                            CHECK(instance.object_instance_idx == 1);
+                            REQUIRE(extrusion.root != nullptr);
+                            CHECK(extrusion.root->first_point() == print.object(0).instances()[1].shift);
+                        }
+        CHECK(visits == 1);
+    }
 }
 
 TEST_CASE("DataTree extruder index boundaries validate before narrowing",
