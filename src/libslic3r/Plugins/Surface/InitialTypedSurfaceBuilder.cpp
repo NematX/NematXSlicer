@@ -39,7 +39,9 @@ covered from above become top surfaces; the remaining area becomes sparse
 internal infill. When an area qualifies as both top and bottom, the configured
 first-layer rule decides which type owns the overlap. A bottom surface above
 the first layer receives the bridge modifier, while a first-layer bottom is
-treated as supported by the build plate or raft.
+treated as supported by the build plate or raft. With soluble support (contact
+distance type "none") that also supports bridges, no bottom is a bridge: it is
+printed as an ordinary solid bottom, squished against the soluble layer.
 
 If several regions use different infill extruders, their portions are clipped
 to the union of their region slices before classification, so one surface
@@ -59,17 +61,36 @@ namespace {
 const char *k_initial_typed_surface_builder_id = "surface.initial_typed_surface_builder";
 const char *k_surface_generation_group = "step_surface_generation_plugin";
 const char *k_no_dependencies[] = { nullptr };
+const raw_used_config_key k_used_config_keys[] = {
+    { "support_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { "support_material_contact_distance_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
+};
 constexpr raw_surface_type k_bottom_surface = RAW_SURFACE_TYPE_POS_BOTTOM | RAW_SURFACE_TYPE_DENS_SOLID;
 constexpr raw_surface_type k_internal_surface = RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE;
 constexpr raw_surface_type k_top_surface = RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID;
 
-raw_surface_type bottom_surface_type(const bool is_first_layer)
+raw_surface_type bottom_surface_type(const bool is_first_layer, const bool bottoms_are_bridges)
 {
     // A bottom surface on the first object layer is supported by the build
     // plate or raft. Bottom surfaces higher in the object are unsupported from
     // below and must carry the bridge modifier so bridge-specific surface
     // plugins and infill code can detect them without recomputing exposure.
-    return is_first_layer ? k_bottom_surface : raw_surface_type(k_bottom_surface | RAW_SURFACE_TYPE_MOD_BRIDGE);
+    return is_first_layer || !bottoms_are_bridges ? k_bottom_surface :
+                                                    raw_surface_type(k_bottom_surface | RAW_SURFACE_TYPE_MOD_BRIDGE);
+}
+
+bool bottoms_are_bridges(const Object &object)
+{
+    // Soluble support has no contact gap: a bottom surface rests on the soluble
+    // layer and is squished against it instead of bridging. dont_support_bridges
+    // keeps that support away from bridges; it is defined by a support plugin, and
+    // without it bridges are not supported, as in the native surface detection.
+    const Config config = object.config();
+    if (!config.get("support_material").get_bool() ||
+        config.get("support_material_contact_distance_type").serialize() != "none")
+        return true;
+    const config_option_handle *dont_support_bridges = config_get(config.handle(), "dont_support_bridges");
+    return dont_support_bridges == nullptr || ConfigOption(dont_support_bridges).get_bool();
 }
 
 extruder_index_t region_infill_extruder_id(const LayerRegion &region)
@@ -212,7 +233,8 @@ StoredSurfaceCollection classify_areas(storage_handle *storage,
                                        const LayerIsland &island,
                                        const ExPolygonCollection &areas,
                                        const bool is_first_layer,
-                                       const bool first_layer_top_priority)
+                                       const bool first_layer_top_priority,
+                                       const bool bridges)
 {
     assert(storage != nullptr);
 
@@ -241,7 +263,7 @@ StoredSurfaceCollection classify_areas(storage_handle *storage,
     StoredExPolygonCollection internal = subtract_areas(storage, areas, occupied.readonly());
 
     StoredSurfaceCollection surfaces(storage);
-    append_surface_group(surfaces, bottom.readonly(), bottom_surface_type(is_first_layer));
+    append_surface_group(surfaces, bottom.readonly(), bottom_surface_type(is_first_layer, bridges));
     append_surface_group(surfaces, internal.readonly(), k_internal_surface);
     append_surface_group(surfaces, top.readonly(), k_top_surface);
     return surfaces;
@@ -264,7 +286,8 @@ void build_island_surfaces(const run_ctx_surface_generation &ctx,
                            storage_handle *storage,
                            const Object &object,
                            const LayerIsland &island,
-                           const bool is_first_layer)
+                           const bool is_first_layer,
+                           const bool bridges)
 {
     std::map<extruder_index_t, std::vector<LayerRegion>> grouped_regions = infill_regions_by_extruder(island);
     if (grouped_regions.empty())
@@ -280,14 +303,14 @@ void build_island_surfaces(const run_ctx_surface_generation &ctx,
 
         if (single_group) {
             StoredSurfaceCollection surfaces =
-                classify_areas(storage, island, island.infill_areas(), is_first_layer, first_layer_top_priority);
+                classify_areas(storage, island, island.infill_areas(), is_first_layer, first_layer_top_priority, bridges);
             set_region_island_surfaces(ctx, region_island_handle, surfaces);
             continue;
         }
 
         StoredExPolygonCollection clipped_areas = clip_infill_areas_to_regions(storage, island, regions);
         StoredSurfaceCollection surfaces =
-            classify_areas(storage, island, clipped_areas.readonly(), is_first_layer, first_layer_top_priority);
+            classify_areas(storage, island, clipped_areas.readonly(), is_first_layer, first_layer_top_priority, bridges);
         set_region_island_surfaces(ctx, region_island_handle, surfaces);
     }
 }
@@ -336,6 +359,14 @@ int32_t InitialTypedSurfaceBuilder::priority_impl() const noexcept
     return 0;
 }
 
+int32_t InitialTypedSurfaceBuilder::used_config_keys(raw_used_config_key *keys) const noexcept
+{
+    if (keys != nullptr)
+        for (uint32_t idx = 0; idx < sizeof(k_used_config_keys) / sizeof(k_used_config_keys[0]); ++idx)
+            keys[idx] = k_used_config_keys[idx];
+    return int32_t(sizeof(k_used_config_keys) / sizeof(k_used_config_keys[0]));
+}
+
 const char *InitialTypedSurfaceBuilder::progress_message_format_impl() const noexcept
 {
     return "Build initial typed surfaces: %u / %u layers";
@@ -359,13 +390,14 @@ void InitialTypedSurfaceBuilder::run_impl(const plugin_run_context *run_ctx) con
         return;
 
     const Object object(ctx->object);
+    const bool bridges = bottoms_are_bridges(object);
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
 
         const Layer layer = object.layer(layer_idx);
         const bool is_first_layer = layer_idx == 0;
         for (uint32_t island_idx = 0; island_idx < layer.island_count(); ++island_idx)
-            build_island_surfaces(*ctx, run_ctx->plugin_storage, object, layer.island(island_idx), is_first_layer);
+            build_island_surfaces(*ctx, run_ctx->plugin_storage, object, layer.island(island_idx), is_first_layer, bridges);
 
         progress().increment();
     }

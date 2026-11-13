@@ -517,6 +517,54 @@ TEST_CASE("InitialTypedSurfaceBuilder converts island infill areas to typed regi
                                   island.infill_areas());
     }
 
+    SECTION("bottoms over soluble support are not bridges")
+    {
+        // A bottom above the first layer is a bridge, except with soluble support
+        // (contact distance type "none") that also supports bridges: the bottom
+        // then rests on the soluble layer and is printed as an ordinary solid bottom.
+        struct SupportCase
+        {
+            const char *support_material;
+            const char *contact_distance_type;
+            const char *dont_support_bridges;
+            SurfaceType expected_surface_type;
+        };
+        const SupportCase cases[] = {
+            { "1", "none", "0", stPosBottom | stDensSolid },
+            { "1", "none", "1", stPosBottom | stDensSolid | stModBridge },
+            { "1", "plane", "0", stPosBottom | stDensSolid | stModBridge },
+            { "0", "none", "0", stPosBottom | stDensSolid | stModBridge }
+        };
+
+        for (const SupportCase &support_case : cases) {
+            CAPTURE(support_case.support_material, support_case.contact_distance_type, support_case.dont_support_bridges);
+
+            PreparedPerimeterPrint prepared;
+            prepare_cube_print(prepared, perimeter_config({
+                {"perimeters", "1"},
+                {"support_material", support_case.support_material},
+                {"support_material_contact_distance_type", support_case.contact_distance_type},
+                {"dont_support_bridges", support_case.dont_support_bridges}
+            }));
+            PrintObject &object = prepared.print.object(0);
+            REQUIRE(object.layer_count() > 2);
+            replace_layer_island(object.layer(0), rectangle_expolygon(30., -10., 50., 10.));
+            replace_layer_island(object.layer(1), rectangle_expolygon(-10., -10., 10., 10.));
+            replace_layer_island(object.layer(2), rectangle_expolygon(30., -10., 50., 10.));
+            rebuild_island_overlap_graph(object);
+
+            ScopedActivePlugins active({SIMPLE_PERIMETER_GENERATOR, INITIAL_TYPED_SURFACE_BUILDER});
+            run_perimeter_and_surface_steps(prepared.print);
+
+            // The island is exposed below and above; the bottom owns the whole area.
+            const LayerSliceIsland &island = object.layer(1).island(0);
+            REQUIRE_FALSE(island.infill_areas().empty());
+            require_only_surface_type(whole_region_island(island).fill_surfaces(),
+                                      support_case.expected_surface_type,
+                                      island.infill_areas());
+        }
+    }
+
     SECTION("isolated first layer resolves bottom/top overlap from raft setting")
     {
         // This island has no object material below or above, so the same fill

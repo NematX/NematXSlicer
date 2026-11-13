@@ -31,6 +31,8 @@ private:
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
+    // Support settings decide whether bottoms above the first layer are bridges.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     // Prefer this algorithm among enabled alternatives for initial surface classification.
     int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     const char *progress_message_format_impl() const noexcept override;
