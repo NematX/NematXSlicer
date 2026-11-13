@@ -106,8 +106,11 @@ the recipe after all modifiers. Finalization also checks actual strands: each is
 straight, planar and monotone along the canonical angle. A row must traverse its
 original core, or, with a positive uniform margin, traverse the uniformly expanded
 core while staying inside its prepared surface. An isolated piece in an axial
-anchor does not satisfy that rule. An incompatible recipe or path stops processing
-before export.
+anchor does not satisfy that rule. An incompatible recipe stops processing before
+export. Finalization never stops slicing on a path: a refused row keeps its whole
+infill group at nominal flow, a refused prepared surface or object keeps its own
+infill, and one warning per object counts them. Broken internal invariants of the
+finalizer also assert in debug builds.
 
 ### Default: excess volume from surfaces
 

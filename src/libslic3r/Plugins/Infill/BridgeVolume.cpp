@@ -81,6 +81,13 @@
    exchanges the object's affected buckets as one batch, keeping root identities.
    The copies then own the old contents. This is not a rollback of earlier plugin
    runs. One object run is sequential; different objects may run in parallel.
+
+   A refused correction never stops slicing; only cancellation does. A row that
+   fails a check restores its whole bucket copy from the original infill, a prepared
+   surface refused while collecting is skipped, and a failure before any correction
+   leaves the whole object unchanged. These keep their nominal flow and are reported
+   in one warning per object. Broken invariants of this finalizer also assert in
+   debug builds; refused geometry and other plugins' contract violations do not.
 */
 #include "BridgeVolume.hpp"
 #include "BridgeClearance.hpp"
@@ -88,6 +95,7 @@
 #include "libslic3r/Plugins/Surface/BridgeGeometry.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -134,7 +142,17 @@ struct Bucket {
     StoredExtrusionEntity output;
 };
 // Accumulate warning categories for one object rather than warning for every piece.
-struct Diagnostics { bool unknown=false,floor=false,one_sided=false,unanchored=false; };
+// Refusals count the buckets and surfaces left at nominal flow and keep the first cause.
+struct Diagnostics {
+    bool unknown=false,floor=false,one_sided=false,unanchored=false;
+    size_t refused_buckets=0,refused_surfaces=0;
+    std::string first_refusal;
+    // Count one refusal of the given kind and keep its cause if it is the first.
+    void refuse(size_t &count,const std::string &cause) { ++count; if (first_refusal.empty()) first_refusal=cause; }
+};
+// Stop debug builds on a broken invariant of this finalizer, then refuse the row
+// like any other check so that its bucket keeps nominal flow.
+[[noreturn]] void internal_error(const char *message);
 // Add one value to a hash used to detect changed inputs, without hashing padding.
 uint64_t mix(uint64_t key,uint64_t value);
 // Describe the space filled by one lower extrusion segment, in mm. Its XY shape
@@ -151,7 +169,7 @@ void index_layer(const Layer &layer,BridgeClearance::Index &index,uint64_t &sign
 // Validate a prepared row and reduce its area against the selected lower-material
 // model. Only the experimental model measures end contacts. Disabled/unknown
 // portions keep incoming flow. Invalid paths or outdated correction
-// records throw, leaving the object's original infill unchanged.
+// records throw; the caller then restores the row's bucket from the original infill.
 void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,const SurfaceWork &surface,
     const BridgeClearance::Index &index,double z,const Config &print_config,
     const run_ctx_finalize_slicing &ctx,uint64_t signature,bool unknown,
@@ -180,6 +198,8 @@ private:
 };
 class CorrectionVisitor final : public ExtrusionTreeVisitor<> {
 public:
+    // First refused row of this bucket, with object, bridge and Z; empty when all rows passed.
+    std::string failure;
     const std::map<uint64_t,SurfaceWork> &surfaces;
     const BridgeClearance::Index &index;
     double z;
@@ -197,8 +217,9 @@ public:
         : surfaces(surfaces),index(index),z(z),print_config(config),context(context),signature(signature),
           unknown(unknown),diagnostics(diagnostics),ctx(ctx),density(density) {}
 private:
-    // Correct paths whose source surface was marked by BridgePreparation.cpp;
-    // add object and bridge identifiers to errors without changing that surface.
+    // Correct paths whose source surface was marked by BridgePreparation.cpp.
+    // Record the first refused row with object and bridge identifiers; later rows
+    // of the same bucket are left alone, since the caller restores the bucket.
     void visit_leaf(MutableExtrusionEntity leaf) override;
 };
 class Finalizer final : public PluginBase {
@@ -238,7 +259,8 @@ private:
     // Register only the flow switch; the host generates the model selector.
     void inilialize_impl(storage_handle *) const override;
     // Check bridge contacts and adjust copied infill trees, then replace all of
-    // this object's affected trees together. Errors and cancellation stop the run.
+    // this object's affected trees together. Cancellation stops the run; a refused
+    // row, surface or object keeps its original infill and reports a warning.
     void run_impl(const plugin_run_context *run_ctx) const override;
 };
 
@@ -257,6 +279,12 @@ void Finalizer::register_group() const
 }
 
 uint64_t mix(uint64_t key,uint64_t value) { return (key^value)*1099511628211ull; }
+
+void internal_error(const char *message)
+{
+    assert(false && "Broken bridge finalization invariant");
+    throw std::runtime_error(message);
+}
 
 std::vector<BridgeClearance::Occupation> occupied_segments(const c_extrusion_segment &segment,
     const EPropertyAttributes &attributes,double z,double offset)
@@ -345,27 +373,27 @@ void index_layer(const Layer &layer,BridgeClearance::Index &index,uint64_t &sign
 
 void CorrectionVisitor::visit_leaf(MutableExtrusionEntity leaf)
 {
+    if (!failure.empty()) return;
     const EPropertyInfill *infill=current_property(EPropertyInfill::key);
     if (infill==nullptr) return;
     const std::map<uint64_t,SurfaceWork>::const_iterator found=surfaces.find(infill->source_surface_id);
     if (found==surfaces.end()) return;
-    const EPropertyAttributes *attr=current_property(EPropertyAttributes::key);
-    if (attr==nullptr) throw std::runtime_error("A prepared bridge leaf has no physical attributes.");
-    const bool internal=found->second.surface.get(BridgeSurfaceInfo::key)->core_rule==2;
-    if (attr->c_extrusion_property_attributes::role!=(internal ? RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL : RAW_EXTRUSION_ROLE_BRIDGE_INFILL))
-        throw std::runtime_error("A prepared bridge lost its bridge-infill extrusion role.");
-    const EPropertyZOffset *offset=current_property(EPropertyZOffset::key);
-    if (offset!=nullptr && offset->z_offset!=0)
-        throw std::runtime_error("A prepared bridge has a nonzero inherited Z offset.");
-    const EPropertyAttributes attributes=*attr;
     try {
+        const EPropertyAttributes *attr=current_property(EPropertyAttributes::key);
+        if (attr==nullptr) throw std::runtime_error("A prepared bridge leaf has no physical attributes.");
+        const bool internal=found->second.surface.get(BridgeSurfaceInfo::key)->core_rule==2;
+        if (attr->c_extrusion_property_attributes::role!=(internal ? RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL : RAW_EXTRUSION_ROLE_BRIDGE_INFILL))
+            throw std::runtime_error("A prepared bridge lost its bridge-infill extrusion role.");
+        const EPropertyZOffset *offset=current_property(EPropertyZOffset::key);
+        if (offset!=nullptr && offset->z_offset!=0)
+            throw std::runtime_error("A prepared bridge has a nonzero inherited Z offset.");
+        const EPropertyAttributes attributes=*attr;
         correct_leaf(leaf,attributes,found->second,index,z,print_config,context,signature,unknown,diagnostics,ctx,*infill,density);
     } catch (const PluginCancelled &) {
         throw;
     } catch (const std::exception &error) {
         const BridgeSurfaceInfo &info=*found->second.surface.get(BridgeSurfaceInfo::key);
-        throw std::runtime_error("Object '"+Object(context.object).name()+"', bridge "+std::to_string(info.logical_key)+
-            ", Z="+std::to_string(z)+" mm: "+error.what());
+        failure="bridge "+std::to_string(info.logical_key)+", Z="+std::to_string(z)+" mm: "+error.what();
     }
 }
 
@@ -578,7 +606,7 @@ void publish_pieces(MutableExtrusionEntity leaf,const EPropertyAttributes &attri
     const std::vector<BridgeClearance::SectionPiece> &pieces,uint64_t logical_key,uint64_t signature,
     const plugin_run_context *run_ctx)
 {
-    if (pieces.empty()) throw std::runtime_error("A bridge correction has no covering pieces.");
+    if (pieces.empty()) internal_error("A bridge correction has no covering pieces.");
     const c_point start=leaf.front(),finish=leaf.back();
     const double length=unscaled(norm(finish-start)),ux=unscaled(finish.x-start.x)/length,uy=unscaled(finish.y-start.y)/length;
     const double across=std::max(1.,double(attributes.c_extrusion_property_attributes::width));
@@ -613,17 +641,17 @@ void publish_pieces(MutableExtrusionEntity leaf,const EPropertyAttributes &attri
     const raw_extrusion_split_status status=extrusion_split_leaf_by_areas(leaf.mutable_handle(),handles.data(),uint32_t(handles.size()),
         SCALED_EPSILON,&collect_fragment,&collector);
     if (status!=RAW_EXTRUSION_SPLIT_STATUS_SUCCESS || collector.overflow || collector.count==0)
-        throw std::runtime_error("The private bridge strand could not be split into its clearance intervals.");
+        internal_error("The private bridge strand could not be split into its clearance intervals.");
     c_point previous=start;
     for (size_t idx=0; idx<collector.count; ++idx) {
         MutableExtrusionEntity fragment(collector.fragments[idx].entity);
         // Independent native cuts may round a shared endpoint differently.
         // Reuse one point at each join, but never bridge a real clipping gap.
         if (norm(fragment.front()-previous)>SCALED_EPSILON || !fragment.set_point(0,previous))
-            throw std::runtime_error("A split bridge strand lost continuity.");
+            internal_error("A split bridge strand lost continuity.");
         if (idx+1==collector.count) {
             if (norm(fragment.back()-finish)>SCALED_EPSILON || !fragment.set_point(fragment.point_count()-1,finish))
-                throw std::runtime_error("A split bridge strand lost its final endpoint.");
+                internal_error("A split bridge strand lost its final endpoint.");
         }
         previous=fragment.back();
         const BridgeClearance::SectionPiece &piece=pieces.at(collector.fragments[idx].area);
@@ -680,9 +708,14 @@ void Finalizer::inilialize_impl(storage_handle *) const
 void Finalizer::run_impl(const plugin_run_context *run_ctx) const
 {
     const run_ctx_finalize_slicing *ctx=plugin_ctx_as_finalize_slicing(run_ctx);
-    if (ctx==nullptr || ctx->replace_infill_buckets==nullptr || ctx->get_requested_support_areas==nullptr)
-        throw std::runtime_error("Bridge finalization requires support-request access and transactional infill publication.");
+    if (ctx==nullptr || ctx->replace_infill_buckets==nullptr || ctx->get_requested_support_areas==nullptr) {
+        assert(false && "Bridge finalization requires support-request access and transactional infill publication.");
+        report_warning(run_ctx,"Bridge compensation skipped: the host provides no support-request access or transactional infill publication.");
+        return;
+    }
     const Object object(ctx->object);const Config print_config=Print(ctx->print).config();
+    const std::string prefix="Object '"+object.name()+"': ";
+    Diagnostics diagnostics;
     std::map<uint64_t,SurfaceWork> surfaces;
     std::vector<Bucket> buckets;
     std::map<const extrusion_entity_handle *,size_t> clones;
@@ -701,41 +734,49 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                 for (const Surface surface : region.fill_surfaces_collection()) {
                     const BridgeSurfaceInfo *info=surface.get(BridgeSurfaceInfo::key);
                     if (info==nullptr) continue;
-                    if (info->schema_version!=1 || (info->core_rule!=1 && info->core_rule!=2))
-                        throw std::runtime_error("A prepared bridge has an unsupported provenance rule.");
-                    if (region.region_count()!=1) throw std::runtime_error("A prepared bridge lost its single-region ownership.");
-                    const LayerRegion owner=region.region(0);
-                    const Config config=owner.print_region().config();
-                    StoredExPolygonCollection prepared(run_ctx->plugin_storage);prepared.push_back(surface.expolygon());
-                    StoredExPolygonCollection core=info->core_rule==2 ? prepared.readonly().clone(run_ctx->plugin_storage) :
-                        subtract(run_ctx->plugin_storage,prepared.readonly(),lower.readonly());
-                    if (core.empty()) throw std::runtime_error("A prepared bridge fragment lost its original core.");
-                    uint64_t input=mix(info->logical_key,info->policy_signature);
-                    for (const char *id=id_impl();*id!='\0';++id) input=mix(input,uint8_t(*id));
-                    input=mix(mix(input,geometry_key(core.readonly())),geometry_key(prepared.readonly()));
-                    input=mix(input,ctx->support_demand_computed);
-                    if (ctx->support_demand_computed)
-                        input=mix(input,geometry_key(ExPolygonCollection(ctx->get_requested_support_areas(island.handle()))));
-                    const double angle=surface.bridge_angle();
-                    uint64_t bits=0;std::memcpy(&bits,&angle,sizeof(bits));input=mix(input,bits);
-                    for (const char *key : {"min_layer_height","resolution_internal","bridge_volume_compensation_enabled","bridged_infill_uniform_margin"}) {
-                        const bool regional=std::strcmp(key,"bridge_volume_compensation_enabled")==0 || std::strcmp(key,"bridged_infill_uniform_margin")==0;
-                        const std::string serialized=(regional ? config : print_config).get(key).serialize();
-                        for (unsigned char c : serialized) input=mix(input,c);
+                    // A refused surface is skipped, so its rows keep their nominal flow.
+                    try {
+                        if (info->schema_version!=1 || (info->core_rule!=1 && info->core_rule!=2))
+                            throw std::runtime_error("A prepared bridge has an unsupported provenance rule.");
+                        if (region.region_count()!=1) throw std::runtime_error("A prepared bridge lost its single-region ownership.");
+                        const LayerRegion owner=region.region(0);
+                        const Config config=owner.print_region().config();
+                        StoredExPolygonCollection prepared(run_ctx->plugin_storage);prepared.push_back(surface.expolygon());
+                        StoredExPolygonCollection core=info->core_rule==2 ? prepared.readonly().clone(run_ctx->plugin_storage) :
+                            subtract(run_ctx->plugin_storage,prepared.readonly(),lower.readonly());
+                        if (core.empty()) throw std::runtime_error("A prepared bridge fragment lost its original core.");
+                        uint64_t input=mix(info->logical_key,info->policy_signature);
+                        for (const char *id=id_impl();*id!='\0';++id) input=mix(input,uint8_t(*id));
+                        input=mix(mix(input,geometry_key(core.readonly())),geometry_key(prepared.readonly()));
+                        input=mix(input,ctx->support_demand_computed);
+                        if (ctx->support_demand_computed)
+                            input=mix(input,geometry_key(ExPolygonCollection(ctx->get_requested_support_areas(island.handle()))));
+                        const double angle=surface.bridge_angle();
+                        uint64_t bits=0;std::memcpy(&bits,&angle,sizeof(bits));input=mix(input,bits);
+                        for (const char *key : {"min_layer_height","resolution_internal","bridge_volume_compensation_enabled","bridged_infill_uniform_margin"}) {
+                            const bool regional=std::strcmp(key,"bridge_volume_compensation_enabled")==0 || std::strcmp(key,"bridged_infill_uniform_margin")==0;
+                            const std::string serialized=(regional ? config : print_config).get(key).serialize();
+                            for (unsigned char c : serialized) input=mix(input,c);
+                        }
+                        const extruder_index_t tool=layer_region_get_role_extruder(owner.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
+                        const c_flow_mm flow=layer_region_get_infill_bridge_flow_mm(owner.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
+                        if (tool==EXTRUDER_ID_UNKNOWN || !(flow.nozzle_diameter>0.)) throw std::runtime_error("A bridge has no resolved reference nozzle.");
+                        const double minimum=print_config.get("min_layer_height").get_effective_value(flow.nozzle_diameter,uint32_t(tool));
+                        const double layer_height=unscaled(layer.height());
+                        const double floor=std::min(layer_height,minimum>0. ? minimum : layer_height);
+                        const bool enabled=config.get("bridge_volume_compensation_enabled").get_bool();
+                        const BridgePreparation::ExpansionMargins margins=info->core_rule==2 ? BridgePreparation::ExpansionMargins{0,0} :
+                            BridgePreparation::expansion_margins(owner.handle());
+                        input=mix(mix(input,uint64_t(margins.axial)),uint64_t(margins.uniform));
+                        StoredExPolygonCollection uniform_core=expand_bridge(run_ctx->plugin_storage,core.readonly(),prepared.readonly(),angle,0,margins.uniform,run_ctx);
+                        surfaces.emplace(surface.id(),SurfaceWork{surface,island,owner,std::move(core),std::move(uniform_core),input,floor,enabled,margins.uniform>0,
+                            layer_height,unscaled(layer.print_z()-layer.height())});affected=true;
+                    } catch (const PluginCancelled &) {
+                        throw;
+                    } catch (const std::exception &error) {
+                        diagnostics.refuse(diagnostics.refused_surfaces,"bridge "+std::to_string(info->logical_key)+", Z="+
+                            std::to_string(unscaled(layer.print_z()))+" mm: "+error.what());
                     }
-                    const extruder_index_t tool=layer_region_get_role_extruder(owner.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
-                    const c_flow_mm flow=layer_region_get_infill_bridge_flow_mm(owner.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
-                    if (tool==EXTRUDER_ID_UNKNOWN || !(flow.nozzle_diameter>0.)) throw std::runtime_error("A bridge has no resolved reference nozzle.");
-                    const double minimum=print_config.get("min_layer_height").get_effective_value(flow.nozzle_diameter,uint32_t(tool));
-                    const double layer_height=unscaled(layer.height());
-                    const double floor=std::min(layer_height,minimum>0. ? minimum : layer_height);
-                    const bool enabled=config.get("bridge_volume_compensation_enabled").get_bool();
-                    const BridgePreparation::ExpansionMargins margins=info->core_rule==2 ? BridgePreparation::ExpansionMargins{0,0} :
-                        BridgePreparation::expansion_margins(owner.handle());
-                    input=mix(mix(input,uint64_t(margins.axial)),uint64_t(margins.uniform));
-                    StoredExPolygonCollection uniform_core=expand_bridge(run_ctx->plugin_storage,core.readonly(),prepared.readonly(),angle,0,margins.uniform,run_ctx);
-                    surfaces.emplace(surface.id(),SurfaceWork{surface,island,owner,std::move(core),std::move(uniform_core),input,floor,enabled,margins.uniform>0,
-                        layer_height,unscaled(layer.print_z()-layer.height())});affected=true;
                 }
             }
             if (affected)
@@ -750,46 +791,71 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                 }
         }
     }
-    if (surfaces.empty()) return;
-    BridgeClearance::Index index(run_ctx);
-    std::unique_ptr<BridgeSurfaceVolume::Index> density;
-    if (m_surface) density=std::make_unique<BridgeSurfaceVolume::Index>(object,*ctx,run_ctx);
-    Diagnostics diagnostics;
-    // Missing support paths may mean generation has not finished, not empty space.
-    // Only the completion flag lets an empty support result be used as known input.
-    bool unknown=!ctx->support_material_generated;
-    uint64_t signature=mix(1469598103934665603ull,ctx->support_material_generated);
-    if (density) signature=mix(signature,density->signature());
-    std::vector<Layer> auxiliary;
-    for (uint32_t idx=0; idx<object.auxiliary_layer_count(); ++idx) {
-        const Layer layer=object.auxiliary_layer(idx);
-        if (layer.properties().has(LayerSupportProperty::key)) auxiliary.push_back(layer);
-    }
-    std::stable_sort(auxiliary.begin(),auxiliary.end(),[](const Layer &a,const Layer &b) { return a.print_z()<b.print_z(); });
-    size_t next_auxiliary=0;
-    // Do not count the bridge's own layer as material below it. Support layers
-    // use their own Z heights, which may lie between the object's layer heights.
-    for (uint32_t idx=0; idx<object.layer_count(); ++idx) {
-        throw_if_cancelled(run_ctx);
-        const Layer layer=object.layer(idx);
-        while (!m_surface && next_auxiliary<auxiliary.size() && auxiliary[next_auxiliary].print_z()<layer.print_z())
-            index_layer(auxiliary[next_auxiliary++],index,signature,clones,buckets,unknown,run_ctx);
-        for (Bucket &bucket : buckets)
-            if (bucket.layer_idx==idx) {
-                CorrectionVisitor visitor(surfaces,index,unscaled(layer.print_z()),print_config,*ctx,signature,unknown,diagnostics,run_ctx,density.get());
-                visitor.traverse(bucket.output.mutable_view());
-            }
-        if (!m_surface) index_layer(layer,index,signature,clones,buckets,unknown,run_ctx);
-    }
+    // Report the refusals of this object once, after any publication.
+    const auto report_refusals=[&]() {
+        if (diagnostics.refused_buckets==0 && diagnostics.refused_surfaces==0) return;
+        report_warning(run_ctx,(prefix+"bridge compensation skipped "+std::to_string(diagnostics.refused_buckets)+
+            " infill group(s) and "+std::to_string(diagnostics.refused_surfaces)+
+            " prepared surface(s), which keep their nominal flow. First cause: "+diagnostics.first_refusal).c_str());
+    };
+    if (surfaces.empty()) { report_refusals();return; }
     std::vector<raw_final_infill_replacement> replacements;
-    for (Bucket &bucket : buckets) replacements.push_back({bucket.source,bucket.output.mutable_handle()});
+    // A failure before or between bucket corrections leaves the whole object unchanged.
+    try {
+        BridgeClearance::Index index(run_ctx);
+        std::unique_ptr<BridgeSurfaceVolume::Index> density;
+        if (m_surface) density=std::make_unique<BridgeSurfaceVolume::Index>(object,*ctx,run_ctx);
+        // Missing support paths may mean generation has not finished, not empty space.
+        // Only the completion flag lets an empty support result be used as known input.
+        bool unknown=!ctx->support_material_generated;
+        uint64_t signature=mix(1469598103934665603ull,ctx->support_material_generated);
+        if (density) signature=mix(signature,density->signature());
+        std::vector<Layer> auxiliary;
+        for (uint32_t idx=0; idx<object.auxiliary_layer_count(); ++idx) {
+            const Layer layer=object.auxiliary_layer(idx);
+            if (layer.properties().has(LayerSupportProperty::key)) auxiliary.push_back(layer);
+        }
+        std::stable_sort(auxiliary.begin(),auxiliary.end(),[](const Layer &a,const Layer &b) { return a.print_z()<b.print_z(); });
+        size_t next_auxiliary=0;
+        // Do not count the bridge's own layer as material below it. Support layers
+        // use their own Z heights, which may lie between the object's layer heights.
+        for (uint32_t idx=0; idx<object.layer_count(); ++idx) {
+            throw_if_cancelled(run_ctx);
+            const Layer layer=object.layer(idx);
+            while (!m_surface && next_auxiliary<auxiliary.size() && auxiliary[next_auxiliary].print_z()<layer.print_z())
+                index_layer(auxiliary[next_auxiliary++],index,signature,clones,buckets,unknown,run_ctx);
+            for (Bucket &bucket : buckets)
+                if (bucket.layer_idx==idx) {
+                    CorrectionVisitor visitor(surfaces,index,unscaled(layer.print_z()),print_config,*ctx,signature,unknown,diagnostics,run_ctx,density.get());
+                    visitor.traverse(bucket.output.mutable_view());
+                    // A refused row may leave this copy partly corrected: restart it from the original.
+                    if (!visitor.failure.empty()) {
+                        bucket.output=ExtrusionEntity(bucket.source).clone(run_ctx->plugin_storage);
+                        diagnostics.refuse(diagnostics.refused_buckets,visitor.failure);
+                    }
+                }
+            if (!m_surface) index_layer(layer,index,signature,clones,buckets,unknown,run_ctx);
+        }
+        for (Bucket &bucket : buckets) replacements.push_back({bucket.source,bucket.output.mutable_handle()});
+    } catch (const PluginCancelled &) {
+        throw;
+    } catch (const std::exception &error) {
+        report_warning(run_ctx,(prefix+"bridge compensation skipped for the whole object, whose infill keeps its nominal flow. Cause: "+
+            error.what()).c_str());
+        return;
+    }
     // Finish allocation and cancellation checks before the host validates and
     // swaps the complete batch; no partially corrected live root is exposed.
     throw_if_cancelled(run_ctx);
-    if (!ctx->replace_infill_buckets(ctx,run_ctx->plugin_storage,replacements.data(),uint32_t(replacements.size())))
-        throw std::runtime_error("The final bridge infill transaction was refused.");
+    if (!ctx->replace_infill_buckets(ctx,run_ctx->plugin_storage,replacements.data(),uint32_t(replacements.size()))) {
+        // The host also refuses the batch when cancellation arrives during publication.
+        throw_if_cancelled(run_ctx);
+        assert(false && "The final bridge infill transaction was refused.");
+        report_warning(run_ctx,(prefix+"bridge compensation skipped: the host refused the corrected infill, which keeps its nominal flow.").c_str());
+        return;
+    }
+    report_refusals();
     if (run_ctx->report_warning!=nullptr) {
-        const std::string prefix="Object '"+object.name()+"': ";
         if (diagnostics.unknown) run_ctx->report_warning(run_ctx->host_context,(prefix+"bridge compensation is incomplete; unknown portions retain nominal flow.").c_str());
         if (diagnostics.floor) run_ctx->report_warning(run_ctx->host_context,(prefix+(m_surface ?
             "the printable bridge height floor exceeds the estimated surface volume budget." :

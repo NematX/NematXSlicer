@@ -145,6 +145,9 @@ struct Fixture {
 // Missing attributes fail the test; the tree and attribute ownership stay unchanged.
 void visit_leaves(const ExtrusionEntity &root,const std::function<void(const ExtrusionEntity &,const ExtrusionAttributes &)> &callback,
     const ExtrusionAttributes *inherited=nullptr);
+// Run finalization, which must not stop slicing, and return its warnings about
+// compensation it skipped; earlier queued plugin messages are discarded.
+std::vector<std::string> finalize_skipped(Print &print);
 
 // Run a scoped action through the actual dispatcher after the bridge finalizer.
 // The action borrows its payload only for the call; PluginBase guards the C boundary.
@@ -320,6 +323,18 @@ void Fixture::add_paths(bool contacts)
     slic3r_api::SupportPipelineInfo &state=object.get_or_add_property<slic3r_api::SupportPipelineInfo>();
     state.demand_computed=1;state.material_generated=1;
 }
+std::vector<std::string> finalize_skipped(Print &print)
+{
+    Orchestrator &orch=Orchestrator::instance();
+    (void)orch.consume_plugin_messages();
+    REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(orch,print));
+    std::vector<std::string> out;
+    for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages())
+        if (message.level==Orchestrator::PluginMessageLevel::Warning && message.message.find("bridge compensation skipped")!=std::string::npos)
+            out.push_back(message.message);
+    return out;
+}
+
 void visit_leaves(const ExtrusionEntity &root,const std::function<void(const ExtrusionEntity &,const ExtrusionAttributes &)> &callback,
     const ExtrusionAttributes *inherited)
 {
@@ -366,7 +381,7 @@ TEST_CASE("Bridge finalizers accept integer-rounded short rows in either directi
         }
 }
 
-TEST_CASE("Bridge finalizers still reject malformed rows beyond endpoint rounding","[plugins][bridge-volume][bridge-direction-rounding]")
+TEST_CASE("Bridge finalizers leave malformed rows uncorrected beyond endpoint rounding","[plugins][bridge-volume][bridge-direction-rounding]")
 {
     for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"})
         for (const std::string defect : {"short direction","long direction","bend","return","arc","Z offset"}) {
@@ -392,9 +407,14 @@ TEST_CASE("Bridge finalizers still reject malformed rows beyond endpoint roundin
                 } else segments.front().z_offset_b=scale_i(.01);
                 REQUIRE(writable.set_segments(segments));
             }
-            fixture.island().regions_islands().front().mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
+            LayerRegionIsland &owner=fixture.island().regions_islands().front();
+            owner.mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
             Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
-            REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+            // The malformed row refuses its bucket, which keeps its incoming flow uncorrected.
+            CHECK(finalize_skipped(fixture.prepared.print).size()==1);
+            visit_leaves(owner.extrusion(LayerRegionIsland::INFILLS),[](const ExtrusionEntity &leaf,const ExtrusionAttributes &) {
+                CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
+            });
         }
 }
 
@@ -938,7 +958,7 @@ TEST_CASE("Peripheral bridge rows use actual lower contacts and local requests i
         if (scenario==5) fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>().material_generated=0;
         Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
         if (scenario==2 || scenario==3) {
-            CHECK_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+            CHECK(finalize_skipped(fixture.prepared.print).size()==1);
             CHECK(upper.extrusion(LayerRegionIsland::INFILLS).child(0).get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
             continue;
         }
@@ -957,10 +977,11 @@ TEST_CASE("Peripheral bridge rows use actual lower contacts and local requests i
     }
 }
 
-TEST_CASE("A peripheral bridge row must stay in its surface and cross the uniform source area","[plugins][bridge-volume][bridge-uniform]")
+TEST_CASE("A peripheral bridge row outside its surface or the uniform source area stays uncorrected","[plugins][bridge-volume][bridge-uniform]")
 {
-    for (int scenario=0;scenario<3;++scenario) {
-        Fixture fixture({{"bridged_infill_uniform_margin",scenario==2 ? "0" : "0.6"}});
+    for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"}) for (int scenario=0;scenario<3;++scenario) {
+        INFO(provider<<" scenario "<<scenario);
+        Fixture fixture({{"bridged_infill_uniform_margin",scenario==2 ? "0" : "0.6"},{"bridge_volume_compensation",provider}});
         fixture.frame();fixture.prepare();fixture.add_paths(false);
         LayerRegionIsland &owner=fixture.island().regions_islands().front();
         owner.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
@@ -972,8 +993,8 @@ TEST_CASE("A peripheral bridge row must stay in its surface and cross the unifor
         path.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=fixture.bridge().id();
         owner.mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
         ApiInternal::LayerIslandAccess::support_demand_mutable(fixture.island())=ExPolygons{rectangle_expolygon(-8,-4,8,4)};
-        Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
-        CHECK_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+        Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
+        CHECK(finalize_skipped(fixture.prepared.print).size()==1);
         CHECK(owner.extrusion(LayerRegionIsland::INFILLS).child(0).get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
     }
 }
@@ -1231,7 +1252,7 @@ TEST_CASE("Prepared bridge recipes generate actual parallel rectilinear and mono
     }
 }
 
-TEST_CASE("A local support request never hides an uncovered missing anchor","[plugins][bridge-volume]")
+TEST_CASE("A local support request never hides an uncovered missing anchor from its warning","[plugins][bridge-volume]")
 {
     for (const bool disabled : {false,true}) {
         Fixture fixture({{"bridge_volume_compensation_enabled",disabled ? "0" : "1"}});
@@ -1242,14 +1263,14 @@ TEST_CASE("A local support request never hides an uncovered missing anchor","[pl
             if (region.has_extrusion(LayerRegionIsland::INFILLS)) root=&region.extrusion(LayerRegionIsland::INFILLS);
         REQUIRE(root!=nullptr);
         Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
-        REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+        REQUIRE(finalize_skipped(fixture.prepared.print).size()==1);
         REQUIRE(root->child_count()==1);
         CHECK(root->child(0).is_leaf());
         CHECK(root->child(0).get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
     }
 }
 
-TEST_CASE("Unavailable supports retain nominal bridge pieces and invalidate stale stamps","[plugins][bridge-volume]")
+TEST_CASE("Unavailable supports retain nominal bridge pieces and keep stale stamps unchanged","[plugins][bridge-volume]")
 {
     Fixture fixture;fixture.prepare();fixture.add_paths(false);
     PrintObject &object=fixture.prepared.print.object(0);
@@ -1266,8 +1287,15 @@ TEST_CASE("Unavailable supports retain nominal bridge pieces and invalidate stal
                 CHECK(attr.height==stamp->nominal.height);
             });
     }
+    // Generated support changes the inputs of these stamps: the rows keep them and their flow, with a warning.
     object.get_or_add_property<slic3r_api::SupportPipelineInfo>().material_generated=1;
-    REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+    CHECK(finalize_skipped(fixture.prepared.print).size()==1);
+    for (const LayerRegionIsland &region : fixture.island().regions_islands()) if (region.has_extrusion(LayerRegionIsland::INFILLS))
+        visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[](const ExtrusionEntity &leaf,const ExtrusionAttributes &attr) {
+            const slic3r_api::BridgeVolumeInfo *stamp=leaf.get_property<slic3r_api::BridgeVolumeInfo>();REQUIRE(stamp!=nullptr);
+            CHECK(stamp->confidence==BRIDGE_CONFIDENCE_UNKNOWN);
+            CHECK(attr.mm3_per_mm==stamp->nominal.mm3_per_mm);
+        });
 }
 
 TEST_CASE("The finalization host refuses foreign duplicate and non-extrusion donors atomically","[plugins][bridge-volume][bridge-api]")
@@ -1671,7 +1699,7 @@ TEST_CASE("Forced layers and explicit local demand require a real support produc
     }
 }
 
-TEST_CASE("A post-infill producer cannot bypass the prepared bridge role contract","[plugins][bridge-volume]")
+TEST_CASE("A post-infill producer bypassing the prepared bridge role contract stays uncorrected","[plugins][bridge-volume]")
 {
     Fixture fixture;fixture.prepare();fixture.add_paths();
     const uint64_t source_id=fixture.bridge().id();
@@ -1681,10 +1709,15 @@ TEST_CASE("A post-infill producer cannot bypass the prepared bridge role contrac
     gap.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=source_id;
     owner.mutable_extrusion(LayerRegionIsland::GAP_FILLS).append_child(std::move(gap));
     Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
-    REQUIRE_THROWS(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+    // Only the gap-fill group is refused: it keeps its flow, while the bridge rows are still corrected.
+    CHECK(finalize_skipped(fixture.prepared.print).size()==1);
+    visit_leaves(owner.extrusion(LayerRegionIsland::GAP_FILLS),[](const ExtrusionEntity &leaf,const ExtrusionAttributes &attr) {
+        CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
+        CHECK(attr.mm3_per_mm==Approx(.08));
+    });
     for (const LayerRegionIsland &region : fixture.island().regions_islands()) if (region.has_extrusion(LayerRegionIsland::INFILLS))
         visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[](const ExtrusionEntity &leaf,const ExtrusionAttributes &) {
-            CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
+            CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr);
         });
 }
 
