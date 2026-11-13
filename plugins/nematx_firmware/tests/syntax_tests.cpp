@@ -143,6 +143,20 @@ void test_subprogram_call()
     require(a.size() == 1 && a[0].kind == Kind::Neutral, "a subprogram call followed by a comment");
 }
 
+void test_profile_controller_commands()
+{
+    // The NematX start and end scripts set up the controller without moving the machine.
+    for (const char *line : { "G133 = 1", "G133=1", "#BCS OFF", "# SLOPE[TYPE=HSC]", "Z[COMP ON PLANE]", "#BCS ON",
+                              "M29 ; end part" }) {
+        const std::vector<ReaderAction> a = translate(line);
+        require(a.size() == 1 && a[0].kind == Kind::Neutral, std::string("controller command is neutral: ") + line);
+    }
+    // A bracket command on an extruder axis may move it: the standard reader reports it as unknown.
+    require(!translate_line("A[COMP ON PLANE]", k_axes, {}).has_value(), "an extruder axis bracket command is not neutral");
+    std::vector<ReaderAction> a = translate("G133 = 1 X5");
+    require(a.size() == 1 && a[0].kind == Kind::Neutral, "G133 with any parameters is neutral");
+}
+
 void test_absolute_moves()
 {
     ReaderModes modes;
@@ -287,6 +301,7 @@ int main()
         test_heaters_and_fans();
         test_set_position_and_units();
         test_subprogram_call();
+    test_profile_controller_commands();
         test_absolute_moves();
         test_relative_moves();
         test_object_metadata();

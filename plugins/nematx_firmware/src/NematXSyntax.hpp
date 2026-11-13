@@ -344,8 +344,26 @@ inline std::optional<std::vector<ReaderAction>> translate_line(std::string_view 
         return std::vector<ReaderAction>{ action };
     }
 
+    // Controller directives written by the profile's scripts, which change no
+    // tracked position, extrusion, temperature or fan: "#BCS ON",
+    // "# SLOPE[TYPE=HSC]", and bracket commands on X, Y or Z such as
+    // "Z[COMP ON PLANE]". Another bracket command on an extruder axis may move
+    // that axis, so it stays unknown.
+    if (code.front() == '#')
+        return std::vector<ReaderAction>{ detail::make(Kind::Neutral) };
+    if (code.size() > 2 && code[1] == '[' && code.back() == ']') {
+        const char axis = char(std::toupper(static_cast<unsigned char>(code.front())));
+        if (axis == 'X' || axis == 'Y' || axis == 'Z')
+            return std::vector<ReaderAction>{ detail::make(Kind::Neutral) };
+    }
+
     const std::vector<std::string_view> words = detail::split_words(code);
     const std::string_view command = words.front();
+
+    // "G133 = 1" sets a controller parameter and "M29" ends the part: neither
+    // moves the machine nor changes what the reader tracks.
+    if (command.substr(0, command.find('=')) == "G133" || (command == "M29" && words.size() == 1))
+        return std::vector<ReaderAction>{ detail::make(Kind::Neutral) };
 
     // Commands with '=': "M104=215", "M106=127.5"...
     const size_t equal = command.find('=');
