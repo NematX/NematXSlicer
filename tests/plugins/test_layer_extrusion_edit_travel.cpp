@@ -59,12 +59,13 @@ The dated-top scene crosses a third island between two distinct attractors
 before and after that island's last arrival, in two shifted instances. Every
 segment of the later detour is checked against the third island's core top.
 The narrow-bridge scene checks its sliced and printed connection separately
-from expected routing. A controlled gap has a chord outside the material;
+from expected routing. A chain of deposited perimeter paths must span the neck,
+joining only at endpoints within the scaled epsilon. A controlled gap has a chord outside the material;
 active attractors and every routed segment are checked in platter coordinates.
 
     controlled scene: slice region masks, attach ordered paths, select active members
         `-- StepLayerExtrusionEdition::run_step: insert travels for point-count checks
-    narrow_bridge_scene: verify printed bridge, prepare eligible gap, query default zones
+    narrow_bridge_scene: verify a continuous printed chain, prepare eligible gap, query default zones
         `-- StepLayerExtrusionEdition::run_step: route the controlled gap with advanced travel
 */
 
@@ -94,7 +95,7 @@ struct NarrowBridgeResult
     Polyline route;
 };
 
-// Slice a one-line bridge, require its printed connection and eligible gap, then copy active zones and the production route.
+// Slice a one-line bridge, require an endpoint-connected deposited chain and eligible gap, then copy active zones and the production route.
 NarrowBridgeResult narrow_bridge_scene();
 
 class ScopedActivePlugins
@@ -910,8 +911,9 @@ NarrowBridgeResult narrow_bridge_scene()
     REQUIRE(diff_ex(result.bridge, result.slices).empty());
     REQUIRE_FALSE(diff_pl(Polylines{Polyline(Points{result.source, result.target})}, result.slices).empty());
 
-    // Inspect actual deposited paths before replacing their ordering with a controlled gap.
+    // Require a continuous deposited perimeter chain across the neck; attribute changes may split it into leaves.
     bool printed_bridge = false;
+    Polylines bridge_parts;
     std::vector<const ExtrusionEntity *> deposited;
     for (const LayerSliceIsland &island : layer.islands())
         for (const LayerRegionIsland &region : island.regions_islands())
@@ -922,11 +924,25 @@ NarrowBridgeResult narrow_bridge_scene()
         if (attributes == nullptr || !attributes->extrusion_role().is_perimeter()) continue;
         Polyline path = leaf->polyline_ref().to_polyline();
         path.translate(shift.x, shift.y);
-        for (const Polyline &part : intersection_pl(Polylines{path}, result.bridge)) {
-            const BoundingBox bounds = get_extents(part);
-            if (bounds.min.x() <= origin.x() + scale_i(10.1) && bounds.max.x() >= origin.x() + scale_i(14.9))
-                printed_bridge = true;
-        }
+        append(bridge_parts, intersection_pl(Polylines{path}, result.bridge));
+    }
+    std::vector<size_t> pending_parts;
+    std::vector<bool> reached(bridge_parts.size(), false);
+    for (size_t i = 0; i < bridge_parts.size(); ++i)
+        if (get_extents(bridge_parts[i]).min.x() <= origin.x() + scale_i(10.1)) pending_parts.push_back(i);
+    while (!pending_parts.empty()) {
+        const size_t current = pending_parts.back();
+        pending_parts.pop_back();
+        if (reached[current]) continue;
+        reached[current] = true;
+        const Polyline &part = bridge_parts[current];
+        if (get_extents(part).max.x() >= origin.x() + scale_i(14.9)) printed_bridge = true;
+        // Only shared endpoints within the scaled epsilon connect deposited pieces.
+        for (size_t i = 0; i < bridge_parts.size(); ++i)
+            if (!reached[i] && (part.front().coincides_with_epsilon(bridge_parts[i].front()) ||
+                part.front().coincides_with_epsilon(bridge_parts[i].back()) ||
+                part.back().coincides_with_epsilon(bridge_parts[i].front()) ||
+                part.back().coincides_with_epsilon(bridge_parts[i].back()))) pending_parts.push_back(i);
     }
     REQUIRE(printed_bridge);
     const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));

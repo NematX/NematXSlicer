@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include <boost/filesystem.hpp>
@@ -14,6 +15,7 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingEntityPropertyTraversal.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Print.hpp"
@@ -59,6 +61,9 @@ that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change both planners' routes while keeping their
 endpoints. A separate dumbbell scene checks real travels through its thin bridge,
 segment containment in sliced material, and publication of those detours in G-code.
+Those bridge assertions apply only to gaps with a source extrusion, identified
+by the provider's ordered-scope traversal. Layer-entry travels have no source
+extrusion and stay straight by design; they are exempt, regardless of Z or point count.
 It compares deposited volume except for settings that change extrusion geometry.
 For each case with deviations, at least one intermediate plan XY must occur in
 the published G0/G1 XY moves without an E word within 0.001 mm. This does not match every
@@ -107,7 +112,8 @@ share a volume comparison. Diagnostics name both endpoint kinds and their XY.
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
     `-- run_case: process the ring and central island, publish text, copy observations
-        |-- collect_travels: visit ordered scopes and copy their reserved travel phases
+        |-- PrintingEntityPropertyTraversal: identify scopes with a source extrusion
+        |-- collect_travels: copy reserved travel phases and their source provenance
         |   `-- append_points: join geometric leaves without consecutive duplicate vertices
         |-- count_wipes: count support wipe leaves with inherited roles
         |-- collect_scope_handles: gather scopes for inspecting outgoing wipes and incoming travels
@@ -122,6 +128,8 @@ struct Result {
     std::string selected_planner;
     // Each route contains consecutive scaled X, Y, Z-offset triples in execution order.
     std::vector<std::vector<coord_t>> travels;
+    // For each route, whether the provider's ordered-scope traversal supplies a source extrusion.
+    std::vector<bool> travel_has_source;
     // Routes whose endpoints lie on different islands.
     std::vector<std::vector<coord_t>> inter_island;
     // Number of copied routes with more than two vertices, regardless of collinearity.
@@ -183,8 +191,8 @@ struct TravelActivation {
 // and return copied routes, support/tower crossing-wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
-// Copy reserved travel phases without changing the plan; skip routes below two vertices and count those above two.
-void collect_travels(const ExtrusionEntity &entity, Result &result);
+// Copy reserved travel phases and their source provenance without changing the plan; skip routes below two vertices and count those above two.
+void collect_travels(const ExtrusionEntity &entity, const std::set<const extrusion_entity_handle *> &scopes_with_source, Result &result);
 // Append geometric leaves in child order, skipping consecutive duplicate XY and Z-offset triples.
 void append_points(const ExtrusionEntity &entity, std::vector<coord_t> &points);
 // Count marked wipe leaves in a borrowed extrusion tree without retaining its views.
@@ -777,6 +785,20 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     REQUIRE(published_path == exported.string());
     REQUIRE(print.printing_plan() != nullptr);
     Result result;
+    // Use the provider's scope traversal to distinguish planned gaps from straight layer-entry travels.
+    std::set<const extrusion_entity_handle *> scopes_with_source;
+    const auto scope_key = slic3r_api::printing_extrusion_scope_property_key(reinterpret_cast<orchestrator_handle *>(&host));
+    using ScopeEntity = slic3r_api::PrintingEntity<slic3r_api::PrintingExtrusionScopeProperty>;
+    for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            slic3r_api::PrintingEntityPropertyTraversal<slic3r_api::PrintingExtrusionScopeProperty> traversal(
+                scope_key, [&scopes_with_source](ScopeEntity *previous, ScopeEntity *next) {
+                    if (previous != nullptr && next != nullptr) scopes_with_source.insert(next->entity.handle());
+                }, slic3r_api::MatchingEntityDescendants::Skip);
+            slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(
+                const_cast<Printing::PrintingLayerGroup *>(&layer)));
+            traversal.process(layer_view);
+        }
     slic3r_api::MutableExtrusionEntity previous_off_scope;
     const Printing::PrintingLayerGroup *previous_off_layer = nullptr;
     std::string previous_off_kind;
@@ -860,7 +882,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                         }
                     }
                     const size_t before = result.travels.size();
-                    collect_travels(*extrusion.root, result);
+                    collect_travels(*extrusion.root, scopes_with_source, result);
                     if (extrusion.sregion_island_role.is_support()) {
                         result.support_wipes += count_wipes(slic3r_api::ExtrusionEntity(
                             reinterpret_cast<const extrusion_entity_handle *>(extrusion.root.get())));
@@ -971,7 +993,8 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     CHECK(result.volume > 0.);
     // Finding an intermediate plan XY in the published moves checks that a detour reaches text output.
     bool emitted_detour = false;
-    for (const std::vector<coord_t> &route : result.travels) {
+    for (size_t travel_idx = 0; travel_idx < result.travels.size(); ++travel_idx) {
+        const std::vector<coord_t> &route = result.travels[travel_idx];
         bool route_emitted = false;
         // Both islands are centred at (100,100); a 6 mm box around the centre identifies endpoints on the central island.
         const bool source_central = route[0] > scale_i(97.) && route[0] < scale_i(103.) &&
@@ -987,7 +1010,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                     std::abs(point.y() - route[idx + 1]) <= scale_i(0.001))
                     emitted_detour = route_emitted = true;
         if (route_emitted) result.published_detours.push_back(route);
-        if (scene == Scene::Dumbbell && config.opt_bool("avoid_crossing_perimeters")) {
+        if (scene == Scene::Dumbbell && config.opt_bool("avoid_crossing_perimeters") && result.travel_has_source[travel_idx]) {
             const Layer &layer = print.object(0).layers().back();
             const Point shift = print.object(0).instances().front().shift;
             const Point minimum = get_extents(layer.lslices()).min + shift;
@@ -1056,10 +1079,10 @@ void collect_scope_handles(slic3r_api::MutableExtrusionEntity entity,
         collect_scope_handles(entity.child_mutable(i), scopes);
 }
 
-void collect_travels(const ExtrusionEntity &entity, Result &result)
+void collect_travels(const ExtrusionEntity &entity, const std::set<const extrusion_entity_handle *> &scopes_with_source, Result &result)
 {
     for (size_t idx = 0; idx < entity.child_count(); ++idx)
-        collect_travels(entity.child(idx), result);
+        collect_travels(entity.child(idx), scopes_with_source, result);
     const auto key = slic3r_api::printing_extrusion_scope_property_key(
         reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(
@@ -1075,6 +1098,7 @@ void collect_travels(const ExtrusionEntity &entity, Result &result)
     if (points.size() < 6)
         return;
     result.deviated += points.size() > 6;
+    result.travel_has_source.push_back(scopes_with_source.count(view.handle()) != 0);
     result.travels.push_back(std::move(points));
 }
 

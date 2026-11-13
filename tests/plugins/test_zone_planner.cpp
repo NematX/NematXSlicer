@@ -28,7 +28,8 @@ the support roles are read from the sliced plan, not synthesized.
     check_clear: compare each route segment with original filled areas
     tests: exercise eligibility, cached margins, domain routing, jumps and limits;
         real default contributors retain disjoint tops when an endpoint occupies another top;
-        activation checks inspect collected zones and routing without inherited legacy top avoidance
+        activation checks inspect collected zones and routing without inherited legacy top avoidance;
+        a wide external perimeter preserves a real legacy top-detour witness after crossing-test inset
 */
 namespace {
 namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
@@ -434,6 +435,8 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
 {
     Owner owner;
     owner.config.set_deserialize_strict("avoid_crossing_top", "1");
+    // Keep a perimeter band wider than the crossing test's 1.5-nozzle-radius inset, independently of the perimeter generator.
+    owner.config.set_deserialize_strict("external_perimeter_extrusion_width", "0.8");
     owner.print.apply(owner.model, owner.config);
     owner.print.process();
     owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
@@ -457,7 +460,13 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
     const std::vector<c_point> expected = compatibility.path(gap.source, gap.target, 0);
     const std::vector<c_point> result = planner.path(0, gap);
+    REQUIRE(compatibility.avoidance_enabled(gap.source, gap.target));
     REQUIRE(expected.size() > 2);
+    double legacy_length = 0.;
+    for (size_t p = 1; p < expected.size(); ++p)
+        legacy_length += work::Line(work::Point(expected[p - 1]), work::Point(expected[p])).length();
+    CHECK(legacy_length > work::Line(work::Point(gap.source.position.x, gap.source.position.y),
+        work::Point(gap.target.position.x, gap.target.position.y)).length() + SCALED_EPSILON);
     double length = 0.;
     for (size_t p = 1; p < result.size(); ++p) length += work::Line(work::Point(result[p - 1]), work::Point(result[p])).length();
     CHECK(length == Approx(work::Line(work::Point(result.front()), work::Point(result.back())).length()).margin(2.));
