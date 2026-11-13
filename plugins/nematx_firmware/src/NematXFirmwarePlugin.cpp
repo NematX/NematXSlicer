@@ -13,6 +13,11 @@
 //
 // This provider also defines the NematX printer settings: extruder_axis,
 // disable_fan_from_unused_extruder, gcode_line_number and gcode_no_comment.
+// It publishes the extruder pressure and phase-splitting settings, and the
+// inactive filament compressibility setting retained for profile compatibility.
+// Initialization publishes definitions; run_impl creates the export session.
+//     inilialize_impl -> define_option: publish NematX setting metadata
+//     run_impl -> make_gcode_firmware_instance: transfer the session to the host
 
 #include <algorithm>
 #include <iterator>
@@ -30,6 +35,7 @@
 
 #include "NematXFirmwareSession.hpp"
 #include "NematXGCodeReader.hpp"
+#include "NematXPressureSettings.hpp"
 
 namespace nematx_firmware {
 namespace {
@@ -40,12 +46,14 @@ using namespace slic3r_api::GCodeGeneration;
 const char *const k_no_dependencies[] = { nullptr };
 const char *const k_defined_config_keys[] = {
     k_extruder_axis_key, k_disable_unused_fan_key, k_line_number_key, k_no_comment_key,
-    "fan_printer_min_speed"
+    "fan_printer_min_speed", k_pressure_factor_key, k_split_acceleration_key, k_compressibility_key
 };
 
-// Settings read by the session: the ones of every built-in firmware, plus the
-// NematX ones.
+// Settings read by the session and the inactive compressibility profile key.
 const raw_used_config_key k_used_config_keys[] = {
+    {k_pressure_factor_key, RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_split_acceleration_key, RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {k_compressibility_key, RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"deretract_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extruder_fan_offset", RAW_CO_VECTOR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"fan_printer_min_speed", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -58,6 +66,15 @@ const raw_used_config_key k_used_config_keys[] = {
     {"gcode_precision_e", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"gcode_precision_xyz", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"machine_limits_usage", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_acceleration_e", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_acceleration_extruding", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_acceleration_x", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_acceleration_y", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_acceleration_z", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_feedrate_e", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_feedrate_x", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_feedrate_y", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"machine_max_feedrate_z", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"nozzle_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"retract_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"single_extruder_multi_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -72,7 +89,7 @@ const raw_used_config_key k_used_config_keys[] = {
     {k_no_comment_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
 };
 
-// Define one printer setting; a definition error makes the plugin fail to load.
+// Define one plugin setting; a definition error makes the plugin fail to load.
 void define_option(orchestrator_handle *orchestrator, raw_config_option_def def)
 {
     def.container_type = RAW_CONTAINER_TYPE_PROJECT;
@@ -129,6 +146,7 @@ private:
         return int32_t(std::size(k_defined_config_keys));
     }
 
+    // Publish shared and NematX definitions; any host rejection stops plugin initialization.
     void inilialize_impl(storage_handle *) const override
     {
         // Publish the shared definition unchanged, including its host domain
@@ -163,9 +181,13 @@ private:
             "Remove comments, including the tags used by the G-code preview.");
         comments.category = RAW_OPTION_CATEGORY_OUTPUT;
         define_option(m_orchestrator, comments);
+
+        for (raw_config_option_def def : pressure_option_definitions())
+            define_option(m_orchestrator, def);
     }
 
-    // Create one session per export and give its ownership to the host.
+    // Transfers one session to the host. Both Reader clients borrow the host and
+    // Print until session destruction; no run-context pointer survives this call.
     void run_impl(const plugin_run_context *run_ctx) const override
     {
         throw_if_cancelled(run_ctx);
@@ -179,6 +201,7 @@ private:
         // The NematX reader only uses the portable reader state.
         session->set_reader_state_id(GCODE_READER_STATE_ID_PORTABLE);
         session->set_gcode_reader_context(m_orchestrator, context->print);
+        session->set_pressure_reader_context(m_orchestrator, context->print);
         context->instance = make_gcode_firmware_instance(std::unique_ptr<GCodeFirmwareSession>(std::move(session)));
     }
 };

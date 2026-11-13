@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -18,13 +19,140 @@
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFormatter.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeReaderService.hpp"
 
 #include "NematXObjectMetadata.hpp"
+#include "NematXPressureSettings.hpp"
+#include "../../pressure/src/PressureFlow.hpp"
+
+// Provides the NematX export session to the package's firmware provider. The
+// base produces nominal commands and finishes script synchronization first.
+// Only the outer public call removes private movement hints, detects support,
+// reads the clean text and passes it through the optional pressure Flow, then
+// OutputFilter. Flow owns layer anticipation and a separate corrected E state;
+// the base retains nominal extrusion accounting. A closed cycle has zero
+// pressure offset at its rounded nominal E coordinate. A distinct Reader client
+// owns its lock and final state, including private items, for this export only.
+// Movement hints carry a per-export token so literal script comments are not hints.
+// Host and Print are borrowed until session destruction. Exceptions propagate
+// to the existing session ABI; the file writer withholds its temporary output.
+//     provider -> set_pressure_reader_context: borrow host objects
+//     begin_print -> setup_firmware: copy settings and reset export state
+//     public wrappers -> filtered -> filter: process outer production once
+//         PressureRuntime::consume -> Reader -> index_fragment -> Flow
+//         OutputFilter::process: remove comments and number final commands
+//     end_print -> separator -> OutputFilter::flush -> controller metadata
 
 namespace nematx_firmware {
 
 using namespace slic3r_api;
 using namespace slic3r_api::GCodeGeneration;
+
+struct NematXGCodeFirmwareSession::PressureRuntime
+{
+    // Owns an independent Reader and Flow and creates one private hint token;
+    // the Reader borrows live host objects. Random-source failures propagate.
+    PressureRuntime(orchestrator_handle *host, const print_handle *print,
+                    const nematx_pressure::FlowConfig &config);
+    // Removes internal hints before Reader input, carries the complete final
+    // state and logs owned issues.
+    // Current-fragment classification and control failures gain a one-based
+    // source ordinal; deferred rewrite failures retain their own local context.
+    // Reader/Flow failures propagate without returning bytes.
+    std::string consume(std::string text, Boundary boundary);
+
+    orchestrator_handle *host;
+    GCodeReaderService reader;
+    GCodeStateTracker prior;
+    nematx_pressure::Flow flow;
+    // Private text prefix shared only by this export's encoder and hint removal.
+    std::string hint_prefix = ";NX_INTERNAL_MOVE=";
+    // Count clean source records, including a final record without LF, like Flow.
+    std::size_t source_rows = 0;
+};
+
+NematXGCodeFirmwareSession::PressureRuntime::PressureRuntime(
+    orchestrator_handle *host, const print_handle *print, const nematx_pressure::FlowConfig &config)
+    : host(host), reader(host, print), flow(config)
+{
+    std::random_device random;
+    for (int word = 0; word < 4; ++word)
+        hint_prefix += std::to_string(random()) + ":";
+}
+
+std::string NematXGCodeFirmwareSession::PressureRuntime::consume(std::string text, Boundary boundary)
+{
+    using namespace nematx_pressure;
+    std::string clean;
+    std::vector<MoveHint> hints;
+    MoveHint pending = MoveHint::None;
+    const std::string_view prefix = hint_prefix;
+    for (size_t begin = 0; begin < text.size();) {
+        const size_t lf = text.find('\n', begin);
+        const size_t end = lf == std::string::npos ? text.size() : lf + 1;
+        const std::string_view row(text.data() + begin, end - begin);
+        if (row.substr(0, prefix.size()) == prefix) {
+            if (pending != MoveHint::None)
+                throw std::logic_error("Repeated NematX internal movement hint.");
+            if (row == hint_prefix + "extrusion\n") pending = MoveHint::Extrusion;
+            else if (row == hint_prefix + "travel\n") pending = MoveHint::Travel;
+            else if (row == hint_prefix + "wipe\n") pending = MoveHint::Wipe;
+            else throw std::logic_error("Malformed NematX internal movement hint.");
+        } else {
+            if (pending != MoveHint::None &&
+                !(row.size() >= 3 && row[0] == 'G' && row[1] >= '0' && row[1] <= '3' && row[2] == ' '))
+                throw std::logic_error("NematX internal hint is not followed by its movement.");
+            hints.push_back(pending);
+            pending = MoveHint::None;
+            clean.append(row);
+        }
+        begin = end;
+    }
+    if (pending != MoveHint::None)
+        throw std::logic_error("NematX internal movement hint has no movement.");
+    ReaderFragment observed = read_fragment(reader, prior, clean);
+    prior = observed.final;
+    SourceFragment source = index_fragment(std::move(clean), std::move(observed));
+    const std::size_t row_count = source.lines.size();
+    FlowOutput output;
+    try {
+        output = flow.consume(std::move(source), hints,
+            {boundary == Boundary::BeginLayer, boundary == Boundary::EndLayer, boundary == Boundary::EndPrint});
+    } catch (const ClassificationError &error) {
+        throw std::invalid_argument("NematX pressure source line " +
+            std::to_string(source_rows + error.line_index + 1) + ": " + error.what());
+    } catch (const ControlError &error) {
+        throw std::invalid_argument("NematX pressure source line " +
+            std::to_string(source_rows + error.line_index + 1) + ": " + error.what());
+    }
+    source_rows += row_count;
+    for (const FlowIssue &issue : output.issues) {
+        const char *cause = "Reader diagnostic";
+        switch (issue.kind) {
+        case FlowIssueKind::InvalidAcceleration: cause = "invalid ;M204 S acceleration ignored"; break;
+        case FlowIssueKind::ReaderInvalidation: cause = "Reader state invalidated"; break;
+        case FlowIssueKind::ReaderDiagnostic: break;
+        case FlowIssueKind::HorizonInsufficient: cause = "pressure anticipation horizon insufficient"; break;
+        case FlowIssueKind::GeometryMerged: cause = "pressure phases merged at output precision"; break;
+        }
+        for (const raw_gcode_reader_event_item &item : issue.reader_items) {
+            if (item.type != RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE)
+                continue;
+            switch (uint32_t(item.value)) {
+            case RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_COMMAND: cause = "Reader unknown command"; break;
+            case RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS: cause = "Reader invalid command parameters"; break;
+            case RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_TOOL: cause = "Reader unknown tool"; break;
+            case RAW_GCODE_READER_DIAGNOSTIC_AMBIGUOUS_TOOL: cause = "Reader ambiguous tool"; break;
+            case RAW_GCODE_READER_DIAGNOSTIC_UNSUPPORTED_STATE_EFFECT: cause = "Reader unsupported state effect"; break;
+            }
+        }
+        const std::string message = "NematX pressure: " + std::string(cause) + ", tool " +
+            (issue.tool ? std::to_string(*issue.tool) : "unknown") + ", source line " +
+            std::to_string(issue.source_ordinal + 1);
+        orchestrator_send_log(host, RAW_PLUGIN_LOG_WARNING, message.c_str());
+    }
+    return std::move(output.bytes);
+}
 
 namespace {
 
@@ -127,6 +255,15 @@ NematXGCodeFirmwareSession::NematXGCodeFirmwareSession(GCodeScriptProcessorView 
     : Base(scripts, storage)
 {}
 
+NematXGCodeFirmwareSession::~NematXGCodeFirmwareSession() = default;
+
+void NematXGCodeFirmwareSession::set_pressure_reader_context(orchestrator_handle *orchestrator,
+                                                          const print_handle *print)
+{
+    m_pressure_orchestrator = orchestrator;
+    m_pressure_print = print;
+}
+
 void NematXGCodeFirmwareSession::setup_firmware(const Config &config)
 {
     Base::setup_firmware(config);
@@ -152,15 +289,56 @@ void NematXGCodeFirmwareSession::setup_firmware(const Config &config)
     m_filter = OutputFilter(config.bool_or_default(k_no_comment_key, false),
                             config.bool_or_default(k_line_number_key, false));
     m_pending.clear();
+    m_pressure.reset();
+    m_output_unterminated = false;
+    nematx_pressure::FlowConfig pressure{};
+    bool enabled = false;
+    for (uint32_t tool = 0; tool < tool_count; ++tool) {
+        const double k = config.vector_float_or_default(k_pressure_factor_key, tool, 0.0);
+        if (!std::isfinite(k) || k < 0.0)
+            throw std::invalid_argument("NematX extruder_pressure_factor must be finite and nonnegative, tool " +
+                                        std::to_string(tool) + ".");
+        const bool split = config.vector_bool_or_default(k_split_acceleration_key, tool, false);
+        pressure.tools.push_back({k, split});
+        enabled = enabled || k > 0.0 || split;
+    }
+    if (!enabled)
+        return;
+    pressure.axis_letters = m_axis_letters;
+    pressure.xyz_digits = gcode_formatter().m_gcode_precision_xyz;
+    pressure.e_digits = gcode_formatter().m_gcode_precision_e;
+    pressure.volumetric = config.bool_or_default("use_volumetric_e", false);
+    const ConfigOption usage = config.get("machine_limits_usage");
+    if (usage.valid() && usage.is_enabled() && usage.serialize() != "ignore") {
+        const char *speed_keys[] = {"machine_max_feedrate_x", "machine_max_feedrate_y",
+                                    "machine_max_feedrate_z", "machine_max_feedrate_e"};
+        const char *accel_keys[] = {"machine_max_acceleration_x", "machine_max_acceleration_y",
+                                    "machine_max_acceleration_z", "machine_max_acceleration_e"};
+        for (size_t axis = 0; axis < 4; ++axis) {
+            pressure.limits.speed[axis] = config.vector_float_or_default(speed_keys[axis], 0, 0.0);
+            pressure.limits.acceleration[axis] = config.vector_float_or_default(accel_keys[axis], 0, 0.0);
+            if (!std::isfinite(pressure.limits.speed[axis]))
+                throw std::invalid_argument(std::string("NematX pressure requires finite ") + speed_keys[axis]);
+            if (!std::isfinite(pressure.limits.acceleration[axis]))
+                throw std::invalid_argument(std::string("NematX pressure requires finite ") + accel_keys[axis]);
+        }
+        pressure.limits.max_extruding_acceleration =
+            config.vector_float_or_default("machine_max_acceleration_extruding", 0, 0.0);
+        if (!std::isfinite(pressure.limits.max_extruding_acceleration))
+            throw std::invalid_argument("NematX pressure requires finite machine_max_acceleration_extruding");
+    }
+    pressure.initial_acceleration = pressure.limits.acceleration[0] > 0.0 ?
+        pressure.limits.acceleration[0] : 100000.0;
+    if (pressure.limits.max_extruding_acceleration > 0.0)
+        pressure.initial_acceleration = std::min(pressure.initial_acceleration,
+                                                pressure.limits.max_extruding_acceleration);
+    m_pressure = std::make_unique<PressureRuntime>(m_pressure_orchestrator, m_pressure_print, pressure);
 }
 
 // ---- Output filtering and metadata -----------------------------------------
 
-// The base session calls some of these public methods itself (write_event()
-// for the startup scripts inside begin_print()). Only the outermost call
-// filters, so no text is numbered twice.
 template<class Write>
-std::string NematXGCodeFirmwareSession::filtered(Write write)
+std::string NematXGCodeFirmwareSession::filtered(Write write, Boundary boundary)
 {
     ++m_filter_depth;
     std::string text;
@@ -171,12 +349,17 @@ std::string NematXGCodeFirmwareSession::filtered(Write write)
         throw;
     }
     --m_filter_depth;
-    return m_filter_depth == 0 ? filter(std::move(text)) : text;
+    return m_filter_depth == 0 ? filter(std::move(text), boundary) : text;
 }
 
-std::string NematXGCodeFirmwareSession::filter(std::string text)
+std::string NematXGCodeFirmwareSession::filter(std::string text, Boundary boundary)
 {
-    return m_filter.process(text + take_pending());
+    text += take_pending();
+    if (m_pressure)
+        text = m_pressure->consume(std::move(text), boundary);
+    if (!text.empty())
+        m_output_unterminated = text.back() != '\n';
+    return m_filter.process(text);
 }
 
 std::string NematXGCodeFirmwareSession::begin_print(const Print &print, const ConstPrintingPlan &plan)
@@ -202,7 +385,7 @@ std::string NematXGCodeFirmwareSession::begin_group(const ConstPrintingGroup &gr
 
 std::string NematXGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
-    return filtered([&] { return Base::begin_layer(layer); });
+    return filtered([&] { return Base::begin_layer(layer); }, Boundary::BeginLayer);
 }
 
 std::string NematXGCodeFirmwareSession::begin_tool_group(const ConstPrintingToolGroup &tool_group)
@@ -227,7 +410,7 @@ std::string NematXGCodeFirmwareSession::end_tool_group()
 
 std::string NematXGCodeFirmwareSession::end_layer()
 {
-    return filtered([&] { return Base::end_layer(); });
+    return filtered([&] { return Base::end_layer(); }, Boundary::EndLayer);
 }
 
 std::string NematXGCodeFirmwareSession::end_group()
@@ -239,7 +422,9 @@ std::string NematXGCodeFirmwareSession::end_print()
 {
     // The layer count and has_support lines read by the NematX controller come from
     // the host statistics, which the exporter writes after the session output.
-    return filtered([&] { return Base::end_print(); }) + m_filter.flush();
+    std::string output = filtered([&] { return Base::end_print(); }, Boundary::EndPrint);
+    output += flush_before_metadata(m_filter, m_pressure && m_output_unterminated);
+    return output;
 }
 
 std::string NematXGCodeFirmwareSession::take_pending() const
@@ -374,9 +559,6 @@ std::string NematXGCodeFirmwareSession::encode_acceleration(uint32_t acceleratio
 
 // ---- Moves ------------------------------------------------------------------------
 
-// G1 X.. Y.. A.. F.. with the axis letter of the current extruder, or G2/G3
-// with I/J center offsets for arcs. With relative extrusion, G90 precedes the
-// coordinates and G91 the extruder distance: "G1 G90 X10 Y5 G91 A0.3".
 std::string NematXGCodeFirmwareSession::encode_move(const PreparedMove &move, bool include_speed) const
 {
     const std::optional<c_vec3d> current = gantry().position();
@@ -421,7 +603,16 @@ std::string NematXGCodeFirmwareSession::encode_move(const PreparedMove &move, bo
     }
     if (include_speed)
         formatter.emit_f(*gantry().requested_speed() * 60.0);
-    return take_pending() + formatter.string();
+    std::string hint;
+    if (m_pressure) {
+        switch (move.kind) {
+        case PreparedMove::Kind::Extrusion: hint = m_pressure->hint_prefix + "extrusion\n"; break;
+        case PreparedMove::Kind::Travel: hint = m_pressure->hint_prefix + "travel\n"; break;
+        case PreparedMove::Kind::Wipe: hint = m_pressure->hint_prefix + "wipe\n"; break;
+        case PreparedMove::Kind::None: break;
+        }
+    }
+    return take_pending() + hint + formatter.string();
 }
 
 // ---- Commands the NematX firmware does not have ------------------------------------

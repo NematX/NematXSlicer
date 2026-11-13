@@ -2,6 +2,8 @@
 
 Each case exports a model through the host executable with
 gcode_flavor = nematx, then checks the G-code text.
+NematXPressureSettings only saves and reloads profiles in fresh host processes;
+it checks declaration and persistence without exporting a model.
 """
 
 from __future__ import annotations
@@ -53,13 +55,13 @@ BASE_PROFILE = (
 # host checks that each one has a value per extruder.
 EXTRUDER_KEYS = (
     "deretract_speed", "extruder_clearance", "extruder_colour", "extruder_extrusion_multiplier_speed",
-    "extruder_fan_offset", "extruder_offset", "extruder_temperature_offset", "max_layer_height",
+    "extruder_fan_offset", "extruder_offset", "extruder_pressure_factor", "extruder_temperature_offset", "max_layer_height",
     "min_layer_height", "retract_before_travel", "retract_before_wipe", "retract_layer_change",
     "retract_length", "retract_length_toolchange", "retract_lift", "retract_lift_above",
     "retract_lift_before_travel", "retract_lift_below", "retract_lift_first_layer", "retract_lift_top",
     "retract_restart_extra", "retract_restart_extra_toolchange", "retract_restart_toolchange_on_perimeter",
     "retract_restart_wipe_toolchange", "retract_speed", "seam_gap", "seam_gap_external",
-    "temperature_heat_speed", "tool_name", "travel_lift_before_obstacle", "travel_ramping_lift",
+    "split_extrusion_acceleration", "temperature_heat_speed", "tool_name", "travel_lift_before_obstacle", "travel_ramping_lift",
     "travel_slope", "wipe", "wipe_extra_perimeter", "wipe_inside_depth", "wipe_inside_end",
     "wipe_inside_start", "wipe_lift", "wipe_lift_length", "wipe_min", "wipe_only_crossing",
     "wipe_return", "wipe_speed",
@@ -67,16 +69,18 @@ EXTRUDER_KEYS = (
 
 
 def host_defaults() -> dict[str, str]:
-    """Default value of every setting, as saved by the host (key = serialized value)."""
+    """Save host defaults and its loading diagnostics; return serialized values by key."""
     case_dir = OUTPUT_ROOT / "defaults"
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "profile.ini").write_text(BASE_PROFILE[0] + "\n", encoding="utf-8")
     saved = case_dir / "defaults.ini"
     environment = dict(os.environ)
     environment["PATH"] = os.pathsep.join(RUNTIME_PATH + [environment.get("PATH", "")])
-    subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--load", str(case_dir / "profile.ini"),
-                    "--save", str(saved)], cwd=HOST_BUILD, capture_output=True, timeout=600, env=environment,
-                   check=True)
+    result = subprocess.run([str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--loglevel", "4",
+                             "--load", str(case_dir / "profile.ini"), "--save", str(saved)],
+                            cwd=HOST_BUILD, capture_output=True, timeout=600, env=environment)
+    (case_dir / "host.log").write_bytes(result.stdout + result.stderr)
+    result.check_returncode()
     defaults = {}
     for line in saved.read_text(encoding="utf-8").splitlines():
         key, separator, value = line.partition(" = ")
@@ -321,6 +325,59 @@ class FirmwareCalibrationOwnership(unittest.TestCase):
                 remove_data(case / "datadir")
                 passed.append(case)
         finish_run(root, len(passed) == len(cases))
+
+
+class NematXPressureSettings(unittest.TestCase):
+    """Check NematX option persistence without invoking slicing or gear setup."""
+
+    def assert_loading_diagnostics(self, log: str) -> None:
+        """Reject missing declarations, type/scope conflicts and NematX deactivation."""
+        self.assertNotRegex(log.lower(), r"without declaring it in used_config_keys|without a value type|"
+                            r"without a matching used_config_keys|conflicting used_config_keys types|"
+                            r"different value type|different config container|different preset type")
+        self.assertNotIn("Disabled plugin 'nematx'", log)
+
+    def test_defaults_and_two_tool_roundtrip(self) -> None:
+        """Keep distinct extruder and filament values through two fresh saves."""
+        plugin = PLUGIN_DATADIR / "plugins" / "nematx-firmware" / ("plugin.dll" if sys.platform == "win32" else "plugin.so")
+        self.assertTrue(plugin.is_file(), f"Missing staged NematX package: {plugin}")
+        defaults = host_defaults()
+        self.assert_loading_diagnostics((OUTPUT_ROOT / "defaults" / "host.log").read_text(encoding="utf-8", errors="replace"))
+        keys = ("extruder_pressure_factor", "split_extrusion_acceleration", "filament_compressibility_factor")
+        for key in keys:
+            self.assertEqual(defaults[key], "0", key)
+        self.assertEqual(defaults["gcode_flavor"], "nematx")
+
+        case = OUTPUT_ROOT / "pressure-settings"
+        case.mkdir(parents=True, exist_ok=True)
+        source = case / "profile.ini"
+        source.write_text(profile_text(BASE_PROFILE + doubled_extruder_options(defaults) + (
+            "nozzle_diameter = 0.4,0.4", 'extruder_axis = "A";"B"', "filament_diameter = 1.75,1.75",
+            "extruder_pressure_factor = 0.02,0.03", "split_extrusion_acceleration = 0,1",
+            "filament_compressibility_factor = 0.004,0.005",
+        )), encoding="utf-8")
+        environment = dict(os.environ)
+        environment["PATH"] = os.pathsep.join(RUNTIME_PATH + [environment.get("PATH", "")])
+        expected = ([0.02, 0.03], [0.0, 1.0], [0.004, 0.005])
+        for index in range(2):
+            saved = case / f"saved-{index}.ini"
+            saved.unlink(missing_ok=True)
+            result = subprocess.run(
+                [str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--loglevel", "4",
+                 "--load", str(source), "--save", str(saved)],
+                cwd=HOST_BUILD, capture_output=True, timeout=600, env=environment)
+            log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            (case / f"save-{index}.log").write_text(log, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, log)
+            self.assertTrue(saved.is_file(), log)
+            self.assert_loading_diagnostics(log)
+            values = dict(line.split(" = ", 1) for line in saved.read_text(encoding="utf-8").splitlines()
+                          if " = " in line)
+            self.assertEqual(values["gcode_flavor"], "nematx")
+            for key, numbers in zip(keys, expected):
+                self.assertEqual([float(value) for value in values[key].split(",")], numbers, key)
+            self.assertEqual(values["nozzle_diameter"], "0.4,0.4")
+            source = saved
 
 
 class NematXFirmwareIntegration(unittest.TestCase):

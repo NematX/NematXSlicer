@@ -1,5 +1,5 @@
 # NematX firmware package: G-code firmware nematx and reader
-# gcode.reader.nematx. Every file of this package lives in this directory.
+# gcode.reader.nematx, with the shared pressure engine from ../pressure.
 
 # The firmware session and reader derive from SDK classes compiled into the
 # static slic3r::plugin_sdk_cpp library (Boost and fast_float headers needed,
@@ -10,6 +10,18 @@ if(NOT TARGET slic3r::plugin_sdk_cpp)
 endif()
 
 add_library(nematx_firmware SHARED
+    ../pressure/src/PressureClassification.cpp
+    ../pressure/src/PressureControls.cpp
+    ../pressure/src/PressureExtrusion.cpp
+    ../pressure/src/PressureFlow.cpp
+    ../pressure/src/PressureGeometry.cpp
+    ../pressure/src/PressureKinematics.cpp
+    ../pressure/src/PressureNominal.cpp
+    ../pressure/src/PressurePlanner.cpp
+    ../pressure/src/PressureReader.cpp
+    ../pressure/src/PressureRewrite.cpp
+    ../pressure/src/PressureSource.cpp
+    ../pressure/src/PressureTokens.cpp
     src/NematXFirmwarePlugin.cpp
     src/NematXFirmwareSession.cpp
     src/NematXGCodeReader.cpp
@@ -46,5 +58,20 @@ nematx_package_plugin(
 
 # The syntax rules are plain C++: their tests need no host DLL.
 add_executable(nematx_firmware_syntax_tests tests/syntax_tests.cpp)
-target_include_directories(nematx_firmware_syntax_tests PRIVATE src)
+target_include_directories(nematx_firmware_syntax_tests PRIVATE src "${SUPERSLICER_SOURCE_DIR}/src")
 add_test(NAME nematx_firmware_syntax COMMAND nematx_firmware_syntax_tests)
+
+# The Windows native test host exports its own C ABI, unlike the normal CLI DLL.
+# plugins_tests lives in the host build next to the console: <build>/src/<config>/ and <build>/tests/plugins/<config>/.
+if(WIN32)
+    get_filename_component(_nematx_host_build "${SUPERSLICER_HOST_EXECUTABLE}" DIRECTORY)
+    get_filename_component(_nematx_host_build "${_nematx_host_build}" DIRECTORY)
+    get_filename_component(_nematx_host_build "${_nematx_host_build}" DIRECTORY)
+    add_test(NAME pressure_exports
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_pressure_exports.py"
+            --host "${SUPERSLICER_HOST_EXECUTABLE}"
+            --host-tests "${_nematx_host_build}/tests/plugins/$<CONFIG>/plugins_tests.exe"
+            --build "${CMAKE_BINARY_DIR}"
+            --native-fixture "${CMAKE_BINARY_DIR}/test-fixtures/pressure-native-host")
+    set_tests_properties(pressure_exports PROPERTIES TIMEOUT 105 RUN_SERIAL TRUE)
+endif()

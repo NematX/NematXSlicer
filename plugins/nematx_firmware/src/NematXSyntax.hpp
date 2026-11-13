@@ -8,6 +8,8 @@
 // Text rules of the NematX G-code dialect, written in plain C++ so they can be
 // unit-tested without the slicer. The firmware session (writer) and the reader
 // both use them.
+// After the final OutputFilter::process call, flush_before_metadata completes
+// an unterminated production line before the session appends its metadata.
 //
 // NematX differs from Marlin mainly in its syntax:
 // - each extruder has its own axis letter (A for the first tool, B for the
@@ -185,6 +187,17 @@ private:
     uint64_t m_line_count = 0;
     std::string m_pending;
 };
+
+// Complete the last production line only when metadata follows, then drain the
+// existing filter. A source CR is passed through unchanged; the filter retains
+// its normal CRLF/comment policy. Use after the final process(), before metadata.
+inline std::string flush_before_metadata(OutputFilter &filter, bool unterminated)
+{
+    std::string output;
+    if (unterminated)
+        output = filter.process("\n");
+    return output + filter.flush();
+}
 
 // Remove a leading line number ("N120 G1 X1" -> "G1 X1"). Other lines are
 // returned unchanged. The reader applies this before interpreting a line.

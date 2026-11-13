@@ -4,10 +4,15 @@
 
 // NematX syntax tests: plain C++, no host library. They cover the axis letters,
 // the output filter (line numbers, comment removal), the reader translation and
-// the object metadata lines.
+// the object metadata lines and the pressure setting definitions published by
+// the provider. main runs each group; require reports the first failed check.
+//     main -> test_pressure_settings: inspect the provider's raw definitions
+//     main -> test_*: check syntax, translation, filtering and metadata
+#include "NematXPressureSettings.hpp"
 #include "NematXObjectMetadata.hpp"
 #include "NematXSyntax.hpp"
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <sstream>
@@ -17,7 +22,76 @@
 using namespace nematx_firmware;
 using Kind = ReaderAction::Kind;
 
+// Run all local checks and return failure with the first diagnostic.
+int main();
+
 namespace {
+
+// Throw with the supplied diagnostic when a local check fails.
+void require(bool condition, const std::string &message);
+
+// Inspect the actual definitions without linking the host or parsing sources.
+void test_pressure_settings();
+
+// Exercise the exact metadata handoff for opaque non-LF text and a source CR.
+void test_metadata_separator();
+
+void test_metadata_separator()
+{
+    for (bool comments : {false, true}) {
+        for (bool numbers : {false, true}) {
+            for (const std::string &tail : {std::string("opaque"), std::string("opaque\r"), std::string("opaque\n")}) {
+                OutputFilter filter(comments, numbers);
+                std::string text = filter.process(tail);
+                text += flush_before_metadata(filter, tail.back() != '\n');
+                text += "; metadata\n";
+                const std::string expected = (numbers ? "N10 opaque" : "opaque") +
+                    std::string(!comments && !numbers && tail.back() == '\r' ? "\r\n" : "\n") + "; metadata\n";
+                require(text == expected, "metadata starts on its own line without an invented CR");
+            }
+        }
+    }
+    OutputFilter inactive;
+    require(inactive.process("opaque") + inactive.flush() == "opaque", "true EOF keeps the missing LF");
+}
+
+void test_pressure_settings()
+{
+    const std::array<raw_config_option_def, 3> definitions = pressure_option_definitions();
+    const char *keys[] = { "extruder_pressure_factor", "split_extrusion_acceleration",
+                           "filament_compressibility_factor" };
+    for (size_t i = 0; i < definitions.size(); ++i) {
+        const raw_config_option_def &def = definitions[i];
+        require(std::string(def.opt_key) == keys[i], "pressure key and unique order");
+        require(def.type == (i == 1 ? RAW_CO_VECTOR_BOOL : RAW_CO_VECTOR_FLOAT), "vector type");
+        require(def.container_type == RAW_CONTAINER_TYPE_PROJECT, "project container");
+        require(def.printer_technology == RAW_PT_FFF, "FFF technology");
+        require(def.invalidates_step == STEP_GCODE, "G-code invalidation metadata");
+        require(def.mode == RAW_CONFIG_OPTION_MODE_EXPERT, "expert mode");
+        require(def.is_vector_extruder == 1, "one value per extruder");
+        require(std::string(def.default_serialized_value) == "0", "disabled default");
+        require(def.option_preset_type == (i == 2 ? RAW_PRESET_TYPE_FFF_FILAMENT :
+                                                   RAW_PRESET_TYPE_FFF_TOOL_EXTRUDER), "preset scope");
+        require(def.category == (i == 2 ? RAW_OPTION_CATEGORY_FILAMENT : RAW_OPTION_CATEGORY_EXTRUDERS),
+                "GUI category");
+        require(def.label != nullptr && def.label[0] != '\0', "visible label");
+        require(def.tooltip != nullptr && def.tooltip[0] != '\0', "tooltip");
+        if (i != 1) {
+            require(def.has_min == 1, "float minimum enabled");
+            require(def.min_value == 0, "nonnegative float");
+            require(def.precision == 6, "float display precision");
+        }
+    }
+    require(std::string(definitions[0].sidetext) == "s", "pressure unit seconds");
+    require(std::string(definitions[0].tooltip).find("K times the model speed") != std::string::npos,
+            "pressure tooltip identifies the model");
+    require(definitions[1].sidetext == nullptr, "no boolean unit");
+    require(std::string(definitions[1].tooltip).find("K is zero") != std::string::npos,
+            "F09 independent of pressure");
+    require(definitions[2].sidetext == nullptr, "no compressibility delay unit");
+    require(std::string(definitions[2].tooltip).find("Inactive") != std::string::npos,
+            "compatibility tooltip states inactivity");
+}
 
 void require(bool condition, const std::string &message)
 {
@@ -294,6 +368,8 @@ void test_convex_hull()
 int main()
 {
     try {
+        test_pressure_settings();
+        test_metadata_separator();
         test_axis_letters();
         test_output_filter();
         test_strip_line_number();

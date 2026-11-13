@@ -6,6 +6,7 @@
 #define nematx_firmware_NematXFirmwareSession_hpp_
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -28,8 +29,11 @@ constexpr char k_no_comment_key[] = "gcode_no_comment";
 // One export in the NematX dialect.
 //
 // The base session (public SDK) walks the PrintingPlan, keeps the machine state
-// and decides which commands are needed; this class only changes how commands
-// are written. It also filters the whole output (line numbers, comment removal),
+// and decides which commands are needed. This class writes those commands and,
+// when pressure or phase splitting is enabled, reads the ordered text with a
+// separate Reader and transforms closed layer cycles before output filtering.
+// The nominal base state is not changed by that transformation.
+// It also filters the whole output (line numbers, comment removal),
 // describes the objects for the NematX controller after the file header, and
 // appends the NematX metadata at the end of the file.
 //
@@ -42,21 +46,30 @@ public:
 
     NematXGCodeFirmwareSession(slic3r_api::GCodeGeneration::GCodeScriptProcessorView scripts, storage_handle *storage);
 
+    // Destroys the owned runtime; the borrowed host and Print must outlive this session.
+    ~NematXGCodeFirmwareSession() override;
+    // Borrows host objects that must outlive this session; retains no run context.
+    void set_pressure_reader_context(orchestrator_handle *orchestrator, const print_handle *print);
+
     std::string reader_plugin_id() const override { return k_reader_plugin_id; }
 
     // Every output passes through filter(): see OutputFilter in NematXSyntax.hpp.
     std::string begin_print(const slic3r_api::Print &print, const slic3r_api::ConstPrintingPlan &plan) override;
     std::string begin_group(const slic3r_api::ConstPrintingGroup &group) override;
+    // Opens the pressure layer before its generated header, without resetting modes.
     std::string begin_layer(const slic3r_api::ConstPrintingLayerGroup &layer) override;
     std::string begin_tool_group(const slic3r_api::ConstPrintingToolGroup &tool_group) override;
     std::string write_extrusion(const slic3r_api::ConstPrintingExtrusion &extrusion) override;
     std::string write_event(const slic3r_api::ExtrusionEntity &event_root) override;
     std::string end_tool_group() override;
+    // Closes the layer after its generated tail and returns all retained phases.
     std::string end_layer() override;
     std::string end_group() override;
+    // Closes pressure before outside-layer text, flushes the filter and adds metadata.
     std::string end_print() override;
 
 protected:
+    // Resets export state and copies validated pressure settings after nominal setup.
     void setup_firmware(const slic3r_api::Config &config) override;
     std::string write_pre_start(const std::string &resolved_script) override;
     std::string write_post_start() override;
@@ -73,6 +86,9 @@ protected:
     std::string encode_pressure_advance(extruder_index_t tool_id,
                                         double pressure_advance) const override;
     std::string encode_acceleration(uint32_t acceleration, bool travel) const override;
+    // Encodes nominal G1 or G2/G3 with I/J center offsets and a private kind hint
+    // only when pressure is enabled. Relative E uses inline modes, for example
+    // "G1 G90 X10 Y5 G91 A0.3"; pending commands precede the hint and move.
     std::string encode_move(const PreparedMove &move, bool include_speed) const override;
     std::string encode_save_speed_ratio(double ratio) const override;
     std::string encode_restore_speed_ratio() const override;
@@ -91,8 +107,21 @@ private:
     size_t physical_tool(extruder_index_t tool_id) const;
     // Text queued between two encoders (see synchronize_selected_extruder_state).
     std::string take_pending() const;
-    std::string filter(std::string text);
-    template<class Write> std::string filtered(Write write);
+    enum class Boundary { Fragment, BeginLayer, EndLayer, EndPrint };
+    // Reads and transforms cleaned production once, then applies the output filter.
+    std::string filter(std::string text, Boundary boundary);
+    // The base may call write_event inside begin_print. Leave nested production
+    // untouched until its outer owner can read, transform and filter all the text.
+    template<class Write> std::string filtered(Write write, Boundary boundary = Boundary::Fragment);
+
+    struct PressureRuntime;
+    // Owns the optional Reader and pressure Flow for this export.
+    std::unique_ptr<PressureRuntime> m_pressure;
+    // Borrowed host objects remain live until session destruction.
+    orchestrator_handle *m_pressure_orchestrator = nullptr;
+    const print_handle *m_pressure_print = nullptr;
+    // Last nonempty pre-filter output needs a separator before metadata when active.
+    bool m_output_unterminated = false;
 
     std::vector<char> m_axis_letters;
     bool m_disable_unused_fan = false;
