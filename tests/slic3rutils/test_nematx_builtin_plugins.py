@@ -18,6 +18,9 @@ SOURCES = (
     "plugins/nematx_firmware/src/NematXFirmwarePlugin.cpp",
     "plugins/nematx_firmware/src/NematXFirmwareSession.cpp",
     "plugins/nematx_firmware/src/NematXGCodeReader.cpp",
+    *(f"plugins/pressure/src/Pressure{part}.cpp" for part in (
+        "Classification", "Controls", "Extrusion", "Flow", "Geometry", "Kinematics",
+        "Nominal", "Planner", "Reader", "Rewrite", "Source", "Tokens")),
     "plugins/regional_fan/src/RegionalFan.cpp",
     "plugins/wipetower/src/WipeTowerManager.cpp", "plugins/wipetower/src/WipeTowerLayout.cpp",
     "plugins/wipetower/src/TowerFootprints.cpp", "plugins/wipetower/src/FilamentSections.cpp",
@@ -27,6 +30,7 @@ SOURCES = (
     "plugins/support_interface_perimeters/src/SupportInterfacePerimeters.cpp",
     "plugins/support_interface_perimeters/src/InterfacePerimeters.cpp",
     "plugins/seam/src/InternalSeam.cpp", "plugins/seam/src/InternalSeamPlugin.cpp",
+    "plugins/top_surface_retraction/src/TopSurfaceRetraction.cpp",
 )
 IDS = (
     "nematx_second_layer_flow", "nematx_corner_stretch", "nematx_fan_first_layer_program",
@@ -35,6 +39,7 @@ IDS = (
     "nematx", "gcode.reader.nematx", "nematx_regional_fan", "nematx_wipetower",
     "nematx_smooth_temperature", "nematx.support.bottom_contact", "nematx.support.bottom_interface",
     "nematx.support.top_contact", "nematx.support.top_interface", "nematx_seam",
+    "nematx_top_surface_retraction",
 )
 
 
@@ -81,7 +86,7 @@ endforeach()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         targets = (binary / "targets.txt").read_text().split(";")
         modules = [target for target in targets if target.startswith("nematx_builtin_")]
-        self.assertEqual(len(modules), 13)
+        self.assertEqual(len(modules), 14)
         activated = (binary / "activations.txt").read_text().splitlines()
         self.assertEqual(set(activated), {plugin_id + " = 1" for plugin_id in IDS})
         registry = (binary / "NematXBuiltinPlugins.cpp").read_text()
