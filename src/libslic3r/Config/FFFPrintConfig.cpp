@@ -33,6 +33,7 @@
 #include <boost/nowide/iostream.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 #include "Flow.hpp"
 #include "PointUtils.hpp"
@@ -45,7 +46,7 @@ init_fff_params() supplies their types, defaults, validation limits and GUI text
 These definitions describe settings; they do not hold a user's chosen values or
 generate toolpaths. Consumers copy defaults into the appropriate config store.
 print_complete_objects() and print_by_object() read optional mode settings for
-native consumers; absent switches and height steps mean disabled and zero.
+native consumers using the effective active provider; an absent height step means zero.
 
 Built-in FFF option definitions and preset key lists. Tower options invalidate
 tower generation, and export merges their current envelopes with the cached
@@ -75,15 +76,15 @@ Representative direct calls (branches are not a timeline):
 
     min_object_distance()
         `-- print_by_object()
-            `-- print_complete_objects()
+            `-- Steps::selected_active_plugin_from_group()
 */
 
 namespace Slic3r {
 
-// Read complete_objects from the borrowed config without changing it; an absent switch returns false.
+// Resolve the active object builder and require a zero height step (missing means zero); borrowed config is unchanged.
 bool print_complete_objects(const ConfigBase &config);
 
-// Read complete_objects and parallel_objects_step from the borrowed config; return true for the switch or a step > 0, treating absent options as false/zero without changing the config.
+// Resolve the selected active ordering builder from the borrowed config; return false without an active object builder.
 bool print_by_object(const ConfigBase &config);
 
 // Populate borrowed preset/category key lists in the definition; copied lists remain definition-owned and allocation failures propagate.
@@ -322,14 +323,15 @@ double min_object_distance(const ConfigBase &cfg)
 
 bool print_complete_objects(const ConfigBase &config)
 {
-    const ConfigOptionBool *option = config.option<ConfigOptionBool>("complete_objects");
-    return option != nullptr && option->value;
+    const ConfigOption *step = config.option("parallel_objects_step");
+    return print_by_object(config) && (step == nullptr || step->get_float() == 0.);
 }
 
 bool print_by_object(const ConfigBase &config)
 {
-    const ConfigOption *step = config.option("parallel_objects_step");
-    return print_complete_objects(config) || (step != nullptr && step->get_float() > 0.);
+    const Plugin *builder = Steps::selected_active_plugin_from_group(
+        Orchestrator::instance(), STEP_ORDERING, "ordering.plan_builder", &config);
+    return builder != nullptr && builder->get_id() == "ordering.plan_builder.by_object";
 }
 
 double min_object_distance(const PrintConfig& config)
@@ -1015,7 +1017,6 @@ void init_categories(PrintConfigDef &definition)
         "notes", 
         "print_custom_setting",
         "print_custom_variables",
-        "complete_objects",
         "parallel_islands",
         "parallel_objects_step",
         "parallel_objects_step_max_z",
@@ -1888,17 +1889,6 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionString());
     def->cli = ConfigOptionDef::nocli;
-
-    def = definition.add("complete_objects", coBool, ptFFF);
-    def->label = L("Complete individual objects");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_SKIRT_BRIM;
-    def->tooltip = L("When printing multiple objects or copies, this feature will complete "
-        "each object before moving onto next one (and starting it from its bottom layer). "
-        "This feature is useful to avoid the risk of ruined prints. "
-        "Slic3r should warn and prevent you from extruder collisions, but beware.");
-    def->mode = comSimpleAE | comPrusa;
-    def->set_default_value(new ConfigOptionBool(false));
 
     def = definition.add("complete_objects_sort", coEnum, ptFFF);
     def->label = L("Object sort");
@@ -6214,9 +6204,9 @@ void init_fff_params(PrintConfigDef &definition)
     def->tooltip = L("When multiple objects are present, instead of jumping from one to another at each layer"
         " the printer will continue to print the current object layers up to this height before moving to the next object."
         " (first layers will be still printed one by one)."
-        "\nThis feature also use the same extruder clearance radius field as 'complete individual objects' (complete_objects)"
+        "\nThis feature uses the extruder clearance radius from the printer settings."
         ", but you can modify them to instead reflect the clerance of the nozzle, if this field reflect the z-clearance of it."
-        "\nThis field is exclusive with 'complete individual objects' (complete_objects). Set to 0 to deactivate.");
+        "\nIn By object mode, set to 0 to complete each object before moving to the next.");
     def->sidetext = L("mm");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloat(0));

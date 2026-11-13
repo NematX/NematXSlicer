@@ -293,7 +293,7 @@ Tables make_tables()
     key_translation_map["bridge_flow"]                              = "bridge_flow_ratio";
     key_translation_map["top_solid_infill_flow_ratio"]              = "fill_top_flow_ratio";
     key_translation_map["infill_combination"]                       = "infill_every_layers"; // bool -> int, see complicated_convert
-    key_translation_map["print_sequence"]                           = "complete_objects";
+    key_translation_map["print_sequence"]                           = "print_plan_builder";
     key_translation_map["brim_type"]                                = "brim_type"; //handled by from_prusa
     //key_translation_map["notes"]                                    = "notes";
     key_translation_map["support_style"]                   = "support_material_style";
@@ -533,8 +533,8 @@ Tables make_tables()
     value_translation_map["retract_lift_top"]["Bottom Only"] = "Not on top";
     value_translation_map["retract_lift_top"]["Top Only"] = "Only on top";
     value_translation_map["thumbnails_format"]["BTT_TFT"] = "BIQU";
-    value_translation_map["complete_objects"]["by layer"] = "0";
-    value_translation_map["complete_objects"]["by object"] = "1";
+    value_translation_map["print_plan_builder"]["by layer"] = "ordering.plan_builder.by_layer";
+    value_translation_map["print_plan_builder"]["by object"] = "ordering.plan_builder.by_object";
     value_translation_map["machine_limits_usage"]["0"] = "time_estimate_only";
     value_translation_map["machine_limits_usage"]["1"] = "emit_to_gcode";
 

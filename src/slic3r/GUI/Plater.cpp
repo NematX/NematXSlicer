@@ -2268,7 +2268,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         // These keys are used by (at least) printconfig::min_object_distance
         "bed_shape", "bed_custom_texture", "bed_custom_model", 
         "brim_width", "brim_width_interior","brim_separation",
-        "complete_objects",
+        "print_plan_builder",
         "parallel_objects_step",
         "parallel_objects_step_max_z",
         "parallel_islands",

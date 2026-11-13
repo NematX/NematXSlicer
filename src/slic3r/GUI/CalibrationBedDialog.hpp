@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationBedDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// bed calibration objects on the plater using whole-object printing.
 
 namespace Slic3r { 
 namespace GUI {
@@ -20,6 +22,7 @@ public:
 protected:
     void create_buttons(wxStdDialogButtonSizer* sizer) override;
 private:
+    // Replace the plate with bed calibration objects configured for whole-object printing.
     void create_geometry(wxCommandEvent& event_args);
 
 };

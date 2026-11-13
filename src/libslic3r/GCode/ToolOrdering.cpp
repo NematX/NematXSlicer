@@ -101,8 +101,6 @@ static coord_t calc_max_layer_height(const PrintConfig &config, coord_t max_obje
     return std::max(max_layer_height, max_object_layer_height);
 }
 
-// For the use case when each object is printed separately
-// (print.config().complete_objects is true).
 ToolOrdering::ToolOrdering(const PrintObject &object, extruder_index_t first_extruder, bool prime_multi_material)
 {
     m_objects.clear();
@@ -142,8 +140,6 @@ ToolOrdering::ToolOrdering(const PrintObject &object, extruder_index_t first_ext
     this->mark_skirt_layers(object.print()->config(), max_layer_height);
 }
 
-// For the use case when some layers of each object is printed separately
-// (print.config().complete_objects is true).
 ToolOrdering::ToolOrdering(const PrintObject &object, const GCode::ObjectsLayerToPrint &layers, extruder_index_t first_extruder, bool prime_multi_material)
 {
     m_objects.clear();
@@ -190,8 +186,6 @@ ToolOrdering::ToolOrdering(const PrintObject &object, const GCode::ObjectsLayerT
     this->mark_skirt_layers(object.print()->config(), max_layer_height);
 }
 
-// For the use case when all objects are printed at once.
-// (print.config().complete_objects is false).
 ToolOrdering::ToolOrdering(const Print &print, extruder_index_t first_extruder, bool prime_multi_material)
 {
     m_objects.clear();
@@ -374,7 +368,7 @@ void ToolOrdering::collect_extruders(
                     // TODO: is it okay?
                     // TODO: ensure that the split by extruder was already done at slicing.
 
-                    if (m_print_config_ptr) { // in this case complete_objects is false (see ToolOrdering constructors)
+                    if (m_print_config_ptr) { // The print-wide constructor supplies settings for shared layers.
                         something_nonoverriddable = false;
                         // let's check if there are nonoverriddable entities()
                         if (is_overriddable(region_island_ptr.extrusion(LayerRegionIsland::PERIMETERS), layer_tools,

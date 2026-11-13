@@ -4168,7 +4168,7 @@ TEST_CASE("The exporter layer count includes auxiliary layers",
     Print print;
     Model model;
     initialize_fff_print(print, model, "gcode.exporter.simple",
-                         {{"complete_objects", "1"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "6"},
+                         {{"print_plan_builder", "ordering.plan_builder.by_object"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "6"},
                           {"complete_objects_one_skirt", "1"}, {"brim_width", "0"}});
     print.process();
     const boost::filesystem::path reference = directory.path() / "reference.gcode";
@@ -5377,7 +5377,7 @@ TEST_CASE("Bambu plate JSON follows generated brim ownership", "[plugins][bambu3
         config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"seam_visibility", "0"},
             {"brim_width", patch || raft || mode == "interior" ? "0" : "3"}, {"brim_width_interior", mode == "interior" ? "1" : "0"},
             {"brim_per_object", global ? "0" : "1"}, {"brim_ears", mode == "ears" ? "1" : "0"},
-            {"complete_objects", sequential ? "1" : "0"}, {"parallel_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
+            {"print_plan_builder", sequential || mode.find("parallel") != std::string::npos ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}, {"parallel_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
             {"skirts", "1"}, {"skirt_distance", "30"}, {"complete_objects_one_skirt", "1"}, {"brim_skirt_trim", "0"},
             {"raft_layers", raft ? "2" : "0"}, {"support_material", raft ? "1" : "0"},
             {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});
@@ -5423,7 +5423,7 @@ TEST_CASE("Bambu plate JSON follows generated brim ownership", "[plugins][bambu3
         const BambuEntries entries = read_bambu_zip(bambu_test_archive(print, print.full_print_config(), reference, bambu_test_metadata()));
         const nlohmann::json plate = nlohmann::json::parse(entries.at("Metadata/plate_1.json"));
         REQUIRE(plate["bbox_objects"].size() == 1);
-        CHECK(plate["is_seq_print"] == sequential);
+        CHECK(plate["is_seq_print"] == (sequential || mode.find("parallel") != std::string::npos));
         CHECK(plate["bbox_objects"][0]["area"].get<double>() == Approx(mode == "interior" ? 64. : 400.).margin(.001));
         CHECK(plate["bbox_objects"][0]["layer_height"].get<double>() == Approx(unscaled(print.object(0).layer(0).scaled_height())));
         if (global || raft) {

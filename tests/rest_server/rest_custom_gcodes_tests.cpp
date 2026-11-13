@@ -260,7 +260,7 @@ TEST_CASE("REST custom G-codes validate requests", "[rest_custom_gcode]")
 
     // Sequential printing refuses a non-empty list but accepts an empty one.
     const std::shared_ptr<SessionContext> session = find_session(fixture, route.substr(9));
-    set_options(session, {{"complete_objects", "1"}});
+    set_options(session, {{"print_plan_builder", "ordering.plan_builder.by_object"}});
     const nlohmann::json sequential = set_error(fixture, route, {{"items", {valid_item}}},
         http::status::unprocessable_entity, "invalid_custom_gcode");
     CHECK_FALSE(sequential.contains("details"));

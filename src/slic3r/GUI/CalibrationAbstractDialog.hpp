@@ -16,6 +16,12 @@
 #include "Jobs/ProgressIndicator.hpp"
 #include "MainFrame.hpp"
 #include "wxExtensions.hpp"
+/*
+Base window for calibration dialogs. Construct with the application and main
+frame, then create the page and controls. Generators selecting a mode call
+require_plan_builder() before replacing any plate data; it reports an
+unavailable mode through the dialog's error window rather than choosing another mode.
+*/
 namespace Slic3r {
 namespace GUI {
 
@@ -29,6 +35,8 @@ public:
 private:
     wxPanel* create_header(wxWindow* parent, const wxFont& bold_font);
 protected:
+    // Require the object builder when true or layer builder when false; show an error without changing the plate if unavailable.
+    bool require_plan_builder(bool by_object);
     void create(boost::filesystem::path html_path, std::string html_name, wxSize dialogsize = wxSize(850, 550), bool include_close_button = false);
     virtual void create_buttons(wxStdDialogButtonSizer*) = 0;
     void on_dpi_changed(const wxRect& suggested_rect) override;

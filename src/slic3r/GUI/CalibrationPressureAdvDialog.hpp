@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationPressureAdvDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// pressure advance calibration samples using by-layer printing.
 //pressure advance PressureAdv ss
 namespace Slic3r { 
 namespace GUI {
@@ -24,6 +26,7 @@ public:
 protected:
     void create_buttons(wxStdDialogButtonSizer* sizer) override;
     void create_row_controls(wxBoxSizer* parent_sizer, int row_count);
+    // Replace the plate with pressure advance samples configured for by-layer printing.
     void create_geometry(wxCommandEvent& event_args);
     void on_row_change(wxCommandEvent& event);
     std::pair<std::vector<double>, int> calc_PA_values(int id_item);

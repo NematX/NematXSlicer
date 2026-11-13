@@ -1111,6 +1111,32 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         }
     }
 
+    // A stored selector wins over the obsolete switch. Rename the original entry
+    // because text loaders consume the mapped entries for their original keys.
+    // The obsolete switch marks a full legacy configuration. Partial files with
+    // only a height step do not select By object. Pair conversion cannot inspect
+    // another key, so it converts only the switch and cannot clear a height step.
+    const bool has_builder = has(dict, "print_plan_builder");
+    const bool has_step = has(dict, "parallel_objects_step");
+    double object_step = 0.;
+    if (has_step) {
+        try { object_step = boost::lexical_cast<double>(value()); }
+        catch (boost::bad_lexical_cast &) {}
+    }
+    if (has(dict, "complete_objects")) {
+        if (has_builder) {
+            erase();
+        } else if (value() == "1") {
+            set("print_plan_builder", "ordering.plan_builder.by_object");
+            if (has(dict, "parallel_objects_step"))
+                value() = "0";
+        } else if (object_step > 0.) {
+            set("print_plan_builder", "ordering.plan_builder.by_object");
+        } else {
+            erase();
+        }
+    }
+
     // it's not needed to check aliases, because they are taken care of in deserialize().
     // still need as some things check for def and emit a ConfigSubstitutionContext
     for (auto it = dict.begin(); it != dict.end(); ++it) {

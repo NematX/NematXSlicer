@@ -97,7 +97,7 @@ void prepare_mixed_height_print(Print &print,
     config.set_deserialize_strict({
         {"first_layer_height", "0.2"},
         {"support_material", "0"},
-        {"complete_objects", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_layer"},
         {"parallel_objects_step", "0"},
         {"seam_visibility", "0"}
     });
@@ -1393,7 +1393,7 @@ TEST_CASE("Exported scripts read the legacy export variables",
             {"solid_infill_extruder", "1"},
             {"top_solid_layers", "0"},
             {"bottom_solid_layers", "0"},
-            {"complete_objects", sequential ? "1" : "0"},
+            {"print_plan_builder", sequential ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
             {"step_perimeter_plugin", "perimeter.generator.classic"},
             {"step_surface_generation_plugin", "surface.initial_typed_surface_builder"},
             {"step_wipetower_plugin", "wipe_tower.manager.default"},

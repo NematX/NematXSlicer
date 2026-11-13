@@ -37,7 +37,7 @@ using namespace Slic3r;
 constexpr const char *step_key = "parallel_objects_step";
 constexpr const char *limit_key = "parallel_objects_step_max_z";
 constexpr const char *islands_key = "parallel_islands";
-constexpr const char *whole_objects_key = "complete_objects";
+constexpr const char *whole_objects_key = "print_plan_builder";
 enum class Expect { Alternate, Invariants, LayerByLayer };
 
 // Slice and export one clearance variant, then check emitted layer order, exact
@@ -76,7 +76,7 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{whole_objects_key, "0"}, {step_key, std::to_string(step)},
+    config.set_deserialize_strict({{whole_objects_key, "ordering.plan_builder.by_object"}, {step_key, std::to_string(step)},
         {limit_key, "0"}, {islands_key, "1"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"seam_visibility", "0"}, {"skirts", "0"}, {"brim_width", "0"}, {"perimeters", "1"},
         {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},

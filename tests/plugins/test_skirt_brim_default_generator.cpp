@@ -312,7 +312,7 @@ DynamicPrintConfig skirt_test_config(const int skirts, const int skirt_brim, con
         { "skirt_brim", std::to_string(skirt_brim) },
         { "min_skirt_length", "0" },
         { "draft_shield", "disabled" },
-        { "complete_objects", per_object ? "1" : "0" },
+        { "print_plan_builder", per_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer" },
         { "complete_objects_one_skirt", "0" },
         { "support_material", "0" },
         { "raft_layers", "0" },
@@ -383,11 +383,14 @@ void run_mesh_until_skirt_brim(PreparedBrimPrint &prepared,
 void run_prepared_print_until_skirt_brim(PreparedBrimPrint &prepared,
                                          const bool include_trim)
 {
+    // Mode-dependent adhesion reads the effective builder even though ordering has not run yet.
     std::vector<const char *> active_plugin_ids = {
         STANDARD_LAYER_HEIGHT_GENERATOR,
         SLICE_VOLUME,
         DEFAULT_BRIM_GENERATOR,
-        DEFAULT_SKIRT_GENERATOR
+        DEFAULT_SKIRT_GENERATOR,
+        "ordering.plan_builder.by_layer",
+        "ordering.plan_builder.by_object"
     };
     if (include_trim)
         active_plugin_ids.push_back(DEFAULT_BRIM_SKIRT_TRIM);
@@ -613,7 +616,7 @@ TEST_CASE("Final plan places each generated brim around its source instance", "[
             CAPTURE(mode, copies);
             DynamicPrintConfig config = brim_test_config(true, mode != "global");
             config.set_deserialize_strict({
-                {"complete_objects", mode == "sequential" ? "1" : "0"},
+                {"print_plan_builder", mode == "sequential" || mode == "parallel" ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
                 {"parallel_objects_step", mode == "parallel" ? "1" : "0"}, {"xy_size_compensation", "0"},
                 {"xy_inner_size_compensation", "0"}, {"hole_size_compensation", "0"},
                 {"first_layer_size_compensation", "0"}, {"brim_separation", "0"}});
@@ -871,7 +874,7 @@ TEST_CASE("Sequential and parallel brim patches reach each instance once", "[plu
         CAPTURE(sequential);
         DynamicPrintConfig config = brim_test_config(true, true);
         // Disable ordinary brim and skirt so only the model patch can satisfy the placement checks.
-        config.set_deserialize_strict({{"complete_objects", sequential ? "1" : "0"},
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
             {"parallel_objects_step", sequential ? "0" : "1"}, {"parallel_islands", "0"},
             {"complete_objects_one_skirt", "0"}, {"skirts", "0"}, {"brim_width", "0"},
             {"brim_width_interior", "0"}, {"brim_skirt_trim", "0"}, {"xy_size_compensation", "0"},
@@ -937,7 +940,7 @@ TEST_CASE("Interior brim retains one local layer per physical copy", "[plugins][
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     DynamicPrintConfig config = brim_test_config(false, true);
-    config.set_deserialize_strict({{"brim_width_interior", "2"}, {"complete_objects", "0"}, {"parallel_objects_step", "0"}});
+    config.set_deserialize_strict({{"brim_width_interior", "2"}, {"print_plan_builder", "ordering.plan_builder.by_layer"}, {"parallel_objects_step", "0"}});
     Test::init_print({Test::mesh(Test::TestMesh::cube_with_hole, Vec3d::Zero(), Vec3d(1., 1., .02))},
         prepared.print, prepared.model, config);
     ModelObject &model_object = prepared.model.objects().front();
@@ -1046,7 +1049,7 @@ TEST_CASE("Plateau brim preview expands common patterns and trimmed owners exact
         for (const bool trim : {false, true}) {
             CAPTURE(mode, trim);
             DynamicPrintConfig config = brim_test_config(true, true);
-            config.set_deserialize_strict({{"complete_objects", mode == "sequential" ? "1" : "0"},
+            config.set_deserialize_strict({{"print_plan_builder", mode == "sequential" || mode == "parallel" ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
                 {"parallel_objects_step", mode == "parallel" ? "1" : "0"}, {"parallel_islands", "0"},
                 {"complete_objects_one_skirt", "0"}, {"skirts", trim ? "1" : "0"}, {"skirt_height", "1"},
                 {"skirt_distance", "1"}, {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"},
@@ -1141,7 +1144,7 @@ TEST_CASE("Object local skirt includes brim without draft shield or distance fla
     for (const bool sequential : {true, false}) {
         CAPTURE(sequential);
         DynamicPrintConfig config = brim_test_config(true, true);
-        config.set_deserialize_strict({{"complete_objects", sequential ? "1" : "0"}, {"complete_objects_one_skirt", "0"},
+        config.set_deserialize_strict({{"print_plan_builder", sequential ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}, {"complete_objects_one_skirt", "0"},
             {"parallel_objects_step", "0"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "1"},
             {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"}, {"draft_shield", "disabled"},
             {"brim_skirt_trim", "0"}});
@@ -1192,7 +1195,7 @@ TEST_CASE("Object local skirts reject foreign first layer geometry", "[plugins][
     const bool global = mode == "global" || mode == "single-global";
     const size_t object_count = mode == "single-global" ? 1 : 2;
     DynamicPrintConfig config = brim_test_config(mode != "close", mode == "normal");
-    config.set_deserialize_strict({{"complete_objects", "1"}, {"complete_objects_one_skirt", "0"},
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"}, {"complete_objects_one_skirt", "0"},
         {"parallel_objects_step", "0"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "1"},
         {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"}, {"draft_shield", "disabled"},
         {"brim_skirt_trim", "0"}, {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"},
@@ -1666,8 +1669,8 @@ TEST_CASE("Default skirt generator owns its serialized option and activation rul
     CHECK(PrintConfig::defaults().option("complete_objects_one_skirt") != nullptr);
 
     /*
-    The plugin owns one activation reason per accepted case, in the print scope:
-    sequential printing or the parallel-objects stepping both need one skirt.
+    The object builder owns both whole-object and height-step printing, so one
+    selector condition enables the setting for both cases in the print scope.
     */
     Orchestrator &orchestrator = Orchestrator::instance();
     size_t rule_count = 0;
@@ -1676,8 +1679,12 @@ TEST_CASE("Default skirt generator owns its serialized option and activation rul
             continue;
         ++rule_count;
         CHECK(rule.scope == RAW_PRESET_TYPE_FFF_PRINT);
+        REQUIRE(rule.clauses.size() == 1);
+        CHECK(rule.clauses.front().condition == RAW_GUI_RULE_CONDITION_STRING_EQUALS);
+        CHECK(rule.clauses.front().condition_key == "print_plan_builder");
+        CHECK(rule.clauses.front().condition_string_value == "ordering.plan_builder.by_object");
     }
-    CHECK(rule_count == 2);
+    CHECK(rule_count == 1);
 }
 
 TEST_CASE("Default skirt/brim plugins are active by default for plugin tests", "[plugins][skirt-brim]")
@@ -1827,11 +1834,13 @@ TEST_CASE("Complete-object brim publishes one reusable origin pattern",
 {
     DynamicPrintConfig config = brim_test_config(true, true);
     config.set_deserialize_strict({
-        {"complete_objects", "1"}, {"parallel_objects_step", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_object"}, {"parallel_objects_step", "0"},
         {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
     });
     PreparedBrimPrint prepared;
     prepare_brim_copies(prepared, config, 60.);
+    REQUIRE(print_by_object(prepared.print.config()));
+    REQUIRE(print_complete_objects(prepared.print.config()));
     const PrintInstances saved = prepared.print.objects().front().instances();
     run_prepared_print_until_skirt_brim(prepared, false);
     const PrintObject &object = prepared.print.objects().front();
@@ -1850,7 +1859,7 @@ TEST_CASE("Per-instance brim preserves bed placement for separated and touching 
 {
     DynamicPrintConfig config = brim_test_config(true, true);
     config.set_deserialize_strict({
-        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_layer"}, {"parallel_objects_step", "0"},
         {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
     });
     PreparedBrimPrint isolated;
@@ -2014,7 +2023,7 @@ TEST_CASE("Per-object brim clips the second object against the first brim in eit
 {
     DynamicPrintConfig config = brim_test_config(true, true);
     config.set_deserialize_strict({
-        {"complete_objects", "0"}, {"parallel_objects_step", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_layer"}, {"parallel_objects_step", "0"},
         {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}
     });
     PreparedBrimPrint left_alone;

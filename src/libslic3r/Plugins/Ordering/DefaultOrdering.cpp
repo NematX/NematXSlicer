@@ -19,7 +19,7 @@ This file intentionally contains only the aggregate registration entry point
 used by the built-in plugin loader. Each phase lives in its own source file so
 an external developer can read or replace one phase without wading through the
 others:
-  - ByLayerPlanBuilder.cpp creates the PrintingPlan;
+  - ByLayerPlanBuilder.cpp or ByObjectPlanBuilder.cpp creates the PrintingPlan;
   - ObjectInstanceCatalog.cpp completes registered instance metadata;
   - DefaultToolGroupOrdering.cpp orders extruder/tool visits;
   - PrintingExtrusionPreSort.cpp coarsely orders each visit's extrusions and
@@ -29,9 +29,13 @@ others:
   - DefaultExtrusionTreeOrdering.cpp remains the functional fallback that fixes
     internal trees and replaces estimates with exact endpoints.
 */
+// Register permanent borrowed ordering providers with the orchestrator; registration failures propagate.
+void register_default_ordering_plugins(orchestrator_handle *orch);
+
 void register_default_ordering_plugins(orchestrator_handle *orch)
 {
     register_by_layer_plan_builder_plugin(orch);
+    register_by_object_plan_builder_plugin(orch);
     ObjectInstanceCatalogPlugin::register_object_instance_catalog_plugin(orch);
     register_default_tool_group_ordering_plugin(orch);
     register_printing_extrusion_pre_sort_plugin(orch);

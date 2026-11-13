@@ -143,7 +143,7 @@ TEST_CASE("REST arrange validates parameters and targets", "[rest_placement]")
     const std::shared_ptr<SessionContext> session = find_session(fixture, session_id);
     REQUIRE(session != nullptr);
     SessionData sequential = session->data_snapshot().value();
-    sequential.configuration.set_deserialize_strict({{"complete_objects", "1"},
+    sequential.configuration.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
         {"extruder_clearance_radius", "50"}, {"skirts", "0"}, {"brim_width", "0"}});
     REQUIRE(session->commit_mutation(session->begin_mutation().value(), std::move(sequential), false,
         SessionRegistry::Clock::now()));

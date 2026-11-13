@@ -4295,13 +4295,14 @@ TEST_CASE("Close Z moved contact stays a contact for the toolpaths", "[plugins][
 }
 
 namespace {
-// A print printed object by object (the option is complete_objects or parallel_objects_step) of two objects whose layer heights are 0.2 and
+// A print using the By object builder with two objects whose layer heights are 0.2 and
 // 0.2001 mm: the layers of the two objects are close to one another, which only the layer-by-layer plan would mind. Each object gets its
 // own pass: no close pair inside an object, and no support z of one object was moved onto a layer z of the other.
 void close_z_object_by_object(const char *option, const char *value, const char *name)
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = close_z_gcode_config("grid", 0);
+    config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     config.set_deserialize_strict({ {option, value} });
     Print print;
     Model model;
@@ -4342,7 +4343,7 @@ void close_z_object_by_object(const char *option, const char *value, const char 
 
 TEST_CASE("Close Z sequential print passes per object", "[plugins][support-tree-family][support-close-z][support-close-z-sequential]")
 {
-    close_z_object_by_object("complete_objects", "1", "sequential");
+    close_z_object_by_object("print_plan_builder", "ordering.plan_builder.by_object", "sequential");
 }
 
 TEST_CASE("Close Z parallel objects step passes per object", "[plugins][support-tree-family][support-close-z][support-close-z-parallel]")

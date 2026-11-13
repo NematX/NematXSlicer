@@ -146,7 +146,7 @@ namespace Slic3r {
 namespace GUI {
 
 namespace {
-// Read the borrowed print config without changing it; enable clearance for complete_objects or a parallel_objects_step > 0 without parallel_islands, and disable it for nonpositive steps unless whole objects are enabled.
+// Resolve the builder once without changing the borrowed config; show clearance for By object except a positive island height step.
 bool sequential_clearance_enabled(const PrintConfig &config);
 }
 
@@ -3878,8 +3878,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 c == GLGizmosManager::EType::Scale ||
                 c == GLGizmosManager::EType::Rotate) {
                 show_sinking_contours();
-                if (print_config != nullptr && sequential_clearance_enabled(*print_config))
-                    update_sequential_clearance(true);
+                update_sequential_clearance(true);
             }
         }
         else if (evt.LeftUp() &&
@@ -4127,8 +4126,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if (cur_scale != Vec3d(1, 1, 1)) {
                 m_selection.scale(cur_scale, trafo_type);
             }
-            if (print_config != nullptr && sequential_clearance_enabled(*print_config))
-                update_sequential_clearance(false);
+            update_sequential_clearance(false);
             wxGetApp().obj_manipul()->set_dirty();
             m_dirty = true;
         }
@@ -4979,8 +4977,7 @@ void GLCanvas3D::update_sequential_clearance(bool force_contours_generation)
         return;
 
     const PrintConfig &config = fff_print()->config();
-    // Negative steps without islands must still reach clearance generation.
-    if (!sequential_clearance_enabled(config) && (config.parallel_objects_step == 0 || config.parallel_islands))
+    if (!sequential_clearance_enabled(config))
         return;
 
     if (m_layers_editing.is_enabled())
@@ -8707,8 +8704,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
 namespace {
 bool sequential_clearance_enabled(const PrintConfig &config)
 {
-    return print_complete_objects(config) ||
-        (print_by_object(config) && !(config.parallel_objects_step > 0 && config.parallel_islands));
+    return print_by_object(config) && !(config.parallel_objects_step > 0 && config.parallel_islands);
 }
 }
 

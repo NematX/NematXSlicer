@@ -200,6 +200,25 @@ TEST_CASE("A SuperSlicer setting does not take the name of an Orca setting that 
     CHECK(values_of(translation, "skirt_speed") == strings({"45"}));
 }
 
+// Import and export the two sequence names independently of the object height step;
+// keep the chosen selector rather than deriving a mode from the step alone.
+TEST_CASE("Bambu sequence names round trip the plan builder selector", "[plugins][bambu][config-export][print-sequence]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool object_mode : {false, true}) {
+        for (const char *step : {"0", "5"}) {
+            CAPTURE(object_mode, step);
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+            REQUIRE(convert_settings_from_bambu({{"print_sequence", object_mode ? "by object" : "by layer"}}, config, substitutions, false));
+            CHECK(config.opt_serialize("print_plan_builder") == (object_mode ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"));
+            config.set_deserialize_strict("parallel_objects_step", step);
+            CHECK(values_of(translate_config_to_bambu(config), "print_sequence") == strings({object_mode ? "by object" : "by layer"}));
+        }
+    }
+}
+
+// Translate explicit renamed selector values into Orca names without using the inverse import values.
 TEST_CASE("Enumeration values are written as Orca names, not as the inverse of the migration table",
           "[bambu][config-export]")
 {
@@ -216,7 +235,7 @@ TEST_CASE("Enumeration values are written as Orca names, not as the inverse of t
     {
         DynamicPrintConfig config = make_config({{"fill_pattern", "stars"},
                                                  {"seam_position", "rear"},
-                                                 {"complete_objects", "1"},
+                                                 {"print_plan_builder", "ordering.plan_builder.by_object"},
                                                  {"thumbnails_format", "BIQU"},
                                                  {"gcode_flavor", "sprinter"},
                                                  {"machine_limits_usage", "emit_to_gcode"},

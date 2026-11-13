@@ -64,8 +64,8 @@ The runner stops after the family returns; user cancellation is rethrown there.
    more than 4 * SCALED_EPSILON (512 units, 0.5 um, the minimum tolerance) apart, and the families choose the z of their layers without seeing each other (the
    layers of two objects, or the grid slabs against the layers of their own object). Once every family has published, align_support_z()
    moves the print z of the auxiliary layers (the supports).
-   - Scope: one pass per object when the print is printed object by object (complete_objects or parallel_objects_step > 0; both options
-     invalidate STEP_SUPPORT), where only the z of an object matter to its own plan; one pass for all objects otherwise.
+   - Scope: one pass per object when print_by_object() selects the object builder,
+     where only the z of an object matter to its own plan; one pass for all objects otherwise.
    - Fixed values: the print z of the object layers (never moved). Movable values: the tops and the bottoms (print_z - height) of the
      auxiliary layers, so two contiguous layers stay contiguous. Rule (close_z_mapping()): a movable value within the tolerance
      (inclusive) of a fixed value takes the nearest one (the lower on a tie); the others are swept in ascending order, a value within
@@ -224,8 +224,8 @@ namespace {
 // Align support layers of the supplied objects using one common height mapping.
 // Object-layer heights are fixed. Support-layer tops and bottoms may move together,
 // preserving shared boundaries between adjacent layers. Count each moved bound.
-// The caller passes one object at a time for complete_objects or parallel_objects_step > 0;
-// otherwise it passes all objects. Both settings invalidate this support stage.
+// The caller passes one object at a time for the effective By object builder;
+// otherwise it passes all objects. Changing the selector replays this support stage.
 // z_step is the printer's Z increment in mm, or 0. Common::close_z_tolerance() starts
 // from max(z_step / 2, 4 * SCALED_EPSILON), about 0.5 um at the minimum (512 scaled units).
 // It caps tolerance at half the nearest distinct object-height gap, but never below that minimum.
@@ -322,9 +322,8 @@ void run_step(Orchestrator &orchestrator, Print &print)
     std::vector<PrintObject *> objects;
     for (size_t idx = 0; idx < print.objects().size(); ++idx)
         objects.push_back(&print.object(idx));
-    // Printed object by object: the same criterion as ByLayerPlanBuilder::use_object_plan (Plugins/Ordering/ByLayerPlanBuilder.cpp, local to that file)
-    // and Print.cpp:1565. Both options invalidate STEP_SUPPORT (complete_objects through STEP_SKIRT_BRIM, which replays from the same checkpoint),
-    // so the scope of the pass is always rebuilt when one of them changes.
+    // Use the effective builder's scope. The selector invalidates STEP_SKIRT_BRIM,
+    // which also replays support from the slicing checkpoint when the mode changes.
     // The Z step is read like the support plugins do (SupportParams: the z_step option of the print config, in mm).
     const double z_step = print.config().z_step.value;
     if (print_by_object(print.config()))

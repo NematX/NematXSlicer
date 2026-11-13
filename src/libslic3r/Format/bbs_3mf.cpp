@@ -54,6 +54,18 @@
 
 #include "BBConfig.hpp"
 
+/*
+Provides archive, model and plate helpers for Bambu-style 3MF projects. Import
+reads mesh XML separately from plate metadata and serialized settings; BBConfig
+translates the latter into native configuration options. Plate metadata callbacks
+run synchronously and borrow the full reader's substitution context so unavailable
+selector values follow its compatibility policy. Metadata-only reads have no
+caller context and use a local context that permits substitutions.
+    load_bbs_3mf() -> create the importer and fill the supplied model and settings
+        load_model_from_file() -> lend the substitution context during parsing
+            _handle_start_config_metadata() -> deserialize plate settings
+*/
+
 //#include <openssl/md5.h>
 
 namespace pt = boost::property_tree;
@@ -1138,6 +1150,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool m_parsing_slice_info { false };
         PlateDataMaps m_plater_data;
         PlateData* m_curr_plater;
+        // Borrowed during the full model load; metadata-only reads use a local substitution context.
+        ConfigSubstitutionContext *m_config_substitutions = nullptr;
         CurrentInstance m_curr_instance;
 
         int m_current_color_group{-1};
@@ -1147,8 +1161,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         _BBS_3MF_Importer();
         ~_BBS_3MF_Importer();
 
-        //BBS: add plate data related logic
-        // add backup & restore logic
+        // Fill the supplied model, settings and output lists from the archive, including backup/restore modes.
+        // Borrow the substitution context while parsing; reported archive failures return false and exceptions propagate.
         bool load_model_from_file(const std::string& filename, Model& model, PlateDataPtrs& plate_data_list, std::vector<Preset*>& project_presets, DynamicPrintConfig& config,
             ConfigSubstitutionContext& config_substitutions, LoadStrategy strategy, bool& is_bbl_3mf, Semver& file_version, Import3mfProgressFn proFn = nullptr, /*BBLProject *project = nullptr,*/ int plate_id = 0);
         bool get_thumbnail(const std::string &filename, std::string &data);
@@ -1267,6 +1281,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _handle_end_config_volume();
         bool _handle_end_config_volume_mesh();
 
+        // Apply metadata to its current owner, using the reader's substitution policy
+        // for unavailable selector values; parsed strings are copied into owned options.
         bool _handle_start_config_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_config_metadata();
 
@@ -1408,7 +1424,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         //else {
         //    m_backup_path = model.get_backup_path();
         //}
+        m_config_substitutions = &config_substitutions;
         bool result = _load_model_from_file(filename, model, plate_data_list, project_presets, config, config_substitutions, proFn, /*project,*/ plate_id);
+        m_config_substitutions = nullptr;
         is_bbl_3mf = m_is_bbl_3mf;
         if (m_bambuslicer_generator_version)
             file_version = *m_bambuslicer_generator_version;
@@ -4242,10 +4260,12 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 //PrintSequence print_sequence = PrintSequence::ByLayer;
                 //ConfigOptionEnum<PrintSequence>::from_string(value, print_sequence);
                 //m_curr_plater->config.set_key_value("print_sequence", new ConfigOptionEnum<PrintSequence>(print_sequence));
+                ConfigSubstitutionContext local_substitutions(ForwardCompatibilitySubstitutionRule::Enable);
+                ConfigSubstitutionContext &substitutions = m_config_substitutions != nullptr ? *m_config_substitutions : local_substitutions;
                 if (value == "by layer")
-                    m_curr_plater->config.set_key_value("complete_objects", new ConfigOptionBool(false));
+                    m_curr_plater->config.set_deserialize("print_plan_builder", "ordering.plan_builder.by_layer", substitutions);
                 else if (value == "by object")
-                    m_curr_plater->config.set_key_value("complete_objects", new ConfigOptionBool(true));
+                    m_curr_plater->config.set_deserialize("print_plan_builder", "ordering.plan_builder.by_object", substitutions);
                 else
                     assert(false);
             }

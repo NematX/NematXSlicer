@@ -10,7 +10,18 @@
 
 #include <unordered_map>
 
+/*
+Shared geometry and print helpers for standalone core tests. Tests using the
+print-sequence selector call initialize_plan_builders() before creating configs:
+    Slic3r::Test::initialize_plan_builders();
+    Slic3r::DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
+Mesh and print helpers below then prepare their caller-owned models.
+*/
+
 namespace Slic3r { namespace Test {
+
+// Initialize FFF definitions and both active plan builders before configuration defaults are cached.
+void initialize_plan_builders();
 
 /// Enumeration of test meshes
 enum class TestMesh {

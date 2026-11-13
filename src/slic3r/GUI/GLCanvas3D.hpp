@@ -1079,6 +1079,7 @@ public:
         return m_sequential_print_clearance.m_evaluating;
     }
 
+    // Update FFF clearance geometry only for the effective object mode; optionally rebuild contours.
     void update_sequential_clearance(bool force_contours_generation);
     void set_sequential_clearance_as_evaluating() {
         m_sequential_print_clearance.m_evaluating = true;

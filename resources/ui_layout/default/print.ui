@@ -585,7 +585,7 @@ page:Output options:output+page_white
 group:Platter
 	setting:duplicate_distance
 group:Sequential printing
-	setting:tags$Advanced$Expert$Prusa:complete_objects
+	setting:tags$Advanced$Expert$Prusa:print_plan_builder
 	line:Parallel printing step
 		setting:label$Step:parallel_objects_step
 		setting:label$Max z:parallel_objects_step_max_z
@@ -636,4 +636,4 @@ group:Skirt & Brim
 	setting:tags$Simple:skirts
 	setting:tags$Simple:brim_width
 group:Sequential printing
-	setting:tags$Simple:complete_objects
+	setting:tags$Simple:print_plan_builder

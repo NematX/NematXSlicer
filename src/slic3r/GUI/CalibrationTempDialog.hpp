@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationTempDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// temperature calibration samples using by-layer printing.
 
 class ComboBox;
 
@@ -22,6 +24,7 @@ public:
     
 protected:
     void create_buttons(wxStdDialogButtonSizer* sizer) override;
+    // Replace the plate with temperature samples configured for by-layer printing.
     void create_geometry(wxCommandEvent& event_args);
 
     ComboBox* steps;

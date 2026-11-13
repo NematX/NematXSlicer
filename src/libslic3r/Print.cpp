@@ -1215,7 +1215,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
         // #4043
         if (total_copies_count > 1 && !print_complete_objects(m_config))
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Only a single object may be printed at a time in Spiral Vase mode. "
-                     "Either remove all but the last object, or enable sequential mode by \"complete_objects\".") };
+                     "Either remove all but the last object, or select By object with a zero height step.") };
         assert(m_objects.size() == 1 || print_complete_objects(config()));
         if (m_objects.front()->all_regions().size() > 1)
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The Spiral Vase option can only be used when printing single material objects, and without any modifiers that may break the vase.") };

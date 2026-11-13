@@ -475,7 +475,7 @@ void build_instance_plan(Print &print, Model &model, const bool separate_groups,
     config.set_num_extruders(2);
     config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"}, {"wipe_tower", global_tower ? "1" : "0"},
         {"wipe_tower_width", "20"}, {"wipe_tower_brim_width", "1"}, {"wipe_tower_rotation_angle", "0"},
-        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"complete_objects", separate_groups ? "1" : "0"}});
+        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"print_plan_builder", separate_groups ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}});
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
     model.objects()[0].name = "Owner";
     model.objects()[0].instances[0]->set_offset(Vec3d(10., 20., 0.));
@@ -654,7 +654,7 @@ TEST_CASE("Global tower eligibility and an empty request list do not modify the 
     build_plan(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     SECTION("single extruder") { config.nozzle_diameter.set(std::vector<double>{0.4}); }
-    SECTION("complete objects") { config.complete_objects.value = true; }
+    SECTION("complete objects") { config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object"); }
     SECTION("spiral vase") { config.spiral_vase.value = true; }
     SECTION("no actual tool change") {
         const_cast<PrintObjectConfig &>(print.default_object_config()).wipe_tower_extruder.value = 2;
@@ -935,6 +935,7 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     const bool parallel = GENERATE(false, true);
     config.set_deserialize_strict("parallel_objects_step", parallel ? "5" : "0");
+    config.set_deserialize_strict("print_plan_builder", parallel ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
     config.set_num_extruders(2);
     config.set_deserialize_strict("step_perimeter_plugin", "perimeter.generator.classic");
     config.set_deserialize_strict("step_surface_generation_plugin", "surface.initial_typed_surface_builder");
@@ -1021,6 +1022,7 @@ TEST_CASE("Parallel groups share one global tower with fused and stacked Z offse
     Print print;
     build_plan(print);
     const_cast<PrintConfig &>(print.config()).parallel_objects_step.value = 5.;
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     slic3r_api::PrintingPlan view = Test::GCode::printing_plan_view(print);
     view.clear();
     for (uint32_t g = 0; g < 2; ++g) {

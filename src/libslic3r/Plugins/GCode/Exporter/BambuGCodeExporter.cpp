@@ -468,7 +468,8 @@ PlateJsonDescription collect_plate_json(const Print &print, const Config &config
     out.first_extruder = facts.initial_tool;
     for (uint32_t tool : facts.used_tools) out.filament_colors.push_back(config.get("filament_colour").get_string(tool));
     out.nozzle_diameter = config.get("nozzle_diameter").get_float(facts.initial_tool);
-    out.is_seq_print = config.get("complete_objects").get_bool();
+    // The API exposes the stored selection; with one active builder it can differ from the effective selection.
+    out.is_seq_print = config.get("print_plan_builder").serialize() == "ordering.plan_builder.by_object";
     out.bed_type = plate_bed_type(config);
     if (metadata.has_measured_statistics()) out.first_layer_time = metadata.numeric_statistics().first_layer_time_seconds;
     return out;

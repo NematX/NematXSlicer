@@ -729,7 +729,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionInts,                 bed_temperature))
     ((ConfigOptionFloatOrPercent,       bridge_precision))
     ((ConfigOptionInts,                 chamber_temperature))
-    ((ConfigOptionBool,                 complete_objects))
     ((ConfigOptionBool,                 complete_objects_one_brim))
     ((ConfigOptionEnum<CompleteObjectSort>, complete_objects_sort))
     ((ConfigOptionFloats,               colorprint_heights))

@@ -205,6 +205,7 @@ private:
     void on_size(wxSizeEvent& evt);
 
     // Create/Update/Reset double slider on 3dPreview
+    // Create and bind the layer slider with its draw mode taken from the effective plan builder.
     wxBoxSizer* create_layers_slider_sizer();
     void check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_from_model,
         const std::vector<double>& layers_z);

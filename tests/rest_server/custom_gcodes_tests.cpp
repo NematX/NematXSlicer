@@ -308,7 +308,7 @@ TEST_CASE("Custom G-code entries are validated and sorted", "[custom_gcode]")
 
     SECTION("sequential printing") {
         DynamicPrintConfig sequential = make_session(1);
-        sequential.set_deserialize_strict("complete_objects", "1");
+        sequential.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
         CHECK(make_custom_gcodes({}, scene, sequential).gcodes.empty());
         try {
             make_custom_gcodes({make_entry(5., CustomGCode::Template)}, scene, sequential);
@@ -400,7 +400,7 @@ TEST_CASE("Custom G-code JSON reports modes and warnings", "[custom_gcode]")
 
     SECTION("sequential printing") {
         CHECK_FALSE(has_warning(custom_gcodes_json(info, scene, single), "sequential_print"));
-        single.set_deserialize_strict("complete_objects", "1");
+        single.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
         CHECK(has_warning(custom_gcodes_json(info, scene, single), "sequential_print"));
         CHECK_FALSE(has_warning(custom_gcodes_json(CustomGCode::Info(), scene, single), "sequential_print"));
     }

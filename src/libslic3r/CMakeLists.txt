@@ -468,6 +468,7 @@ set(SLIC3R_SOURCES
 	Plugins/Ordering/NearestNeighborOrderingEngine.cpp
 	Plugins/Ordering/NearestNeighborOrderingEngine.hpp
 	Plugins/Ordering/ByLayerPlanBuilder.cpp
+	Plugins/Ordering/ByObjectPlanBuilder.cpp
 	Plugins/Ordering/ObjectInstanceCatalog.hpp
 	Plugins/Ordering/ObjectInstanceCatalog.cpp
 	Plugins/Ordering/DefaultToolGroupOrdering.cpp

@@ -4,13 +4,23 @@
 #include "test_data.hpp"
 #include <libslic3r/GCodeReader.hpp>
 
+/*
+Checks skirt and brim placement through generated cube prints and G-code reads.
+The standalone executable registers both plan builders before configuration
+defaults are cached, allowing its object-mode settings to resolve a provider.
+    SCENARIO -> initialize_plan_builders() -> register and finalize the selector
+        Test::gcode() -> export geometry for the placement assertions
+*/
+
 using namespace Slic3r::Test;
 using namespace Slic3r;
+
 
 constexpr char* SKIRT_TAG = "Skirt";
 constexpr char* BRIM_TAG = "Brim";
 
 SCENARIO("skirt test by merill", "") {
+    initialize_plan_builders();
 
     GIVEN("2 objects, don't complete individual object") {
         DynamicPrintConfig &config = Slic3r::DynamicPrintConfig::full_print_config();
@@ -19,7 +29,7 @@ SCENARIO("skirt test by merill", "") {
         config.set_deserialize("bottom_solid_layers", "0");
         config.set_deserialize("fill_density", "0");
         config.set_deserialize("perimeters", "1");
-        config.set_deserialize("complete_objects", "0");
+        config.set_deserialize("print_plan_builder", "ordering.plan_builder.by_layer");
         config.set_key_value("gcode_comments", new ConfigOptionBool(true));
 
         WHEN("skirt with 3 layers is requested") {
@@ -159,7 +169,7 @@ SCENARIO("skirt test by merill", "") {
         config.set_deserialize("bottom_solid_layers", "0");
         config.set_deserialize("fill_density", "0");
         config.set_deserialize("perimeters", "1");
-        config.set_deserialize("complete_objects", "1");
+        config.set_deserialize("print_plan_builder", "ordering.plan_builder.by_object");
         config.set_deserialize("brim_per_object", "1");
         config.set_deserialize("gcode_comments", "1");
 

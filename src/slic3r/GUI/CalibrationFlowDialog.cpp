@@ -22,6 +22,12 @@
 #include <wx/file.h>
 #include <wx/wupdlock.h>
 #include "wxExtensions.hpp"
+/*
+Provides flow calibration samples to the plater. Requested flow values determine
+the sample settings; objects are configured to print individually.
+    CalibrationFlowDialog::create_geometry() -> prepare sample objects and settings
+        set_deserialize_strict() -> select By object; set_key_value() -> use a zero height step
+*/
 
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
@@ -62,6 +68,8 @@ void CalibrationFlowDialog::create_geometry_2_5(wxCommandEvent &event_args)
 }
 
 void CalibrationFlowDialog::create_geometry(float start, float delta) {
+    if (!require_plan_builder(true))
+        return;
     // wait for slicing end if needed
     wxGetApp().Yield();
 
@@ -161,7 +169,8 @@ void CalibrationFlowDialog::create_geometry(float start, float delta) {
 
     /// --- main config, please modify object config when possible ---
     DynamicPrintConfig new_print_config = *print_config; //make a copy
-    new_print_config.set_key_value("complete_objects", new ConfigOptionBool(true));
+    new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+    new_print_config.set_key_value("parallel_objects_step", new ConfigOptionFloat(0.));
     //if skirt, use only one
     if (print_config->option<ConfigOptionInt>("skirts")->get_int() > 0 && print_config->option<ConfigOptionInt>("skirt_height")->get_int() > 0) {
         new_print_config.set_key_value("complete_objects_one_skirt", new ConfigOptionBool(true));
