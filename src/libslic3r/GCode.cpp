@@ -2037,6 +2037,12 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 {
 
     const Print &print = print_mod;
+    const ConfigOption *step_option = print.config().option("complete_objects_step");
+    const ConfigOption *limit_option = print.config().option("complete_objects_step_max_z");
+    const ConfigOption *islands_option = print.config().option("complete_islands");
+    const double object_step = step_option == nullptr ? 0. : step_option->get_float();
+    const double object_step_max_z = limit_option == nullptr ? 0. : limit_option->get_float();
+    const bool print_islands = islands_option != nullptr && islands_option->get_bool();
     Print::StatusMonitor status_monitor{print_mod};
     LockMonitor monitor_soft_lock(status_monitor.stats());
     this->m_throw_if_canceled =
@@ -2331,8 +2337,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     // Parallel object batches have independent orderings; the single-object
     // parallel-islands case shares one ordering across all its layers.
     if (print.has_global_wipe_tower() &&
-        (print.config().complete_objects_step.value <= 0. ||
-         (print.config().complete_islands.value && print.objects().size() == 1))) {
+        (object_step <= 0. ||
+         (print_islands && print.objects().size() == 1))) {
         assert(print.tool_orderings().size() == 1);
         wipe_tower.set_config(&print.config(), &print.default_object_config(), &print.default_region_config());
         std::vector<const PrintObject *> objects;
@@ -2351,13 +2357,13 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 
     if (print_by_object(print.config())) {
         // Order object instances for sequential print.
-        if(print.config().complete_objects_sort.value == cosObject)
+        if(complete_objects_sort(print.config()) == cosObject)
             print_object_instances_ordering = print.sort_object_instances_by_model_order();
-        else if (print.config().complete_objects_sort.value == cosZ)
+        else if (complete_objects_sort(print.config()) == cosZ)
             print_object_instances_ordering = print.sort_object_instances_by_max_z();
-        else if (print.config().complete_objects_sort.value == cosY)
+        else if (complete_objects_sort(print.config()) == cosY)
             print_object_instances_ordering = print.sort_object_instances_by_max_y();
-        else if(print.config().complete_objects_sort.value == cosNearest)
+        else if(complete_objects_sort(print.config()) == cosNearest)
             print_object_instances_ordering = chain_print_object_instances(print);
         // Find the 1st printing object, find its tool ordering and the initial extruder ID.
         print_object_instance_sequential_active = print_object_instances_ordering.begin();
@@ -2759,7 +2765,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
             assert(it_tool_ordering == print.tool_orderings().end());
             set_extra_lift(m_last_layer_z_, prev_object->layers().back().id(), print.config(), m_writer, initial_extruder_id /* osef, it's only for the lift_min */);
         } else {
-            if (print.config().complete_objects_step > 0) {
+            if (object_step > 0) {
             /////////////////////////////////////////////// begin complete_objects_step
                 //print wipe tower (if here) for the first layer
                 ToolOrdering parallel_ordering;
@@ -2780,8 +2786,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 //}
                 
                 coord_t height_step_range = scale_to_layer_coord(
-                    std::min(print.config().complete_objects_step, print.config().extruder_clearance_height));
-                if (print.config().complete_objects_sort.value == cosNearest) {
+                    std::min(object_step, print.config().extruder_clearance_height.value));
+                if (complete_objects_sort(print.config()) == cosNearest) {
                     print_object_instances_ordering = chain_print_object_instances(print);
                 }
                 bool first_layers = true;
@@ -2797,9 +2803,9 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                     }
                 }
                 bool is_layers = true;
-                while (is_layers && (print.config().complete_objects_step_max_z.value == 0 || z_start + EPSILON < print.config().complete_objects_step_max_z.value)) {
-                    if (print.config().complete_objects_step_max_z.value > 0) {
-                        z_end = std::min(z_end, scale_to_layer_coord(print.config().complete_objects_step_max_z.value));
+                while (is_layers && (object_step_max_z == 0 || z_start + EPSILON < object_step_max_z)) {
+                    if (object_step_max_z > 0) {
+                        z_end = std::min(z_end, scale_to_layer_coord(object_step_max_z));
                     }
                     std::set<const LayerSliceIsland*> printed_island;
                     is_layers = false;
@@ -2811,7 +2817,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                         const PrintObject &object = *(*it_print_object_instance)->print_object;
                         ObjectsLayerToPrint object_and_support_layers = collect_layers_to_print(object, status_monitor);
 
-                        if (!first_layers && print.config().complete_islands.value) {
+                        if (!first_layers && print_islands) {
                             if (separate_islands_done.find(&object) != separate_islands_done.end()) {
                                 //already printed, pass
                                 // relance
@@ -3198,21 +3204,21 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 assert(!is_layers || !print.tool_orderings().empty());
                 //TODO
                 //if (is_layers && !print.tool_orderings().empty()) {
-                //    assert(print.config().complete_objects_step_max_z.value > 0);
+                //    assert(object_step_max_z > 0);
                 //    if (wipe_tower) {
                 //        m_wipe_tower = std::move(wipe_tower);
                 //    }
                 //    // Return to normal printing
-                //    // skip all layer below print.config().complete_objects_step_max_z.value
+                //    // skip all layer below object_step_max_z
                 //    size_t idx;
-                //    for (idx = 0; idx < parallel_layers_to_print.size() && parallel_layers_to_print[idx].first + EPSILON < print.config().complete_objects_step_max_z.value; idx++) {
+                //    for (idx = 0; idx < parallel_layers_to_print.size() && parallel_layers_to_print[idx].first + EPSILON < object_step_max_z; idx++) {
                 //        //print wipe tower (if here) up to the z
                 //        if (m_wipe_tower && idx > 0) {
                 //            extruder_index_t extruder_id = print.tool_orderings().back().first_extruder();
 
                 //            assert (parallel_ordering
                 //                       .layer_tools()[m_wipe_tower->get_current_layer_idx() + 1]
-                //                       ._print_z < scale_to_layer_coord(print.config().complete_objects_step_max_z.value));
+                //                       ._print_z < scale_to_layer_coord(object_step_max_z));
                 //                m_wipe_tower->next_layer();
                 //                this->m_pos_layer = this->m_layer = parallel_layers_to_print[idx].second.back().layer();
                 //                file.write(m_wipe_tower->tool_change(*this, extruder_id, true));

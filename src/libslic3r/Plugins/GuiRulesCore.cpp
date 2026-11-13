@@ -445,12 +445,6 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     // ----- sequential printing, wipe tower, MMU -------------------------
     const GuiCondition by_object = string_equals("print_plan_builder", "ordering.plan_builder.by_object");
     const GuiCondition whole_objects = all_of({ by_object, float_equals("complete_objects_step", 0.) });
-    add_rule({ "complete_objects_sort", "complete_objects_step" }, by_object);
-    const GuiCondition parallel_possible = all_of({
-        by_object,
-        non_zero("complete_objects_step")
-    });
-    add_rule({ "complete_objects_step_max_z", "complete_islands" }, parallel_possible);
     add_rule({ "standby_temperature_delta" }, true_("ooze_prevention"));
 
     const GuiCondition tower_possible = false_("spiral_vase");

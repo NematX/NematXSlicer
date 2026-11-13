@@ -2264,7 +2264,13 @@ const std::regex Plater::priv::pattern_step(".*[.](step|stp)", std::regex::icase
 Plater::priv::priv(Plater *q, MainFrame *main_frame)
     : q(q)
     , main_frame(main_frame)
-    , config(Slic3r::DynamicPrintConfig::new_from_defaults_keys({
+    , config(Slic3r::DynamicPrintConfig::new_from_defaults_keys([](std::vector<std::string> keys) {
+        // Inactive providers do not publish their settings into the global definition.
+        keys.erase(std::remove_if(keys.begin(), keys.end(), [](const std::string &key) {
+            return !PrintConfigDef::instance().has(key);
+        }), keys.end());
+        return keys;
+    }({
         // These keys are used by (at least) printconfig::min_object_distance
         "bed_shape", "bed_custom_texture", "bed_custom_model", 
         "brim_width", "brim_width_interior","brim_separation",
@@ -2298,7 +2304,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "perimeters", "perimeter_extruder", "fill_density", "infill_extruder", "raft_layers", 
         "support_material", "support_material_extruder", "support_material_interface_extruder", "support_material_contact_distance", "top_solid_layers",
         "z_step"
-        }))
+        })))
     , sidebar(new Sidebar(q))
     , notification_manager(std::make_unique<NotificationManager>(q))
     , m_worker{q, std::make_unique<NotificationProgressIndicator>(notification_manager.get()), "ui_worker"}

@@ -377,7 +377,7 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
 EnabledMap rule_enabled(const Orchestrator &orchestrator, const DynamicPrintConfig &config)
 {
     EnabledMap out;
-    const char *const owners[] = { core_gui_rules_owner, infill_gui_rules_owner };
+    const char *const owners[] = { core_gui_rules_owner, infill_gui_rules_owner, "ordering.plan_builder.by_object" };
     for (const char *owner : owners) {
         for (const Orchestrator::GuiRuleApplication &application :
              orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1, owner))

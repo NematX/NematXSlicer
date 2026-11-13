@@ -449,6 +449,10 @@ add_test(NAME plugins_inactive_builder_import
     COMMAND $<TARGET_FILE:${_TEST_NAME}_tests> "[.inactive-builder-import]" ${CATCH_EXTRA_ARGS})
 set_tests_properties(plugins_inactive_builder_import PROPERTIES
     ENVIRONMENT "SLIC3R_TEST_WITHOUT_BY_OBJECT=1")
+add_test(NAME plugins_inactive_builder_settings
+    COMMAND $<TARGET_FILE:${_TEST_NAME}_tests> "[.inactive-builder-settings]" ${CATCH_EXTRA_ARGS})
+set_tests_properties(plugins_inactive_builder_settings PROPERTIES
+    ENVIRONMENT "SLIC3R_TEST_WITHOUT_BY_OBJECT=1")
 
 # Hidden probes intentionally stop their process, so a separate driver checks
 # the guard's status and diagnostic without aborting the ordinary plugin suite.

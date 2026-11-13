@@ -90,6 +90,8 @@ extrusion endpoints. Explicit model indices distinguish every object sort mode.
 The plugins_inactive_builder_import CTest entry runs the isolated import case
 with SLIC3R_TEST_WITHOUT_BY_OBJECT so the requested provider is absent when the
 startup enum is finalized.
+The plugins_inactive_builder_settings entry uses the same isolated startup to
+check that optional object settings do not disable other providers or scene defaults.
 Setting-support checks compare definition defaults with config values and read
 only provider metadata; unregistered copies model providers with no used keys.
 Definition nature checks exercise classification transport and its permission
@@ -2698,13 +2700,16 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
         {"complete_objects_step", "0"}, {"complete_objects_sort", "object"},
+        {"complete_objects_step_max_z", "0"}, {"complete_islands", "0"},
         {"skirts", "0"}, {"skirt_height", "1"}, {"brim_width", "0"}, {"brim_per_object", "1"},
         {"complete_objects_one_skirt", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"},
         {"fill_density", "0%"}, {"support_material", "0"}, {"support_material_enforce_layers", "0"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
     const std::vector<E2E::Domain> domains = {
         E2E::enum_domain("complete_objects_sort"),
-        {{"complete_objects_step"}, {{"height-step", {{"complete_objects_step", "1"}}}}}
+        {{"complete_objects_step"}, {{"height-step", {{"complete_objects_step", "1"}}}}},
+        {{"complete_objects_step_max_z"}, {{"height-limit", {{"complete_objects_step_max_z", "0.6"}}}}},
+        {{"complete_islands"}, {{"separate-islands", {{"complete_islands", "1"}}}}}
     };
     TriangleMesh mesh = E2E::stl_fixture(false);
     mesh.scale(0.25);
@@ -3104,6 +3109,86 @@ TEST_CASE("Object step aliases load and save with current names", "[plugins][con
             CHECK(text.find("parallel_islands") == std::string::npos);
         }
     }
+}
+
+// Keep object-setting display precision and replay skirt generation when its optional height-step input changes.
+TEST_CASE("Object settings preserve precision and replay their earliest readers", "[plugins][config][print-sequence][invalidation]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const char *key : { "complete_objects_sort", "complete_objects_step", "complete_objects_step_max_z", "complete_islands" }) {
+        CAPTURE(key);
+        const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+        REQUIRE(definition != nullptr);
+        CHECK(definition->precision == 6);
+        CHECK(definition->invalidates_step == (std::string(key) == "complete_objects_step" ? STEP_SUPPORT : STEP_ORDERING));
+    }
+    const std::optional<Steps::Checkpoint> checkpoint = Steps::config_option_replay_checkpoint("complete_objects_step");
+    REQUIRE(checkpoint.has_value());
+    CHECK(*checkpoint == Steps::Checkpoint::Slicing);
+    CHECK(*checkpoint == Steps::checkpoint_before_step(STEP_SKIRT_BRIM));
+}
+
+// Resolve every serialized object order independently of the plugin enum's integer layout.
+TEST_CASE("Object sort helper maps serialized names", "[plugins][config][print-sequence]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config;
+    CHECK(complete_objects_sort(config) == cosObject);
+    const std::pair<const char *, CompleteObjectSort> orders[] = {
+        { "object", cosObject }, { "lowy", cosY }, { "lowz", cosZ }, { "nearest", cosNearest }
+    };
+    for (const auto &order : orders) {
+        config.set_deserialize_strict("complete_objects_sort", order.first);
+        CHECK(complete_objects_sort(config) == order.second);
+    }
+}
+
+// Start without the object provider, retain dependent providers and build filtered scene defaults;
+// slice and export with missing object settings so optional readers exercise their defaults.
+TEST_CASE("Inactive object builder leaves scene defaults and other providers usable", "[.inactive-builder-settings]")
+{
+    using namespace Slic3r;
+    REQUIRE(std::getenv("SLIC3R_TEST_WITHOUT_BY_OBJECT") != nullptr);
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    REQUIRE_FALSE(host.is_plugin_active(host.get_plugin("ordering.plan_builder.by_object")));
+    for (const char *id : { "skirt_brim.skirt.default", "skirt_brim.brim.default",
+                           "wipe_tower.manager.default", "ordering.wipe_into_first.default" }) {
+        CAPTURE(id);
+        REQUIRE(host.get_plugin(id) != nullptr);
+        CHECK(host.is_plugin_active(host.get_plugin(id)));
+    }
+    for (const char *key : { "complete_objects_sort", "complete_objects_step", "complete_objects_step_max_z", "complete_islands" })
+        CHECK_FALSE(PrintConfigDef::instance().has(key));
+    CHECK_FALSE(PrintConfigDef::instance().has("complete_objects_one_brim"));
+    CHECK(PrintConfigDef::instance().has("complete_objects_one_skirt"));
+    std::vector<std::string> scene_keys = { "bed_shape", "print_plan_builder", "complete_objects_step",
+        "complete_objects_step_max_z", "complete_islands", "complete_objects_sort",
+        "complete_objects_one_skirt", "brim_per_object", "duplicate_distance", "extruder_clearance_radius" };
+    scene_keys.erase(std::remove_if(scene_keys.begin(), scene_keys.end(), [](const std::string &key) {
+        return !PrintConfigDef::instance().has(key);
+    }), scene_keys.end());
+    const std::unique_ptr<DynamicPrintConfig> scene(DynamicPrintConfig::new_from_defaults_keys(scene_keys));
+    CHECK(scene->has("bed_shape"));
+    CHECK(complete_objects_sort(*scene) == cosObject);
+    CHECK_FALSE(print_by_object(*scene));
+    CHECK_FALSE(print_complete_objects(*scene));
+    const slic3r_api::Config view(ApiHost::to_config_handle(scene.get()));
+    CHECK(view.float_or_default("complete_objects_step", 0.) == 0.);
+    CHECK(view.float_or_default("complete_objects_step_max_z", 0.) == 0.);
+    CHECK_FALSE(view.bool_or_default("complete_islands", false));
+    Model model;
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ {"skirts", "1"}, {"brim_width", "1"}, {"fill_density", "0%"} });
+    Test::init_print({make_cube(5., 5., 1.)}, print, model, config);
+    print.process();
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    host.export_gcode_cli(print, path.string());
+    CHECK_FALSE(Test::GCode::read_text_file(path).empty());
+    Test::GCode::remove_output_pair(path);
 }
 
 // Import a plate selection absent from the startup enum, requiring the reader's

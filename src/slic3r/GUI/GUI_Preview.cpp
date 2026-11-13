@@ -463,9 +463,11 @@ wxBoxSizer* Preview::create_layers_slider_sizer()
     std::lock_guard lock(m_layers_slider->lock_render());
 
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->fff_prints.get_edited_preset().config;
+    const ConfigOption *step = config.option("complete_objects_step");
+    const ConfigOption *islands = config.option("complete_islands");
     m_layers_slider->SetDrawMode(wxGetApp().get_current_printer_technology() == ptSLA,
                                  print_by_object(config) &&
-                                     !(config.opt_float("complete_objects_step") > 0 && config.opt_bool("complete_islands")));
+                                     !(step != nullptr && step->get_float() > 0 && islands != nullptr && islands->get_bool()));
     m_layers_slider->enable_action_icon(wxGetApp().is_editor());
 
     sizer->Add(m_layers_slider, 0, wxEXPAND, 0);

@@ -1187,7 +1187,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     if (unsupported_setting)
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
-    if (print_complete_objects(m_config) /*|| m_config.complete_objects_step > 0*/) {
+    if (print_complete_objects(m_config)) {
     	if (! sequential_print_horizontal_clearance_valid(*this, const_cast<Polygons*>(&m_sequential_print_clearance_contours)))
             return { PrintBase::PrintValidationError::pveWrongPosition, _u8L("Some objects are too close; your extruder will collide with them.") };
         if (print_complete_objects(m_config) && ! sequential_print_vertical_clearance_valid(*this))
@@ -1677,7 +1677,9 @@ void Print::process() {
     if (this->should_execute_step(STEP_WIPETOWER)) {
         m_tool_orderings.clear();
         bool is_separate_objects = print_by_object(config());
-        if (config().complete_objects_step.value > 0 && config().complete_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
+        const ConfigOption *object_step = config().option("complete_objects_step");
+        const ConfigOption *islands = config().option("complete_islands");
+        if (object_step != nullptr && object_step->get_float() > 0 && islands != nullptr && islands->get_bool() && m_default_object_config.wipe_tower && m_objects.size() == 1) {
             is_separate_objects = false;
         }
         if (is_separate_objects) {
@@ -1686,13 +1688,13 @@ void Print::process() {
             // TODO: add extruder-switch minimizing option.
             // Order object instances for sequential print.
             std::vector<const PrintInstance *> instances_ordering;
-            if (config().complete_objects_sort.value == cosObject)
+            if (complete_objects_sort(config()) == cosObject)
                 instances_ordering = this->sort_object_instances_by_model_order();
-            else if (config().complete_objects_sort.value == cosZ)
+            else if (complete_objects_sort(config()) == cosZ)
                 instances_ordering = this->sort_object_instances_by_max_z();
-            else if (config().complete_objects_sort.value == cosY)
+            else if (complete_objects_sort(config()) == cosY)
                 instances_ordering = this->sort_object_instances_by_max_y();
-            else if (config().complete_objects_sort.value == cosNearest)
+            else if (complete_objects_sort(config()) == cosNearest)
                 instances_ordering = chain_print_object_instances(*this);
             // Find the 1st printing object, find its tool ordering and the initial extruder ID.
             extruder_index_t previous_final_extruder = EXTRUDER_ID_UNKNOWN;
