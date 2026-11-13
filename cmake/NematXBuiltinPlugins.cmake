@@ -79,6 +79,18 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
         SOURCES plugins/nematx_firmware/src/NematXFirmwarePlugin.cpp
             plugins/nematx_firmware/src/NematXFirmwareSession.cpp
             plugins/nematx_firmware/src/NematXGCodeReader.cpp
+            plugins/pressure/src/PressureClassification.cpp
+            plugins/pressure/src/PressureControls.cpp
+            plugins/pressure/src/PressureExtrusion.cpp
+            plugins/pressure/src/PressureFlow.cpp
+            plugins/pressure/src/PressureGeometry.cpp
+            plugins/pressure/src/PressureKinematics.cpp
+            plugins/pressure/src/PressureNominal.cpp
+            plugins/pressure/src/PressurePlanner.cpp
+            plugins/pressure/src/PressureReader.cpp
+            plugins/pressure/src/PressureRewrite.cpp
+            plugins/pressure/src/PressureSource.cpp
+            plugins/pressure/src/PressureTokens.cpp
         PLUGIN_IDS nematx gcode.reader.nematx)
     nematx_add_builtin_module(regional_fan
         SOURCES plugins/regional_fan/src/RegionalFan.cpp PLUGIN_IDS nematx_regional_fan)

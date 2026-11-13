@@ -6,6 +6,9 @@ Selectors are settings that choose a provider; layout fragments describe pieces 
 Initialization registers providers and settings, applies activation choices, then copies
 provider ids, selector keys and layout fragment ids before individual tests run.
 The copied sets remain unchanged when later tests register or activate providers.
+When SLIC3R_TEST_EXTERNAL_PLUGIN_REPOSITORY names a package directory, its packages
+are loaded and the providers listed in SLIC3R_TEST_EXTERNAL_PLUGIN_IDS are activated
+before the exclusive selectors are built, so a selector can choose them.
 The configuration/activation helpers run inside the function-local static
 initializer lambda, once per process. The startup query only ensures that
 initialization has finished before returning the copied sets.
@@ -1163,6 +1166,26 @@ void ensure_plugin_test_runtime_initialized()
         }
 #endif
 
+        // Optional external-package integration checks use the real loader and
+        // initialize settings before config definitions become immutable.
+        if (const char *repository = std::getenv("SLIC3R_TEST_EXTERNAL_PLUGIN_REPOSITORY")) {
+            load_plugin_packages_from_repository(boost::filesystem::path(repository), orchestrator);
+            // Keep external dependency failures visible before activation's assertion.
+            for (const auto &[id, report] : orchestrator.plugin_package_load_reports())
+                if (boost::filesystem::path(report.package_path).parent_path() == boost::filesystem::path(repository))
+                    for (const Slic3r::PluginPackageLoadIssue &issue : report.issues)
+                        BOOST_LOG_TRIVIAL(error) << "External test package '" << id << "': " << issue.detail;
+            if (const char *ids = std::getenv("SLIC3R_TEST_EXTERNAL_PLUGIN_IDS")) {
+                std::string remaining(ids);
+                while (!remaining.empty()) {
+                    const auto comma = remaining.find(',');
+                    activate_plugin_or_fail(orchestrator, remaining.substr(0,comma).c_str());
+                    if (comma == std::string::npos) break;
+                    remaining.erase(0,comma+1);
+                }
+            }
+        }
+        // External exclusive providers must be active when selectors collect their values.
         register_exclusive_step_group_options(orchestrator);
         // An isolated test run can prove that another encoder publishes every
         // shared option before PNG has ever been initialized.

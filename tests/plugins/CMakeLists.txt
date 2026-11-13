@@ -107,6 +107,8 @@ add_executable(${_TEST_NAME}_tests
     test_gcode_printing_plan_file_writer.cpp
     test_gcode_script_processor.cpp
     test_gcode_settings_scripts.cpp
+    test_nematx_pressure.cpp
+    test_nematx_pressure_qualification.cpp
     test_gui_rule_explanations.cpp
     test_gui_rule_helpers.cpp
     test_gyroid_pattern.cpp
