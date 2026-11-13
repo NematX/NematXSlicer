@@ -26,8 +26,7 @@ helper implements this layout rather than duplicating it in each file exporter.
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Exporter {
 
-/* Main suffix of the built-in exporter, and the text aliases that it accepts when a destination spells them. The host uses the same
-   definition to check a typed suffix before an export. */
+/* Main suffix of the built-in exporter, and the usual text aliases offered by its file filter. A destination may use any suffix. */
 inline constexpr const char *k_default_gcode_exporter_extension = ".gcode";
 inline constexpr std::array<const char *, 2> k_default_gcode_exporter_aliases = {".g", ".gco"};
 

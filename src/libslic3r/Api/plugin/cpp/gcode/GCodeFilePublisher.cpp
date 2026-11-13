@@ -76,7 +76,7 @@ bool same_gcode_file_fingerprint(const GCodeFileFingerprint &left, const GCodeFi
     return left.byte_count == right.byte_count && left.crc32 == right.crc32;
 }
 
-// Return the destination with the main suffix added when it has none, or throw when its suffix is not accepted.
+// Return the destination with the main suffix added when it has none; any other suffix is kept.
 boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, std::string_view destination_utf8);
 
 // Throw unless the destination directory exists, the destination is not a directory and is not the reference.
@@ -131,7 +131,7 @@ bool write_and_verify_sibling(const plugin_run_context &run_context,
                               const boost::filesystem::path &sibling,
                               const GCodeFileWriter &write);
 
-// Build an owned path from the borrowed destination, append the main suffix only to a suffixless name, and otherwise use the shared name matcher; empty or incompatible destinations throw without I/O.
+// Build an owned path from the borrowed destination and append the main suffix only to a suffixless name; an empty destination throws without I/O.
 boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, std::string_view destination_utf8)
 {
     if (destination_utf8.empty())
@@ -139,12 +139,7 @@ boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, s
 
     boost::filesystem::path destination{std::string(destination_utf8)};
     if (destination.extension().empty())
-        return destination += format.extension;
-
-    const std::string suffix = destination.extension().string();
-    if (!gcode_destination_matches_format(destination_utf8, format))
-        throw std::runtime_error("The G-code exporter '" + format.exporter_id +
-                                 "' does not support the destination extension '" + suffix + "'.");
+        destination += format.extension;
     return destination;
 }
 

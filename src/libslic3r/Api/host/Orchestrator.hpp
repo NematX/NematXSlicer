@@ -347,8 +347,6 @@ public:
         std::string action_label;
         bool supports_removable_media = true;
 
-        // Match a complete destination name against the exporter suffix, its final component or built-in text aliases, ignoring case; no extension imposes no restriction.
-        bool accepts_extension(const std::string &destination) const;
         // Return a unique path in the system temporary directory, `prefix` + random part + the exporter extension; nothing is created.
         std::string temporary_path(const std::string &prefix) const;
     };

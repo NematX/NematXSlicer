@@ -22,9 +22,13 @@ should keep the file that already sits there when its work fails or is
 cancelled. publish_gcode_file() gives every such exporter the same behavior:
 
     destination checks  ->  write into a unique sibling  ->  verify its fingerprint  ->  replace the destination
-    (not empty, suffix,      (the exporter's own work)       (byte count and CRC-32)      (FilesystemTransaction)
+    (not empty, main suffix  (the exporter's own work)       (byte count and CRC-32)      (FilesystemTransaction)
+     added when missing,
      directory, not the
      reference)
+
+Any destination suffix is accepted: the user chooses the file name. Only a name
+without a suffix receives the exporter's main suffix.
 
 The sibling shares the destination's directory so that the replacement stays on
 one volume. The replacement renames an existing destination to a backup, then
@@ -52,24 +56,26 @@ returns. The return value describes publication, not ownership of the Print.
 
 namespace slic3r_api {
 
-// The suffixes that one file exporter accepts for its destination.
+// The usual suffixes of one file exporter. They name suffixless destinations and staging files and fill
+// file filters; a destination with any other suffix is still accepted.
 struct GCodeFileFormat
 {
-    // Exporter identity, named in the refusal of a suffix.
+    // Exporter identity.
     std::string exporter_id;
     // Main suffix with its dot (".gcode"): appended when the destination has none, and given to the sibling.
     std::string extension;
-    // Other accepted suffixes (".g"), compared without case.
+    // Other usual suffixes (".g"), compared without case.
     std::vector<std::string> aliases;
 };
 
-// Match a complete destination name against the main suffix, its final component and explicit aliases, without case; an empty main suffix imposes no restriction.
+// Tell whether a complete destination name ends with the main suffix, its final component or an explicit alias, without case;
+// an empty main suffix matches every name. Publication does not require a match.
 bool gcode_destination_matches_format(std::string_view destination, const GCodeFileFormat &format);
 
 // Write the complete file into the helper-owned sibling stream; return false after reporting a failure, or throw on I/O failure or cancellation.
 using GCodeFileWriter = std::function<bool(std::ostream &output)>;
 
-// Check the borrowed destination/reference, write and reread a unique sibling stream, then transactionally replace the destination; return its published path or empty on writer refusal, and throw on validation, I/O, fingerprint, cancellation, or replacement failure.
+// Check the borrowed destination/reference, write and reread a unique sibling stream, then transactionally replace the destination; return its published path or empty on writer refusal, and throw on an empty destination, I/O, fingerprint, cancellation, or replacement failure.
 std::string publish_gcode_file(const plugin_run_context &run_context,
                                const GCodeFileFormat &format,
                                std::string_view destination_utf8,

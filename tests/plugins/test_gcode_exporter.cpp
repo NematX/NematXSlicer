@@ -1330,10 +1330,11 @@ TEST_CASE("G-code export copies the reference without rerunning slicing", "[plug
     CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), third_target.string(), selection) == third_target.string());
     expect_simple_export(read_binary_file(third_target), expected);
     CHECK(read_binary_file(reference) == expected);
-    const boost::filesystem::path unsupported_target = directory.path() / "wrong.bgcode";
-    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), unsupported_target.string(), selection),
-                      "The G-code exporter 'gcode.exporter.simple' does not support the destination extension '.bgcode'.");
-    CHECK_FALSE(boost::filesystem::exists(unsupported_target));
+    // Any suffix chosen for the destination is kept.
+    const boost::filesystem::path other_suffix_target = directory.path() / "piece.nc";
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), other_suffix_target.string(), selection) ==
+          other_suffix_target.string());
+    expect_simple_export(read_binary_file(other_suffix_target), expected);
     CHECK(print.is_step_done(STEP_GCODE));
     CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == gcode_timestamp);
     CHECK(print.print_statistics().total_extruded_volume == sentinel_volume);
@@ -1486,11 +1487,10 @@ TEST_CASE("CLI G-code export publishes the requested exporter extension", "[plug
     CHECK(suffixless_export == suffixless_expected.string());
     CHECK(read_binary_file(suffixless_expected) == expected);
 
-    const std::map<std::string, std::string> files_before_rejection = snapshot_directory(directory.path());
-    const boost::filesystem::path unsupported_path = directory.path() / "unsupported.bgcode";
-    CHECK_THROWS_WITH(Orchestrator::instance().export_gcode_cli(print, unsupported_path.string()),
-                      "The G-code exporter 'gcode.exporter.simple' does not support the destination extension '.bgcode'.");
-    CHECK(snapshot_directory(directory.path()) == files_before_rejection);
+    // A destination with another suffix is published under that exact name.
+    const boost::filesystem::path other_suffix_path = directory.path() / "other suffix.nc";
+    CHECK(Orchestrator::instance().export_gcode_cli(print, other_suffix_path.string()) == other_suffix_path.string());
+    CHECK(read_binary_file(other_suffix_path) == expected);
 
     const std::map<std::string, std::string> files = snapshot_directory(directory.path());
     for (const std::pair<const std::string, std::string> &file : files)
@@ -2047,9 +2047,8 @@ TEST_CASE("G-code export goes through the selected exporter service", "[plugins]
     CHECK(boost::filesystem::path(temporary).extension().string() == ".probe");
     CHECK(Test::export_print_to(orchestrator, print, probe_config, reference.string(), temporary, selection) == temporary);
     boost::filesystem::remove(temporary);
-    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, probe_config, reference.string(),
-                                                (directory.path() / ".app.upload.ab12-cd34").string(), selection),
-                      "The G-code exporter 'test.gcode.exporter.probe' does not support the destination extension '.ab12-cd34'.");
+    const std::string other_suffix = (directory.path() / ".app.upload.ab12-cd34").string();
+    CHECK(Test::export_print_to(orchestrator, print, probe_config, reference.string(), other_suffix, selection) == other_suffix);
 }
 
 // Selection and export never clear a cancellation raised elsewhere: the flag belongs to the slicing run that raised it.
@@ -2076,13 +2075,13 @@ TEST_CASE("G-code exporter calls leave the global cancellation flag alone", "[pl
 }
 
 // Exercise one literal destination table through host selection and actual publication; temporary files stay owned by the scoped directory and validation failures must leave no destination.
-TEST_CASE("Destination names share the host and publisher suffix rule", "[plugins][gcode][exporter][export-contract][compound-extension]")
+TEST_CASE("Destinations keep any suffix and only suffixless names receive the main suffix", "[plugins][gcode][exporter][export-contract][compound-extension]")
 {
     ScopedTestDirectory directory;
     const boost::filesystem::path reference = directory.path() / "reference.gcode";
     write_binary_file(reference, "G1 X1\n");
     const plugin_run_context context = {};
-    struct NameCase { const char *extension; const char *name; bool accepted; bool text_aliases; };
+    struct NameCase { const char *extension; const char *name; bool matches; bool text_aliases; };
     const NameCase cases[] = {
         {".gcode.3mf", "x", true, false},
         {".gcode.3mf", "x.gcode.3mf", true, false},
@@ -2104,36 +2103,27 @@ TEST_CASE("Destination names share the host and publisher suffix rule", "[plugin
     };
     for (const NameCase &item : cases) {
         CAPTURE(item.extension, item.name);
-        Orchestrator::GCodeExporterSelection selection;
-        selection.plugin_id = item.text_aliases ? "gcode.exporter.simple" : "test.compound";
-        selection.extension = item.extension;
         slic3r_api::GCodeFileFormat format;
-        format.exporter_id = selection.plugin_id;
+        format.exporter_id = item.text_aliases ? "gcode.exporter.simple" : "test.compound";
         format.extension = item.extension;
         if (item.text_aliases)
             format.aliases = {".g", ".gco"};
         const boost::filesystem::path destination = directory.path() / item.name;
         const bool bare = destination.extension().empty();
-        // The host receives names after the existing suffixless-name appending step; the publisher performs that step itself.
+        // Only a suffixless name receives the main suffix; any other suffix is published as chosen.
         const std::string expected = destination.string() + (bare ? item.extension : "");
-        CHECK(selection.accepts_extension(expected) == item.accepted);
+        CHECK(slic3r_api::gcode_destination_matches_format(expected, format) == item.matches);
         bool wrote = false;
         const slic3r_api::GCodeFileWriter writer = [&wrote](std::ostream &output) {
             wrote = true;
             output << "published\n";
             return true;
         };
-        if (item.accepted) {
-            const std::string published = slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer);
-            CHECK(published == expected);
-            CHECK(read_binary_file(published) == "published\n");
-            CHECK(wrote);
-            boost::filesystem::remove(published);
-        } else {
-            CHECK_THROWS(slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer));
-            CHECK_FALSE(wrote);
-            CHECK_FALSE(boost::filesystem::exists(destination));
-        }
+        const std::string published = slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer);
+        CHECK(published == expected);
+        CHECK(read_binary_file(published) == "published\n");
+        CHECK(wrote);
+        boost::filesystem::remove(published);
     }
     CHECK(read_binary_file(reference) == "G1 X1\n");
     CHECK(snapshot_directory(directory.path()).size() == 1);
@@ -2212,7 +2202,6 @@ TEST_CASE("Composed exporters keep CLI aliases and temporary suffixes", "[plugin
     const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
     const std::string temporary = selection.temporary_path(".f4a.upload.");
     CHECK(boost::iends_with(temporary, ".gcode.3mf"));
-    CHECK(selection.accepts_extension(temporary));
     CHECK_FALSE(boost::filesystem::exists(temporary));
     for (const std::string &name : {std::string("cli.gcode.3mf"), std::string("cli.3mf")}) {
         const std::string destination = (directory.path() / name).string();
@@ -3470,7 +3459,6 @@ TEST_CASE("An exporter without local file needs no extension and no destination"
     REQUIRE_NOTHROW(selection = orchestrator.select_gcode_exporter(print, print.full_print_config()));
     CHECK(selection.plugin_id == k_no_file_exporter_id);
     CHECK(selection.extension.empty());
-    CHECK(selection.accepts_extension(".anything"));
 
     // No output_path in the request, and a reporter that says nothing: the Print holds an empty result.
     const size_t exports_before = g_exporter_probe_state.no_file_export_count;
@@ -3545,7 +3533,7 @@ TEST_CASE("Changing binary G-code support does not invalidate G-code", "[plugins
     CHECK(print.is_step_done(STEP_GCODE));
 }
 
-// A destination that the built-in exporter refuses (suffix, missing directory) is refused before any thumbnail is rendered.
+// A destination that the built-in exporter refuses (missing directory) is refused before any thumbnail is rendered.
 TEST_CASE("A refused destination renders no thumbnail", "[plugins][gcode][exporter][export-contract][thumbnails]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -3560,8 +3548,6 @@ TEST_CASE("A refused destination renders no thumbnail", "[plugins][gcode][export
     const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
 
     uint32_t calls = 0;
-    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
-                                       (directory.path() / "wrong.bgcode").string(), selection, white_square_renderer(calls)));
     CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
                                        (directory.path() / "missing" / "out.gcode").string(), selection, white_square_renderer(calls)));
     CHECK(calls == 0);
@@ -4238,9 +4224,6 @@ TEST_CASE("Binary G-code publication validates paths and cleans private files", 
     const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
     uint32_t calls = 0;
 
-    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
-                                       (directory.path() / "wrong.gcode").string(), selection,
-                                       white_square_renderer(calls)));
     CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
                                        (directory.path() / "missing" / "output.bgcode").string(), selection,
                                        white_square_renderer(calls)));

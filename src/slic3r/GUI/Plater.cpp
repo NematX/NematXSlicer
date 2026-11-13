@@ -7347,18 +7347,6 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
 
 
 
-// Keep a borrowed suffixless upload name for later extension appending, otherwise match the complete name through the selection; return a localized refusal without I/O or ownership transfer, propagating formatting failures.
-static wxString check_gcode_exporter_extension(
-    const Orchestrator::GCodeExporterSelection &selection,
-    const std::string &destination)
-{
-    const std::string extension = fs::path(destination).extension().string();
-    if (extension.empty() || selection.accepts_extension(destination))
-        return wxString();
-    return format_wxstr(_L("The selected G-code exporter supports %1% files, not %2%."),
-                        selection.extension, extension);
-}
-
 // Return false for an empty plate, a gizmo in editing mode (which tells the user why) or an earlier processing error.
 bool Plater::priv::can_start_export()
 {
@@ -8341,15 +8329,6 @@ void Plater::send_gcode()
 
     PrintHostSendDialog dlg(default_output_file, upload_job.printhost->get_post_upload_actions(), groups, storage_paths, storage_names);
     if (dlg.ShowModal() == wxID_OK) {
-
-        if (printer_technology() == ptFFF) {
-            const wxString error_str = check_gcode_exporter_extension(exporter_selection, dlg.filename().string());
-            if (! error_str.IsEmpty()) {
-                ErrorDialog(this, error_str, std::function<void(const std::string&)>([](const std::string& key) -> void { wxGetApp().sidebar().jump_to_option(key); })).ShowModal();
-                return;
-            }
-        }
-
         upload_job.upload_data.upload_path = dlg.filename();
         if (printer_technology() == ptFFF && upload_job.upload_data.upload_path.extension().empty())
             upload_job.upload_data.upload_path += exporter_selection.extension;

@@ -167,10 +167,6 @@ static bool config_option_def_compatible(const ConfigOptionDef &existing, const 
 // Copy validated raw metadata and deserialize its default into a native definition.
 static void populate_config_option_def_from_raw(ConfigOptionDef &out, const raw_config_option_def *def, const std::string &translation_domain);
 
-// Reject an incompatible complete destination name with a user-facing suffix diagnostic.
-static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
-                                       const std::string &destination);
-
 namespace {
 
 struct GCodeExportQueryCapture
@@ -3599,32 +3595,12 @@ std::string Orchestrator::export_gcode(Print &print,
     return path;
 }
 
-// Build the selected format and delegate the borrowed complete name to the shared suffix matcher, adding only the built-in text aliases; return acceptance without I/O or state changes, propagating allocation failures.
-bool Orchestrator::GCodeExporterSelection::accepts_extension(const std::string &destination) const
-{
-    slic3r_api::GCodeFileFormat format;
-    format.extension = extension;
-    if (plugin_id == k_default_gcode_exporter_id && extension == slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_extension)
-        format.aliases.assign(slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.begin(),
-                              slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.end());
-    return slic3r_api::gcode_destination_matches_format(destination, format);
-}
-
 // Build the path from the system temporary directory so that the exporter extension is the
 // real suffix even when the prefix contains dots. Only the name is reserved by randomness; no file is created.
 std::string Orchestrator::GCodeExporterSelection::temporary_path(const std::string &prefix) const
 {
     return (boost::filesystem::temp_directory_path() /
             boost::filesystem::unique_path(prefix + "%%%%-%%%%-%%%%-%%%%" + extension)).string();
-}
-
-// Check the borrowed complete destination name and throw a suffix diagnostic on refusal; no files or selection state are changed and allocation errors propagate.
-static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
-                                       const std::string &destination)
-{
-    if (!selection.accepts_extension(destination))
-        throw RuntimeError("The G-code exporter '" + selection.plugin_id +
-                            "' does not support the destination extension '" + boost::filesystem::path(destination).extension().string() + "'.");
 }
 
 // Resolve the exporter, strictly, then run QUERY, which executes on the calling thread with the borrowed Print in the
@@ -3835,7 +3811,6 @@ std::string Orchestrator::export_gcode_cli(Print &print,
     const std::string requested_path = print.output_filepath(
         requested_output_path, std::string(), selection.extension);
     const boost::filesystem::path requested_file(requested_path);
-    require_exporter_extension(selection, requested_file.string());
     const boost::filesystem::path reference_directory = requested_file.parent_path().empty() ?
         boost::filesystem::current_path() : requested_file.parent_path();
     const boost::filesystem::path reference = reference_directory /
