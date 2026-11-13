@@ -282,7 +282,7 @@ void CalibrationRetractionDialog::create_geometry(wxCommandEvent& event_args) {
     if (nb_items > 1) {
         DynamicPrintConfig new_print_config = *print_config; //make a copy
         new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
-        new_print_config.set_key_value("parallel_objects_step", new ConfigOptionFloat(0.));
+        new_print_config.set_key_value("complete_objects_step", new ConfigOptionFloat(0.));
         //if skirt, use only one
         if (print_config->option<ConfigOptionInt>("skirts")->get_int() > 0 && print_config->option<ConfigOptionInt>("skirt_height")->get_int() > 0) {
             new_print_config.set_key_value("complete_objects_one_skirt", new ConfigOptionBool(true));

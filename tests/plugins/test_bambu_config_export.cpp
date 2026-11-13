@@ -212,7 +212,7 @@ TEST_CASE("Bambu sequence names round trip the plan builder selector", "[plugins
             ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
             REQUIRE(convert_settings_from_bambu({{"print_sequence", object_mode ? "by object" : "by layer"}}, config, substitutions, false));
             CHECK(config.opt_serialize("print_plan_builder") == (object_mode ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"));
-            config.set_deserialize_strict("parallel_objects_step", step);
+            config.set_deserialize_strict("complete_objects_step", step);
             CHECK(values_of(translate_config_to_bambu(config), "print_sequence") == strings({object_mode ? "by object" : "by layer"}));
         }
     }

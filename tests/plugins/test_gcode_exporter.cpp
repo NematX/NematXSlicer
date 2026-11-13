@@ -5377,7 +5377,7 @@ TEST_CASE("Bambu plate JSON follows generated brim ownership", "[plugins][bambu3
         config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"seam_visibility", "0"},
             {"brim_width", patch || raft || mode == "interior" ? "0" : "3"}, {"brim_width_interior", mode == "interior" ? "1" : "0"},
             {"brim_per_object", global ? "0" : "1"}, {"brim_ears", mode == "ears" ? "1" : "0"},
-            {"print_plan_builder", sequential || mode.find("parallel") != std::string::npos ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}, {"parallel_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
+            {"print_plan_builder", sequential || mode.find("parallel") != std::string::npos ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}, {"complete_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
             {"skirts", "1"}, {"skirt_distance", "30"}, {"complete_objects_one_skirt", "1"}, {"brim_skirt_trim", "0"},
             {"raft_layers", raft ? "2" : "0"}, {"support_material", raft ? "1" : "0"},
             {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});

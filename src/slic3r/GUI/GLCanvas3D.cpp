@@ -8704,7 +8704,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
 namespace {
 bool sequential_clearance_enabled(const PrintConfig &config)
 {
-    return print_by_object(config) && !(config.parallel_objects_step > 0 && config.parallel_islands);
+    return print_by_object(config) && !(config.complete_objects_step > 0 && config.complete_islands);
 }
 }
 

@@ -465,7 +465,7 @@ wxBoxSizer* Preview::create_layers_slider_sizer()
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->fff_prints.get_edited_preset().config;
     m_layers_slider->SetDrawMode(wxGetApp().get_current_printer_technology() == ptSLA,
                                  print_by_object(config) &&
-                                     !(config.opt_float("parallel_objects_step") > 0 && config.opt_bool("parallel_islands")));
+                                     !(config.opt_float("complete_objects_step") > 0 && config.opt_bool("complete_islands")));
     m_layers_slider->enable_action_icon(wxGetApp().is_editor());
 
     sizer->Add(m_layers_slider, 0, wxEXPAND, 0);

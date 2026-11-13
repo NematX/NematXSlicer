@@ -1187,7 +1187,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     if (unsupported_setting)
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
-    if (print_complete_objects(m_config) /*|| m_config.parallel_objects_step > 0*/) {
+    if (print_complete_objects(m_config) /*|| m_config.complete_objects_step > 0*/) {
     	if (! sequential_print_horizontal_clearance_valid(*this, const_cast<Polygons*>(&m_sequential_print_clearance_contours)))
             return { PrintBase::PrintValidationError::pveWrongPosition, _u8L("Some objects are too close; your extruder will collide with them.") };
         if (print_complete_objects(m_config) && ! sequential_print_vertical_clearance_valid(*this))
@@ -1677,12 +1677,12 @@ void Print::process() {
     if (this->should_execute_step(STEP_WIPETOWER)) {
         m_tool_orderings.clear();
         bool is_separate_objects = print_by_object(config());
-        if (config().parallel_objects_step.value > 0 && config().parallel_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
+        if (config().complete_objects_step.value > 0 && config().complete_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
             is_separate_objects = false;
         }
         if (is_separate_objects) {
             //throw new std::exception();
-            // FIXME: parallel_objects_step: end extruder on each pass isn't computed correctly.
+            // FIXME: complete_objects_step: end extruder on each pass isn't computed correctly.
             // TODO: add extruder-switch minimizing option.
             // Order object instances for sequential print.
             std::vector<const PrintInstance *> instances_ordering;

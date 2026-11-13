@@ -444,13 +444,13 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
 
     // ----- sequential printing, wipe tower, MMU -------------------------
     const GuiCondition by_object = string_equals("print_plan_builder", "ordering.plan_builder.by_object");
-    const GuiCondition whole_objects = all_of({ by_object, float_equals("parallel_objects_step", 0.) });
-    add_rule({ "complete_objects_sort", "parallel_objects_step" }, by_object);
+    const GuiCondition whole_objects = all_of({ by_object, float_equals("complete_objects_step", 0.) });
+    add_rule({ "complete_objects_sort", "complete_objects_step" }, by_object);
     const GuiCondition parallel_possible = all_of({
         by_object,
-        non_zero("parallel_objects_step")
+        non_zero("complete_objects_step")
     });
-    add_rule({ "parallel_objects_step_max_z", "parallel_islands" }, parallel_possible);
+    add_rule({ "complete_objects_step_max_z", "complete_islands" }, parallel_possible);
     add_rule({ "standby_temperature_delta" }, true_("ooze_prevention"));
 
     const GuiCondition tower_possible = false_("spiral_vase");
@@ -462,7 +462,7 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     add_rule({ "wipe_tower_extruder_toolchange" }, all_of({ wipe_ready, non_zero("wipe_tower_extruder") }));
     // A global tower is positioned for By layer or a nonzero object height step, not whole-object printing.
     add_rule({ "wipe_tower_x", "wipe_tower_y" }, all_of({ tower_possible, true_("wipe_tower"),
-        any_of({ string_equals("print_plan_builder", "ordering.plan_builder.by_layer"), non_zero("parallel_objects_step") }) }));
+        any_of({ string_equals("print_plan_builder", "ordering.plan_builder.by_layer"), non_zero("complete_objects_step") }) }));
     add_rule({ "wipe_tower_width", "wipe_tower_rotation_angle",
                "wipe_tower_brim_width", "wipe_tower_cone_angle", "wipe_tower_extra_spacing",
                "wipe_tower_bridging", "wipe_tower_brim", "wipe_tower_no_sparse_layers",

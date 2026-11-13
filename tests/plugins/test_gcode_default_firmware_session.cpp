@@ -2108,7 +2108,7 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     config.set_deserialize_strict({{"first_layer_height", "0.2"},
                                    {"support_material", "0"},
                                    {"print_plan_builder", "ordering.plan_builder.by_layer"},
-                                   {"parallel_objects_step", "0"},
+                                   {"complete_objects_step", "0"},
                                    {"seam_visibility", "0"}});
     Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
                      print, model, config);

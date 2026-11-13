@@ -934,7 +934,7 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     Model model;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     const bool parallel = GENERATE(false, true);
-    config.set_deserialize_strict("parallel_objects_step", parallel ? "5" : "0");
+    config.set_deserialize_strict("complete_objects_step", parallel ? "5" : "0");
     config.set_deserialize_strict("print_plan_builder", parallel ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
     config.set_num_extruders(2);
     config.set_deserialize_strict("step_perimeter_plugin", "perimeter.generator.classic");
@@ -1021,7 +1021,7 @@ TEST_CASE("Parallel groups share one global tower with fused and stacked Z offse
     WipeActivation active;
     Print print;
     build_plan(print);
-    const_cast<PrintConfig &>(print.config()).parallel_objects_step.value = 5.;
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("complete_objects_step", "5");
     const_cast<PrintConfig &>(print.config()).set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     slic3r_api::PrintingPlan view = Test::GCode::printing_plan_view(print);
     view.clear();

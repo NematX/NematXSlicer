@@ -323,7 +323,7 @@ double min_object_distance(const ConfigBase &cfg)
 
 bool print_complete_objects(const ConfigBase &config)
 {
-    const ConfigOption *step = config.option("parallel_objects_step");
+    const ConfigOption *step = config.option("complete_objects_step");
     return print_by_object(config) && (step == nullptr || step->get_float() == 0.);
 }
 
@@ -1017,9 +1017,9 @@ void init_categories(PrintConfigDef &definition)
         "notes", 
         "print_custom_setting",
         "print_custom_variables",
-        "parallel_islands",
-        "parallel_objects_step",
-        "parallel_objects_step_max_z",
+        "complete_islands",
+        "complete_objects_step",
+        "complete_objects_step_max_z",
         "complete_objects_sort",
         "extruder_clearance_radius", 
         "extruder_clearance_height", "gcode_comments", "gcode_label_objects", "output_filename_format", "post_process", "perimeter_extruder",
@@ -6197,36 +6197,38 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = definition.add("parallel_objects_step", coFloat, ptFFF);
-    def->label = L("Parallel printing step");
+    def = definition.add("complete_objects_step", coFloat, ptFFF);
+    def->aliases = { "parallel_objects_step" };
+    def->label = L("Object step height");
     def->category = OptionCategory::output;
     def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("When multiple objects are present, instead of jumping from one to another at each layer"
         " the printer will continue to print the current object layers up to this height before moving to the next object."
         " (first layers will be still printed one by one)."
-        "\nThis feature uses the extruder clearance radius from the printer settings."
-        ", but you can modify them to instead reflect the clerance of the nozzle, if this field reflect the z-clearance of it."
+        "\nThe step is capped by 'extruder_clearance_height'. The 'extruder_clearance' graph describes the nozzle clearance."
+        " If the step exceeds the graph height, islands cannot be separated."
         "\nIn By object mode, set to 0 to complete each object before moving to the next.");
     def->sidetext = L("mm");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloat(0));
 
-    def = definition.add("parallel_objects_step_max_z", coFloat, ptFFF);
-    def->label = L("Max height for parallel printing step");
+    def = definition.add("complete_objects_step_max_z", coFloat, ptFFF);
+    def->aliases = { "parallel_objects_step_max_z" };
+    def->label = L("Object step max height");
     def->category = OptionCategory::output;
     def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("If the nozzle print higher than taht, the print is switched back to normal printing. Allow to quicly print the first layer per object if these need quick printing.");
+    def->tooltip = L("Above this height, printing switches back to layer-by-layer printing. Set to 0 for no height limit.");
     def->sidetext = L("mm");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloat(0));
 
-    def = definition.add("parallel_islands", coBool, ptFFF);
-    def->label = L("Island Parallel printing step");
+    def = definition.add("complete_islands", coBool, ptFFF);
+    def->aliases = { "parallel_islands" };
+    def->label = L("Print islands separately");
     def->category = OptionCategory::output;
     def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("When using 'parallel_objects_step', consider each object island as a separate object, if far enough."
+    def->tooltip = L("When using 'complete_objects_step', consider each object island as a separate object, if far enough."
                     "\nTwo islands are considered separate if they are farther than the extruder clearance.");
-    def->sidetext = L("mm");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 

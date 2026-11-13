@@ -101,7 +101,7 @@ TEST_CASE("Arrange defaults follow the GUI distance rules", "[placement]")
     CHECK(maximum_arrange_distance_mm() > 100.);
     DynamicPrintConfig config = default_placement_config();
     config.set_deserialize_strict({{"duplicate_distance", "6"}, {"print_plan_builder", "ordering.plan_builder.by_layer"},
-        {"parallel_objects_step", "0"}});
+        {"complete_objects_step", "0"}});
     CHECK(default_arrange_distance(config) == Approx(6.));
     CHECK(minimum_arrange_distance(config) == Approx(0.));
 
@@ -151,7 +151,7 @@ TEST_CASE("Arrange keeps the requested object distance and insets brims from the
     DynamicPrintConfig config = default_placement_config();
     config.set_deserialize_strict({{"bed_shape", "0x0,210x0,210x210,0x210"},
         {"duplicate_distance", "0"}, {"skirts", "0"}, {"brim_width", "5"},
-        {"print_plan_builder", "ordering.plan_builder.by_layer"}, {"parallel_objects_step", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_layer"}, {"complete_objects_step", "0"},
         {"skirt_distance_from_brim", "0"}});
     Model scene;
     ModelObject *first_object = scene.add_object("first", "first.stl", make_cube(90., 90., 10.));

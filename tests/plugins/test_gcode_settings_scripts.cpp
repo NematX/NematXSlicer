@@ -98,7 +98,7 @@ void prepare_mixed_height_print(Print &print,
         {"first_layer_height", "0.2"},
         {"support_material", "0"},
         {"print_plan_builder", "ordering.plan_builder.by_layer"},
-        {"parallel_objects_step", "0"},
+        {"complete_objects_step", "0"},
         {"seam_visibility", "0"}
     });
     initialize_mixed_height_cube_print(print, model, config, first_tool, second_tool);

@@ -94,7 +94,7 @@ const raw_used_config_key k_used_config_keys[] = {
     { "min_skirt_length", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "draft_shield", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "print_plan_builder", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { "complete_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "complete_objects_one_skirt", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "resolution_internal", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "first_layer_height", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
@@ -947,7 +947,7 @@ void generate_default_skirt(const plugin_run_context *run_ctx, orchestrator_hand
     storage_handle *storage = run_ctx->plugin_storage;
     // The API exposes the stored selection; with one active builder it can differ from the effective selection.
     if (print_config.get("print_plan_builder").serialize() == "ordering.plan_builder.by_object" &&
-        print_config.get("parallel_objects_step").get_float() == 0. &&
+        print_config.get("complete_objects_step").get_float() == 0. &&
         !print_config.get("complete_objects_one_skirt").get_bool()) {
         std::vector<std::vector<SkirtOutput>> outputs(print.object_count());
         for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {

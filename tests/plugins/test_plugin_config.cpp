@@ -2697,14 +2697,14 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
     Orchestrator &host = Orchestrator::instance();
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-        {"parallel_objects_step", "0"}, {"complete_objects_sort", "object"},
+        {"complete_objects_step", "0"}, {"complete_objects_sort", "object"},
         {"skirts", "0"}, {"skirt_height", "1"}, {"brim_width", "0"}, {"brim_per_object", "1"},
         {"complete_objects_one_skirt", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"},
         {"fill_density", "0%"}, {"support_material", "0"}, {"support_material_enforce_layers", "0"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
     const std::vector<E2E::Domain> domains = {
         E2E::enum_domain("complete_objects_sort"),
-        {{"parallel_objects_step"}, {{"height-step", {{"parallel_objects_step", "1"}}}}}
+        {{"complete_objects_step"}, {{"height-step", {{"complete_objects_step", "1"}}}}}
     };
     TriangleMesh mesh = E2E::stl_fixture(false);
     mesh.scale(0.25);
@@ -2758,7 +2758,7 @@ TEST_CASE("Plan builders preserve auxiliary sources and owners in distinct scene
         CAPTURE(scene);
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-            {"parallel_objects_step", "0"}, {"complete_objects_sort", "object"}, {"skirts", "0"},
+            {"complete_objects_step", "0"}, {"complete_objects_sort", "object"}, {"skirts", "0"},
             {"brim_width", "0"}, {"brim_width_interior", "0"}, {"support_material", "0"},
             {"support_material_enforce_layers", "0"}, {"wipe_tower", "0"}, {"layer_height", "0.3"},
             {"first_layer_height", "0.3"}, {"brim_skirt_trim", "0"}, {"draft_shield", "disabled"},
@@ -2775,7 +2775,7 @@ TEST_CASE("Plan builders preserve auxiliary sources and owners in distinct scene
             mesh = Test::SupportGrid::slab(true);
             config = Test::SupportGrid::config("grid", false, 3, true);
             config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-                {"parallel_objects_step", "0"}, {"filament_diameter", "1.75,1.75"},
+                {"complete_objects_step", "0"}, {"filament_diameter", "1.75,1.75"},
                 {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
         }
         if (scene == "wipe-tower") {
@@ -2866,7 +2866,7 @@ TEST_CASE("Object sort settings produce distinct explicit instance orders", "[pl
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-        {"parallel_objects_step", "0"}, {"complete_objects_sort", "object"}, {"skirts", "0"},
+        {"complete_objects_step", "0"}, {"complete_objects_sort", "object"}, {"skirts", "0"},
         {"brim_width", "0"}, {"support_material", "0"}, {"wipe_tower", "0"}, {"layer_height", "0.3"}});
     Model model;
     Print print;
@@ -2906,7 +2906,7 @@ TEST_CASE("Changing the print sequence replays adhesion support and plan constru
     Orchestrator &host = Orchestrator::instance();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_layer"},
-        {"parallel_objects_step", "0"}, {"skirts", "1"}, {"brim_width", "1"},
+        {"complete_objects_step", "0"}, {"skirts", "1"}, {"brim_width", "1"},
         {"support_material", "1"}, {"support_material_enforce_layers", "1"}, {"support_material_style", "grid"}});
     Model model;
     Print print;
@@ -2972,7 +2972,7 @@ TEST_CASE("Print sequence helpers follow the effective active builder", "[plugin
             config.set_deserialize_strict("print_plan_builder", stored_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
             const bool expected_object = active == 2 || (active == 3 && stored_object);
             for (const double step : {0., 5.}) {
-                config.set_key_value("parallel_objects_step", new ConfigOptionFloat(step));
+                config.set_key_value("complete_objects_step", new ConfigOptionFloat(step));
                 CAPTURE(active, stored_object, step);
                 CHECK(print_by_object(config) == expected_object);
                 CHECK(print_complete_objects(config) == (expected_object && step == 0.));
@@ -3040,7 +3040,7 @@ TEST_CASE("Legacy print sequence uses the obsolete switch as its conversion mark
             CHECK_FALSE(config.has("complete_objects"));
             const ConfigOption *builder = config.option("print_plan_builder");
             CHECK((builder == nullptr ? "ordering.plan_builder.by_layer" : builder->serialize()) == std::string(row.builder));
-            const ConfigOption *step = config.option("parallel_objects_step");
+            const ConfigOption *step = config.option("complete_objects_step");
             CHECK((step == nullptr ? 0. : step->get_float()) == row.step);
         }
     }
@@ -3053,6 +3053,57 @@ TEST_CASE("Legacy print sequence uses the obsolete switch as its conversion mark
     value = "0";
     PrintConfigDef::handle_legacy_pair(key, value);
     CHECK(key.empty());
+}
+
+// Load the old object-step names through profile and project readers, then verify
+// that both writers retain their values using only the current names.
+TEST_CASE("Object step aliases load and save with current names", "[plugins][config][legacy][object-step-aliases]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Model model;
+    Print print;
+    Test::init_print({make_cube(5., 5., 1.)}, print, model);
+    const std::string legacy = "parallel_objects_step = 2.5\nparallel_objects_step_max_z = 8\nparallel_islands = 1\n";
+    for (const bool project : {false, true}) {
+        CAPTURE(project);
+        DynamicPrintConfig config;
+        if (!project) {
+            config.load_from_ini_string(legacy, ForwardCompatibilitySubstitutionRule::Disable);
+        } else {
+            const boost::filesystem::path archive = directory.path() / "old-object-step.3mf";
+            const std::string text = "; generated by SuperSlicer 2.7.0\n\n; print_version = SUSI_2.7.0\n"
+                "; parallel_objects_step = 2.5\n; parallel_objects_step_max_z = 8\n; parallel_islands = 1\n";
+            REQUIRE(store_3mf(archive.string().c_str(), &model, nullptr, OptionStore3mf{}.set_export_config(false)));
+            REQUIRE(mz_zip_add_mem_to_archive_file_in_place(archive.string().c_str(), "Metadata/Slic3r.config",
+                text.data(), text.size(), nullptr, 0, MZ_DEFAULT_COMPRESSION));
+            ConfigSubstitutionContext substitutions(ForwardCompatibilitySubstitutionRule::Disable);
+            Model loaded;
+            REQUIRE(load_3mf(archive.string().c_str(), config, substitutions, &loaded, false, false));
+        }
+        REQUIRE(config.option("complete_objects_step") != nullptr);
+        REQUIRE(config.option("complete_objects_step_max_z") != nullptr);
+        REQUIRE(config.option("complete_islands") != nullptr);
+        CHECK(config.opt_float("complete_objects_step") == 2.5);
+        CHECK(config.opt_float("complete_objects_step_max_z") == 8.);
+        CHECK(config.opt_bool("complete_islands"));
+        for (const char *key : {"parallel_objects_step", "parallel_objects_step_max_z", "parallel_islands"})
+            CHECK_FALSE(config.has(key));
+        const boost::filesystem::path profile = directory.path() / "object-step.ini";
+        config.save(profile.string(), ConfigWriteTarget::Local);
+        const boost::filesystem::path saved = directory.path() / "object-step.3mf";
+        REQUIRE(store_3mf(saved.string().c_str(), &model, &config));
+        const std::string outputs[] = {Test::GCode::read_text_file(profile),
+            read_archive_entry(saved, "Metadata/SuperSlicer.config")};
+        for (const std::string &text : outputs) {
+            CHECK(text.find("complete_objects_step = 2.5") != std::string::npos);
+            CHECK(text.find("complete_objects_step_max_z = 8") != std::string::npos);
+            CHECK(text.find("complete_islands = 1") != std::string::npos);
+            CHECK(text.find("parallel_objects_step") == std::string::npos);
+            CHECK(text.find("parallel_islands") == std::string::npos);
+        }
+    }
 }
 
 // Import a plate selection absent from the startup enum, requiring the reader's

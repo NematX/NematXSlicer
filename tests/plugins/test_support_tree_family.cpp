@@ -4348,7 +4348,7 @@ TEST_CASE("Close Z sequential print passes per object", "[plugins][support-tree-
 
 TEST_CASE("Close Z parallel objects step passes per object", "[plugins][support-tree-family][support-close-z][support-close-z-parallel]")
 {
-    close_z_object_by_object("parallel_objects_step", "5", "parallel");
+    close_z_object_by_object("complete_objects_step", "5", "parallel");
 }
 
 // The internal setter moves a layer and its slice z and keeps its id.

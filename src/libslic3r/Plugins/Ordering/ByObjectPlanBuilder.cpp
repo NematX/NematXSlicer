@@ -135,7 +135,7 @@ private:
     {
         if (keys != nullptr) {
             keys[0] = raw_used_config_key{"complete_objects_sort", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
-            keys[1] = raw_used_config_key{"parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
+            keys[1] = raw_used_config_key{"complete_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
         }
         return 2;
     }

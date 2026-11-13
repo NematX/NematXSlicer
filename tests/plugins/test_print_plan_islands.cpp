@@ -34,9 +34,9 @@ match every plan layer in order before island scheduling is checked.
 */
 namespace {
 using namespace Slic3r;
-constexpr const char *step_key = "parallel_objects_step";
-constexpr const char *limit_key = "parallel_objects_step_max_z";
-constexpr const char *islands_key = "parallel_islands";
+constexpr const char *step_key = "complete_objects_step";
+constexpr const char *limit_key = "complete_objects_step_max_z";
+constexpr const char *islands_key = "complete_islands";
 constexpr const char *whole_objects_key = "print_plan_builder";
 enum class Expect { Alternate, Invariants, LayerByLayer };
 
