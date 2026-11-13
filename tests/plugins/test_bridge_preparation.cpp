@@ -1438,6 +1438,38 @@ TEST_CASE("An external bridge without a detectable direction follows the fill di
     CHECK_FALSE(bool(bridge.get_property<slic3r_api::BridgeSurfaceInfo>()->angle_from_user));
 }
 
+// A second region covering the first one gives the bridge two physical owners, which
+// preparation refuses: the island keeps its unprepared bridge surface and one warning is reported.
+TEST_CASE("A bridge island that cannot be prepared keeps its surfaces and warns","[plugins][bridge-preparation]")
+{
+    Fixture fixture;
+    Layer &layer=fixture.prepared.print.object(0).layer(1);
+    ApiInternal::LayerAccess::add_region(layer,fixture.prepared.print.register_print_region(layer.region(0).region().config()));
+    ApiInternal::LayerRegionAccess::slices_mutable(layer.region(1))=layer.region(0).get_raw_slices();
+    LayerSliceIsland &island=fixture.island();
+    island.fill_regions(layer);
+    REQUIRE(island.regions().size()==2);
+    // Move the seeded surfaces to a region island owned by both regions.
+    LayerRegionIsland &seeded=island.regions_islands().front();
+    const SurfaceCollection surfaces=seeded.fill_surfaces();
+    seeded.set_fill_surfaces().clear();
+    island.get_or_add_region_island(island.regions(),0).set_fill_surfaces()=surfaces;
+    Orchestrator &orch=Orchestrator::instance();
+    (void)orch.consume_plugin_messages();
+    REQUIRE_NOTHROW(fixture.prepare());
+    size_t warnings=0;
+    for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages())
+        if (message.message.find("bridge preparation skipped 1 island")!=std::string::npos) ++warnings;
+    CHECK(warnings==1);
+    bool bridge=false;
+    for (const LayerRegionIsland &region : island.regions_islands())
+        for (const Surface &surface : region.fill_surfaces()) {
+            CHECK(surface.get_property<slic3r_api::BridgeSurfaceInfo>()==nullptr);
+            bridge=bridge || surface.surface_type==(stPosBottom|stDensSolid|stModBridge);
+        }
+    CHECK(bridge);
+}
+
 TEST_CASE("Three connected bridge seeds are consumed once with stable grouping","[plugins][bridge-preparation]")
 {
     uint64_t key=0;

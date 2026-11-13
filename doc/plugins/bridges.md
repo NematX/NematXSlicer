@@ -110,7 +110,9 @@ anchor does not satisfy that rule. An incompatible recipe stops processing befor
 export. Finalization never stops slicing on a path: a refused row keeps its whole
 infill group at nominal flow, a refused prepared surface or object keeps its own
 infill, and one warning per object counts them. Broken internal invariants of the
-finalizer also assert in debug builds.
+finalizer also assert in debug builds. Preparation does not stop slicing either: an
+island whose preparation fails keeps its unprepared surfaces, and one warning per
+object counts these islands.
 
 ### Default: excess volume from surfaces
 

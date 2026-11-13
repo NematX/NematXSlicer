@@ -53,6 +53,7 @@
 #include "BridgePreparation.hpp"
 #include "BridgeGeometry.hpp"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -114,8 +115,16 @@ struct Candidate {
     StoredExPolygonCollection core;
 };
 struct InternalCandidate { size_t piece; StoredExPolygonCollection core; };
+// Stop debug builds on a broken invariant of this plugin, then refuse the island
+// like any other failed check so that it keeps its input surfaces.
+[[noreturn]] void internal_error(const char *message)
+{
+    assert(false && "Broken bridge preparation invariant");
+    throw std::runtime_error(message);
+}
 // Choose directions and extend bridge areas in one island without changing its
-// input surfaces. Throw if region ownership or the resulting area partition is invalid.
+// input surfaces. Throw if region ownership or the resulting area partition is invalid;
+// the caller then drops the island's private outputs, so it keeps its input surfaces.
 void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation &ctx, storage_handle *storage,
     const LayerIsland &island, uint32_t layer_idx, uint32_t island_idx,
     std::vector<Destination> &outputs, const plugin_run_context *run_ctx);
@@ -185,8 +194,8 @@ private:
     // Register the uniform margin beside the existing infill anchor controls.
     void inilialize_impl(storage_handle *) const override;
     // Build and validate private object outputs, then replace their surface collections.
-    // Missing capabilities, geometry errors and the final cancellation check precede
-    // replacement. Each host call publishes one collection; there is no object-wide rollback.
+    // An island that fails keeps its input surfaces, and one warning per object counts
+    // them; only cancellation stops the run. Each host call publishes one collection.
     void run_impl(const plugin_run_context *run_ctx) const override;
 };
 
@@ -236,24 +245,35 @@ void Preparation::inilialize_impl(storage_handle *) const
 void Preparation::run_impl(const plugin_run_context *run_ctx) const
 {
     const run_ctx_surface_generation *ctx=plugin_ctx_as_surface_generation(run_ctx);
-    if (ctx==nullptr || ctx->object==nullptr || ctx->append_surface_like==nullptr || ctx->set_region_island_fill_surfaces==nullptr)
-        throw std::runtime_error("Bridge preparation requires the surface publication capabilities.");
+    if (ctx==nullptr || ctx->object==nullptr || ctx->append_surface_like==nullptr || ctx->set_region_island_fill_surfaces==nullptr) {
+        assert(false && "Bridge preparation requires the surface publication capabilities.");
+        report_warning(run_ctx,"Bridge preparation skipped: the host provides no surface publication capabilities.");
+        return;
+    }
     const Object object(ctx->object);
     std::vector<Destination> outputs;
+    size_t refused=0;
+    std::string first_cause;
     for (uint32_t layer_idx=1; layer_idx<object.layer_count(); ++layer_idx) {
         const Layer layer=object.layer(layer_idx);
         for (uint32_t island_idx=0; island_idx<layer.island_count(); ++island_idx) {
             throw_if_cancelled(run_ctx);
+            const size_t first_output=outputs.size();
             try {
                 prepare_island(m_orchestrator,*ctx,run_ctx->plugin_storage,layer.island(island_idx),layer_idx,island_idx,outputs,run_ctx);
             } catch (const PluginCancelled &) {
                 throw;
             } catch (const std::exception &error) {
-                throw std::runtime_error("Object '"+object.name()+"', layer "+std::to_string(layer_idx)+
-                    ", island "+std::to_string(island_idx)+": "+error.what());
+                // Drop the island's private outputs: its input surfaces stay published unchanged.
+                while (outputs.size()>first_output) outputs.pop_back();
+                if (refused++==0)
+                    first_cause="layer "+std::to_string(layer_idx)+", island "+std::to_string(island_idx)+": "+error.what();
             }
         }
     }
+    if (refused>0)
+        report_warning(run_ctx,("Object '"+object.name()+"': bridge preparation skipped "+std::to_string(refused)+
+            " island(s), whose bridges keep their unprepared surfaces. First cause: "+first_cause).c_str());
     // Allocation of group descriptors precedes publication of any collection.
     for (Destination &out : outputs)
         if (out.target==nullptr)
@@ -563,7 +583,7 @@ double direction(orchestrator_handle *orch, const Config &print_config, const La
                     "the bridge follows the fill direction of its layer.").c_str());
         } else throw std::runtime_error("No bridge direction could be detected; specify bridge_angle or disable bridge preparation.");
     }
-    if (!std::isfinite(angle) || angle<0.) throw std::runtime_error("Invalid canonical bridge direction.");
+    if (!std::isfinite(angle) || angle<0.) internal_error("Invalid canonical bridge direction.");
     return std::fmod(angle,PI);
 }
 
@@ -574,8 +594,8 @@ void append_prepared(const run_ctx_surface_generation &ctx, Destination &destina
     ctx.append_surface_like(destination.output.mutable_handle(),source.source.handle(),areas.handle());
     for (uint32_t idx=start; idx<destination.output.size(); ++idx) {
         if (info.core_rule==2 && !destination.output.set_type(idx,source.source.type()|RAW_SURFACE_TYPE_MOD_BRIDGE))
-            throw std::runtime_error("The internal bridge classification could not be stored.");
-        if (!destination.output.set_bridge_angle(idx,angle)) throw std::runtime_error("The prepared bridge angle could not be stored.");
+            internal_error("The internal bridge classification could not be stored.");
+        if (!destination.output.set_bridge_angle(idx,angle)) internal_error("The prepared bridge angle could not be stored.");
         destination.output.mutable_at(idx).get_or_add(BridgeSurfaceInfo::key)=info;
     }
 }
