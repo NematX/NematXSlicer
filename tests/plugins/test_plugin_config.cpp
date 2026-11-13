@@ -2563,7 +2563,8 @@ namespace {
 // Run one initial builder against borrowed sources, compare ordinary groups with
 // the native builder and independently enumerate auxiliary owners, sources and
 // placements. Positive steps rebucket native layers by integer Z division before
-// comparison. The Print owns inspected data; assertion and plugin failures propagate.
+// comparison, merging layers at or above a positive limit into a final group.
+// The Print owns inspected data; assertion and plugin failures propagate.
 void check_sequence_builder(Slic3r::Print &print, bool object_mode);
 
 void check_sequence_builder(Slic3r::Print &print, bool object_mode)
@@ -2574,6 +2575,8 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
     const double step = print.full_print_config().opt_float("complete_objects_step");
     const coord_t interval = object_mode && step > 0. ? scale_to_layer_coord(std::min(
         step, print.config().extruder_clearance_height.value)) : 0;
+    const coord_t limit = interval > 0 ? scale_to_layer_coord(print.full_print_config().opt_float("complete_objects_step_max_z")) : 0;
+    const int64_t final_slice = std::numeric_limits<int64_t>::max();
     std::map<std::pair<int64_t, uint32_t>, size_t> slice_groups;
     if (interval > 0) {
         // Calculate expected group addresses directly from Z, independently of the builder loop.
@@ -2584,21 +2587,52 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
             const Printing::PrintingObjectInstance &instance = ordinary.object_instances[id];
             const coord_t first_z = instance.object->layer(0).scaled_print_z();
             for (Printing::PrintingLayerGroup &layer : group.layers) {
-                const int64_t slice = layer.print_z == first_z ? -1 : layer.print_z / interval;
-                Printing::PrintingGroup &target = slices[{slice, id}];
-                target.printing_catalog_ids = {id};
-                target.layers.push_back(std::move(layer));
+                const int64_t slice = layer.print_z == first_z ? -1 : limit > 0 && layer.print_z >= limit ? final_slice : layer.print_z / interval;
+                Printing::PrintingGroup &target = slices[{slice, slice == final_slice ? 0 : id}];
+                if (slice != final_slice) {
+                    target.printing_catalog_ids = {id};
+                    target.layers.push_back(std::move(layer));
+                } else {
+                    auto found = std::find_if(target.layers.begin(), target.layers.end(), [&layer](const Printing::PrintingLayerGroup &item) { return item.print_z == layer.print_z; });
+                    if (found == target.layers.end())
+                        target.layers.push_back(std::move(layer));
+                    else {
+                        for (const Layer *source : layer.layers)
+                            if (std::find(found->layers.begin(), found->layers.end(), source) == found->layers.end())
+                                found->layers.push_back(source);
+                        for (Printing::PrintingToolGroup &tool : layer.tool_groups) {
+                            auto bucket = std::find_if(found->tool_groups.begin(), found->tool_groups.end(), [&tool](const Printing::PrintingToolGroup &item) { return item.extruder_id == tool.extruder_id; });
+                            if (bucket == found->tool_groups.end())
+                                found->tool_groups.push_back(std::move(tool));
+                            else
+                                for (Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                                    bucket->extrusions.push_back(std::move(extrusion));
+                        }
+                    }
+                }
             }
             for (const Layer &layer : instance.object->auxiliary_layers()) {
                 const LayerInstanceProperty *owner = layer.get_property<LayerInstanceProperty>();
                 if (owner != nullptr && owner->object_instance_idx != instance.object_instance_idx)
                     continue;
-                const int64_t slice = layer.scaled_print_z() <= first_z ? -1 : layer.scaled_print_z() / interval;
-                slices[{slice, id}].printing_catalog_ids = {id};
+                const int64_t slice = layer.scaled_print_z() <= first_z ? -1 : limit > 0 && layer.scaled_print_z() >= limit ? final_slice : layer.scaled_print_z() / interval;
+                if (slice == final_slice)
+                    slices[{slice, 0}];
+                else
+                    slices[{slice, id}].printing_catalog_ids = {id};
             }
         }
+        if (limit > 0 && print.auxiliary_object() != nullptr)
+            for (const Layer &layer : print.auxiliary_object()->auxiliary_layers())
+                if (layer.scaled_print_z() >= limit)
+                    slices[{final_slice, 0}];
         ordinary.groups.clear();
         for (auto &entry : slices) {
+            if (entry.first.first == final_slice) {
+                for (uint32_t id = 0; id < ordinary.object_instances.size(); ++id)
+                    entry.second.printing_catalog_ids.push_back(id);
+                std::sort(entry.second.layers.begin(), entry.second.layers.end(), [](const Printing::PrintingLayerGroup &a, const Printing::PrintingLayerGroup &b) { return a.print_z < b.print_z; });
+            }
             slice_groups[entry.first] = ordinary.groups.size();
             ordinary.groups.push_back(std::move(entry.second));
         }
@@ -2618,7 +2652,8 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
     plugin->run(run);
 
     const PrintObject *global = print.auxiliary_object();
-    const size_t leading = object_mode && global != nullptr && !global->auxiliary_layers().empty() ? 1 : 0;
+    const size_t leading = object_mode && global != nullptr && std::any_of(global->auxiliary_layers().begin(), global->auxiliary_layers().end(),
+        [limit](const Layer &layer) { return limit == 0 || layer.scaled_print_z() < limit; }) ? 1 : 0;
     REQUIRE(actual.groups.size() == ordinary.groups.size() + leading);
     REQUIRE(actual.object_instances.size() == ordinary.object_instances.size());
     for (size_t id = 0; id < ordinary.object_instances.size(); ++id) {
@@ -2661,6 +2696,8 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
                     continue;
                 uint32_t id = Printing::PRINTING_OBJECT_INSTANCE_ID_NONE;
                 size_t group = 0;
+                if (is_global && limit > 0 && layer.scaled_print_z() >= limit)
+                    group = slice_groups.at({final_slice, 0}) + leading;
                 Point shift(0, 0);
                 if (!is_global) {
                     const auto instance = std::find_if(ordinary.object_instances.begin(), ordinary.object_instances.end(),
@@ -2670,8 +2707,8 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
                     shift = object->instances()[copy].shift;
                     if (object_mode) {
                       if (interval > 0) {
-                        const int64_t slice = layer.scaled_print_z() <= object->layer(0).scaled_print_z() ? -1 : layer.scaled_print_z() / interval;
-                        group = slice_groups.at({slice, id}) + leading;
+                         const int64_t slice = layer.scaled_print_z() <= object->layer(0).scaled_print_z() ? -1 : limit > 0 && layer.scaled_print_z() >= limit ? final_slice : layer.scaled_print_z() / interval;
+                         group = slice_groups.at({slice, slice == final_slice ? 0 : id}) + leading;
                       } else {
                         const auto target = std::find_if(ordinary.groups.begin(), ordinary.groups.end(),
                             [id](const Printing::PrintingGroup &item) { return std::find(item.printing_catalog_ids.begin(), item.printing_catalog_ids.end(), id) != item.printing_catalog_ids.end(); });
@@ -2749,14 +2786,18 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
     const std::vector<E2E::Domain> domains = {
         E2E::enum_domain("complete_objects_sort"),
-        {{"complete_objects_step", "extruder_clearance_height"}, {
+        {{"complete_objects_step", "extruder_clearance_height", "complete_objects_step_max_z", "skirts", "skirt_height", "complete_objects_one_skirt"}, {
             {"height-step", {{"complete_objects_step", "1"}}},
-            {"clearance-cap", {{"complete_objects_step", "1"}, {"extruder_clearance_height", "0.6"}}}}},
-        {{"complete_objects_step_max_z"}, {{"height-limit", {{"complete_objects_step_max_z", "0.6"}}}}},
+            {"clearance-cap", {{"complete_objects_step", "1"}, {"extruder_clearance_height", "0.6"}}},
+            {"height-limit-ignored", {{"complete_objects_step_max_z", "0.6"}}},
+            {"height-limit", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}}},
+            {"height-limit-above", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "100"}}},
+            {"height-limit-local-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}}},
+            {"height-limit-global-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}, {"complete_objects_one_skirt", "1"}}}}},
         {{"complete_islands"}, {{"separate-islands", {{"complete_islands", "1"}}}}}
     };
     TriangleMesh mesh = E2E::stl_fixture(false);
-    mesh.scale(0.25);
+    mesh.scale(2.);
     Model layer_model;
     Print layer_print;
     Test::init_print({mesh}, layer_print, layer_model, baseline);
@@ -2793,6 +2834,14 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
         });
         CHECK(extruding_moves > 0);
         check_sequence_builder(print, true);
+        if (config.opt_float("complete_objects_step") > 0. && config.opt_float("complete_objects_step_max_z") == 0.6) {
+            REQUIRE(print.object(0).layer_count() > 1);
+            CHECK(print.object(0).layer(0).scaled_print_z() < scale_to_layer_coord(0.6));
+            CHECK(print.object(0).layers().back().scaled_print_z() > scale_to_layer_coord(0.6));
+            REQUIRE(print.printing_plan()->groups.back().printing_catalog_ids.size() == 2);
+            REQUIRE_FALSE(print.printing_plan()->groups.back().layers.empty());
+            CHECK(print.printing_plan()->groups.back().layers.front().print_z >= scale_to_layer_coord(0.6));
+        }
     }
 }
 
@@ -3008,6 +3057,132 @@ TEST_CASE("By object steps cover every layer through empty slices", "[plugins][p
                         ++supports;
     REQUIRE(supports > 0);
     check_sequence_builder(print, true);
+    config.set_deserialize_strict("complete_objects_step_max_z", "0.6");
+    print.apply(model, config);
+    print.process();
+    check_sequence_builder(print, true);
+}
+
+// Exercise a boundary on and between layers, below a step and above all objects.
+// Independent source enumeration checks each extrusion and auxiliary owner once.
+TEST_CASE("By object height limit merges the remainder by layer", "[plugins][printing-plan][ordering][object-step][object-step-max-z]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const double limit : {0., 0.1, 0.4, 0.45, 0.6, 0.7, 10.}) {
+        for (const double step : {0., 0.5}) {
+            CAPTURE(limit, step);
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+                {"complete_objects_step", std::to_string(step)}, {"complete_objects_step_max_z", std::to_string(limit)},
+                {"complete_objects_sort", "object"}, {"skirts", "0"}, {"brim_width", "1"},
+                {"brim_per_object", "1"}, {"wipe_tower", "0"}, {"first_layer_height", "0.2"}, {"layer_height", "0.2"}});
+            Model model;
+            Print print;
+            Test::init_print({make_cube(3., 3., 1.4), make_cube(3., 3., 0.8)}, print, model, config);
+            model.objects()[0].instances.front()->set_offset(Vec3d(40., 40., 0.));
+            model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(80., 40., 0.));
+            model.objects()[1].instances.front()->set_offset(Vec3d(120., 40., 0.));
+            print.apply(model, config);
+            print.process();
+            check_sequence_builder(print, true);
+            const Printing::PrintingPlan &plan = *print.printing_plan();
+            if (step == 0.) {
+                CHECK(plan.groups.size() == 3);
+                continue;
+            }
+            const bool final = limit > 0. && limit <= 1.4;
+            if (final) {
+                REQUIRE(plan.groups.back().printing_catalog_ids.size() == 3);
+                coord_t previous = 0;
+                for (const Printing::PrintingLayerGroup &layer : plan.groups.back().layers) {
+                    CHECK(layer.print_z >= scale_to_layer_coord(limit));
+                    CHECK(layer.print_z > previous);
+                    previous = layer.print_z;
+                }
+                for (size_t idx = 3; idx + 1 < plan.groups.size(); ++idx)
+                    for (const Printing::PrintingLayerGroup &layer : plan.groups[idx].layers)
+                        CHECK(layer.print_z < scale_to_layer_coord(limit));
+                if (limit == 0.45)
+                    CHECK(plan.groups.size() == 7);
+            } else {
+                CHECK(plan.groups.back().printing_catalog_ids.size() == 1);
+            }
+        }
+    }
+}
+
+// Mark generated support for the shifted second copy and place the limit below the global skirt.
+// Require real extrusion sources of both kinds and exactly one final-group visit
+// for every source role; the shared checker also checks all other source placements.
+TEST_CASE("Height limit retains global and owned auxiliary extrusions in the final group", "[plugins][printing-plan][ordering][object-step][object-step-max-z]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = Test::SupportGrid::config("grid", false, 3, true);
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0.5"}, {"complete_objects_step_max_z", "0.1"},
+        {"filament_diameter", "1.75,1.75"}, {"skirts", "1"}, {"skirt_height", "1"},
+        {"complete_objects_one_skirt", "1"}, {"min_skirt_length", "0"}});
+    Model model;
+    Print print;
+    Test::init_print({Test::SupportGrid::slab(true)}, print, model, config);
+    model.objects().front().instances.front()->set_offset(Vec3d(40., 40., 0.));
+    model.objects().front().add_instance(*model.objects().front().instances.front())->set_offset(Vec3d(110., 60., 0.));
+    print.apply(model, config);
+    print.process();
+    using Source = std::pair<const LayerRegionIsland *, ExtrusionRole>;
+    std::set<Source> global_sources, owned_sources;
+    const coord_t limit = scale_to_layer_coord(0.1);
+    const coord_t first_z = print.object(0).layer(0).scaled_print_z();
+    const ExtrusionRole roles[] = {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE,
+        LayerRegionIsland::PERIMETERS, LayerRegionIsland::GAP_FILLS, LayerRegionIsland::INFILLS,
+        LayerRegionIsland::IRONINGS, LayerRegionIsland::MILLS};
+    REQUIRE(print.auxiliary_object() != nullptr);
+    for (const Layer &layer : print.auxiliary_object()->auxiliary_layers())
+        if (layer.scaled_print_z() >= limit)
+            for (const LayerSliceIsland &slice : layer.islands())
+                for (const LayerRegionIsland &island : slice.regions_islands())
+                    for (const ExtrusionRole role : roles)
+                        if (island.has_extrusion(role) && island.extrusion(role).total_volume() > 0.)
+                            global_sources.emplace(&island, role);
+    for (const std::unique_ptr<Layer> &layer : print.object(0).mutable_auxiliary_layers()) {
+        if (layer->scaled_print_z() < limit || layer->scaled_print_z() <= first_z)
+            continue;
+        layer->get_or_add_property<LayerInstanceProperty>().object_instance_idx = 1;
+        REQUIRE(layer->get_property<LayerInstanceProperty>() != nullptr);
+        for (const LayerSliceIsland &slice : layer->islands())
+            for (const LayerRegionIsland &island : slice.regions_islands())
+                for (const ExtrusionRole role : roles)
+                    if (island.has_extrusion(role) && island.extrusion(role).total_volume() > 0.)
+                        owned_sources.emplace(&island, role);
+    }
+    REQUIRE_FALSE(global_sources.empty());
+    REQUIRE_FALSE(owned_sources.empty());
+    check_sequence_builder(print, true);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    REQUIRE_FALSE(plan.groups.empty());
+    std::map<Source, size_t> final_visits;
+    for (const Printing::PrintingLayerGroup &layer : plan.groups.back().layers)
+        for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+            for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                ++final_visits[{extrusion.region_island, extrusion.sregion_island_role}];
+                if (owned_sources.count({extrusion.region_island, extrusion.sregion_island_role}) != 0) {
+                    REQUIRE(extrusion.printing_catalog_id < plan.object_instances.size());
+                    const Printing::PrintingObjectInstance &owner = plan.object_instances[extrusion.printing_catalog_id];
+                    CHECK(owner.object == &print.object(0));
+                    CHECK(owner.object_instance_idx == 1);
+                    REQUIRE(extrusion.root != nullptr);
+                    const Point shift = print.object(0).instances()[1].shift;
+                    const ExtrusionEntity &source = extrusion.region_island->extrusion(extrusion.sregion_island_role);
+                    CHECK(extrusion.root->first_point() == source.first_point() + shift);
+                    CHECK(extrusion.root->last_point() == source.last_point() + shift);
+                }
+            }
+    for (const Source &source : global_sources)
+        CHECK(final_visits[source] == 1);
+    for (const Source &source : owned_sources)
+        CHECK(final_visits[source] == 1);
 }
 
 // Reject zero scaled slice heights, then invoke the builder directly to prove its

@@ -29,6 +29,8 @@ the builder with any partial clones still owned by the plan.
     ordered_source_instances_for_object_plan() -> cache placements, choose order
         source_instances() -> read copies and heights
         order_instances_by_nearest() -> greedy walk from the origin
+    append_by_layer_object_layers() -> merge selected object and local auxiliary layers by Z
+        append_layer_instance_extrusions() -> clone each selected instance placement
     append_print_auxiliary_group() -> create a leading global group
         append_print_auxiliary_layers_to_group() -> merge global layers by Z
             layer_group_for_print_z() -> find or append a Z bucket
@@ -43,6 +45,46 @@ the builder with any partial clones still owned by the plan.
 */
 
 namespace slic3r_api { namespace Ordering { namespace PlanBuilderCommon {
+
+// Merge borrowed object layers by Z and clone them at validated instance placements.
+// The plan owns clones; source layers stay unchanged. Cancellation, invalid owners
+// and allocation failures propagate. The optional interval is half-open in scaled Z.
+// Omitting first layers excludes object layer zero and auxiliaries at or below it.
+void append_by_layer_object_layers(const Print &print, PrintingPlan &plan, PrintingGroup &group,
+    std::map<coord_t, uint32_t> &indices, const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter, bool omit_first_layers);
+
+void append_by_layer_object_layers(const Print &print, PrintingPlan &plan, PrintingGroup &group,
+    std::map<coord_t, uint32_t> &indices, const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter, bool omit_first_layers)
+{
+    for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+        throw_if_cancelled(run_ctx);
+        const Object object = print.object(object_idx);
+        for (uint32_t instance_idx = 0; instance_idx < object.instance_count(); ++instance_idx)
+            group.append_printing_catalog_id(plan, plan.find_or_add_object_instance(object, instance_idx));
+        const coord_t first_z = object.layer_count() == 0 ? 0 : object.layer(0).print_z();
+        for (uint32_t kind = 0; kind < 2; ++kind) {
+            const uint32_t count = kind == 0 ? object.layer_count() : object.auxiliary_layer_count();
+            for (uint32_t idx = 0; idx < count; ++idx) {
+                throw_if_cancelled(run_ctx);
+                const Layer layer = kind == 0 ? object.layer(idx) : object.auxiliary_layer(idx);
+                if (omit_first_layers && (kind == 0 ? idx == 0 : layer.print_z() <= first_z))
+                    continue;
+                if (filter.print_z_interval && (layer.print_z() < filter.print_z_interval->first ||
+                    layer.print_z() >= filter.print_z_interval->second))
+                    continue;
+                PrintingLayerGroup layers = layer_group_for_print_z(group, indices, layer.print_z(), run_ctx);
+                append_layer_once(layers, layer, run_ctx);
+                for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, layer)) {
+                    throw_if_cancelled(run_ctx);
+                    const uint32_t catalog = plan.find_or_add_object_instance(object, projection.first);
+                    append_layer_instance_extrusions(plan, layers, layer, projection.second, catalog, run_ctx, filter);
+                }
+            }
+        }
+    }
+}
 
 const raw_extrusion_role k_region_island_roles[] = {
     RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
@@ -82,11 +124,14 @@ static std::string config_string_value(const Config &config, const char *key);
 /*
 Create the leading group used by complete-object plans for global helper
 layers. Return false if there is no auxiliary work or the group cannot be created.
+The optional half-open Z interval selects source layers before cloning. The plan
+owns copies; cancellation and allocation failures propagate without changing sources.
 */
 bool append_print_auxiliary_group(
     const Print &print,
     PrintingPlan &plan,
-    const plugin_run_context *run_ctx);
+    const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter);
 
 /*
 Append the hidden print-level auxiliary object to an existing by-layer group.
@@ -94,12 +139,15 @@ Append the hidden print-level auxiliary object to an existing by-layer group.
 The auxiliary object has exactly one logical instance at shift zero. Its layers
 are already in platter coordinates, so they must not be duplicated for real
 object instances.
+The optional half-open Z interval selects source layers. The plan owns copies;
+cancellation and allocation failures propagate without changing sources.
 */
 void append_print_auxiliary_layers_to_group(const Print &print,
                                             PrintingPlan &plan,
                                             PrintingGroup &group,
                                             std::map<coord_t, uint32_t> &layer_index_by_print_z,
-                                            const plugin_run_context *run_ctx);
+                                             const plugin_run_context *run_ctx,
+                                             const LayerExtrusionFilter &filter);
 
 /*
 Find or create the PrintingLayerGroup for print_z.
@@ -307,11 +355,18 @@ static std::string config_string_value(const Config &config, const char *key)
 bool append_print_auxiliary_group(
     const Print &print,
     PrintingPlan &plan,
-    const plugin_run_context *run_ctx)
+    const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter)
 {
     throw_if_cancelled(run_ctx);
     const Object auxiliary_object = print.auxiliary_object();
-    if (auxiliary_object.auxiliary_layer_count() == 0)
+    bool has_layers = false;
+    for (uint32_t idx = 0; idx < auxiliary_object.auxiliary_layer_count(); ++idx) {
+        const coord_t z = auxiliary_object.auxiliary_layer(idx).print_z();
+        if (!filter.print_z_interval || (z >= filter.print_z_interval->first && z < filter.print_z_interval->second))
+            has_layers = true;
+    }
+    if (!has_layers)
         return false;
 
     /*
@@ -326,7 +381,7 @@ bool append_print_auxiliary_group(
 
     std::map<coord_t, uint32_t> layer_index_by_print_z;
     append_print_auxiliary_layers_to_group(
-        print, plan, group, layer_index_by_print_z, run_ctx);
+        print, plan, group, layer_index_by_print_z, run_ctx, filter);
     sort_layer_groups_by_print_z(group, run_ctx);
     return true;
 }
@@ -335,7 +390,8 @@ void append_print_auxiliary_layers_to_group(const Print &print,
                                             PrintingPlan &plan,
                                             PrintingGroup &group,
                                             std::map<coord_t, uint32_t> &layer_index_by_print_z,
-                                            const plugin_run_context *run_ctx)
+                                             const plugin_run_context *run_ctx,
+                                             const LayerExtrusionFilter &filter)
 {
     throw_if_cancelled(run_ctx);
     const Object auxiliary_object = print.auxiliary_object();
@@ -350,12 +406,15 @@ void append_print_auxiliary_layers_to_group(const Print &print,
     for (uint32_t layer_idx = 0; layer_idx < auxiliary_object.auxiliary_layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
         const Layer layer = auxiliary_object.auxiliary_layer(layer_idx);
+        if (filter.print_z_interval && (layer.print_z() < filter.print_z_interval->first ||
+            layer.print_z() >= filter.print_z_interval->second))
+            continue;
         PrintingLayerGroup layer_group =
             layer_group_for_print_z(
                 group, layer_index_by_print_z, layer.print_z(), run_ctx);
         append_layer_once(layer_group, layer, run_ctx);
         append_layer_instance_extrusions(
-            plan, layer_group, layer, c_point{}, UINT32_MAX, run_ctx);
+            plan, layer_group, layer, c_point{}, UINT32_MAX, run_ctx, filter);
     }
 }
 

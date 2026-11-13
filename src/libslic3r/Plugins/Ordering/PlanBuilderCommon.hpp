@@ -33,6 +33,8 @@ Typical use after obtaining a plan, group, source layer and instance placement:
     sort_layer_groups_by_print_z(group, ctx);
 The optional LayerExtrusionFilter restricts only the extrusion traversal; callers
 still choose which layer groups and source-layer context entries to create.
+The by-layer object and global auxiliary helpers also select layer context by the
+filter's Z interval, allowing a shared final group above an object-step limit.
 */
 
 namespace slic3r_api { namespace Ordering { namespace PlanBuilderCommon {
@@ -60,6 +62,12 @@ struct LayerExtrusionFilter
     std::optional<std::pair<coord_t, coord_t>> print_z_interval;
     const std::vector<uint32_t> *island_indices = nullptr;
 };
+
+// Append object and local auxiliary layers selected by Z to a shared by-layer group.
+// Optionally omit layer zero and its auxiliaries already emitted by the first pass.
+void append_by_layer_object_layers(const Print &print, PrintingPlan &plan, PrintingGroup &group,
+    std::map<coord_t, uint32_t> &indices, const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter = {}, bool omit_first_layers = false);
 
 /* Return all object instances in model/source order with their shift cached. */
 std::vector<SourceInstance> source_instances(
@@ -144,21 +152,25 @@ Append the hidden print-level auxiliary object to an existing by-layer group.
 The auxiliary object has exactly one logical instance at shift zero. Its layers
 are already in platter coordinates, so they must not be duplicated for real
 object instances.
+The optional filter selects source layers by its half-open Z interval.
 */
 void append_print_auxiliary_layers_to_group(const Print &print,
                                             PrintingPlan &plan,
                                             PrintingGroup &group,
                                             std::map<coord_t, uint32_t> &layer_index_by_print_z,
-                                            const plugin_run_context *run_ctx);
+                                             const plugin_run_context *run_ctx,
+                                             const LayerExtrusionFilter &filter = {});
 
 /*
 Create the leading group used by complete-object plans for global helper
 layers. Return false if there is no auxiliary work or the group cannot be created.
+The optional filter selects source layers by its half-open Z interval.
 */
 bool append_print_auxiliary_group(
     const Print &print,
     PrintingPlan &plan,
-    const plugin_run_context *run_ctx);
+    const plugin_run_context *run_ctx,
+    const LayerExtrusionFilter &filter = {});
 
 /*
 Translate stored geometry in the owned canonical clone through the core bridge

@@ -18,10 +18,25 @@
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 
 /*
+ByLayerPlanBuilder creates the initial mutable PrintingPlan for the ordering chain
+from read-only Print views and PlanBuilderCommon helpers. Each printable role
+bucket is cloned and shifted to its instance placement; later orderers own and
+edit those clones without changing the sliced source geometry.
+
+One PrintingGroup contains the whole print. Its layer groups are keyed by scaled
+print_z and their tool groups by extruder ID; each extrusion owns a cloned role
+bucket. LayerInstanceProperty restricts object-local auxiliary layers to their
+owner. Unmarked layers repeat for every copy, while the global auxiliary object
+already holds plate-space geometry. PlanBuilderCommon keeps role buckets in sync
+with LayerRegionIsland::has_extrusion(). Construction remains replaceable through
+STEP_ORDERING rather than calling native plan builders.
+
 Representative direct calls (branches are not a timeline):
 
     build_plan_by_layer()
-        |-- append_layer_instance_extrusions()
+        |-- append_by_layer_object_layers() -> clone object layers at instance placements
+        |       `-- append_layer_instance_extrusions()
+        |               `-- layer_instance_projections() -> validate owners and choose shifts
         |-- append_print_auxiliary_layers_to_group()
         `-- sort_layer_groups_by_print_z()
 
@@ -35,35 +50,6 @@ void register_by_layer_plan_builder_plugin(orchestrator_handle *orch);
 namespace {
 
 using namespace PlanBuilderCommon;
-
-/*
-ByLayerPlanBuilder is the first plugin in the ordering chain.
-
-It creates the mutable PrintingPlan from the read-only Print through plugin
-views and the shared PlanBuilderCommon construction helpers. The source data tree
-stays untouched: each printable role bucket from a LayerRegionIsland is cloned
-into the plan, and the clone is shifted
-for the object instance it belongs to. Later ordering plugins can reorder those
-clones without changing perimeter, infill or support generation results.
-
-The plan built here has this shape:
-  - by-layer printing: one PrintingGroup for the whole print;
-  - inside a group, PrintingLayerGroups are keyed by scaled print_z;
-  - inside a layer group, PrintingToolGroups are keyed by extruder id;
-  - each stored PrintingExtrusion owns one cloned role bucket.
-
-Object-local auxiliary layers marked with LayerInstanceProperty are cloned
-only for their owner. Unmarked layers remain common patterns for every copy;
-the separate global auxiliary object already stores plate-space geometry.
-
-    build_plan_by_layer() -> merge Z buckets, then place each local auxiliary
-        layer_instance_projections() -> validate the owner and choose its shifts
-
-PlanBuilderCommon keeps its copied role buckets in sync with
-LayerRegionIsland::has_extrusion(). Do not call native PrintingPlan builders
-from this plugin: the point of this file is to make construction replaceable by
-another STEP_ORDERING plugin.
-*/
 
 const char *k_no_dependencies[] = { nullptr };
 const char *k_group_builder = "ordering.plan_builder";
@@ -93,74 +79,7 @@ void build_plan_by_layer(
         return;
 
     std::map<coord_t, uint32_t> layer_index_by_print_z;
-    for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
-        throw_if_cancelled(run_ctx);
-        const Object object = print.object(object_idx);
-
-        /*
-        The global by-layer group records every physical instance represented by
-        the batch. Geometry is duplicated below; this list is only context for
-        later ordering and debugging.
-        */
-        for (uint32_t object_instance_idx = 0; object_instance_idx < object.instance_count(); ++object_instance_idx) {
-            throw_if_cancelled(run_ctx);
-            const uint32_t printing_catalog_id =
-                plan.find_or_add_object_instance(object, object_instance_idx);
-            group.append_printing_catalog_id(plan, printing_catalog_id);
-        }
-
-        for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
-            throw_if_cancelled(run_ctx);
-            const Layer layer = object.layer(layer_idx);
-            /*
-            The map merges layers from several objects when their scaled print_z
-            matches. That is the normal by-layer printing contract: all geometry
-            at the same Z belongs to one layer batch before tool/island ordering.
-            */
-            PrintingLayerGroup layer_group =
-                layer_group_for_print_z(
-                    group, layer_index_by_print_z, layer.print_z(), run_ctx);
-            append_layer_once(layer_group, layer, run_ctx);
-            /*
-            The source layer exists once per object, so clone it once per
-            physical instance with that instance's bed shift applied.
-            */
-            for (uint32_t object_instance_idx = 0; object_instance_idx < object.instance_count(); ++object_instance_idx) {
-                throw_if_cancelled(run_ctx);
-                const uint32_t printing_catalog_id =
-                    plan.find_or_add_object_instance(object, object_instance_idx);
-                append_layer_instance_extrusions(plan, layer_group,
-                                                 layer,
-                                                 object.instance_shift(object_instance_idx),
-                                                 printing_catalog_id,
-                                                 run_ctx);
-            }
-        }
-
-        /*
-        Real-object auxiliary layers are local. Merge them by print Z and clone
-        a marked layer only for its owner, or a common layer for every copy.
-        The separate global auxiliary object already stores plateau geometry.
-        */
-        for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
-            throw_if_cancelled(run_ctx);
-            const Layer layer = object.auxiliary_layer(layer_idx);
-            PrintingLayerGroup layer_group =
-                layer_group_for_print_z(
-                    group, layer_index_by_print_z, layer.print_z(), run_ctx);
-            append_layer_once(layer_group, layer, run_ctx);
-            for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, layer)) {
-                throw_if_cancelled(run_ctx);
-                const uint32_t printing_catalog_id =
-                    plan.find_or_add_object_instance(object, projection.first);
-                append_layer_instance_extrusions(plan, layer_group,
-                                                 layer,
-                                                 projection.second,
-                                                 printing_catalog_id,
-                                                 run_ctx);
-            }
-        }
-    }
+    append_by_layer_object_layers(print, plan, group, layer_index_by_print_z, run_ctx);
 
     append_print_auxiliary_layers_to_group(
         print, plan, group, layer_index_by_print_z, run_ctx);

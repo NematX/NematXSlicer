@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <stdexcept>
@@ -27,8 +28,13 @@ With a positive height step, the first object layer is printed for every instanc
 then each instance contributes a group for each nonempty Z interval. The interval
 height is capped by the printer clearance height. Auxiliary layers at or below
 the first object layer belong to its first group; others follow their Z interval.
-The height limit and island switch do not affect this builder's scheduling.
-Global auxiliary geometry precedes the instance groups; local auxiliary layers
+With a positive step and height limit, intervals stop at that limit. Remaining
+layers from all instances share a final group in increasing Z, using the same
+construction as By layer. Layer zero and its auxiliaries always stay in the first
+pass, even above the limit. The island switch does not affect scheduling.
+Global auxiliary geometry below the height limit precedes the instance groups;
+geometry at or above the limit joins the final group. Without a limit, all global
+auxiliary geometry precedes the instance groups. Local auxiliary layers
 marked with an owner are included only for that instance; unmarked local layers
 are reproduced for every copy. Sources remain unchanged.
 The provider owns the object order, height step, height limit and island settings.
@@ -41,6 +47,7 @@ Their activation rules keep them editable only for the selected By object mode.
                 append_print_auxiliary_group() -> retain global auxiliaries
                 append_layer_instance_extrusions() -> copy and shift geometry
                 sort_layer_groups_by_print_z() -> order each instance's layers
+                append_by_layer_object_layers() -> merge the remaining instance layers
 */
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
 
@@ -58,8 +65,9 @@ const char *k_defined_config_keys[] = {
 void initialize_by_object_settings(orchestrator_handle *orch);
 
 // Replace the plan with cloned instance groups, selecting layer zero first and then
-// half-open Z intervals when the step is positive. Invalid auxiliary owners,
-// cancellation and allocation failures propagate; the borrowed print is unchanged.
+// half-open Z intervals when the step is positive. A positive height limit caps
+// intervals and merges the remainder by Z. Invalid auxiliary owners, cancellation
+// and allocation failures propagate; the borrowed print is unchanged.
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx);
 
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx)
@@ -68,7 +76,6 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
     /* Do not clear a usable plan after cancellation has already been requested. */
     plan.clear();
     throw_if_cancelled(run_ctx);
-    append_print_auxiliary_group(print, plan, run_ctx);
     const std::vector<SourceInstance> instances =
         ordered_source_instances_for_object_plan(print, run_ctx);
 
@@ -77,10 +84,18 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
         object_step, print.config().float_or_default("extruder_clearance_height", 0.))) : 0;
     // Validation rejects positive steps whose capped height scales to zero.
     const bool with_step = height_step_range > 0;
+    const double max_z = print.config().float_or_default("complete_objects_step_max_z", 0.);
+    const coord_t object_step_max_z = with_step && max_z > 0. ? scale_to_layer_coord(max_z) : 0;
+    LayerExtrusionFilter lower_filter;
+    if (object_step_max_z > 0)
+        lower_filter.print_z_interval = std::make_pair(std::numeric_limits<coord_t>::lowest(), object_step_max_z);
+    append_print_auxiliary_group(print, plan, run_ctx, lower_filter);
     bool first_layers = true;
     coord_t z_start = 0, z_end = height_step_range;
     bool is_layers = true;
-    while (is_layers) {
+    while (is_layers && (first_layers || object_step_max_z == 0 || z_start + EPSILON < object_step_max_z)) {
+        if (object_step_max_z > 0)
+            z_end = std::min(z_end, object_step_max_z);
         is_layers = false;
         for (const SourceInstance &source : instances) {
             throw_if_cancelled(run_ctx);
@@ -157,6 +172,33 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
         } else {
             z_start = z_end;
             z_end += height_step_range;
+        }
+    }
+    if (object_step_max_z > 0) {
+        // The first pass is unconditional; do not clone it again when the limit is below it.
+        bool has_remaining = false;
+        for (const SourceInstance &source : instances) {
+            const coord_t first_z = source.object.layer_count() == 0 ? 0 : source.object.layer(0).print_z();
+            for (uint32_t idx = 1; idx < source.object.layer_count(); ++idx)
+                has_remaining |= source.object.layer(idx).print_z() >= object_step_max_z;
+            for (uint32_t idx = 0; idx < source.object.auxiliary_layer_count(); ++idx) {
+                const coord_t z = source.object.auxiliary_layer(idx).print_z();
+                has_remaining |= z > first_z && z >= object_step_max_z;
+            }
+        }
+        const Object auxiliary = print.auxiliary_object();
+        for (uint32_t idx = 0; idx < auxiliary.auxiliary_layer_count(); ++idx)
+            has_remaining |= auxiliary.auxiliary_layer(idx).print_z() >= object_step_max_z;
+        if (has_remaining) {
+            PrintingGroup group = plan.append_group();
+            if (!group.valid())
+                return;
+            std::map<coord_t, uint32_t> indices;
+            LayerExtrusionFilter filter;
+            filter.print_z_interval = std::make_pair(object_step_max_z, std::numeric_limits<coord_t>::max());
+            append_by_layer_object_layers(print, plan, group, indices, run_ctx, filter, true);
+            append_print_auxiliary_layers_to_group(print, plan, group, indices, run_ctx, filter);
+            sort_layer_groups_by_print_z(group, run_ctx);
         }
     }
 }
