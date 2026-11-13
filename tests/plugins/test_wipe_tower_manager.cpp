@@ -8,6 +8,7 @@ Wipe manager tests lend a test-only service to the host. The service reports
 real changes between consecutive concrete tool visits and writes one local
 straight line per band. Constructed plans isolate insertion and ownership;
 the sliced-print test exercises the export-side ordering and downstream path.
+Its positive object-step variant checks validation rejection before processing.
 copy_gcode_export_objects, checking owned footprints after real tower generation.
 
 Operation notes:
@@ -18,6 +19,7 @@ Representative direct calls (branches are not a timeline):
     TEST_CASE
         |-- Test::init_print()
         |-- print.apply()
+        |-- print.validate() -> reject a tower with a positive object step
         |-- print.process()
         |-- Steps::StepExtrusionOrdering::run_step()
         |-- Steps::StepGenerateWipeTower::run_step()
@@ -925,7 +927,8 @@ TEST_CASE("Process settings distinguish synthetic wipes from missing real source
     print.mutable_printing_plan().object_instances[0].object = nullptr;
 }
 
-// Slice owned two-tool models in shared or restarting-Z groups and export in the checkout, checking maintenance and elevated bands through real downstream plugins; preparation/export failures remain assertions.
+// Export two-tool models through shared groups and check tower maintenance;
+// stepped object printing is rejected before processing because it cannot use a tower.
 TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code export", "[plugins][wipe-tower]")
 {
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
@@ -959,6 +962,12 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     model.objects()[1].config.set_deserialize_strict("infill_extruder", "2");
     model.objects()[1].config.set_deserialize_strict("solid_infill_extruder", "2");
     print.apply(model, config);
+    if (parallel) {
+        const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
+        CHECK(validation.first == PrintBase::PrintValidationError::pveWrongSettings);
+        CHECK(validation.second == "A wipe tower is not supported with a positive By object height step.");
+        return;
+    }
     try {
         print.process();
     } catch (...) {
@@ -984,13 +993,6 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     CHECK(check_wipes(print) == active.first->requests.size());
     std::string error;
     CHECK(Steps::StepGenerateWipeTower::validate_post(print, &error));
-    if (parallel) {
-        // A leading skirt/brim batch precedes the two restarting-Z object batches.
-        REQUIRE(print.printing_plan()->groups.size() == 3);
-        CHECK(print.has_global_wipe_tower());
-        REQUIRE(print.printing_plan()->object_instances.size() == 3);
-        CHECK(active.first->bands.back().z > 0.2);
-    }
 
     // Export replays ordering and wipe generation normally, then every downstream plugin.
     // Compiler source paths are absolute in this build, so the export remains

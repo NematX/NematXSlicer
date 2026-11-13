@@ -101,6 +101,9 @@ the nature of their definition allows. Redefinition diagnostics are captured fro
 the host log, independently of the returned registration status.
 The Prusa checks read Metadata/Slic3r_PE.config inside the 3MF archive.
 They distinguish compatible plugin options from SuperSlicer-only options.
+Print sequence checks compare cloned extrusion sources and placements with native
+plans. Positive object steps are checked by independently assigning each source Z
+to an integer interval; placement and wipe-tower validation are checked separately.
 
 Operation notes:
 - config_option_serialize :  ThrowingSerializedOption::serialize
@@ -120,6 +123,7 @@ Representative direct calls (branches are not a timeline):
         |-- PluginE2E::linear_cases() -> check setting coverage
         |-- Orchestrator::export_gcode_cli() -> export the small STL scene
         |-- build_printing_plan_by_object() -> supply ordinary-layer expectations
+        |-- check_sequence_builder() -> compare source coverage and Z intervals
         `-- ConfigBase::load_from_gcode_string_legacy() -> check legacy conversion
 */
 
@@ -2558,14 +2562,47 @@ TEST_CASE("Loading a project applies each profile section to its own preset",
 namespace {
 // Run one initial builder against borrowed sources, compare ordinary groups with
 // the native builder and independently enumerate auxiliary owners, sources and
-// placements. The Print owns all inspected data; assertion and plugin failures propagate.
+// placements. Positive steps rebucket native layers by integer Z division before
+// comparison. The Print owns inspected data; assertion and plugin failures propagate.
 void check_sequence_builder(Slic3r::Print &print, bool object_mode);
 
 void check_sequence_builder(Slic3r::Print &print, bool object_mode)
 {
     using namespace Slic3r;
-    const Printing::PrintingPlan ordinary = object_mode ?
+    Printing::PrintingPlan ordinary = object_mode ?
         Printing::build_printing_plan_by_object(print) : Printing::build_printing_plan_by_layer(print);
+    const double step = print.full_print_config().opt_float("complete_objects_step");
+    const coord_t interval = object_mode && step > 0. ? scale_to_layer_coord(std::min(
+        step, print.config().extruder_clearance_height.value)) : 0;
+    std::map<std::pair<int64_t, uint32_t>, size_t> slice_groups;
+    if (interval > 0) {
+        // Calculate expected group addresses directly from Z, independently of the builder loop.
+        std::map<std::pair<int64_t, uint32_t>, Printing::PrintingGroup> slices;
+        for (Printing::PrintingGroup &group : ordinary.groups) {
+            REQUIRE(group.printing_catalog_ids.size() == 1);
+            const uint32_t id = group.printing_catalog_ids.front();
+            const Printing::PrintingObjectInstance &instance = ordinary.object_instances[id];
+            const coord_t first_z = instance.object->layer(0).scaled_print_z();
+            for (Printing::PrintingLayerGroup &layer : group.layers) {
+                const int64_t slice = layer.print_z == first_z ? -1 : layer.print_z / interval;
+                Printing::PrintingGroup &target = slices[{slice, id}];
+                target.printing_catalog_ids = {id};
+                target.layers.push_back(std::move(layer));
+            }
+            for (const Layer &layer : instance.object->auxiliary_layers()) {
+                const LayerInstanceProperty *owner = layer.get_property<LayerInstanceProperty>();
+                if (owner != nullptr && owner->object_instance_idx != instance.object_instance_idx)
+                    continue;
+                const int64_t slice = layer.scaled_print_z() <= first_z ? -1 : layer.scaled_print_z() / interval;
+                slices[{slice, id}].printing_catalog_ids = {id};
+            }
+        }
+        ordinary.groups.clear();
+        for (auto &entry : slices) {
+            slice_groups[entry.first] = ordinary.groups.size();
+            ordinary.groups.push_back(std::move(entry.second));
+        }
+    }
     Orchestrator &host = Orchestrator::instance();
     Plugin *plugin = host.get_plugin(object_mode ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
     REQUIRE(plugin != nullptr);
@@ -2632,10 +2669,15 @@ void check_sequence_builder(Slic3r::Print &print, bool object_mode)
                     id = uint32_t(instance - ordinary.object_instances.begin());
                     shift = object->instances()[copy].shift;
                     if (object_mode) {
+                      if (interval > 0) {
+                        const int64_t slice = layer.scaled_print_z() <= object->layer(0).scaled_print_z() ? -1 : layer.scaled_print_z() / interval;
+                        group = slice_groups.at({slice, id}) + leading;
+                      } else {
                         const auto target = std::find_if(ordinary.groups.begin(), ordinary.groups.end(),
                             [id](const Printing::PrintingGroup &item) { return std::find(item.printing_catalog_ids.begin(), item.printing_catalog_ids.end(), id) != item.printing_catalog_ids.end(); });
                         REQUIRE(target != ordinary.groups.end());
                         group = size_t(target - ordinary.groups.begin()) + leading;
+                      }
                     }
                 }
                 layers[group][layer.scaled_print_z()].insert(&layer);
@@ -2707,7 +2749,9 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
     const std::vector<E2E::Domain> domains = {
         E2E::enum_domain("complete_objects_sort"),
-        {{"complete_objects_step"}, {{"height-step", {{"complete_objects_step", "1"}}}}},
+        {{"complete_objects_step", "extruder_clearance_height"}, {
+            {"height-step", {{"complete_objects_step", "1"}}},
+            {"clearance-cap", {{"complete_objects_step", "1"}, {"extruder_clearance_height", "0.6"}}}}},
         {{"complete_objects_step_max_z"}, {{"height-limit", {{"complete_objects_step_max_z", "0.6"}}}}},
         {{"complete_islands"}, {{"separate-islands", {{"complete_islands", "1"}}}}}
     };
@@ -2900,6 +2944,139 @@ TEST_CASE("Object sort settings produce distinct explicit instance orders", "[pl
             CHECK(instance.object_instance_idx == 0);
         }
     }
+}
+
+// Slice unequal boxes and support geometry, then compare every source extrusion,
+// owner, Z interval and first-layer group with independently bucketed native layers.
+TEST_CASE("By object steps cover every layer through empty slices", "[plugins][printing-plan][print-sequence][ordering][object-step]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::pair<double, const char *> cases[] = {
+        {0.1, "object"}, {0.2, "object"}, {0.5, "object"},
+        {0.5, "lowz"}, {0.5, "nearest"}, {2., "object"}
+    };
+    for (const std::pair<double, const char *> &test : cases) {
+        const double step = test.first;
+        const char *order = test.second;
+        CAPTURE(step, order);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"complete_objects_step", std::to_string(step)}, {"complete_objects_sort", order},
+            {"extruder_clearance_height", "0.7"}, {"skirts", "0"}, {"brim_width", "1"},
+            {"brim_per_object", "1"}, {"support_material", "0"}, {"wipe_tower", "0"},
+            {"first_layer_height", "0.2"}, {"layer_height", "0.3"}});
+        Model model;
+        Print print;
+        Test::init_print({make_cube(3., 3., 1.4), make_cube(3., 3., 0.8)}, print, model, config);
+        model.objects()[0].instances.front()->set_offset(Vec3d(40., 40., 0.));
+        model.objects()[1].instances.front()->set_offset(Vec3d(100., 40., 0.));
+        print.apply(model, config);
+        print.process();
+        size_t brims = 0;
+        for (const PrintObject &object : print.objects())
+            for (const Layer &layer : object.auxiliary_layers())
+                if (LayerAdhesionProperty::layer_is_brim(layer))
+                    for (const LayerSliceIsland &slice : layer.islands())
+                        for (const LayerRegionIsland &island : slice.regions_islands())
+                            for (const ExtrusionRole role : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE,
+                                LayerRegionIsland::PERIMETERS, LayerRegionIsland::GAP_FILLS, LayerRegionIsland::INFILLS,
+                                LayerRegionIsland::IRONINGS, LayerRegionIsland::MILLS})
+                                if (island.has_extrusion(role) && island.extrusion(role).total_volume() > 0.)
+                                    ++brims;
+        REQUIRE(brims > 0);
+        check_sequence_builder(print, true);
+        REQUIRE(print.printing_plan()->groups.size() >= 2);
+        for (size_t g = 0; g < 2; ++g) {
+            REQUIRE(print.printing_plan()->groups[g].layers.size() == 1);
+            CHECK(print.printing_plan()->groups[g].layers.front().print_z == scale_to_layer_coord(0.2));
+        }
+    }
+    DynamicPrintConfig config = Test::SupportGrid::config("grid", false, 3, true);
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0.5"}, {"filament_diameter", "1.75,1.75"}});
+    Model model;
+    Print print;
+    Test::init_print({Test::SupportGrid::slab(true)}, print, model, config);
+    print.process();
+    size_t supports = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        for (const LayerSliceIsland &slice : layer.islands())
+            for (const LayerRegionIsland &island : slice.regions_islands())
+                for (const ExtrusionRole role : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
+                    if (island.has_extrusion(role) && island.extrusion(role).total_volume() > 0.)
+                        ++supports;
+    REQUIRE(supports > 0);
+    check_sequence_builder(print, true);
+}
+
+// Reject zero scaled slice heights, then invoke the builder directly to prove its
+// whole-object fallback terminates and retains every source layer and extrusion.
+TEST_CASE("By object rejects steps with zero scaled slice height", "[plugins][print-sequence][validate][object-step]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const std::pair<double, double> values : {std::make_pair(0.5, 0.), std::make_pair(1e-12, 1.)}) {
+        CAPTURE(values.first, values.second);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
+        config.set_key_value("complete_objects_step", new ConfigOptionFloat(values.first));
+        config.set_key_value("extruder_clearance_height", new ConfigOptionFloat(values.second));
+        Model model;
+        Print print;
+        Test::init_print({make_cube(3., 3., 1.)}, print, model, config);
+        const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
+        CHECK(validation.first == PrintBase::PrintValidationError::pveWrongSettings);
+        CHECK(validation.second == "The By object height step capped by the extruder clearance height must be greater than zero at layer precision.");
+        print.process();
+        check_sequence_builder(print, true);
+        REQUIRE(print.printing_plan() != nullptr);
+        CHECK(print.printing_plan()->groups.size() == 1);
+    }
+}
+
+// Validate close and separated copies above the printer clearance height, then
+// require an explicit stepped-tower error without changing zero-step validation.
+TEST_CASE("By object step validation checks placement and rejects wipe towers", "[plugins][print-sequence][validate][object-step]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const double distance : {8., 30.}) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"complete_objects_step", "0.5"}, {"extruder_clearance_height", "1"},
+            {"extruder_clearance_radius", "10"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
+        Model model;
+        Print print;
+        Test::init_print({make_cube(3., 3., 2.)}, print, model, config);
+        ModelObject &object = model.objects().front();
+        object.instances.front()->set_offset(Vec3d(40., 40., 0.));
+        object.add_instance(*object.instances.front())->set_offset(Vec3d(40. + distance, 40., 0.));
+        print.apply(model, config);
+        const auto result = print.validate();
+        CAPTURE(distance, result.second);
+        CHECK(result.first == (distance < 10. ? PrintBase::PrintValidationError::pveWrongPosition : PrintBase::PrintValidationError::pveNone));
+        if (distance > 10.) {
+            config.set_deserialize_strict("complete_objects_step", "0");
+            print.apply(model, config);
+            CHECK(print.validate().first == PrintBase::PrintValidationError::pveWrongPosition);
+        }
+    }
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0.5"}, {"wipe_tower", "1"}, {"skirts", "0"},
+        {"perimeter_extruder", "1"}, {"infill_extruder", "2"}, {"solid_infill_extruder", "2"},
+        {"nozzle_diameter", "0.4,0.4"}, {"filament_diameter", "1.75,1.75"}});
+    Model model;
+    Print print;
+    Test::init_print({make_cube(3., 3., 1.)}, print, model, config);
+    REQUIRE(print.has_wipe_tower());
+    CHECK(print.validate().second == "A wipe tower is not supported with a positive By object height step.");
+    config.set_deserialize_strict("complete_objects_step", "0");
+    print.apply(model, config);
+    CHECK(print.validate().second.empty());
 }
 
 // Change only the builder on a processed support-enabled print and require all

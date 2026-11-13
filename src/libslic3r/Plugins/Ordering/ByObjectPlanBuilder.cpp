@@ -6,6 +6,7 @@
 #include "DefaultOrdering.hpp"
 #include "PlanBuilderCommon.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <map>
@@ -21,7 +22,12 @@
 
 /*
 Provides the By object plan builder to the ordering chain. Borrowed print layers
-are cloned through PlanBuilderCommon into one owned group per physical instance.
+are cloned through PlanBuilderCommon into owned groups per physical instance.
+With a positive height step, the first object layer is printed for every instance,
+then each instance contributes a group for each nonempty Z interval. The interval
+height is capped by the printer clearance height. Auxiliary layers at or below
+the first object layer belong to its first group; others follow their Z interval.
+The height limit and island switch do not affect this builder's scheduling.
 Global auxiliary geometry precedes the instance groups; local auxiliary layers
 marked with an owner are included only for that instance; unmarked local layers
 are reproduced for every copy. Sources remain unchanged.
@@ -51,7 +57,8 @@ const char *k_defined_config_keys[] = {
 // Publish copied option definitions and activation rules to the borrowed host; registration failures follow the host API.
 void initialize_by_object_settings(orchestrator_handle *orch);
 
-// Replace the plan with instance groups owning cloned sources. Invalid auxiliary owners,
+// Replace the plan with cloned instance groups, selecting layer zero first and then
+// half-open Z intervals when the step is positive. Invalid auxiliary owners,
 // cancellation and allocation failures propagate; the borrowed print is unchanged.
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx);
 
@@ -65,49 +72,92 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
     const std::vector<SourceInstance> instances =
         ordered_source_instances_for_object_plan(print, run_ctx);
 
-    for (const SourceInstance &source : instances) {
-        throw_if_cancelled(run_ctx);
-        /* Each physical copy has a group that later stages consume independently. */
-        throw_if_cancelled(run_ctx);
-        PrintingGroup group = plan.append_group();
-        if (!group.valid())
-            continue;
-
-        const uint32_t printing_catalog_id =
-            plan.find_or_add_object_instance(source.object, source.object_instance_idx);
-        group.append_printing_catalog_id(plan, printing_catalog_id);
-        std::map<coord_t, uint32_t> layer_index_by_print_z;
-
-        /* Shift object-local geometry into this physical instance's position. */
-        for (uint32_t layer_idx = 0; layer_idx < source.object.layer_count(); ++layer_idx) {
+    const double object_step = print.config().float_or_default("complete_objects_step", 0.);
+    const coord_t height_step_range = object_step > 0. ? scale_to_layer_coord(std::min(
+        object_step, print.config().float_or_default("extruder_clearance_height", 0.))) : 0;
+    // Validation rejects positive steps whose capped height scales to zero.
+    const bool with_step = height_step_range > 0;
+    bool first_layers = true;
+    coord_t z_start = 0, z_end = height_step_range;
+    bool is_layers = true;
+    while (is_layers) {
+        is_layers = false;
+        for (const SourceInstance &source : instances) {
             throw_if_cancelled(run_ctx);
-            const Layer layer = source.object.layer(layer_idx);
-            PrintingLayerGroup layer_group =
-                layer_group_for_print_z(
-                    group, layer_index_by_print_z, layer.print_z(), run_ctx);
-            append_layer_once(layer_group, layer, run_ctx);
-            append_layer_instance_extrusions(
-                plan, layer_group, layer, source.shift, printing_catalog_id, run_ctx);
-        }
-
-        /* Common local layers apply to every copy, marked layers only to their owner. */
-        for (uint32_t layer_idx = 0; layer_idx < source.object.auxiliary_layer_count(); ++layer_idx) {
-            throw_if_cancelled(run_ctx);
-            const Layer layer = source.object.auxiliary_layer(layer_idx);
-            const std::optional<uint32_t> owner = layer_instance_owner(layer);
-            if (owner && *owner >= source.object.instance_count())
-                throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
-            if (owner && *owner != source.object_instance_idx)
+            const coord_t first_layer_z = source.object.layer_count() == 0 ? 0 : source.object.layer(0).print_z();
+            std::vector<Layer> layers_to_print_range;
+            for (uint32_t layer_idx = 0; layer_idx < source.object.layer_count(); ++layer_idx) {
+                const Layer layer = source.object.layer(layer_idx);
+                if (with_step) {
+                    // PrintObjectSlice.cpp assigns object layer ids from their sorted list index.
+                    // if first_layer then only id==0, else only id != 0
+                    if (first_layers != (layer_idx == 0))
+                        continue;
+                    if (!first_layers && layer.print_z() >= z_end)
+                        is_layers = true;
+                    // keep only layers that are in our current printing range
+                    if (!first_layers && (layer.print_z() < z_start || layer.print_z() >= z_end))
+                        continue;
+                }
+                layers_to_print_range.push_back(layer);
+            }
+            // Auxiliary ids describe insertion order, not their sorted Z position.
+            // Their first-layer geometry travels with layer zero; the rest follows Z.
+            for (uint32_t layer_idx = 0; layer_idx < source.object.auxiliary_layer_count(); ++layer_idx) {
+                const Layer layer = source.object.auxiliary_layer(layer_idx);
+                const std::optional<uint32_t> owner = layer_instance_owner(layer);
+                if (owner && *owner >= source.object.instance_count())
+                    throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
+                if (owner && *owner != source.object_instance_idx)
+                    continue;
+                if (with_step) {
+                    if (first_layers != (layer.print_z() <= first_layer_z))
+                        continue;
+                    if (!first_layers && layer.print_z() >= z_end)
+                        is_layers = true;
+                    if (!first_layers && (layer.print_z() < z_start || layer.print_z() >= z_end))
+                        continue;
+                }
+                layers_to_print_range.push_back(layer);
+            }
+            if (with_step && layers_to_print_range.empty())
                 continue;
-            PrintingLayerGroup layer_group =
-                layer_group_for_print_z(
-                    group, layer_index_by_print_z, layer.print_z(), run_ctx);
-            append_layer_once(layer_group, layer, run_ctx);
-            append_layer_instance_extrusions(
-                plan, layer_group, layer, source.shift, printing_catalog_id, run_ctx);
-        }
+            /* Each physical copy has a group that later stages consume independently. */
+            throw_if_cancelled(run_ctx);
+            PrintingGroup group = plan.append_group();
+            if (!group.valid())
+                continue;
 
-        sort_layer_groups_by_print_z(group, run_ctx);
+            const uint32_t printing_catalog_id =
+                plan.find_or_add_object_instance(source.object, source.object_instance_idx);
+            group.append_printing_catalog_id(plan, printing_catalog_id);
+            std::map<coord_t, uint32_t> layer_index_by_print_z;
+
+            /* Shift object-local geometry into this physical instance's position. */
+            LayerExtrusionFilter filter;
+            if (with_step && !first_layers)
+                filter.print_z_interval = std::make_pair(z_start, z_end);
+            for (const Layer &layer : layers_to_print_range) {
+                throw_if_cancelled(run_ctx);
+                PrintingLayerGroup layer_group =
+                    layer_group_for_print_z(
+                        group, layer_index_by_print_z, layer.print_z(), run_ctx);
+                append_layer_once(layer_group, layer, run_ctx);
+                append_layer_instance_extrusions(
+                    plan, layer_group, layer, source.shift, printing_catalog_id, run_ctx, filter);
+            }
+
+            sort_layer_groups_by_print_z(group, run_ctx);
+        }
+        if (!with_step)
+            break;
+        if (first_layers) {
+            first_layers = false;
+            is_layers = true;
+        } else {
+            z_start = z_end;
+            z_end += height_step_range;
+        }
     }
 }
 
@@ -223,7 +273,7 @@ private:
     // Return the display name without effects.
     const char *name_impl() const noexcept override { return "By object"; }
     // Describe the owned group arrangement without effects.
-    const char *description_impl() const noexcept override { return "Creates one printing group per object instance."; }
+    const char *description_impl() const noexcept override { return "Creates object instance groups for whole objects or height steps."; }
     // Join the plan builder alternatives without declaring another selector.
     const char *exclusive_group_impl() const noexcept override { return "ordering.plan_builder"; }
     // Run in ordering without effects.
@@ -242,7 +292,7 @@ private:
                 keys[idx] = k_defined_config_keys[idx];
         return 4;
     }
-    // Report owned setting types so the host can validate definitions and invalidate ordering on edits.
+    // Report setting types so the host invalidates ordering when the step cap changes too.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
     {
         if (keys != nullptr) {
@@ -250,8 +300,9 @@ private:
             keys[1] = raw_used_config_key{ "complete_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[2] = raw_used_config_key{ "complete_objects_step_max_z", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[3] = raw_used_config_key{ "complete_islands", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
+            keys[4] = raw_used_config_key{ "extruder_clearance_height", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
         }
-        return 4;
+        return 5;
     }
     // Define the provider's settings and rules once without taking ownership of host storage.
     void inilialize_impl(storage_handle *) const override

@@ -41,6 +41,8 @@ tool ordering for preview ticks and legacy export. Statistics use measured
 export totals and the wipe-tower share for sidebar and placeholders.
 Validation checks print-level active settings against their selected plugin
 group providers; object/region overrides are not inspected by that guard.
+By object placement checks include positive height steps, capped by the printer
+clearance height. A positive step with an active wipe tower is rejected.
 Adhesion winding normalization reads stored contours before ordering. It preserves
 entries, properties and ordering permissions, and reports fragmented event phases
 that cannot be reversed under the generation contract.
@@ -118,6 +120,12 @@ Representative direct calls (branches are not a timeline):
 #include "Utils.hpp"
 
 namespace Slic3r {
+
+// Read the optional object step from borrowed configuration; absent settings mean zero.
+static double object_step_height(const Print &print);
+
+// Accept positive object steps, whose slices never exceed the clearance height; otherwise compare the tallest non-final instance with it.
+static inline bool sequential_print_vertical_clearance_valid(const Print &print);
 
 Print::Print() : m_pipeline_progress(this->status())
 {
@@ -1024,7 +1032,10 @@ bool Print::sequential_print_horizontal_clearance_valid(const Print &print, Poly
     std::vector<size_t> intersecting_idxs;
 
 	std::map<ObjectID, Polygon> map_model_object_to_convex_hull;
-    const double dist_grow = min_object_distance(static_cast<const ConfigBase*>(&print.full_print_config()), 0);
+    const double object_step = object_step_height(print);
+    const double clearance_height = object_step > 0. ?
+        std::min(object_step, print.config().extruder_clearance_height.value) : 0.;
+    const double dist_grow = min_object_distance(static_cast<const ConfigBase*>(&print.full_print_config()), clearance_height);
 	for (const PrintObject &print_object : print.objects()) {
         const double object_grow = (print_complete_objects(print.config()) && !print_object.config().brim_per_object) ? dist_grow : std::max(dist_grow, print_object.config().brim_width.value);
 	    assert(! print_object.model_object()->instances.empty());
@@ -1100,6 +1111,12 @@ bool Print::sequential_print_horizontal_clearance_valid(const Print &print, Poly
     return true;
 }
 
+static double object_step_height(const Print &print)
+{
+    const ConfigOption *step_option = print.full_print_config().option("complete_objects_step");
+    return step_option == nullptr ? 0. : step_option->get_float();
+}
+
 static inline bool sequential_print_vertical_clearance_valid(const Print &print)
 {
 	std::vector<const PrintInstance*> print_instances_ordered = print.sort_object_instances_by_model_order();
@@ -1109,7 +1126,10 @@ static inline bool sequential_print_vertical_clearance_valid(const Print &print)
 	auto it = std::max_element(print_instances_ordered.begin(), print_instances_ordered.end(), [](auto l, auto r) {
 		return l->print_object->height() < r->print_object->height();
 	});
-    return it == print_instances_ordered.end() || (*it)->print_object->height() <= scale_i(print.config().extruder_clearance_height.value);
+    const double object_step = object_step_height(print);
+    // With a step the nozzle descends only one slice, capped by the clearance height.
+    return it == print_instances_ordered.end() || object_step > 0. ||
+        (*it)->print_object->height() <= scale_i(print.config().extruder_clearance_height.value);
 }
 
 coord_t Print::get_object_first_layer_height(const PrintObject& object) const {
@@ -1187,10 +1207,17 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     if (unsupported_setting)
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
-    if (print_complete_objects(m_config)) {
+    const double object_step = object_step_height(*this);
+    if (print_by_object(m_config) && object_step > 0. && scale_to_layer_coord(std::min(
+        object_step, m_config.extruder_clearance_height.value)) == 0)
+        return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The By object height step capped by the extruder clearance height must be greater than zero at layer precision.") };
+    if (print_by_object(m_config) && object_step > 0. && this->has_wipe_tower())
+        return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("A wipe tower is not supported with a positive By object height step.") };
+
+    if (print_by_object(m_config)) {
     	if (! sequential_print_horizontal_clearance_valid(*this, const_cast<Polygons*>(&m_sequential_print_clearance_contours)))
             return { PrintBase::PrintValidationError::pveWrongPosition, _u8L("Some objects are too close; your extruder will collide with them.") };
-        if (print_complete_objects(m_config) && ! sequential_print_vertical_clearance_valid(*this))
+        if (! sequential_print_vertical_clearance_valid(*this))
             return { PrintBase::PrintValidationError::pveWrongPosition,_u8L("Some objects are too tall and cannot be printed without extruder collisions.") };
     }
     else
