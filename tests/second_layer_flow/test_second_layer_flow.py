@@ -299,6 +299,8 @@ def profile_text(
     extra_options: tuple[str, ...] = (),
 ) -> str:
     lines = [
+        # The checks read E: keep a Marlin export rather than the default NematX extruder axes.
+        "gcode_flavor = marlin2",
         "seam_visibility = 0",
         "layer_height = 0.2",
         "first_layer_height = 0.2",
