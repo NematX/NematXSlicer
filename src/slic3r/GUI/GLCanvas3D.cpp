@@ -145,6 +145,11 @@ static bool show_imgui_demo_window = false;
 namespace Slic3r {
 namespace GUI {
 
+namespace {
+// Read the borrowed print config without changing it; enable clearance for complete_objects or a parallel_objects_step > 0 without parallel_islands, and disable it for nonpositive steps unless whole objects are enabled.
+bool sequential_clearance_enabled(const PrintConfig &config);
+}
+
 #ifdef __WXGTK3__
 // wxGTK3 seems to simulate OSX behavior in regard to HiDPI scaling support.
 RetinaHelper::RetinaHelper(wxWindow* window) : m_window(window), m_self(nullptr) {}
@@ -1863,8 +1868,7 @@ void GLCanvas3D::set_config(const DynamicPrintConfig* config)
         if (ptech == ptSLA) {
             slot = ArrangeSettingsDb_AppCfg::slotSLA;
         } else if (ptech == ptFFF) {
-            auto co_opt = config->option<ConfigOptionBool>("complete_objects");
-            if (co_opt && co_opt->value)
+            if (print_complete_objects(*config))
                 slot = ArrangeSettingsDb_AppCfg::slotFFFSeqPrint;
             else
                 slot = ArrangeSettingsDb_AppCfg::slotFFF;
@@ -3764,6 +3768,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     if (!m_initialized || !_set_current())
         return;
 
+    const PrintConfig *print_config = current_printer_technology() == ptFFF ? &fff_print()->config() : nullptr;
+
 #if ENABLE_RETINA_GL
     const float scale = m_retina_helper->get_scale_factor();
     evt.SetX(evt.GetX() * scale);
@@ -3872,9 +3878,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 c == GLGizmosManager::EType::Scale ||
                 c == GLGizmosManager::EType::Rotate) {
                 show_sinking_contours();
-                if (current_printer_technology() == ptFFF &&
-                    (fff_print()->config().complete_objects ||
-                     (fff_print()->config().parallel_objects_step > 0 && !fff_print()->config().parallel_islands)))
+                if (print_config != nullptr && sequential_clearance_enabled(*print_config))
                     update_sequential_clearance(true);
             }
         }
@@ -4123,9 +4127,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if (cur_scale != Vec3d(1, 1, 1)) {
                 m_selection.scale(cur_scale, trafo_type);
             }
-            if (current_printer_technology() == ptFFF &&
-                (fff_print()->config().complete_objects ||
-                 (fff_print()->config().parallel_objects_step > 0 && !fff_print()->config().parallel_islands)))
+            if (print_config != nullptr && sequential_clearance_enabled(*print_config))
                 update_sequential_clearance(false);
             wxGetApp().obj_manipul()->set_dirty();
             m_dirty = true;
@@ -4528,7 +4530,7 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     if (tower_moved)
         post_event(Vec3dEvent(EVT_GLCANVAS_WIPETOWER_MOVED, std::move(wipe_tower_origin)));
 
-    if (current_printer_technology() == ptFFF && fff_print()->config().complete_objects) {
+    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -4617,7 +4619,7 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_ROTATED));
 
-    if (current_printer_technology() == ptFFF && fff_print()->config().complete_objects) {
+    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -4694,7 +4696,7 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_SCALED));
 
-    if (current_printer_technology() == ptFFF && fff_print()->config().complete_objects) {
+    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -4973,9 +4975,12 @@ void GLCanvas3D::mouse_up_cleanup()
 
 void GLCanvas3D::update_sequential_clearance(bool force_contours_generation)
 {
-    if (current_printer_technology() != ptFFF ||
-        (!fff_print()->config().complete_objects &&
-         (fff_print()->config().parallel_objects_step == 0 || fff_print()->config().parallel_islands)))
+    if (current_printer_technology() != ptFFF)
+        return;
+
+    const PrintConfig &config = fff_print()->config();
+    // Negative steps without islands must still reach clearance generation.
+    if (!sequential_clearance_enabled(config) && (config.parallel_objects_step == 0 || config.parallel_islands))
         return;
 
     if (m_layers_editing.is_enabled())
@@ -6874,7 +6879,7 @@ void GLCanvas3D::_render_selection()
 
 void GLCanvas3D::_render_sequential_clearance()
 {
-    if (current_printer_technology() != ptFFF || !fff_print()->config().complete_objects)
+    if (current_printer_technology() != ptFFF || !print_complete_objects(fff_print()->config()))
         return;
 
     if (m_layers_editing.is_enabled())
@@ -6972,8 +6977,7 @@ void GLCanvas3D::_render_overlays()
     if (m_layers_editing.last_object_id >= 0 && m_layers_editing.object_max_z() > 0.0f)
         m_layers_editing.render_overlay(*this);
 
-    const ConfigOptionBool* opt = dynamic_cast<const ConfigOptionBool*>(m_config->option("complete_objects"));
-    bool sequential_print = opt != nullptr && opt->value;
+    bool sequential_print = print_complete_objects(*m_config);
     std::vector<const ModelInstance*> sorted_instances;
     if (sequential_print) {
         for (ModelObject &model_object : m_model->objects())
@@ -7465,6 +7469,8 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     if (!print->has_skirt() && !print->has_brim())
         return;
 
+    const PrintConfig &config = print->config();
+
     //get skirt & brim color
     const ColorRGBA color = m_gcode_viewer.get_extrusion_colors()[uint8_t(GCodeExtrusionRole::Skirt)];
 
@@ -7473,7 +7479,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     for (const PrintObject& print_object : print->objects()) {
         total_layer_count = std::max(total_layer_count, print_object.total_layer_count());
     }
-    size_t skirt_height = print->has_infinite_skirt() ? total_layer_count : std::min<size_t>(print->config().skirt_height.value, total_layer_count);
+    size_t skirt_height = print->has_infinite_skirt() ? total_layer_count : std::min<size_t>(config.skirt_height.value, total_layer_count);
     if (skirt_height == 0 && print->has_brim())
         skirt_height = 1;
 
@@ -7517,6 +7523,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     GLVolume *volume = m_volumes.new_toolpath_volume(color);
     GLModel::Geometry init_data;
     init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    const bool object_skirts = sequential_clearance_enabled(config);
     for (size_t i = 0; i < skirt_height; ++ i) {
         volume->_print_zs.push_back(scale_to_layer_coord(print_zs_mm[i]));
         volume->offsets.push_back(init_data.indices_count());
@@ -7553,9 +7560,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
                 for (const PrintInstance& inst : print_object.instances()) {
                     if (!print_object.skirt().empty()) volume = ensure_volume_is_ready(volume, init_data);
                     _3DScene::extrusionentity_to_verts(print_object.skirt(), print_zs_mm[i],
-                                                       (print->config().complete_objects ||
-                                                        (print->config().parallel_objects_step > 0 &&
-                                                         !print->config().parallel_islands)) ?
+                                                       object_skirts ?
                                                            inst.shift :
                                                            Point(0, 0),
                                                        init_data);
@@ -8697,6 +8702,14 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
     if (instance_idx >= object.instances.size())
         return nullptr;
     return object.instances[instance_idx];
+}
+
+namespace {
+bool sequential_clearance_enabled(const PrintConfig &config)
+{
+    return print_complete_objects(config) ||
+        (print_by_object(config) && !(config.parallel_objects_step > 0 && config.parallel_islands));
+}
 }
 
 } // namespace GUI

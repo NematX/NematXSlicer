@@ -731,7 +731,7 @@ void generate_per_object_brim(storage_handle *storage,
     const PrintObjectConfig &brim_config = object.config();
     const Flow flow = brim_flow_for_object(print, object);
 
-    if (print.config().complete_objects || print.config().parallel_objects_step.value > 0) {
+    if (print_by_object(print.config())) {
         // PrintApply.cpp groups instances with identical transforms except for XY translation into one PrintObject.
         // Project the first real instance, then subtract its shift to obtain the shared local patch.
         const PrintInstance &first_instance = object.instances().front();

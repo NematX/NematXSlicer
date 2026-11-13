@@ -64,10 +64,7 @@ private:
 // Determine whether sequential printing adds a physical nozzle-clearance constraint.
 bool sequential_printing(const DynamicPrintConfig &config)
 {
-    const ConfigOptionBool *complete_objects = config.option<ConfigOptionBool>("complete_objects");
-    const ConfigOption *parallel_step = config.option("parallel_objects_step");
-    return (complete_objects != nullptr && complete_objects->value) ||
-        (parallel_step != nullptr && parallel_step->get_float() > 0.);
+    return print_by_object(config);
 }
 
 // Compare every transform coefficient exactly, as placement no-op detection requires.

@@ -813,6 +813,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
 
 )
 
+// Return whether printing builds each whole object before the next one.
+bool print_complete_objects(const ConfigBase &config);
+// Return whether printing builds object by object, whole or in height steps.
+bool print_by_object(const ConfigBase &config);
+
 //static inline
 double min_object_distance(const PrintConfig& config); //TODO: remove
 //static inline

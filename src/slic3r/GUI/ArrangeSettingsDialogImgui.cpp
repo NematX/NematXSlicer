@@ -152,9 +152,8 @@ void ArrangeSettingsDialogImgui::set_arrange_settings_distance_from_objects(cons
         if (tech == ptSLA) {
             dist = dd_opt->value;
         } else if (tech == ptFFF) {
-            const ConfigOptionBool *co_opt = conf.option<ConfigOptionBool>("complete_objects");
             const ConfigOption *nz_opt = conf.option("nozzle_diameter");
-            if (co_opt && co_opt->value && nz_opt) {
+            if (print_complete_objects(conf) && nz_opt) {
                 dist = float(min_object_distance(&conf, 0.));
             } else {
                 dist = 0.f;

@@ -44,6 +44,8 @@ init_categories() assigns built-in settings to their profile types;
 init_fff_params() supplies their types, defaults, validation limits and GUI text.
 These definitions describe settings; they do not hold a user's chosen values or
 generate toolpaths. Consumers copy defaults into the appropriate config store.
+print_complete_objects() and print_by_object() read optional mode settings for
+native consumers; absent switches and height steps mean disabled and zero.
 
 Built-in FFF option definitions and preset key lists. Tower options invalidate
 tower generation, and export merges their current envelopes with the cached
@@ -70,9 +72,19 @@ Representative direct calls (branches are not a timeline):
         |-- definition.add()
         |-- def->set_default_value()
         `-- def->set_enum_values()
+
+    min_object_distance()
+        `-- print_by_object()
+            `-- print_complete_objects()
 */
 
 namespace Slic3r {
+
+// Read complete_objects from the borrowed config without changing it; an absent switch returns false.
+bool print_complete_objects(const ConfigBase &config);
+
+// Read complete_objects and parallel_objects_step from the borrowed config; return true for the switch or a step > 0, treating absent options as false/zero without changing the config.
+bool print_by_object(const ConfigBase &config);
 
 // Populate borrowed preset/category key lists in the definition; copied lists remain definition-owned and allocation failures propagate.
 void init_categories(PrintConfigDef &definition);
@@ -308,6 +320,18 @@ double min_object_distance(const ConfigBase &cfg)
     return ret;
 }*/
 
+bool print_complete_objects(const ConfigBase &config)
+{
+    const ConfigOptionBool *option = config.option<ConfigOptionBool>("complete_objects");
+    return option != nullptr && option->value;
+}
+
+bool print_by_object(const ConfigBase &config)
+{
+    const ConfigOption *step = config.option("parallel_objects_step");
+    return print_complete_objects(config) || (step != nullptr && step->get_float() > 0.);
+}
+
 double min_object_distance(const PrintConfig& config)
 {
     return min_object_distance(static_cast<const ConfigBase*>(&config));
@@ -323,9 +347,7 @@ double min_object_distance(const ConfigBase *config, double ref_height /* = 0*/)
 
     double base_dist = 0;
     //std::cout << "START min_object_distance =>" << base_dist << "\n";
-    const ConfigOptionBool* opt_complete_object = config->option<ConfigOptionBool>("complete_objects");
-    const ConfigOption* opt_parallel_objects_step = config->option("parallel_objects_step");
-    if ((opt_parallel_objects_step && opt_parallel_objects_step->get_float() > 0) || (opt_complete_object && opt_complete_object->value)) {
+    if (print_by_object(*config)) {
         double skirt_dist = 0;
         double brim_dist = 0;
         try {

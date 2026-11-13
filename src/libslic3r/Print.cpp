@@ -1026,7 +1026,7 @@ bool Print::sequential_print_horizontal_clearance_valid(const Print &print, Poly
 	std::map<ObjectID, Polygon> map_model_object_to_convex_hull;
     const double dist_grow = min_object_distance(static_cast<const ConfigBase*>(&print.full_print_config()), 0);
 	for (const PrintObject &print_object : print.objects()) {
-        const double object_grow = (print.config().complete_objects && !print_object.config().brim_per_object) ? dist_grow : std::max(dist_grow, print_object.config().brim_width.value);
+        const double object_grow = (print_complete_objects(print.config()) && !print_object.config().brim_per_object) ? dist_grow : std::max(dist_grow, print_object.config().brim_width.value);
 	    assert(! print_object.model_object()->instances.empty());
 	    assert(! print_object.instances().empty());
 	    ObjectID model_object_id = print_object.model_object()->id();
@@ -1187,10 +1187,10 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     if (unsupported_setting)
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
-    if (m_config.complete_objects /*|| m_config.parallel_objects_step > 0*/) {
+    if (print_complete_objects(m_config) /*|| m_config.parallel_objects_step > 0*/) {
     	if (! sequential_print_horizontal_clearance_valid(*this, const_cast<Polygons*>(&m_sequential_print_clearance_contours)))
             return { PrintBase::PrintValidationError::pveWrongPosition, _u8L("Some objects are too close; your extruder will collide with them.") };
-        if (m_config.complete_objects && ! sequential_print_vertical_clearance_valid(*this))
+        if (print_complete_objects(m_config) && ! sequential_print_vertical_clearance_valid(*this))
             return { PrintBase::PrintValidationError::pveWrongPosition,_u8L("Some objects are too tall and cannot be printed without extruder collisions.") };
     }
     else
@@ -1213,10 +1213,10 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
         for (const PrintObjectUPtr &object : m_objects)
             total_copies_count += object->instances().size();
         // #4043
-        if (total_copies_count > 1 && ! m_config.complete_objects.value)
+        if (total_copies_count > 1 && !print_complete_objects(m_config))
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Only a single object may be printed at a time in Spiral Vase mode. "
                      "Either remove all but the last object, or enable sequential mode by \"complete_objects\".") };
-        assert(m_objects.size() == 1 || config().complete_objects.value);
+        assert(m_objects.size() == 1 || print_complete_objects(config()));
         if (m_objects.front()->all_regions().size() > 1)
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The Spiral Vase option can only be used when printing single material objects, and without any modifiers that may break the vase.") };
     }
@@ -1676,7 +1676,7 @@ void Print::process() {
     // Preview ticks and the legacy exporter consume this ordering cache.
     if (this->should_execute_step(STEP_WIPETOWER)) {
         m_tool_orderings.clear();
-        bool is_separate_objects = this->config().complete_objects.value || config().parallel_objects_step.value > 0;
+        bool is_separate_objects = print_by_object(config());
         if (config().parallel_objects_step.value > 0 && config().parallel_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
             is_separate_objects = false;
         }
@@ -1897,14 +1897,14 @@ bool Print::has_wipe_tower() const
     if (config().nozzle_diameter.size() <= 1 || config().spiral_vase.value)
         return false;
     for (const PrintObject &object : objects())
-        if (!object.instances().empty() && ((config().complete_objects.value && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value))
+        if (!object.instances().empty() && ((print_complete_objects(config()) && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value))
             return true;
     return false;
 }
 
 // Inspect borrowed settings outside complete-object/vase modes; return global eligibility independent of parallel scheduling without changing geometry, ownership or pipeline state.
 bool Print::has_global_wipe_tower() const {
-    if (config().nozzle_diameter.size() <= 1 || !m_default_object_config.wipe_tower || config().complete_objects ||
+    if (config().nozzle_diameter.size() <= 1 || !m_default_object_config.wipe_tower || print_complete_objects(config()) ||
         config().spiral_vase.value) {
         return false;
     }

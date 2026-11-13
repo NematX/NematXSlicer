@@ -196,8 +196,7 @@ bool printer_gcode_empty(const DynamicPrintConfig &session, const char *key)
 
 bool sequential_printing(const DynamicPrintConfig &session)
 {
-    const ConfigOptionBool *option = session.option<ConfigOptionBool>("complete_objects");
-    return option != nullptr && option->value;
+    return print_complete_objects(session);
 }
 
 } // namespace

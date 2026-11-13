@@ -327,7 +327,7 @@ void run_step(Orchestrator &orchestrator, Print &print)
     // so the scope of the pass is always rebuilt when one of them changes.
     // The Z step is read like the support plugins do (SupportParams: the z_step option of the print config, in mm).
     const double z_step = print.config().z_step.value;
-    if (print.config().complete_objects.value || print.config().parallel_objects_step.value > 0)
+    if (print_by_object(print.config()))
         for (PrintObject *object : objects)
             align_support_z({ object }, z_step);
     else

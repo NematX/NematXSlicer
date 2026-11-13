@@ -87,7 +87,7 @@ PlanFacts summarize_plan(const PrintingPlan *plan)
 int32_t object_layer_count(const Print &print)
 {
     int32_t count = 0;
-    if (print.config().complete_objects.value) {
+    if (print_complete_objects(print.config())) {
         for (const PrintObject &object : print.objects()) {
             std::vector<coord_t> z_values;
             for (const Layer &layer : object.layers())

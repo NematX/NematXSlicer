@@ -712,7 +712,7 @@ void ToolOrdering::mark_skirt_layers(const PrintConfig &config, coord_t max_laye
 void ToolOrdering::assign_custom_gcodes(const Print &print)
 {
 	// Only valid for non-sequential print.
-	assert(! print.config().complete_objects.value);
+	assert(!print_complete_objects(print.config()));
 
 	const CustomGCode::Info	&custom_gcode_per_print_z = print.model().custom_gcode_per_print_z;
 	if (custom_gcode_per_print_z.gcodes.empty())
