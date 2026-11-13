@@ -62,6 +62,7 @@ worker callback, so their mutable caches are not shared between workers.
 */
 
 #include "AvoidCrossingPerimetersTravel.hpp"
+#include "PerimeterTravelPlanner.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -92,6 +93,9 @@ namespace {
 using namespace TravelConnection;
 namespace AC = AvoidCrossing;
 namespace Work = PluginCommon::work;
+
+// Publish the router inputs read by both route generation and retraction planning.
+int32_t perimeter_travel_config_keys(raw_used_config_key *keys) noexcept;
 
 const char *const k_dependencies[] = {
     "layer_extrusion_edit.transition_scope.default",
@@ -143,6 +147,13 @@ public:
                               const TravelEndpoint &target,
                               extruder_index_t extruder_id);
 
+    // Classify a print-space route against the perimeter contours of the target layer, keeping
+    // its tops. Missing or different object provenance counts as a crossing.
+    bool crosses(const TravelEndpoint &source,
+                 const TravelEndpoint &target,
+                 extruder_index_t extruder_id,
+                 const std::vector<c_point> &path);
+
 private:
     // Resolve regional activation only for valid object instances, probing inside on a boundary.
     bool endpoint_enables_avoidance(const TravelEndpoint &endpoint) const;
@@ -167,6 +178,8 @@ private:
     const plugin_run_context *m_run_ctx = nullptr;
     AC::LayerInputCache m_inputs;
     std::map<RouterKey, std::unique_ptr<RoutingState>> m_routers;
+    // Retraction filtering keeps tops, so it uses its own crossing cache per layer and tool.
+    std::map<RouterKey, AC::PerimeterCrossing> m_perimeter_crossings;
 };
 
 class AvoidCrossingPerimetersTravel : public PluginBase
@@ -376,6 +389,41 @@ std::vector<c_point> LayerTravelPlanner::path(const TravelEndpoint &source,
     return path;
 }
 
+bool LayerTravelPlanner::crosses(const TravelEndpoint &source,
+                                 const TravelEndpoint &target,
+                                 const extruder_index_t extruder_id,
+                                 const std::vector<c_point> &path)
+{
+    throw_if_cancelled(m_run_ctx);
+    if (!source.region_island.valid() || !target.region_island.valid() ||
+        source.region_island.region_count() == 0 || target.region_island.region_count() == 0 ||
+        source.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE ||
+        source.printing_catalog_id != target.printing_catalog_id || path.size() < 2)
+        return true;
+    const Layer source_layer = source.region_island.region(0).layer();
+    const Layer target_layer = target.region_island.region(0).layer();
+    const Object object = target_layer.object();
+    if (source_layer.object().handle() != object.handle())
+        return true;
+    if (target.printing_catalog_id >= m_plan.object_instance_count())
+        throw std::runtime_error("A retraction refers to an invalid object instance.");
+    const uint64_t instance = m_plan.object_instance(target.printing_catalog_id).object_instance_idx();
+    if (instance >= object.instance_count())
+        throw std::runtime_error("A retraction refers to an invalid object copy.");
+    const c_point shift = object.instance_shift(static_cast<size_t>(instance));
+    Work::Polyline local;
+    for (const c_point point : path)
+        local.points.push_back(Work::Point{point.x - shift.x, point.y - shift.y});
+
+    const AC::Input &input = input_for(target_layer);
+    const double nozzle_diameter = m_print_config.vector_float_or_default("nozzle_diameter", extruder_id, 0.4);
+    AC::PerimeterCrossing &crossing = m_perimeter_crossings[RouterKey{target_layer.handle(), extruder_id}];
+    crossing.prepare(m_run_ctx->plugin_storage, *input.target, extruder_id,
+                     std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5)),
+                     [this]() { throw_if_cancelled(m_run_ctx); }, false);
+    return crossing.can_cross_perimeter(local, true);
+}
+
 AvoidCrossingPerimetersTravel &AvoidCrossingPerimetersTravel::instance(orchestrator_handle *orchestrator)
 {
     static AvoidCrossingPerimetersTravel plugin(orchestrator);
@@ -428,6 +476,11 @@ int32_t AvoidCrossingPerimetersTravel::exclusive_group_priority_impl() const noe
 }
 
 int32_t AvoidCrossingPerimetersTravel::used_config_keys(raw_used_config_key *keys) const noexcept
+{
+    return perimeter_travel_config_keys(keys);
+}
+
+int32_t perimeter_travel_config_keys(raw_used_config_key *keys) noexcept
 {
     static const raw_used_config_key used_keys[] = {
         {"avoid_crossing_perimeters", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -499,6 +552,35 @@ void AvoidCrossingPerimetersTravel::run_impl(const plugin_run_context *run_ctx) 
 }
 
 } // namespace
+
+// Keep the provider's planner private while sharing its worker caches.
+struct PerimeterTravelPlanner::Impl
+{
+    LayerTravelPlanner planner;
+    // Keep the planner alive for all queries from one layer worker.
+    Impl(const Print &print, const PrintingPlan &plan, const plugin_run_context *ctx) : planner(print, plan, ctx) {}
+};
+
+PerimeterTravelPlanner::PerimeterTravelPlanner(const Print &print, const PrintingPlan &plan,
+    const plugin_run_context *ctx) : m_impl(std::make_unique<Impl>(print, plan, ctx)) {}
+PerimeterTravelPlanner::~PerimeterTravelPlanner() = default;
+
+int32_t PerimeterTravelPlanner::used_config_keys(raw_used_config_key *keys) noexcept
+{
+    return perimeter_travel_config_keys(keys);
+}
+
+std::vector<c_point> PerimeterTravelPlanner::path(const TravelEndpoint &source,
+    const TravelEndpoint &target, extruder_index_t tool)
+{
+    return m_impl->planner.path(source, target, tool);
+}
+
+bool PerimeterTravelPlanner::crosses(const TravelEndpoint &source, const TravelEndpoint &target,
+    extruder_index_t tool, const std::vector<c_point> &path)
+{
+    return m_impl->planner.crosses(source, target, tool, path);
+}
 
 void register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle *orchestrator)
 {

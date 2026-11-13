@@ -447,6 +447,7 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/FirstLayerFan.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.hpp
+	Plugins/LayerExtrusionEdit/PerimeterTravelPlanner.hpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.hpp
 	Plugins/LayerExtrusionEdit/SlowdownSolver.cpp

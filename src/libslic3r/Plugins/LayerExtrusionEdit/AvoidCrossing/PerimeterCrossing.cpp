@@ -42,14 +42,17 @@ namespace pw = PluginCommon::polygon_work;
 namespace clipper = PluginCommon::clipper;
 
 void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer,
-                                size_t extruder, coord_t radius, std::function<void()> cancel)
+                                size_t extruder, coord_t radius, std::function<void()> cancel,
+                                bool exclude_top_surfaces)
 {
     m_cancel = cancel ? std::move(cancel) : []() {};
-    if (m_cache.layer == &layer && m_cache.extruder == extruder && m_cache.radius == radius)
+    if (m_cache.layer == &layer && m_cache.extruder == extruder && m_cache.radius == radius &&
+        m_cache.exclude_top_surfaces == exclude_top_surfaces)
         return;
     m_cache.layer = &layer;
     m_cache.extruder = extruder;
     m_cache.radius = radius;
+    m_cache.exclude_top_surfaces = exclude_top_surfaces;
     pw::ExPolygons slices = clipper::union_ex(storage, layer.lslices);
     pw::ExPolygons offset_slices;
     if (layer.support) {
@@ -82,8 +85,11 @@ void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer
             slices = clipper::intersection_ex(storage, slices, clipper::offset_ex(storage, clip, SCALED_EPSILON * 10));
         }
         offset_slices = clipper::offset_ex(storage, slices, -radius * 1.5f);
-        // Tops are excluded even when no outer contour would be crossed.
+        // Tops are excluded even when no outer contour would be crossed, unless
+        // the caller tests only real perimeter contours.
         for (const RegionInput &region : layer.regions) {
+            if (!exclude_top_surfaces)
+                break;
             m_cancel();
             offset_slices = clipper::diff_ex(storage, offset_slices, region.top_surfaces);
             slices = clipper::diff_ex(storage, slices, region.top_surfaces);

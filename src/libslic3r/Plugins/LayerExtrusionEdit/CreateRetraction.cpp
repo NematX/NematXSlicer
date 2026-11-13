@@ -10,14 +10,25 @@ Semantic retraction planning for compact PrintingPlan scopes
 The transition producer has already decided where process boundaries exist.
 This module resolves the retraction settings at those boundaries and appends
 firmware-neutral E-axis requests to the existing ordered phases. Local scope
-pairs use their owner views directly. Only layer-edge values are copied into a
-small scalar cache so parallel workers never inspect or mutate another layer.
+pairs use their owner views directly. Layer-edge snapshots contain endpoint
+values and provenance into immutable sliced geometry, never extrusion-tree
+views. Parallel workers mutate only their own layer's process phases.
+
+    setup_run_impl -> publish endpoint and regional provenance snapshots
+    run_impl -> decide_boundary: preview the selected built-in travel route
+        -> perimeter crossing test: suppress only hidden ordinary XY travels
+        -> write_outgoing_retraction / write_incoming_retraction: E-axis events
+
+The preview reuses the perimeter travel provider's router before any wipe is
+created. Missing provenance and unknown travel providers retain retraction;
+explicit requests, tool changes and configured layer changes are not suppressed.
 */
 
 #include "CreateRetraction.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -25,6 +36,7 @@ small scalar cache so parallel workers never inspect or mutate another layer.
 #include <vector>
 
 #include "ExtrusionScopeHelpers.hpp"
+#include "PerimeterTravelPlanner.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_extrusion_edit.h"
@@ -121,6 +133,9 @@ struct BoundaryState
     EPropertyModifier modifier{};
     extruder_index_t extruder_id = EXTRUDER_ID_UNKNOWN;
     double normal_retract_target = 0.0;
+    TravelConnection::TravelEndpoint travel;
+    bool first_object_layer = false;
+    bool has_hidden_interior = false;
 };
 
 /* Immutable values published by one setup_run worker. */
@@ -205,7 +220,7 @@ BoundaryState boundary_state(const ScopeEntity &scope,
                              bool resolve_normal_target,
                              const plugin_run_context *run_ctx);
 
-/* Return the direct XY gap used by retract_before_travel. */
+/* Return direct XY distance for discontinuity checks and unknown providers. */
 double planar_gap_mm(const BoundaryState &source,
                      const BoundaryState &target);
 
@@ -218,7 +233,10 @@ RetractionDecision decide_boundary(const Config &print_config,
                                    const BoundaryState &source,
                                    const BoundaryState &target,
                                    bool layer_change,
-                                   bool actual_toolchange);
+                                   bool actual_toolchange,
+                                   AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner &planner,
+                                   bool known_travel_provider,
+                                   bool perimeter_avoiding);
 
 /* Configure one empty event with a process role and zero physical flow. */
 void set_event_attributes(MutableExtrusionEntity event,
@@ -552,6 +570,20 @@ BoundaryState boundary_state(
     state.position = endpoint.position;
     state.modifier = endpoint.modifier;
     state.extruder_id = scope.tool_group.extruder_id();
+    // Immutable sliced provenance may be read by either side of a layer edge;
+    // no extrusion-tree handle escapes this endpoint snapshot.
+    state.travel.position = {endpoint.position.x, endpoint.position.y, endpoint.position.z, true};
+    state.travel.region_island = scope.printing_extrusion.region_island();
+    state.travel.printing_catalog_id = scope.printing_extrusion.printing_catalog_id();
+    state.travel.interior_point = endpoint.interior_point;
+    state.travel.has_interior_point = endpoint.has_interior_point;
+    if (state.travel.region_island.valid() && state.travel.region_island.region_count() > 0) {
+        const LayerRegion region = state.travel.region_island.region(0);
+        state.first_object_layer = region.layer().bottom_z() <= SCALED_EPSILON;
+        const Config regional = region.print_region().config();
+        state.has_hidden_interior = regional.get("fill_density").get_float() > 0. ||
+            regional.bool_or_default("avoid_crossing_perimeters", false);
+    }
     if (resolve_normal_target)
         state.normal_retract_target = normal_retract_target(
             print_config, plan, scope, endpoint, run_ctx);
@@ -585,7 +617,10 @@ RetractionDecision decide_boundary(const Config &print_config,
                                    const BoundaryState &source,
                                    const BoundaryState &target,
                                    const bool layer_change,
-                                   const bool actual_toolchange)
+                                   const bool actual_toolchange,
+                                   AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner &planner,
+                                   const bool known_travel_provider,
+                                   const bool perimeter_avoiding)
 {
     if (!source.valid || !target.valid)
         throw std::invalid_argument("Retraction decisions need two valid scope endpoints.");
@@ -596,23 +631,38 @@ RetractionDecision decide_boundary(const Config &print_config,
         target.modifier.toolchange_retraction != 0;
     const extruder_index_t retracting_extruder = source.extruder_id != EXTRUDER_ID_UNKNOWN ?
         source.extruder_id : target.extruder_id;
-    const double gap = planar_gap_mm(source, target);
+    double gap = planar_gap_mm(source, target);
     const double minimum_gap = print_config.vector_float_or_default(
         "retract_before_travel", retracting_extruder, 0.0);
     const bool retract_on_layer = print_config.vector_bool_or_default(
         "retract_layer_change", retracting_extruder, false);
     const bool discontinuous = gap >= unscaled(SCALED_EPSILON);
-
-    decision.requested = decision.toolchange_retraction ||
+    const bool forced = decision.toolchange_retraction ||
         source.modifier.enforce_retraction != 0 ||
         target.modifier.enforce_retraction != 0 ||
-        (discontinuous && gap >= minimum_gap) ||
         (layer_change && retract_on_layer);
+    const bool crossing_only = print_config.bool_or_default("only_retract_when_crossing_perimeters", false) &&
+        !(target.first_object_layer && print_config.bool_or_default("enforce_retract_first_layer", true));
+    std::vector<c_point> route;
+    if (!forced && discontinuous && known_travel_provider && (perimeter_avoiding || crossing_only)) {
+        route = perimeter_avoiding ? planner.path(source.travel, target.travel, retracting_extruder) :
+            TravelConnection::straight_path(source.travel, target.travel, retracting_extruder);
+        gap = 0.;
+        for (size_t i = 1; i < route.size(); ++i)
+            gap += unscaled(c_point_distance_to(route[i - 1], route[i]));
+    }
+    decision.requested = forced || (discontinuous && gap >= minimum_gap);
     if (source.modifier.disable_retraction != 0 ||
         target.modifier.disable_retraction != 0)
         decision.requested = false;
     if (!decision.requested)
         return decision;
+
+    // Explicit requests and tool/layer transitions retain their own semantics.
+    // Only an ordinary XY-travel request may be suppressed as hidden interior.
+    if (!forced && crossing_only && target.has_hidden_interior && known_travel_provider &&
+        !planner.crosses(source.travel, target.travel, retracting_extruder, route))
+        return RetractionDecision{};
 
     decision.target = decision.toolchange_retraction ?
         print_config.vector_float_or_default(
@@ -776,11 +826,16 @@ int32_t CreateRetraction::used_config_keys(raw_used_config_key *keys) const noex
         {"retract_length_toolchange", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"retract_restart_extra", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"retract_restart_extra_toolchange", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"print_retract_length", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+        {"print_retract_length", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"only_retract_when_crossing_perimeters", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"enforce_retract_first_layer", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"fill_density", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
     };
     if (keys != nullptr)
         std::copy(std::begin(used_keys), std::end(used_keys), keys);
-    return int32_t(sizeof(used_keys) / sizeof(used_keys[0]));
+    const int32_t count = int32_t(sizeof(used_keys) / sizeof(used_keys[0]));
+    return count + AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner::used_config_keys(
+        keys == nullptr ? nullptr : keys + count);
 }
 
 int32_t CreateRetraction::defined_config_keys(const char **keys) const noexcept
@@ -932,11 +987,20 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
     PrintingLayerGroup layer(ctx->layer_group);
     PrintingPlan plan(ctx->plan);
     const Config print_config = Print(ctx->print).config();
+    AvoidCrossingPerimetersTravelPlugin::PerimeterTravelPlanner planner(Print(ctx->print), plan, run_ctx);
+    const orchestrator_plugin_handle *travel_provider = orchestrator_select_plugin(
+        m_orchestrator, print_config.handle(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
+    const char *travel_id = orchestrator_plugin_id(travel_provider);
+    const bool perimeter_avoiding = travel_id != nullptr &&
+        std::strcmp(travel_id, "layer_extrusion_edit.travel.avoid_crossing_perimeters") == 0;
+    const bool known_travel_provider = perimeter_avoiding || (travel_id != nullptr &&
+        std::strcmp(travel_id, "layer_extrusion_edit.travel.default") == 0);
 
     PrintingEntityPropertyTraversal<PrintingExtrusionScopeProperty> traversal(
         m_scope_property,
         retraction_state_definition(),
-        [this, &print_config, &plan, &progress = progress(), preceding, following, run_ctx]
+        [this, &print_config, &plan, &planner, known_travel_provider, perimeter_avoiding,
+         &progress = progress(), preceding, following, run_ctx]
         (ScopeEntity *previous, ScopeEntity *next) {
             throw_if_cancelled(run_ctx);
             if (previous == nullptr && next != nullptr) {
@@ -951,7 +1015,7 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                         *next, print_config, plan, m_scope_property, true, false, run_ctx);
                     const RetractionDecision decision = decide_boundary(
                         print_config, preceding->last, target, true,
-                        incoming_toolchange);
+                        incoming_toolchange, planner, known_travel_provider, perimeter_avoiding);
                     write_incoming_retraction(*next, decision, m_scope_property, run_ctx);
                 }
                 progress.increment();
@@ -975,7 +1039,8 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                         *next, print_config, plan, m_scope_property, true, false, run_ctx);
                     const RetractionDecision decision = decide_boundary(
                         print_config, source, target, false,
-                        boundary_toolchange(*previous->property, *next->property));
+                        boundary_toolchange(*previous->property, *next->property),
+                        planner, known_travel_provider, perimeter_avoiding);
                     write_outgoing_retraction(*previous, decision, m_scope_property, run_ctx);
                     write_incoming_retraction(*next, decision, m_scope_property, run_ctx);
                 }
@@ -994,7 +1059,7 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
                     *previous, print_config, plan, m_scope_property, false, true, run_ctx);
                 const RetractionDecision decision = decide_boundary(
                     print_config, source, following->first, true,
-                    outgoing_toolchange);
+                    outgoing_toolchange, planner, known_travel_provider, perimeter_avoiding);
                 write_outgoing_retraction(*previous, decision, m_scope_property, run_ctx);
             }
         },

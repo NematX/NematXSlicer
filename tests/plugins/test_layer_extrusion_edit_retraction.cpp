@@ -26,6 +26,14 @@ the production stage validates them; plugin execution never repairs these trees.
 
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/LayerRegion.hpp"
+#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
+#include "libslic3r/Steps/StepPostSlicing.hpp"
+#include "libslic3r/Steps/StepSlicing.hpp"
+#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
+#include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 
 namespace {
 
@@ -37,6 +45,159 @@ using slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope;
 constexpr const char *ENTRY_STATE_PLUGIN =
     "layer_extrusion_edit.entry_state.default";
 constexpr const char *TRAVEL_PLUGIN = "layer_extrusion_edit.travel.default";
+
+TEST_CASE("CreateRetraction declares the settings used by crossing decisions",
+          "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Plugin *plugin = Orchestrator::instance().get_plugin(RETRACTION_PLUGIN);
+    REQUIRE(plugin != nullptr);
+    const std::vector<Plugin::UsedConfigKey> keys = plugin->get_used_config_keys();
+    for (const char *name : {"only_retract_when_crossing_perimeters", "enforce_retract_first_layer",
+                            "fill_density", "avoid_crossing_perimeters", "nozzle_diameter"}) {
+        CAPTURE(name);
+        CHECK(std::any_of(keys.begin(), keys.end(), [name](const Plugin::UsedConfigKey &key) {
+            return key.key == name;
+        }));
+    }
+}
+
+TEST_CASE("CreateRetraction honors interior crossing suppression and its first-layer exemption",
+          "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool crossing_only = GENERATE(false, true);
+    const bool first_layer = GENERATE(false, true);
+    const bool enforce_first_layer = GENERATE(false, true);
+    CAPTURE(crossing_only, first_layer, enforce_first_layer);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"only_retract_when_crossing_perimeters", crossing_only ? "1" : "0"},
+        {"enforce_retract_first_layer", enforce_first_layer ? "1" : "0"},
+        {"retract_before_travel", "0.5"}, {"retract_layer_change", "0"},
+        {"retract_length", "2"}, {"fill_density", "20%"}
+    });
+    Print print;
+    Model model;
+    Slic3r::Test::init_print(
+        {Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    Steps::StepPostSlicing::run_step(orchestrator, print);
+    PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() > 1);
+    Layer &source_layer = object.layer(first_layer ? 0 : 1);
+    LayerSliceIsland &island = source_layer.island(0);
+    LayerRegionIsland &region = island.get_or_add_region_island(island.regions(), 0);
+    const Point center = get_extents(source_layer.lslices()).center() + object.instances().front().shift;
+
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.clear();
+    const PrintingObjectInstanceId catalog_id = plan.find_or_add_object_instance(object, 0);
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    PrintingLayerGroup &layer = plan.groups.back().layers.back();
+    layer.print_z = source_layer.scaled_print_z();
+    layer.tool_groups.emplace_back();
+    PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    for (const double x : {-3., 1.}) {
+        std::unique_ptr<ExtrusionPath> path = make_print_path(0., 1.);
+        path->set_polyline(ArcPolyline(Points{
+            center + Point(scale_i(x), 0), center + Point(scale_i(x + 1.), 0)}));
+        append_printing_extrusion(tool, path->clone_canonical());
+        tool.extrusions.back().region_island = &region;
+        tool.extrusions.back().printing_catalog_id = catalog_id;
+    }
+
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
+    const OrderedExtrusionScope source(
+        find_scope(entity_view(*tool.extrusions.front().root)), scope_property_key());
+    const OrderedExtrusionScope target(
+        find_scope(entity_view(*tool.extrusions.back().root)), scope_property_key());
+    std::vector<std::string> outgoing;
+    std::vector<std::string> incoming;
+    collect_transition_events(source.after().readonly(), outgoing);
+    collect_transition_events(target.before().readonly(), incoming);
+    const bool expected = !crossing_only || (first_layer && enforce_first_layer);
+    CHECK(outgoing == (expected ? std::vector<std::string>{"retract"} : std::vector<std::string>{}));
+    CHECK(incoming == (expected ? std::vector<std::string>{"unretract"} : std::vector<std::string>{}));
+}
+
+TEST_CASE("CreateRetraction classifies a routed hole crossing without bypassing thresholds or modifiers",
+          "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool avoiding = GENERATE(false, true);
+    const int mode = GENERATE(0, 1, 2, 3);
+    CAPTURE(avoiding, mode);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"only_retract_when_crossing_perimeters", "1"}, {"enforce_retract_first_layer", "0"},
+        {"avoid_crossing_perimeters", avoiding ? "1" : "0"}, {"avoid_crossing_not_first_layer", "0"},
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"external_perimeter_extrusion_width", "1.2"},
+        {"retract_before_travel", mode == 1 ? "100" : "0.5"}, {"retract_layer_change", "0"},
+        {"retract_length", "2"}, {"fill_density", "20%"}
+    });
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
+    Polygon contour({Point(0, 0), Point(scale_i(30.), 0), Point(scale_i(30.), scale_i(30.)), Point(0, scale_i(30.))});
+    contour.make_counter_clockwise();
+    Polygon hole({Point(scale_i(10.), scale_i(10.)), Point(scale_i(20.), scale_i(10.)),
+                  Point(scale_i(20.), scale_i(20.)), Point(scale_i(10.), scale_i(20.))});
+    hole.make_clockwise();
+    const ExPolygons subject{ExPolygon(std::move(contour), {std::move(hole)})};
+    PluginStorage storage;
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&print.object(0)));
+    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        reinterpret_cast<storage_handle *>(&storage), print_view, object_view,
+        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
+        scale_i(.2), scale_i(.2), scale_i(.1));
+    REQUIRE(built.created);
+    Layer &native_layer = *reinterpret_cast<Layer *>(const_cast<layer_handle *>(built.layer.handle()));
+    ApiInternal::LayerIslandAccess::perimeter_slices_mutable(native_layer.island(0)) = subject;
+    const slic3r_api::LayerRegionIsland region = built.layer.island(0).get_or_create_full_region_island(0);
+    REQUIRE(region.valid());
+    PrintingPlan &plan = print.mutable_printing_plan();
+    const PrintingObjectInstanceId catalog = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    PrintingLayerGroup &layer = plan.groups.back().layers.back();
+    layer.print_z = scale_i(.2);
+    layer.tool_groups.emplace_back();
+    PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    const c_point shift = object_view.instance_shift(0);
+    for (const double x : {4., 25.}) {
+        std::unique_ptr<ExtrusionPath> path = make_print_path(0., 1.);
+        path->set_polyline(ArcPolyline(Points{Point(scale_i(x) + shift.x, scale_i(15.) + shift.y),
+            Point(scale_i(x + 1.) + shift.x, scale_i(15.) + shift.y)}));
+        if (mode == 2) path->get_or_add_property<ExtrusionPropertyModifier>().enforce_retraction = 1;
+        if (mode == 3) path->get_or_add_property<ExtrusionPropertyModifier>().disable_retraction = 1;
+        append_printing_extrusion(tool, path->clone_canonical());
+        tool.extrusions.back().region_island = reinterpret_cast<const LayerRegionIsland *>(region.handle());
+        tool.extrusions.back().printing_catalog_id = catalog;
+    }
+    const char *travel = avoiding ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN;
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, travel});
+    const OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)), scope_property_key());
+    const OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions.back().root)), scope_property_key());
+    std::vector<std::string> outgoing;
+    std::vector<std::string> incoming;
+    collect_transition_events(source.after().readonly(), outgoing);
+    collect_transition_events(target.before().readonly(), incoming);
+    const bool expected = mode == 2 || (mode == 0 && !avoiding);
+    CHECK(outgoing == (expected ? std::vector<std::string>{"retract"} : std::vector<std::string>{}));
+    CHECK(incoming == (expected ? std::vector<std::string>{"unretract"} : std::vector<std::string>{}));
+    if (avoiding)
+        CHECK(target.travel().segment_count() > 1);
+    else
+        CHECK(target.travel().segment_count() == 1);
+}
 
 /* Return the second printable extrusion used as the target in these fixtures. */
 PrintingExtrusion &target_extrusion(Print &print)

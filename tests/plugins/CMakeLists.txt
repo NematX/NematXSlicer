@@ -518,6 +518,10 @@ set_tests_properties(infill_gap_fill PROPERTIES LABELS "infill;gap-fill" TIMEOUT
 add_test(NAME support_interface_gap_fill COMMAND ${_TEST_NAME}_tests "[support-gap-fill]")
 set_tests_properties(support_interface_gap_fill PROPERTIES LABELS "support;gap-fill" TIMEOUT 900)
 
+# Retraction filtering has its own gate, independent of unrelated plan fixtures.
+add_test(NAME retraction_crossing_policy COMMAND ${_TEST_NAME}_tests "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
+set_tests_properties(retraction_crossing_policy PROPERTIES LABELS "retraction" TIMEOUT 180)
+
 # The export gate uses the production registry and the host's default plugins.
 if(TARGET Slic3r_app_console)
     find_package(Python3 QUIET COMPONENTS Interpreter)
@@ -529,5 +533,12 @@ if(TARGET Slic3r_app_console)
                 --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
                 --output "${CMAKE_BINARY_DIR}/temp/infill-gap-fill-export")
         set_tests_properties(infill_gap_fill_export PROPERTIES LABELS "infill;gap-fill;plugin-e2e" TIMEOUT 300)
+        add_test(NAME retraction_crossing_export
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_retraction_crossing_export.py"
+                --host "$<TARGET_FILE:Slic3r_app_console>"
+                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
+                --output "${CMAKE_BINARY_DIR}/temp/f21/retraction-exports")
+        set_tests_properties(retraction_crossing_export PROPERTIES LABELS "retraction;plugin-e2e" TIMEOUT 900)
     endif()
 endif()
