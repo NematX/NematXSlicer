@@ -4,6 +4,8 @@ A collection of plugins for NematXSlicer.
 
 ## Plugins
 
+- [nematx_top_surface_retraction](plugins/top_surface_retraction/README.md): travel retraction over exposed top areas
+
 - [nematx_second_layer_flow](doc/nematx_second_layer_flow.md)
 - [nematx_corner_stretch](doc/nematx_corner_stretch.md)
 - [nematx_infill_aroundholes](plugins/infill_aroundholes/README.md)

@@ -1,0 +1,8 @@
+[plugin]
+id = @PLUGIN_ID@
+name = @PLUGIN_NAME@
+full_name = @PLUGIN_NAME@
+description = @PLUGIN_DESCRIPTION@
+slicer = SuperSlicer
+internal = 0
+bundled_exact = 0
