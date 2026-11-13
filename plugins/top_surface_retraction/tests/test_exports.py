@@ -108,6 +108,9 @@ def main():
             metadata.read(destination / "version.ini", encoding="utf-8")
             activation.set("installed", "nematx-top-surface-retraction", metadata["plugin"]["package_version"])
             activation.set("installed", "nematx-top-surface-retraction.slicer_version", metadata["plugin"]["slicer_version"])
+            # The host defaults may have no package association yet.
+            if not activation.has_section("plugin_packages"):
+                activation.add_section("plugin_packages")
             activation.set("plugin_packages", PLUGIN, "nematx-top-surface-retraction")
         with (data / "plugins/activated.ini").open("w", encoding="utf-8") as stream:
             activation.write(stream)
