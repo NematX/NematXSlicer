@@ -63,6 +63,7 @@
 #include "libslic3r/Config/PresetBundle.hpp"
 #include "libslic3r/SLA/SLAPrintConfig.hpp"
 #include "libslic3r/Format/3mf.hpp"
+
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/Format/BambuConfigExport.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -71,6 +72,10 @@
 
 /*
 Tests for plugin-owned temporary configurations.
+Graph inverse checks use local point arrays and verify that internal evaluation types
+cannot enter persisted settings or public C type conversions.
+  Graph inverse test -> create_inverse / inverse_interpolate -> native interpolation
+                     -> deserialize / C vector setter -> public-type validation
 Serialization checks use options that throw or change length between calls to verify
 that C functions report failures and C++ views throw instead of returning empty text.
 Call graph for these checks:
@@ -435,6 +440,90 @@ TEST_CASE("Temporary configs create options and clear only dynamic configs", "[p
     CHECK(config_get_or_add_mutable(static_handle, "temporary", SLIC3R_CONFIG_OPTION_INT) == nullptr);
     CHECK(static_config.keys().size() == static_key_count);
     CHECK(static_config.option<Slic3r::ConfigOptionInt>("value")->value == 17);
+}
+
+// Check inverse graph evaluation and its exclusion from persistent and C API graph types.
+TEST_CASE("Graph inverses preserve point thresholds without exposing the internal step type",
+          "[plugins][config][graph]")
+{
+    using Slic3r::GraphData;
+    const GraphData square(0, 3, GraphData::SQUARE, {{0., 0.}, {1., 1.}, {2., 2.}});
+    const GraphData inverse = square.create_inverse();
+    CHECK(inverse.type == GraphData::SQUARE_INVERSE);
+    for (const double y : {0., 1., 2.})
+        CHECK(square.inverse_interpolate(y) == y);
+    CHECK(square.inverse_interpolate(0.5) == 1.);
+    CHECK(square.inverse_interpolate(1.5) == 2.);
+    CHECK(square.inverse_interpolate(0.99995) == 1.);
+    CHECK(square.inverse_interpolate(1.00005) == 2.);
+    CHECK(square.inverse_interpolate(-1.) == 0.);
+    CHECK(square.inverse_interpolate(3.) == 2.);
+    CHECK(square.interpolate(0.5) == 0.);
+    CHECK(graph_inverse_interpolate(reinterpret_cast<const graph_data_handle *>(&square), 0.5) == 1.);
+    CHECK(graph_data_type(reinterpret_cast<const graph_data_handle *>(&inverse)) == RAW_GRAPH_TYPE_NONE);
+
+    // Double inversion checks stored data and type only, not exact inversion of a spline curve.
+    for (const GraphData::GraphType type : {GraphData::SQUARE, GraphData::SQUARE_INVERSE,
+                                          GraphData::LINEAR, GraphData::SPLINE}) {
+        const GraphData original(1, 3, type, {{0., 0.}, {2., 1.}, {4., 3.}, {6., 5.}});
+        const GraphData twice = original.create_inverse().create_inverse();
+        CHECK(twice.type == original.type);
+        CHECK(twice.graph_points == original.graph_points);
+        CHECK(twice.begin_idx == original.begin_idx);
+        CHECK(twice.end_idx == original.end_idx);
+    }
+    const GraphData linear(0, 3, GraphData::LINEAR, {{0., 0.}, {2., 1.}, {4., 3.}});
+    CHECK(linear.inverse_interpolate(0.5) == Approx(1.));
+    CHECK(linear.inverse_interpolate(2.) == Approx(3.));
+    CHECK(linear.inverse_interpolate(-1.) == 0.);
+    CHECK(linear.inverse_interpolate(4.) == 4.);
+
+    const GraphData range(1, 3, GraphData::SQUARE, {{0., 0.}, {2., 1.}, {4., 3.}, {6., 5.}});
+    CHECK(range.inverse_interpolate(0.) == 2.);
+    CHECK(range.inverse_interpolate(1.) == 2.);
+    CHECK(range.inverse_interpolate(2.) == 4.);
+    CHECK(range.inverse_interpolate(3.) == 4.);
+    CHECK(range.inverse_interpolate(5.) == 4.);
+    const GraphData single(1, 2, GraphData::SQUARE, {{0., 0.}, {2., 1.}, {4., 3.}});
+    for (const double y : {-1., 1., 5.})
+        CHECK(single.inverse_interpolate(y) == 2.);
+    const GraphData point(0, 1, GraphData::SQUARE, {{2., 1.}});
+    for (const double y : {-1., 1., 5.})
+        CHECK(point.inverse_interpolate(y) == 2.);
+    CHECK(GraphData().inverse_interpolate(0.) == 1.);
+
+    // Decreasing Y is not repaired; this lower plateau selects the first endpoint at its exact Y.
+    const GraphData decreasing(0, 3, GraphData::SQUARE, {{0., 2.}, {1., 1.}, {2., 0.}});
+    CHECK_FALSE(decreasing.create_inverse().validate());
+    const GraphData plateau(0, 3, GraphData::SQUARE, {{0., 0.}, {1., 0.}, {2., 2.}});
+    CHECK(plateau.create_inverse().validate());
+    CHECK(plateau.inverse_interpolate(0.) == 0.);
+    CHECK(plateau.inverse_interpolate(1.) == 2.);
+
+    CHECK_THROWS_AS(inverse.serialize(), std::invalid_argument);
+    const std::string hidden = "0:3:" + std::to_string(int(GraphData::SQUARE_INVERSE)) + ":0x0:1x1:2x2";
+    GraphData decoded;
+    CHECK_FALSE(decoded.deserialize(hidden));
+    CHECK_FALSE(decoded.deserialize("0:3:3:0x0:1x1:2x2"));
+    Slic3r::ConfigOptionGraph option(square);
+    config_option_handle *handle = reinterpret_cast<config_option_handle *>(&option);
+    CHECK(config_option_deserialize(handle, hidden.c_str(), 0) == 0);
+    CHECK(option.value == square);
+    Slic3r::ConfigOptionGraphs options({square});
+    config_option_vector_handle *vector_handle = config_option_vector_cast_mutable(
+        reinterpret_cast<config_option_handle *>(&options));
+    REQUIRE(vector_handle != nullptr);
+    CHECK(config_option_vector_deserialize_at(vector_handle, 0, hidden.c_str()) == 0);
+    CHECK(options.get_values().front() == square);
+    config_option_handle *options_handle = reinterpret_cast<config_option_handle *>(&options);
+    const std::string original_options = options.serialize();
+    const std::string mixed = square.serialize() + "," + hidden;
+    for (const int32_t append : {0, 1}) {
+        CHECK(config_option_deserialize(options_handle, hidden.c_str(), append) == 0);
+        CHECK(options.serialize() == original_options);
+        CHECK(config_option_deserialize(options_handle, mixed.c_str(), append) == 0);
+        CHECK(options.serialize() == original_options);
+    }
 }
 
 TEST_CASE("Graph config values expose copied unscaled points and their interpolation type",

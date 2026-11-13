@@ -19,8 +19,7 @@ namespace Slic3r::Rest::detail {
 
 using Json = nlohmann::json;
 
-// Wire names match the specification; COUNT is an internal sentinel and keeps
-// the linear fallback.
+// Map public types to wire names; reject the internal inverse step instead of exposing it as linear.
 inline const char *graph_type_name(GraphData::GraphType type)
 {
     switch (type) {
@@ -32,6 +31,8 @@ inline const char *graph_type_name(GraphData::GraphType type)
         return "spline";
     case GraphData::COUNT:
         break;
+    case GraphData::SQUARE_INVERSE:
+        throw std::invalid_argument("Cannot expose an internal graph type");
     }
     return "linear";
 }

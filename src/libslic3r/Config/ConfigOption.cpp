@@ -60,6 +60,14 @@
 #include "Preset.hpp"
 #include "Utils.hpp"
 
+// Configuration options parse stored values and expose typed values to slicing and settings clients.
+// Graph evaluation reads the selected point range without changing it. Inversion copies all points
+// before swapping their coordinates; internal step types cannot be saved as configuration values.
+// Graph call tree:
+//   inverse_interpolate -> create_inverse (copy and swap) -> interpolate (evaluate the copy)
+//   deserialize -> validate (check point order and range)
+//   serialize -> encode public types and stored points
+
 #define L(s) (s)
 
 namespace Slic3r {
@@ -652,10 +660,9 @@ std::string ConfigOptionGraphs::serialize_at(int idx) const {
 }
 
 bool ConfigOptionGraphs::deserialize(const std::string &str, bool append) {
-    if (!append) {
-        this->m_values.clear();
-        this->m_enabled.clear();
-    }
+    // Parse into local vectors so one rejected graph cannot erase or partially append settings.
+    std::vector<GraphData> values = append ? this->m_values : std::vector<GraphData>();
+    std::vector<bool> enabled_values = append ? this->m_enabled : std::vector<bool>();
     std::istringstream is(str);
     std::string graph_str;
     char sep = ',';
@@ -671,12 +678,13 @@ bool ConfigOptionGraphs::deserialize(const std::string &str, bool append) {
             assert(this->can_be_disabled());
         }
         GraphData graph;
-        bool ok = graph.deserialize(graph_str);
-        if (ok) {
-            this->m_values.push_back(std::move(graph));
-            this->m_enabled.push_back(enabled);
-        }
+        if (!graph.deserialize(graph_str))
+            return false;
+        values.push_back(std::move(graph));
+        enabled_values.push_back(enabled);
     }
+    this->m_values = std::move(values);
+    this->m_enabled = std::move(enabled_values);
     set_default_enabled();
     return true;
 }
@@ -1151,14 +1159,16 @@ double GraphData::interpolate(double x_value) const {
     if (this->data_size() < 1) {
         // nothing
     } else if (this->graph_points.size() == 1 || this->graph_points[begin_idx].x() >= x_value) {
-        y_value = this->graph_points.front().y();
+        y_value = this->type == GraphType::SQUARE_INVERSE ?
+            this->graph_points[begin_idx].y() : this->graph_points.front().y();
     } else if (this->graph_points[end_idx - 1].x() <= x_value) {
         y_value = this->graph_points[end_idx - 1].y();
     } else {
         // find first and second datapoint
         for (size_t idx = this->begin_idx; idx < this->end_idx; ++idx) {
             const auto &data_point = this->graph_points[idx];
-            if (is_approx(data_point.x(), x_value)) {
+            if (this->type == GraphType::SQUARE_INVERSE ? data_point.x() == x_value :
+                                                        is_approx(data_point.x(), x_value)) {
                 // lucky point
                 return data_point.y();
             } else if (data_point.x() < x_value) {
@@ -1173,6 +1183,8 @@ double GraphData::interpolate(double x_value) const {
                 assert(data_point.x() > x_value);
                 if (this->type == GraphData::GraphType::SQUARE) {
                     y_value = data_point_before.y();
+                } else if (this->type == GraphData::GraphType::SQUARE_INVERSE) {
+                    y_value = data_point.y();
                 } else if (this->type == GraphData::GraphType::LINEAR) {
                     const double interval = data_point.x() - data_point_before.x();
                     const double ratio_before = (x_value - data_point_before.x()) / interval;
@@ -1255,13 +1267,21 @@ double GraphData::interpolate(double x_value) const {
     return y_value;
 }
 
-double GraphData::inverse_interpolate(double y_value) const {
+GraphData GraphData::create_inverse() const {
     GraphData inverse = *this;
-    // inverse x & y
     for (Vec2d &data_point : inverse.graph_points) {
         std::swap(data_point.x(), data_point.y());
     }
-    return inverse.interpolate(y_value);
+    if (inverse.type == GraphType::SQUARE)
+        inverse.type = GraphType::SQUARE_INVERSE;
+    else if (inverse.type == GraphType::SQUARE_INVERSE)
+        inverse.type = GraphType::SQUARE;
+    // A spline through swapped points approximates, but does not invert, the original curve.
+    return inverse;
+}
+
+double GraphData::inverse_interpolate(double y_value) const {
+    return create_inverse().interpolate(y_value);
 }
 
 bool GraphData::validate() const {
@@ -1278,6 +1298,8 @@ bool GraphData::validate() const {
 }
 
 std::string GraphData::serialize() const {
+    if (this->type >= GraphType::COUNT)
+        throw std::invalid_argument("Cannot serialize an internal graph type");
     std::ostringstream ss;
     ss << this->begin_idx;
     ss << ":";
@@ -1361,8 +1383,9 @@ bool GraphData::deserialize(const std::string &str) {
             return false;
         // get type
         if (std::getline(iss, item, sep)) {
-            uint16_t int_type;
-            std::istringstream(item) >> int_type;
+            uint16_t int_type = 0;
+            if (!(std::istringstream(item) >> int_type) || int_type >= GraphType::COUNT)
+                return false;
             this->type = GraphType(int_type);
         } else
             return false;

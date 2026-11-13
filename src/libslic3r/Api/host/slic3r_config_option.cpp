@@ -214,6 +214,18 @@ static bool vector_item_has_valid_syntax(
 
 extern "C" {
 
+// Read the public interpolation type from a borrowed graph; null and internal types return NONE.
+// No ownership changes or exceptions cross this C boundary.
+raw_graph_type graph_data_type(const graph_data_handle *me);
+
+// Copy finite unscaled points into a host allocation with the requested public mode.
+// Invalid input and allocation failures return null; ownership transfers only on success.
+// No exception crosses this C boundary.
+graph_data_handle *graph_data_create(const c_vec2d *points, uint32_t count, raw_graph_type type);
+
+// Destroy only an owned graph created above; null has no effect and no exception escapes.
+void graph_data_free(graph_data_handle *me);
+
 int32_t config_get_computed_value(const config_handle *me,
                                   const char *key,
                                   extruder_index_t extruder_id,
@@ -314,7 +326,8 @@ raw_graph_type graph_data_type(const graph_data_handle *me)
     case Slic3r::GraphData::GraphType::SQUARE: return RAW_GRAPH_TYPE_SQUARE;
     case Slic3r::GraphData::GraphType::LINEAR: return RAW_GRAPH_TYPE_LINEAR;
     case Slic3r::GraphData::GraphType::SPLINE: return RAW_GRAPH_TYPE_SPLINE;
-    case Slic3r::GraphData::GraphType::COUNT: break;
+    case Slic3r::GraphData::GraphType::COUNT:
+    case Slic3r::GraphData::GraphType::SQUARE_INVERSE: break;
     }
     return RAW_GRAPH_TYPE_NONE;
 }
