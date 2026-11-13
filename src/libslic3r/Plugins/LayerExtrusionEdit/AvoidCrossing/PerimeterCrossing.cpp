@@ -11,7 +11,12 @@ off-object paths use platter coordinates.
 prepare builds a base version and an offset version of the layer slices. For
 objects, when any region assigns a perimeter or infill role to another tool,
 preparation clips the slices to the selected tool's area so that tool does not
-ooze its material over another tool's area. It then insets the offset version by
+ooze its material over another tool's area. Perimeters occupy raw slices minus
+fill_expolygons() (the fill areas published by perimeter processing); sparse and
+solid fill contribute independently by their tool. Only when the infill tools
+differ is the split restricted to each region's raw slices; when they agree,
+their tool receives the whole, unrestricted fill_expolygons() area.
+It then insets the offset version by
 1.5 nozzle radii. Tops are removed from both versions. prepare_platter unions
 last normal object areas below its Z plus epsilon for real instances in current
 and earlier plan groups. The offset version expands them by 1.5 radii, without
@@ -24,8 +29,9 @@ For paths whose endpoints are inside it, hole boxes are built on demand and hole
 edges are tested. Large holes use boxes to avoid unnecessary edge scans.
 
     prepare: reuse or rebuild the two versions for a layer, tool and radius
-    |-- object: union slices, clip if any region assigns a role to another tool,
-    |           inset, then subtract regional tops
+     |-- object: union slices, clip if any region assigns a role to another tool,
+     |           inset, then subtract regional tops
+     |   `-- tool_mask: union the selected tool's regional role areas
     prepare_platter: reuse or collect blockers by Z, group and radius, then expand
     `-- slice_islands: simplify rings and retain unsimplified contour boxes
     can_cross_perimeter: choose base or offset version
@@ -62,32 +68,10 @@ void PerimeterCrossing::prepare(storage_handle *storage, const LayerInput &layer
     pw::ExPolygons slices;
     pw::ExPolygons offset_slices;
     slices = clipper::union_ex(storage, layer.lslices);
-    bool multiple_extruders = false;
-    for (const RegionInput &region : layer.regions) {
-        multiple_extruders = multiple_extruders || region.perimeter_extruder != extruder + 1 ||
-            region.infill_extruder != extruder + 1 || region.solid_infill_extruder != extruder + 1;
-        if (multiple_extruders)
-            break;
-    }
+    const ToolMask mask = tool_mask(storage, layer, extruder);
     // Restrict this tool to its own material area before testing paths that could ooze over another tool's area.
-    if (multiple_extruders) {
-        pw::ExPolygons clip;
-        for (const RegionInput &region : layer.regions) {
-            const bool same = region.perimeter_extruder == region.infill_extruder &&
-                region.infill_extruder == region.solid_infill_extruder;
-            if (same) {
-                if (region.perimeter_extruder == extruder + 1)
-                    clip = clipper::union_ex(storage, clip, region.raw_slices);
-            } else if (region.perimeter_extruder == extruder + 1) {
-                assert(region.infill_extruder != extruder + 1);
-                clip = clipper::union_ex(storage, clip, clipper::diff_ex(storage, region.raw_slices, region.fill_expolygons));
-            } else {
-                assert(region.infill_extruder == extruder + 1);
-                clip = clipper::union_ex(storage, clip, region.fill_expolygons);
-            }
-        }
-        slices = clipper::intersection_ex(storage, slices, clipper::offset_ex(storage, clip, SCALED_EPSILON * 10));
-    }
+    if (mask.multiple_extruders)
+        slices = clipper::intersection_ex(storage, slices, clipper::offset_ex(storage, mask.area, SCALED_EPSILON * 10));
     offset_slices = clipper::offset_ex(storage, slices, -radius * 1.5f);
     // Tops are excluded even when no outer contour would be crossed, unless
     // the caller tests only real perimeter contours.

@@ -37,6 +37,7 @@ LayerSupportProperty. It checks copied input without generating support toolpath
         |-- build_input: copy target geometry and additional object-layer slices for support
         |-- build_external_input: copy ordered holes, shifts and spacing
         |-- check_layer: compare fields, regional geometry and flow averages
+        |   `-- core_solid: select solid surfaces and restrict them to regional fill
         `-- check_external: compare against core Z lookups and instance shifts
 
 The Print stays alive throughout the comparisons. Copies are checked after
@@ -57,6 +58,7 @@ struct Coverage {
     size_t single = 0;
     size_t multiple = 0;
     size_t shared_top = 0;
+    size_t shared_solid = 0;
     size_t empty_region = 0;
     size_t support = 0;
     size_t support_same_z = 0;
@@ -72,6 +74,8 @@ void check_ring(const pw::Polygon &actual, const Polygon &expected);
 void check_polygons(const pw::ExPolygons &actual, const ExPolygons &expected);
 // Independently select regional tops from core region-island memberships.
 ExPolygons core_tops(const Layer &layer, const LayerRegion &region, Coverage &coverage);
+// Select solid surfaces from core island groups and clip them to raw slices and fill_expolygons(), counting shared groups.
+ExPolygons core_solid(const Layer &layer, const LayerRegion &region, Coverage &coverage);
 // Compare every layer field with native accessors and flow averages, recording exercised branches.
 void check_layer(const input::LayerInput &actual, const Layer &layer, Coverage &coverage);
 // Compare external holes, instance shifts and the global average with core Z lookups.
@@ -145,6 +149,7 @@ TEST_CASE("Avoid-crossing input clips tops of a shared region island", "[plugins
     print.process();
     const Coverage coverage = check_print(print);
     CHECK(coverage.shared_top > 0);
+    CHECK(coverage.shared_solid > 0);
 }
 
 TEST_CASE("Avoid-crossing default spacing includes other objects' brim settings", "[plugins][avoid-crossing-input]")
@@ -279,6 +284,23 @@ ExPolygons core_tops(const Layer &layer, const LayerRegion &region, Coverage &co
     return result;
 }
 
+ExPolygons core_solid(const Layer &layer, const LayerRegion &region, Coverage &coverage)
+{
+    ExPolygons result;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &group : island.regions_islands()) {
+            if (group.regions().count(&region) == 0)
+                continue;
+            for (const Surface &surface : group.fill_surfaces()) {
+                if (!surface.has_fill_solid())
+                    continue;
+                if (group.regions().size() > 1) ++coverage.shared_solid;
+                result.push_back(surface.expolygon);
+            }
+        }
+    return intersection_ex(result, intersection_ex(region.get_raw_slices(), region.fill_expolygons()));
+}
+
 void check_layer(const input::LayerInput &actual, const Layer &layer, Coverage &coverage)
 {
     CHECK(actual.print_z == layer.scaled_print_z());
@@ -306,6 +328,7 @@ void check_layer(const input::LayerInput &actual, const Layer &layer, Coverage &
         const input::RegionInput &copy = actual.regions[i];
         check_polygons(copy.raw_slices, region.get_raw_slices());
         check_polygons(copy.fill_expolygons, region.fill_expolygons());
+        check_polygons(copy.solid_fill_expolygons, core_solid(layer, region, coverage));
         check_polygons(copy.top_surfaces, core_tops(layer, region, coverage));
         size_t islands = 0;
         for (const LayerSliceIsland &island : layer.islands())

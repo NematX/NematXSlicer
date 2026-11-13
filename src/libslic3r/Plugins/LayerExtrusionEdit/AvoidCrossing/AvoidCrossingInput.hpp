@@ -12,7 +12,7 @@ settings needed to prepare it; it does not test or route a travel itself.
 Select an existing layer with LayerIdentity, then call build_input. Input owns a
 stable, immutable LayerInput containing the target slices, the filled areas
 published by perimeter processing, and spacing averages in scaled coordinates.
-Each RegionInput retains raw slices, reconstructed fill areas, top surfaces and
+Each RegionInput retains raw slices, reconstructed fill areas, solid fill areas, top surfaces and
 regional settings, including regions with no slices. For support targets, Input
 also copies the owner's object-layer perimeter slices strictly below print Z +
 SCALED_EPSILON for routing. platter_blockers separately unions the last normal
@@ -70,10 +70,13 @@ struct LayerIdentity
 };
 
 // Settings and geometry for every public region, including regions without slices.
+// fill_expolygons reconstructs LayerRegion::fill_expolygons(), the fill areas published by perimeter processing.
+// Solid fill and the fill used to split sparse from solid are restricted to raw_slices.
 struct RegionInput
 {
     PluginCommon::polygon_work::ExPolygons raw_slices;
     PluginCommon::polygon_work::ExPolygons fill_expolygons;
+    PluginCommon::polygon_work::ExPolygons solid_fill_expolygons;
     PluginCommon::polygon_work::ExPolygons top_surfaces;
     int perimeter_extruder = 0;
     int infill_extruder = 0;
@@ -100,6 +103,17 @@ struct LayerInput
     coord_t perimeter_spacing = 0;
     float external_perimeter_width = 0.f;
 };
+
+// Tool clipping is needed when any region assigns an extrusion role to another tool.
+struct ToolMask
+{
+    bool multiple_extruders = false;
+    PluginCommon::polygon_work::ExPolygons area;
+};
+
+// Union the selected zero-based tool's role areas; split fill within raw slices only when infill tools differ.
+// Area may be empty even when clipping is needed for a tool owning no region; callers use multiple_extruders to decide clipping.
+ToolMask tool_mask(storage_handle *storage, const LayerInput &layer, int extruder);
 
 // Holes retain source CW orientation; consumers reverse them before expand.
 // Support appends the last object layer strictly below Z + SCALED_EPSILON, possibly duplicating same-Z holes.

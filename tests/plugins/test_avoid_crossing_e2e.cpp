@@ -225,9 +225,10 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {{"avoid_crossing_top"}, {{"tops", {{"avoid_crossing_top", "1"}}}}},
         {{"avoid_travel_island"}, {{"island", {{"avoid_travel_island", "1"}}}}},
         {{"avoid_travel_island_weight"}, {{"island-weight", {{"avoid_travel_island_weight", "2"}}}}},
-        // Keep all material roles together so the crossing mask never sees a solid-only tool.
-        {{"infill_extruder", "perimeter_extruder", "solid_infill_extruder"},
-            {{"tools", {{"infill_extruder", "2"}, {"perimeter_extruder", "2"}, {"solid_infill_extruder", "2"}}}}},
+        // Separate role assignments exercise sparse-only, perimeter-only and solid-only tools.
+        {{"infill_extruder"}, {{"infill-tool", {{"infill_extruder", "2"}}}}},
+        {{"perimeter_extruder"}, {{"perimeter-tool", {{"perimeter_extruder", "2"}}}}},
+        {{"solid_infill_extruder"}, {{"solid-tool", {{"solid_infill_extruder", "2"}}}}},
         {{"ironing"}, {{"ironing", {{"ironing", "1"}}}}},
         {{"perimeters"}, {{"perimeters", {{"perimeters", "3"}}}}},
         {{"wipe"}, {{"no-wipe", {{"wipe", "0"}}}}},
@@ -256,7 +257,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
             CHECK(std::any_of(result.support_crossings.begin(), result.support_crossings.end(),
                 [](const std::vector<coord_t> &route) { return route.size() > 6; }));
         } else {
-            if (test.name != "nozzle" && test.name != "tools" && test.name != "ironing" && test.name != "perimeters")
+            if (test.name != "nozzle" && test.name != "ironing" && test.name != "perimeters")
                 CHECK(result.volume == Approx(volume).margin(0.01));
             if (test.name == "straight") {
                 CHECK(result.deviated == 0);

@@ -23,6 +23,9 @@ fill areas from islands containing that region. With several such islands it
 grows them by ten scaled units and intersects with the region's raw slices before
 public ensure_valid cleanup, matching the core's fill-area preparation. Top
 surfaces shared by several regions are clipped to this region's raw slices.
+fill_expolygons reconstructs LayerRegion::fill_expolygons(), the fill areas published
+by perimeter processing. Solid surfaces and the fill used for the sparse/solid split
+are restricted to raw slices. Subtracting solid surfaces gives sparse fill.
 Support copies no tops. is_first_layer compares the target Z with normal object layer zero; auxiliary
 layers at that exact height also qualify, while owners without normal layers do not.
 Regional flow spacing and external width are averaged
@@ -50,7 +53,7 @@ An owner without normal layers cannot mark a target as first_layer.
     |-- copy_layer: copy geometry and compute regional flow averages
     |   |-- is_first_layer: compare print Z with normal object layer zero
     |   |-- default_spacing: average nozzles over the collected printing tools
-    |   `-- copy_region: rebuild fill areas and select regional tops
+    |   `-- copy_region: rebuild fill and solid fill areas and select regional tops
     `-- first_layer_below_print_z: find the last object-layer index below the supplied Z
     build_external_input: collect holes, shifts and spacing across print objects
     |-- layer_at_print_z: find an exact-Z object-layer index
@@ -59,6 +62,7 @@ An owner without normal layers cannot mark a target as first_layer.
     platter_blockers: union translated object slices from eligible printing groups
     `-- first_layer_below_print_z: select each object's last normal layer below Z plus epsilon
     is_off_object_layer: compare the normal layer at Z with the supplied layer
+    tool_mask: union regional perimeter, sparse and solid areas for one tool
 
 The caller supplies temporary API storage and keeps the print unchanged during
 these reads. Returned buffers own their geometry independently of that storage.
@@ -77,7 +81,7 @@ static constexpr double ClipperSafetyOffset = 10.;
 
 // Copy layer geometry and average flows from an existing normal object or the global auxiliary object.
 static LayerInput copy_layer(storage_handle *storage, const Print &print, LayerIdentity identity);
-// Copy region settings and rebuild fill areas in island order; temporary handles stay in caller storage.
+// Copy region settings and rebuild fill_expolygons() and solid fill areas in island order; temporary handles stay in caller storage.
 static RegionInput copy_region(storage_handle *storage, const Layer &layer, const LayerRegion &region, bool support);
 // Average scaled nozzle diameters over collected printing tools; at least one tool must be collected.
 static coord_t default_spacing(const Print &print, const Object &object);
@@ -87,6 +91,41 @@ bool is_off_object_layer(const Layer &layer);
 pw::ExPolygons platter_blockers(storage_handle *storage, const PrintingPlan &plan, uint32_t group_idx, coord_t print_z);
 // Copy the target and the owner's lower perimeter slices for support routing into independent buffers.
 Input build_input(storage_handle *storage, const Print &print, LayerIdentity target);
+// Return role areas for a zero-based tool; split fill within raw slices only when infill tools differ.
+// Area can also be empty for a tool owning no region; callers decide clipping from multiple_extruders, not area emptiness.
+ToolMask tool_mask(storage_handle *storage, const LayerInput &layer, int extruder);
+
+ToolMask tool_mask(storage_handle *storage, const LayerInput &layer, int extruder)
+{
+    ToolMask result;
+    for (const RegionInput &region : layer.regions) {
+        result.multiple_extruders = region.perimeter_extruder != extruder + 1 ||
+            region.infill_extruder != extruder + 1 || region.solid_infill_extruder != extruder + 1;
+        if (result.multiple_extruders) break;
+    }
+    if (!result.multiple_extruders) return result;
+    for (const RegionInput &region : layer.regions) {
+        if (region.perimeter_extruder == region.infill_extruder && region.infill_extruder == region.solid_infill_extruder) {
+            if (region.perimeter_extruder == extruder + 1)
+                result.area = clipper::union_ex(storage, result.area, region.raw_slices);
+        } else {
+            if (region.perimeter_extruder == extruder + 1)
+                result.area = clipper::union_ex(storage, result.area, clipper::diff_ex(storage, region.raw_slices, region.fill_expolygons));
+            // Preserve the direct fill union when its two roles share a tool.
+            if (region.infill_extruder == region.solid_infill_extruder) {
+                if (region.infill_extruder == extruder + 1)
+                    result.area = clipper::union_ex(storage, result.area, region.fill_expolygons);
+            } else {
+                const pw::ExPolygons fill = clipper::intersection_ex(storage, region.fill_expolygons, region.raw_slices);
+                if (region.infill_extruder == extruder + 1)
+                    result.area = clipper::union_ex(storage, result.area, clipper::diff_ex(storage, fill, region.solid_fill_expolygons));
+                if (region.solid_infill_extruder == extruder + 1)
+                    result.area = clipper::union_ex(storage, result.area, region.solid_fill_expolygons);
+            }
+        }
+    }
+    return result;
+}
 
 std::optional<uint32_t> layer_at_print_z(const Object &object, coord_t z)
 {
@@ -275,9 +314,6 @@ static RegionInput copy_region(storage_handle *storage, const Layer &layer, cons
                 break;
             }
         }
-        // Support inputs omit tops rather than treating the support subject as an object top surface.
-        if (support)
-            continue;
         for (uint32_t gi = 0; gi < island.region_island_count(); ++gi) {
             const LayerRegionIsland group = island.region_island(gi);
             bool contains = false;
@@ -286,7 +322,10 @@ static RegionInput copy_region(storage_handle *storage, const Layer &layer, cons
             if (!contains)
                 continue;
             for (const Surface surface : group.fill_surfaces()) {
-                if (!surface_type_is_top(surface.type()))
+                if (surface_type_is_solid(surface.type()))
+                    out.solid_fill_expolygons.push_back(clipper::from_expolygon_view(surface.expolygon()));
+                // Support inputs omit tops rather than treating the support subject as an object top surface.
+                if (support || !surface_type_is_top(surface.type()))
                     continue;
                 pw::ExPolygons tops{clipper::from_expolygon_view(surface.expolygon())};
                 // Shared top surfaces must be restricted to this region before crossing and boundary preparation.
@@ -305,6 +344,8 @@ static RegionInput copy_region(storage_handle *storage, const Layer &layer, cons
     StoredExPolygonCollection valid = clipper::to_stored_expolygons(storage, out.fill_expolygons);
     valid.ensure_valid();
     out.fill_expolygons = clipper::from_expolygon_collection_view(valid.readonly());
+    out.solid_fill_expolygons = clipper::intersection_ex(storage, out.solid_fill_expolygons,
+        clipper::intersection_ex(storage, out.raw_slices, out.fill_expolygons));
     return out;
 }
 

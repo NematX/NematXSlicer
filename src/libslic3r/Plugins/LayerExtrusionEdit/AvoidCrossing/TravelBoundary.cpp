@@ -65,7 +65,8 @@ Internal construction prepares the rings in four stages:
    passes over the top's edge.
 4. Tool clipping: on layers using several tools, restrict the remaining rings to
    the area printed by the current tool, preparing detours that do not ooze its
-   material onto another tool's area.
+   material onto another tool's area. Perimeter, sparse fill and solid fill areas
+   contribute independently according to each role's tool assignment.
 
 Indexing runs after construction, so grids point at the final ring arrays; those
 arrays, including the contours and holes of to_avoid, must not change afterwards.
@@ -88,6 +89,7 @@ to leave travels direct when there is no interior; support bypasses that test.
     |   `-- offset_ex: inset concatenated perimeter slices without prior union
     |-- build_internal: construct one tool's object-space rings
     |   |-- get_boundary: form insets, use lower slices for support, exclude tops, clip by tool
+    |   |   `-- tool_mask: union the selected tool's regional role areas
     |   |   `-- inner_offset: preserve narrow connections while moving rings inward
     |   |       |-- resample_expolygon: add local width sampling points
     |   |       |   `-- resample_polygon: insert points without changing ring order
@@ -213,30 +215,9 @@ ExPolygons get_boundary(storage_handle *storage, const Input &input, int extrude
         boundary = clipper::diff_ex(storage, boundary, tops);
     }
     // Keep this tool over its own printed area so its material does not ooze over another tool's area.
-    bool multiple = false;
-    for (const RegionInput &region : layer.regions) {
-        multiple = region.perimeter_extruder != extruder + 1 || region.infill_extruder != extruder + 1 ||
-                   region.solid_infill_extruder != extruder + 1;
-        if (multiple) break;
-    }
-    if (multiple) {
-        ExPolygons clip;
-        for (const RegionInput &region : layer.regions) {
-            const bool same = region.perimeter_extruder == region.infill_extruder &&
-                              region.infill_extruder == region.solid_infill_extruder;
-            if (same) {
-                if (region.perimeter_extruder == extruder + 1)
-                    clip = clipper::union_ex(storage, clip, region.raw_slices);
-            } else if (region.perimeter_extruder == extruder + 1) {
-                assert(region.infill_extruder != extruder + 1);
-                clip = clipper::union_ex(storage, clip, clipper::diff_ex(storage, region.raw_slices, region.fill_expolygons));
-            } else {
-                assert(region.infill_extruder == extruder + 1);
-                clip = clipper::union_ex(storage, clip, region.fill_expolygons);
-            }
-        }
-        boundary = clipper::intersection_ex(storage, boundary, clipper::offset_ex(storage, clip, SCALED_EPSILON * 10));
-    }
+    const ToolMask mask = tool_mask(storage, layer, extruder);
+    if (mask.multiple_extruders)
+        boundary = clipper::intersection_ex(storage, boundary, clipper::offset_ex(storage, mask.area, SCALED_EPSILON * 10));
     return boundary;
 }
 

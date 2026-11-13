@@ -2,6 +2,7 @@
 // Prepare base and offset area boundaries, then query paths in the target's local
 // coordinates, or prepare_platter() and query in platter coordinates. For objects, when any region assigns a perimeter or infill role to
 // another tool, preparation clips the slices to the selected tool's area.
+// Perimeter, sparse fill and solid fill contribute independently by role assignment.
 // Objects use an inset of 1.5 nozzle radii in the offset version and, by default,
 // no tops in either version. Platter queries use the last normal object areas below Z plus epsilon,
 // expanded by 1.5 radii, with neither tool clipping nor top removal. Real instances

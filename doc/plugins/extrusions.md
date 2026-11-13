@@ -691,7 +691,15 @@ Before routing, `PerimeterCrossing` tests the direct segment against prepared
 interior boundaries, not extrusion centerlines. When region settings assign
 perimeters or infill to a tool other than the current one, object interiors are
 clipped to the current tool so its material does not ooze over another tool's
-area. Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
+area. `perimeter_extruder`, `infill_extruder` and `solid_infill_extruder` assign
+the three roles independently. A region contributes `raw_slices - fill` for
+perimeters, `fill - solid` for sparse infill, and `solid` for solid infill.
+When the infill tools differ, `fill` is the region's `fill_expolygons()` area
+restricted to `raw_slices`, and `solid` is its solid fill surfaces restricted to
+that area. When infill and solid infill share a tool, that tool receives the
+whole, unrestricted `fill_expolygons()` area instead. When the three
+roles agree, the region contributes `raw_slices` to that tool instead.
+Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
 then removes top surfaces from both. The provider tests the inset version.
 Off-object targets use slices from each object's last normal layer strictly below
 the query Z plus `SCALED_EPSILON`, expanded by 1.5 radii without tool clipping or

@@ -78,15 +78,24 @@
 // Layers are borrowed during geometry preparation and routing calls. Cached
 // polygons are owned by the router; stored layer pointers identify the prepared
 // context.
+// fill_expolygons() is the fill area published by perimeter processing.
+// Tool clipping unions each tool's perimeter area (raw slices minus fill_expolygons()),
+// sparse fill (region-restricted fill_expolygons() minus solid surfaces) and solid fill independently.
+// The raw-slice restriction applies only when the infill tools differ; when they
+// agree, their tool receives the whole, unrestricted fill_expolygons() area.
 //
 // Entry points and the helpers that prepare their results:
 // |-- init_layer: reset routing caches and prepare inset perimeter slices
 // |-- prepare_crossing_test: prepare interiors for can_cross_perimeter
-// |   `-- regional_top_surfaces: separate each region's tops
+// |   |-- regional_top_surfaces: separate each region's tops
+// |   `-- tool_mask: union the selected tool's regional role areas
+// |       `-- regional_solid_surfaces: separate solid fill within raw slices
 // |-- can_cross_perimeter: test a path against prepared interiors
 // `-- travel_to: select boundaries and enforce the detour limit
 //     |-- get_boundary: build internal areas and collect excluded tops
 //     |   |-- regional_top_surfaces: apply regional top settings
+//     |   |-- tool_mask: union the selected tool's regional role areas
+//     |   |   `-- regional_solid_surfaces: separate solid fill within raw slices
 //     |   `-- inner_offset: reduce the inset in narrow areas
 //     |-- get_boundary_external: place expanded object holes
 //     |-- init_boundary: store rings and index their edges
@@ -99,6 +108,16 @@ namespace Slic3r {
 
 // Copy top surfaces from the layer's islands, clipping shared islands to the region's raw slices.
 static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region);
+// Collect solid surfaces from this region's island groups and clip them to raw slices and fill_expolygons().
+static ExPolygons regional_solid_surfaces(const Layer &layer, const LayerRegion &region, const ExPolygons &fill);
+// Own the clipping area and indicate whether any role belongs to a different tool.
+struct RegionalToolMask {
+    bool multiple_extruders = false;
+    ExPolygons area;
+};
+// Union regional role areas for a zero-based tool, restricting split fill to raw slices only when infill tools differ.
+// Area can also be empty for a tool owning no region; callers decide clipping from multiple_extruders, not area emptiness.
+static RegionalToolMask tool_mask(const Layer &layer, extruder_index_t extruder);
 // Return mean nozzle diameter in scaled units as fallback spacing; the object must have at least one extruder.
 static inline coord_t get_default_perimeter_spacing(const PrintObject &print_object);
 // Return mean perimeter spacing in scaled units over regions with raw slices, or the object's mean nozzle diameter.
@@ -2349,58 +2368,66 @@ static ExPolygons get_boundary(const Layer &layer, extruder_index_t extruder_id,
         boundary = diff_ex(boundary, top_layer_polygons);
     }
 
-    // multiple extruders?
-    // clip by region
-    LayerRegionCRefs all_regions = layer.regions();
-    bool multiple_extruders = false;
-    for (const LayerRegion &lregion : all_regions) {
-            multiple_extruders = multiple_extruders ||
-                lregion.region().config().perimeter_extruder.value !=
-                    extruder_id + 1;
-            multiple_extruders = multiple_extruders ||
-                lregion.region().config().infill_extruder.value !=
-                    extruder_id + 1;
-            multiple_extruders = multiple_extruders ||
-                lregion.region().config().solid_infill_extruder.value !=
-                    extruder_id + 1;
-            if (multiple_extruders) {
-                break;
-            }
-    }
-    if (multiple_extruders) {
-        ExPolygons clip;
-        for (const LayerRegion &lregion : all_regions) {
-            bool same_extruders = lregion.region().config().perimeter_extruder.value ==
-                    lregion.region().config().infill_extruder.value &&
-                lregion.region().config().infill_extruder.value ==
-                    lregion.region().config().solid_infill_extruder.value;
-
-            if (same_extruders) {
-                if (lregion.region().config().perimeter_extruder.value ==
-                    extruder_id + 1) {
-                    clip = union_ex(clip, lregion.get_raw_slices());
-                }
-            } else {
-                if (lregion.region().config().infill_extruder.value !=
-                    lregion.region().config().solid_infill_extruder.value) {
-                    BOOST_LOG_TRIVIAL(warning) << "";
-                }
-                if (lregion.region().config().perimeter_extruder.value ==
-                    extruder_id + 1) {
-                    assert(lregion.region().config().infill_extruder.value !=
-                            extruder_id + 1);
-                    clip = union_ex(clip, diff_ex(lregion.get_raw_slices(), lregion.fill_expolygons()));
-                } else {
-                    assert(lregion.region().config().infill_extruder.value ==
-                            extruder_id + 1);
-                    clip = union_ex(clip, lregion.fill_expolygons());
-                }
-            }
-        }
-        boundary = intersection_ex(boundary, offset_ex(clip, SCALED_EPSILON * 10 /*safety offset*/));
-    }
+    // Keep detours over the current tool's material area.
+    const RegionalToolMask mask = tool_mask(layer, extruder_id);
+    if (mask.multiple_extruders)
+        boundary = intersection_ex(boundary, offset_ex(mask.area, SCALED_EPSILON * 10));
 
     return boundary;
+}
+
+static RegionalToolMask tool_mask(const Layer &layer, extruder_index_t extruder)
+{
+    RegionalToolMask result;
+    const LayerRegionCRefs regions = layer.regions();
+    for (const LayerRegion &region : regions) {
+        result.multiple_extruders = region.region().config().perimeter_extruder.value != extruder + 1 ||
+            region.region().config().infill_extruder.value != extruder + 1 ||
+            region.region().config().solid_infill_extruder.value != extruder + 1;
+        if (result.multiple_extruders) break;
+    }
+    if (!result.multiple_extruders) return result;
+    for (const LayerRegion &region : regions) {
+        const int perimeter = region.region().config().perimeter_extruder.value;
+        const int infill = region.region().config().infill_extruder.value;
+        const int solid_infill = region.region().config().solid_infill_extruder.value;
+        if (perimeter == infill && infill == solid_infill) {
+            if (perimeter == extruder + 1)
+                result.area = union_ex(result.area, region.get_raw_slices());
+        } else {
+            const ExPolygons &fill = region.fill_expolygons();
+            if (perimeter == extruder + 1)
+                result.area = union_ex(result.area, diff_ex(region.get_raw_slices(), fill));
+            // Preserve the direct fill union when its two roles share a tool.
+            if (infill == solid_infill) {
+                if (infill == extruder + 1)
+                    result.area = union_ex(result.area, fill);
+            } else {
+                const ExPolygons local_fill = intersection_ex(fill, region.get_raw_slices());
+                const ExPolygons solid = regional_solid_surfaces(layer, region, fill);
+                if (infill == extruder + 1)
+                    result.area = union_ex(result.area, diff_ex(local_fill, solid));
+                if (solid_infill == extruder + 1)
+                    result.area = union_ex(result.area, solid);
+            }
+        }
+    }
+    return result;
+}
+
+static ExPolygons regional_solid_surfaces(const Layer &layer, const LayerRegion &region, const ExPolygons &fill)
+{
+    ExPolygons solid;
+    for (const LayerSliceIsland &island : layer.islands()) {
+        for (const LayerRegionIsland &group : island.regions_islands()) {
+            if (group.regions().count(&region) == 0)
+                continue;
+            for (const Surface &surface : group.fill_surfaces())
+                if (surface.has_fill_solid())
+                    solid.push_back(surface.expolygon);
+        }
+    }
+    return intersection_ex(solid, intersection_ex(region.get_raw_slices(), fill));
 }
 
 static ExPolygons regional_top_surfaces(const Layer &layer, const LayerRegion &region)
@@ -2596,43 +2623,9 @@ bool AvoidCrossingPerimeters::prepare_crossing_test(const PerimeterCrossingConte
 
         // On multi-extruder layers, retain only regions printed by the active
         // tool so another material is not treated as safe interior.
-        const LayerRegionCRefs all_regions = context.layer.regions();
-        bool multiple_extruders = false;
-        for (const LayerRegion &region : all_regions) {
-            multiple_extruders = multiple_extruders ||
-                region.region().config().perimeter_extruder.value != context.extruder_id + 1 ||
-                region.region().config().infill_extruder.value != context.extruder_id + 1 ||
-                region.region().config().solid_infill_extruder.value != context.extruder_id + 1;
-            if (multiple_extruders)
-                break;
-        }
-
-        if (multiple_extruders) {
-            ExPolygons clip;
-            for (const LayerRegion &region : all_regions) {
-                const bool same_extruders =
-                    region.region().config().perimeter_extruder.value ==
-                        region.region().config().infill_extruder.value &&
-                    region.region().config().infill_extruder.value ==
-                        region.region().config().solid_infill_extruder.value;
-                if (same_extruders) {
-                    if (region.region().config().perimeter_extruder.value == context.extruder_id + 1)
-                        clip = union_ex(clip, region.get_raw_slices());
-                } else {
-                    if (region.region().config().infill_extruder.value !=
-                        region.region().config().solid_infill_extruder.value)
-                        BOOST_LOG_TRIVIAL(warning) << "";
-                    if (region.region().config().perimeter_extruder.value == context.extruder_id + 1) {
-                        assert(region.region().config().infill_extruder.value != context.extruder_id + 1);
-                        clip = union_ex(clip, diff_ex(region.get_raw_slices(), region.fill_expolygons()));
-                    } else {
-                        assert(region.region().config().infill_extruder.value == context.extruder_id + 1);
-                        clip = union_ex(clip, region.fill_expolygons());
-                    }
-                }
-            }
-            slices = intersection_ex(slices, offset_ex(clip, SCALED_EPSILON * 10));
-        }
+        const RegionalToolMask mask = tool_mask(context.layer, context.extruder_id);
+        if (mask.multiple_extruders)
+            slices = intersection_ex(slices, offset_ex(mask.area, SCALED_EPSILON * 10));
         append(offset_slices, offset_ex(slices, -context.nozzle_radius * 1.5f));
     }
 
