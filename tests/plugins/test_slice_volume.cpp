@@ -1,4 +1,8 @@
-/* Slice volume plugin tests, and the baseline dump of the object slicing.
+/* Slice volume plugin tests, import repair contracts, and the baseline dump of the object slicing.
+
+   Import cases exercise per-volume painting preservation and public format
+   loaders before any pipeline geometry is prepared. Mesh-use cases inspect
+   separate working copies so import repair cannot hide a slicing defect.
 
    The dump case ([slicing-dump], hidden: it runs only when asked by name or by tag) slices several real meshes through the plugin
    pipeline (layer height generation, then STEP_SLICING) with a list of settings and writes, for every object, layer and region, every
@@ -79,12 +83,15 @@
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/AMF.hpp"
+#include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 
 // Keep persisted names compatible without changing the public volume numbering.
 TEST_CASE("Internal seam attractor names retain the stable volume identity", "[volume][internal-seam]")
@@ -123,6 +130,299 @@ TEST_CASE("Internal seam attractor names retain the stable volume identity", "[v
     REQUIRE(loaded.objects().size() == 1);
     REQUIRE(loaded.objects().front().volumes.size() == 2);
     CHECK(loaded.objects().front().volumes.back()->type() == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
+}
+
+// Import policy operates per volume and must not renumber any painted mesh.
+TEST_CASE("Import repair preserves painted volumes and repairs their unpainted siblings", "[mesh-repair][import]")
+{
+    using namespace Slic3r;
+    const std::string painting = GENERATE(std::string("support"), std::string("material"),
+                                         std::string("builtin:seam"), std::string("plugin:test"));
+    const bool painted_has_defects = GENERATE(false, true);
+    const indexed_triangle_set clean = its_make_cube(10., 10., 10.);
+    indexed_triangle_set broken = clean;
+    broken.indices.emplace_back(0, 0, 1);
+    broken.vertices.push_back(broken.vertices[0]);
+    broken.indices.emplace_back(0, int(broken.vertices.size() - 1), 1);
+    Model model;
+    ModelObject *object = model.add_object("mixed import", "", TriangleMesh(painted_has_defects ? broken : clean));
+    ModelVolume *painted = object->volumes.front();
+    painted->name = "painted source";
+    FacetsAnnotation &annotation = painting == "support" ? painted->supported_facets :
+        painting == "material" ? painted->mm_segmentation_facets : painted->facets_annotation_mutable(painting);
+    annotation.set_triangle_from_string(0, "4");
+    const std::string original_paint = annotation.get_triangle_as_string(0);
+    const TriangleMesh *original_mesh = &painted->mesh();
+    const indexed_triangle_set painted_before = painted->mesh().its;
+    ModelVolume *unpainted = object->add_volume(TriangleMesh(broken));
+    unpainted->name = "repairable source";
+
+    model.repair_imported_meshes();
+
+    CHECK(&painted->mesh() == original_mesh);
+    CHECK(painted->mesh().its.vertices == painted_before.vertices);
+    CHECK(painted->mesh().its.indices == painted_before.indices);
+    CHECK(annotation.get_triangle_as_string(0) == original_paint);
+    CHECK(painted->mesh().validate().degenerate_facets == (painted_has_defects ? 2 : 0));
+    CHECK(unpainted->mesh().validate().valid());
+    CHECK(unpainted->mesh().facets_count() == 12);
+    CHECK(unpainted->mesh().stats().repaired_errors.degenerate_facets == 2);
+    const std::vector<std::string> warnings = model.mesh_validation_warnings();
+    REQUIRE(warnings.size() == (painted_has_defects ? 1 : 0));
+    if (painted_has_defects) {
+        CHECK(warnings.front().find("mixed import") != std::string::npos);
+        CHECK(warnings.front().find("painted source") != std::string::npos);
+    }
+}
+
+// Keep the decoded source when repair cannot retain any surface.
+TEST_CASE("Import repair retains a wholly degenerate source with a warning", "[mesh-repair][import]")
+{
+    using namespace Slic3r;
+    indexed_triangle_set broken;
+    broken.vertices = {Vec3f(0, 0, 0), Vec3f(1, 0, 0)};
+    broken.indices = {Vec3i32(0, 0, 1)};
+    Model model;
+    ModelObject *object = model.add_object("degenerate", "", TriangleMesh(broken));
+    const indexed_triangle_set before = object->volumes.front()->mesh().its;
+    model.repair_imported_meshes();
+    CHECK(object->volumes.front()->mesh().its.indices == before.indices);
+    CHECK(object->volumes.front()->mesh().its.vertices == before.vertices);
+    REQUIRE(model.mesh_validation_warnings().size() == 1);
+}
+
+// Painting must be decoded before the project loader decides whether to repair.
+TEST_CASE("3MF import keeps painted degenerate faces and reports their volume", "[mesh-repair][import][formats]")
+{
+    using namespace Slic3r;
+    indexed_triangle_set broken = its_make_cube(10., 10., 10.);
+    broken.indices.emplace_back(0, 0, 1);
+    Model source;
+    ModelObject *object = source.add_object("painted import", "", TriangleMesh(broken));
+    object->add_instance();
+    object->volumes.front()->name = "preserved painting";
+    object->volumes.front()->supported_facets.set_triangle_from_string(0, "4");
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("painted-mesh-repair-" + std::to_string(object->id().id) + ".3mf");
+    struct ArchiveOwner {
+        std::filesystem::path path;
+        // Remove only the archive owned by this case.
+        ~ArchiveOwner() { std::error_code error; std::filesystem::remove(path, error); }
+    } owner{path};
+    const DynamicPrintConfig saved_config;
+    REQUIRE(store_3mf(path.u8string().c_str(), &source, &saved_config));
+    Model loaded;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(path.u8string().c_str(), config, substitutions, &loaded, false, false));
+    REQUIRE(loaded.objects().size() == 1);
+    REQUIRE(loaded.objects().front().volumes.size() == 1);
+    const ModelVolume &volume = *loaded.objects().front().volumes.front();
+    CHECK(volume.mesh().facets_count() == broken.indices.size());
+    CHECK(volume.mesh().validate().degenerate_facets == 1);
+    CHECK(volume.supported_facets.get_triangle_as_string(0) == "4");
+    const std::vector<std::string> warnings = loaded.mesh_validation_warnings();
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings.front().find("preserved painting") != std::string::npos);
+}
+
+// Public format loaders must apply the same policy even without Model::read_from_file.
+TEST_CASE("Public model loaders share import repair", "[mesh-repair][import][formats]")
+{
+    using namespace Slic3r;
+    const std::string format = GENERATE(std::string("3mf"), std::string("amf"), std::string("obj"), std::string("stl"));
+    indexed_triangle_set broken = its_make_cube(10., 10., 10.);
+    broken.indices.emplace_back(0, 0, 1);
+    Model source;
+    ModelObject *object = source.add_object("dirty cube", "", TriangleMesh(broken));
+    object->add_instance();
+    const DynamicPrintConfig config;
+    std::string filename = (std::filesystem::temp_directory_path() /
+        ("mesh-repair-" + std::to_string(object->id().id) + "." + format)).u8string();
+    struct ArchiveOwner {
+        std::string &filename;
+        // Remove only this case's temporary input, including AMF's adjusted suffix.
+        ~ArchiveOwner() { std::error_code error; std::filesystem::remove(filename, error); }
+    } owner{filename};
+    if (format == "3mf") REQUIRE(store_3mf(filename.c_str(), &source, &config));
+    else if (format == "amf") REQUIRE(store_amf(filename, &source, &config, OptionStoreAmf{}));
+    else if (format == "obj") REQUIRE(store_obj(filename.c_str(), &source));
+    else REQUIRE(store_stl(filename.c_str(), &source, true));
+
+    Model loaded;
+    DynamicPrintConfig read_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    if (format == "3mf") REQUIRE(load_3mf(filename.c_str(), read_config, substitutions, &loaded, false, false));
+    else if (format == "amf") REQUIRE(load_amf(filename.c_str(), &read_config, &substitutions, &loaded, false));
+    else if (format == "obj") REQUIRE(load_obj(filename.c_str(), &loaded));
+    else REQUIRE(load_stl(filename.c_str(), &loaded));
+    REQUIRE(loaded.objects().size() == 1);
+    const TriangleMesh &mesh = loaded.objects().front().volumes.front()->mesh();
+    CHECK(mesh.validate().valid());
+    CHECK(mesh.facets_count() == 12);
+    CHECK(mesh.stats().volume == Approx(1000.).margin(0.01));
+    CHECK(loaded.mesh_validation_warnings().empty());
+
+    // Geometry-only reload must not finalize a second time around the loader.
+    const Model reloaded = Model::read_from_file(filename);
+    REQUIRE(reloaded.objects().size() == 1);
+    const TriangleMesh &reloaded_mesh = reloaded.objects().front().volumes.front()->mesh();
+    CHECK(reloaded_mesh.validate().valid());
+    CHECK(reloaded_mesh.facets_count() == mesh.facets_count());
+    CHECK(reloaded_mesh.stats().volume == Approx(mesh.stats().volume));
+    CHECK(reloaded_mesh.stats().repaired_errors.degenerate_facets == mesh.stats().repaired_errors.degenerate_facets);
+}
+
+// Slicing/projection must prepare their own working mesh, independently of import repair.
+TEST_CASE("Native and plugin mesh use removes only local degenerate faces", "[mesh-repair][mesh-use]")
+{
+    using namespace Slic3r;
+    const bool mirrored = GENERATE(false, true);
+    const indexed_triangle_set clean = its_make_cube(10., 10., 10.);
+    indexed_triangle_set dirty = clean;
+    dirty.indices.emplace_back(0, 0, 1);
+    dirty.vertices.push_back(dirty.vertices[0]);
+    dirty.indices.emplace_back(0, int(dirty.vertices.size() - 1), 1);
+    const indexed_triangle_set before = dirty;
+    Transform3d transform = Transform3d::Identity();
+    if (mirrored)
+        transform.scale(Vec3d(-1., 1., 1.));
+    transform.translate(Vec3d(2., 3., 0.));
+    MeshSlicingParams params;
+    params.trafo = transform;
+    indexed_triangle_set native_dirty = dirty;
+    indexed_triangle_set native_clean = clean;
+    if (mirrored) {
+        its_flip_triangles(native_dirty);
+        its_flip_triangles(native_clean);
+    }
+    const Polygons expected = slice_mesh(native_clean, 5.f, params);
+    const Polygons actual = slice_mesh(native_dirty, 5.f, params);
+    CHECK(diff_ex(expected, actual).empty());
+    CHECK(diff_ex(actual, expected).empty());
+    const std::vector<Polygons> multi = slice_mesh(native_dirty, std::vector<float>{2.f, 5.f}, params, [] {});
+    REQUIRE(multi.size() == 2);
+    CHECK(diff_ex(multi[1], expected).empty());
+    CHECK(diff_ex(expected, multi[1]).empty());
+
+    const Polygons expected_projection = project_mesh(clean, transform, [] {});
+    const Polygons projection = project_mesh(dirty, transform, [] {});
+    CHECK(diff_ex(projection, expected_projection).empty());
+    CHECK(diff_ex(expected_projection, projection).empty());
+    for (const Polygon &ring : projection)
+        CHECK_FALSE(has_duplicate_points(ring));
+
+    PluginStorage storage;
+    storage_handle *storage_handle_value = reinterpret_cast<storage_handle *>(&storage);
+    const TriangleMesh source(dirty);
+    const triangle_mesh_handle *handle = reinterpret_cast<const triangle_mesh_handle *>(&source);
+    const slic3r_api::TriangleMesh mesh(handle);
+    c_matrix4d matrix{};
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col)
+            matrix.value[row * 4 + col] = transform.matrix()(row, col);
+    const slic3r_api::StoredPolygonCollection api_projection = mesh.project_to_polygons(storage_handle_value, matrix);
+    const Polygons &api_polygons = *reinterpret_cast<const Polygons *>(api_projection.handle());
+    CHECK(diff_ex(api_polygons, expected_projection).empty());
+    CHECK(diff_ex(expected_projection, api_polygons).empty());
+    c_mesh_slicing_params api_params{};
+    api_params.transform = matrix;
+    const std::vector<slic3r_api::StoredPolygonCollection> api_slices =
+        mesh.slice_to_polygons(storage_handle_value, api_params, std::vector<float>{5.f}, nullptr);
+    REQUIRE(api_slices.size() == 1);
+    const Polygons &api_slice = *reinterpret_cast<const Polygons *>(api_slices.front().handle());
+    CHECK(diff_ex(api_slice, expected).empty());
+    CHECK(diff_ex(expected, api_slice).empty());
+    Polygons c_slice;
+    polygon_collection_handle *c_slice_handle = reinterpret_cast<polygon_collection_handle *>(&c_slice);
+    const float z = 5.f;
+    REQUIRE(triangle_mesh_slice_to_polygons(handle, &api_params, &z, &c_slice_handle, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+    CHECK(diff_ex(c_slice, expected).empty());
+    CHECK(diff_ex(expected, c_slice).empty());
+    CHECK(source.its.indices == before.indices);
+    CHECK(source.its.vertices == before.vertices);
+    CHECK(dirty.indices == before.indices);
+    CHECK(dirty.vertices == before.vertices);
+}
+
+// Selected patches remain open surfaces; cleanup must not add faces or close the mesh.
+TEST_CASE("Local mesh preparation preserves an open selected patch", "[mesh-repair][mesh-use]")
+{
+    using namespace Slic3r;
+    indexed_triangle_set patch;
+    patch.vertices = {Vec3f(0, 0, 0), Vec3f(10, 0, 0), Vec3f(0, 10, 0)};
+    patch.indices = {Vec3i32(0, 1, 2), Vec3i32(0, 0, 1)};
+    const indexed_triangle_set before = patch;
+    indexed_triangle_set scratch;
+    const indexed_triangle_set &prepared = mesh_without_degenerate_faces(patch, scratch);
+    REQUIRE(prepared.indices.size() == 1);
+    CHECK(prepared.indices.front() == before.indices.front());
+    CHECK(prepared.vertices == before.vertices);
+    CHECK(its_num_open_edges(prepared) == 3);
+    const Polygons projected = project_mesh(patch, Transform3d::Identity(), [] {});
+    CHECK(area(projected) == Approx(scale_d(10.) * scale_d(10.) * 0.5));
+    CHECK(patch.indices == before.indices);
+    CHECK(patch.vertices == before.vertices);
+}
+
+// Resolve the painting before cleaning its independent patch, including a selected bad face.
+TEST_CASE("Painting selection remains attached to an unmodified degenerate source", "[mesh-repair][mesh-use][painting]")
+{
+    using namespace Slic3r;
+    indexed_triangle_set dirty = its_make_cube(10., 10., 10.);
+    dirty.indices.emplace_back(0, 0, 1);
+    Model model;
+    ModelObject *object = model.add_object("painted mesh", "", TriangleMesh(dirty));
+    ModelVolume &volume = *object->volumes.front();
+    volume.supported_facets.set_triangle_from_string(0, "4");
+    volume.supported_facets.set_triangle_from_string(12, "4");
+    const indexed_triangle_set before = volume.mesh().its;
+    const indexed_triangle_set selected = volume.supported_facets.get_facets_strict(volume, EnforcerBlockerType::ENFORCER);
+    REQUIRE(selected.indices.size() == 2);
+    indexed_triangle_set expected = before;
+    expected.indices.resize(1);
+    const Polygons actual = project_mesh(selected, Transform3d::Identity(), [] {});
+    const Polygons reference = project_mesh(expected, Transform3d::Identity(), [] {});
+    REQUIRE_FALSE(reference.empty());
+    CHECK(diff_ex(actual, reference).empty());
+    CHECK(diff_ex(reference, actual).empty());
+    CHECK(volume.mesh().its.indices == before.indices);
+    CHECK(volume.mesh().its.vertices == before.vertices);
+    CHECK(volume.supported_facets.get_triangle_as_string(0) == "4");
+    CHECK(volume.supported_facets.get_triangle_as_string(12) == "4");
+}
+
+// Opt-in real-mesh qualification uses a temporary STL extracted from Senin's
+// original volume, including all 28 bad faces. No project import repair runs.
+TEST_CASE("Senin raw native projection preserves the cleaned reference geometry",
+          "[.][mesh-repair-real-project]")
+{
+    using namespace Slic3r;
+    const char *path = std::getenv("SLIC3R_MESH_REPAIR_QUALIFICATION_STL");
+    REQUIRE(path != nullptr);
+    TriangleMesh source;
+    REQUIRE(source.ReadSTLFile(path, false));
+    // STL stores points per face. Restore exact shared vertex indexing without
+    // removing or changing any face, including the degenerate ones.
+    its_merge_vertices(source.its, false);
+    REQUIRE(source.its.vertices.size() == 57565);
+    REQUIRE(source.facets_count() == 115166);
+    REQUIRE(its_num_degenerate_faces(source.its) == 28);
+    const indexed_triangle_set before = source.its;
+    indexed_triangle_set cleaned = before;
+    REQUIRE(its_remove_degenerate_faces(cleaned, false) == 28);
+    REQUIRE(its_num_open_edges(cleaned) == 0);
+    const Transform3d transform = Transform3d::Identity();
+    const Polygons expected = project_mesh(cleaned, transform, [] {});
+    const Polygons actual = project_mesh(source.its, transform, [] {});
+    REQUIRE_FALSE(expected.empty());
+    CHECK(actual.size() == expected.size());
+    CHECK(diff_ex(actual, expected).empty());
+    CHECK(diff_ex(expected, actual).empty());
+    for (const Polygon &ring : actual)
+        CHECK_FALSE(has_duplicate_points(ring));
+    CHECK(source.its.vertices == before.vertices);
+    CHECK(source.its.indices == before.indices);
 }
 
 namespace {
@@ -858,20 +1158,43 @@ TEST_CASE("triangle_mesh_slice_to_polygons gives an empty layer when PositiveLar
     polygon_collection_handle *handles[1] = {layer.mutable_handle()};
     c_mesh_slicing_params params = {};
     params.transform = helper_transform(false);
-    // Control: the other modes keep the zero-area loops, so the slicer does produce them.
+    // The wall contains useful triangles, but its section is wholly collinear.
+    // Exact ring cleanup removes it before either positive-mode selection.
+    REQUIRE(its_num_degenerate_faces(mesh.its) == 0);
+    for (const Vec3f &vertex : mesh.its.vertices)
+        REQUIRE(vertex.y() == 0.f);
     params.mode = RAW_MESH_SLICING_MODE_POSITIVE;
     params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE;
     REQUIRE(triangle_mesh_slice_to_polygons(mesh_handle, &params, zs.data(), handles, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
-    REQUIRE_FALSE(layer.empty());
-    // Fixture precondition: every loop of the wall has a zero area.
-    for (uint32_t idx = 0; idx < layer.size(); ++idx)
-        REQUIRE(layer.at(idx).area() == 0.);
+    CHECK(layer.empty());
 
     params.mode = RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR;
     params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR;
 
     REQUIRE(triangle_mesh_slice_to_polygons(mesh_handle, &params, zs.data(), handles, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
     CHECK(layer.empty());
+
+    // A neighboring solid must survive unchanged while the wall disappears.
+    TriangleMesh cube = make_cube(10., 10., 10.);
+    cube.translate(Vec3f(0.f, 20.f, 0.f));
+    TriangleMesh mixed = mesh;
+    mixed.merge(cube);
+    Polygons reference;
+    polygon_collection_handle *reference_handle = reinterpret_cast<polygon_collection_handle *>(&reference);
+    for (raw_mesh_slicing_mode mode : {RAW_MESH_SLICING_MODE_REGULAR, RAW_MESH_SLICING_MODE_POSITIVE,
+                                      RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR}) {
+        params.mode = mode;
+        params.mode_below = mode;
+        REQUIRE(triangle_mesh_slice_to_polygons(reinterpret_cast<const triangle_mesh_handle *>(&cube),
+            &params, zs.data(), &reference_handle, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+        REQUIRE(triangle_mesh_slice_to_polygons(reinterpret_cast<const triangle_mesh_handle *>(&mixed),
+            &params, zs.data(), handles, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+        REQUIRE_FALSE(reference.empty());
+        const Polygons &actual = *reinterpret_cast<const Polygons *>(layer.handle());
+        CHECK(actual.size() == reference.size());
+        CHECK(diff_ex(actual, reference).empty());
+        CHECK(diff_ex(reference, actual).empty());
+    }
 }
 
 // keep_largest_contour_only() keeps the contour of largest positive area, and leaves the islands untouched when there
@@ -1445,6 +1768,100 @@ TEST_CASE("The Python slicing maps the status of the real host to its exceptions
     CHECK(never.calls.load() > 0);
     CHECK(always.calls.load() > 0);
 }
+
+// Exercise borrowed source handles so strict construction cannot hide bad faces.
+TEST_CASE("Python mesh cleanup preserves the source and matches clean working geometry",
+          "[mesh-repair][mesh-use][python-real-host]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const PythonEntryPoints python = find_python_entry_points();
+    REQUIRE(Test::Plugins::python_plugin_test_runtime_available());
+    REQUIRE(python.run_simple_string != nullptr);
+    const int shape = GENERATE(0, 1, 2);
+    const bool mirror = GENERATE(false, true);
+    indexed_triangle_set clean = its_make_cube(10., 10., 10.);
+    if (shape == 1) {
+        clean.vertices = {Vec3f(0, 0, 0), Vec3f(10, 0, 0), Vec3f(0, 10, 0)};
+        clean.indices = {Vec3i32(0, 1, 2)};
+    } else if (shape == 2) {
+        clean.indices.clear();
+    }
+    indexed_triangle_set dirty = clean;
+    dirty.indices.emplace_back(0, 0, 1);
+    dirty.vertices.push_back(dirty.vertices.front());
+    dirty.indices.emplace_back(0, int(dirty.vertices.size() - 1), 1);
+    const TriangleMesh source(dirty);
+    const TriangleMesh reference(clean);
+    PluginStorage storage;
+    TemporaryFiles files;
+    const std::filesystem::path script = files.make("mesh_cleanup.py");
+    std::ostringstream text;
+    text << "PARAMS = {\"source\": " << reinterpret_cast<uintptr_t>(&source)
+         << ", \"reference\": " << reinterpret_cast<uintptr_t>(&reference)
+         << ", \"storage\": " << reinterpret_cast<uintptr_t>(&storage)
+         << ", \"mirror\": " << (mirror ? "True" : "False") << "}\n";
+    text << R"PY(
+import slic3r_api
+import slic3r_api_generated as generated
+import slic3r_datatree_views as views
+
+api = slic3r_api._registered_apis[0]
+source = views.TriangleMesh(api, PARAMS["source"])
+reference = views.TriangleMesh(api, PARAMS["reference"])
+storage = PARAMS["storage"]
+transform = generated.CMatrix4d()
+for index in range(0, 16, 5):
+    transform.value[index] = 1.0
+transform.value[0] = -1.0 if PARAMS["mirror"] else 1.0
+transform.value[3] = 2.0
+transform.value[7] = 3.0
+
+def snapshot(mesh):
+    vertices = [mesh.vertex_at(i) for i in range(mesh.vertex_count())]
+    faces = [mesh.triangle_at(i) for i in range(mesh.triangle_count())]
+    return ([(v.x, v.y, v.z) for v in vertices], [(f.a, f.b, f.c) for f in faces])
+
+def ring(polygon):
+    points = [(p.x, p.y) for p in polygon.points()]
+    assert len(points) >= 3
+    assert len(points) == len(set(points))
+    # Only the starting vertex is immaterial. Preserve winding and all coordinates.
+    return min(tuple(points[i:] + points[:i]) for i in range(len(points)))
+
+def polygons(collection):
+    return sorted(ring(collection.at(i)) for i in range(collection.size()))
+
+def surfaces(collection):
+    result = []
+    for i in range(collection.size()):
+        surface = collection.at(i)
+        result.append((ring(surface.contour()),
+                       sorted(ring(surface.hole(j)) for j in range(surface.hole_size()))))
+    return sorted(result)
+
+before = snapshot(source)
+for repeat in range(2):
+    with source.project_to_polygons(storage, transform) as actual:
+        with reference.project_to_polygons(storage, transform) as expected:
+            assert polygons(actual) == polygons(expected)
+    for method, convert in (("slice_to_polygons", polygons), ("slice_to_expolygons", surfaces)):
+        actual = getattr(source, method)(storage, transform, [2.0, 5.0])
+        expected = getattr(reference, method)(storage, transform, [2.0, 5.0])
+        try:
+            assert [convert(layer) for layer in actual] == [convert(layer) for layer in expected]
+        finally:
+            for layer in actual + expected:
+                layer.free_from_storage()
+    assert snapshot(source) == before
+)PY";
+    write_text(script, text.str());
+    tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
+    REQUIRE(run_python_script(python, script));
+    CHECK(storage.size() == 0);
+    CHECK(source.its.vertices == dirty.vertices);
+    CHECK(source.its.indices == dirty.indices);
+}
+
 TEST_CASE("The Python remove_collinear gives the points of the native Polygon::remove_collinear",
           "[plugins][slice-volume][remove-collinear][python-real-host]")
 {

@@ -9,6 +9,7 @@
    collections. */
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <vector>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -59,6 +60,95 @@ Polygons notched_square_and_tiny_hole()
 }
 } // namespace
 
+// Raw normalization must not merge rings or discard a zero-signed-area crossing.
+TEST_CASE("Mesh ring normalization removes exact degeneracies without changing useful regions", "[mesh-repair][rings]")
+{
+    using namespace Slic3r;
+    Polygon clean;
+    clean.points = {Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10)};
+    Polygon crossing;
+    crossing.points = {Point(0, 0), Point(10, 10), Point(0, 10), Point(10, 0)};
+    // Populate raw arrays directly: Polygon constructors already trim near
+    // closing points, and reject some of the malformed rings tested here.
+    Polygon needle;
+    needle.points = {Point(0, 0), Point(1000000000, 999999999), Point(999999999, 999999998)};
+    // This determinant is -1 in integer arithmetic but rounds to zero in double.
+    REQUIRE(int128::orient(needle.points[0], needle.points[1], needle.points[2]) != 0);
+    Polygons rings(6);
+    rings[0].points = {Point(0, 0), Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10), Point(0, 0)};
+    rings[1].points = {Point(0, 0), Point(1, 0), Point(2, 0)};
+    rings[3].points = {Point(1, 1), Point(1, 1)};
+    rings[4].points = crossing.points;
+    rings[5].points = needle.points;
+    normalize_mesh_polygons(rings);
+    REQUIRE(rings.size() == 3);
+    CHECK(rings[0] == clean);
+    CHECK(rings[1] == crossing);
+    CHECK(rings[2] == needle);
+    const Polygons once = rings;
+    normalize_mesh_polygons(rings);
+    CHECK(rings == once);
+
+    Polygon touching;
+    touching.points = {Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10),
+                      Point(0, 0), Point(-10, 0), Point(-10, -10), Point(0, -10)};
+    Polygons split{touching};
+    normalize_mesh_polygons(split);
+    REQUIRE(split.size() == 2);
+    double area = 0.;
+    for (const Polygon &ring : split) {
+        CHECK_FALSE(has_duplicate_points(ring));
+        CHECK(ring.is_counter_clockwise());
+        area += ring.area();
+    }
+    CHECK(area == touching.area());
+    CHECK(diff_ex(Polygons{touching}, split).empty());
+    CHECK(diff_ex(split, Polygons{touching}).empty());
+}
+
+// Keep explicit hole ownership when an exterior disappears or splits at a contact.
+TEST_CASE("Mesh surface normalization retains hole ownership", "[mesh-repair][rings]")
+{
+    using namespace Slic3r;
+    Polygon flat;
+    flat.points = {Point(0, 0), Point(10, 0), Point(20, 0)};
+    Polygon hole;
+    hole.points = {Point(2, 2), Point(2, 4), Point(4, 4), Point(4, 2)};
+    ExPolygons empty_group{ExPolygon(flat, hole)};
+    normalize_mesh_expolygons(empty_group);
+    CHECK(empty_group.empty());
+
+    Polygon touching;
+    touching.points = {Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10),
+                      Point(0, 0), Point(-10, 0), Point(-10, -10), Point(0, -10)};
+    ExPolygons surfaces{ExPolygon(touching, hole)};
+    normalize_mesh_expolygons(surfaces);
+    REQUIRE(surfaces.size() == 2);
+    double area = 0.;
+    for (const ExPolygon &surface : surfaces) {
+        REQUIRE(surface.contour.size() == 4);
+        CHECK(surface.contour.is_counter_clockwise());
+        area += surface.area();
+        for (const Point &point : surface.contour.points)
+            CHECK(std::find(touching.points.begin(), touching.points.end(), point) != touching.points.end());
+        for (const Polygon &actual_hole : surface.holes)
+            CHECK(polygons_match(actual_hole, hole));
+    }
+    CHECK(area == touching.area() + hole.area());
+    CHECK(surfaces[0].holes.size() + surfaces[1].holes.size() == 1);
+    const ExPolygons once = surfaces;
+    normalize_mesh_expolygons(surfaces);
+    CHECK(surfaces == once);
+
+    ExPolygons unsplit(1);
+    unsplit.front().contour.points = {Point(0, 0), Point(10, 0), Point(10, 10), Point(0, 10)};
+    unsplit.front().holes.resize(1);
+    unsplit.front().holes.front().points = hole.points;
+    const ExPolygons unsplit_before = unsplit;
+    normalize_mesh_expolygons(unsplit);
+    CHECK(unsplit == unsplit_before);
+}
+
 TEST_CASE("Polygon collection ensure_valid matches the native one, holes of a removed contour included",
           "[plugins][geometry-cleanup]")
 {
@@ -76,8 +166,9 @@ TEST_CASE("Polygon collection ensure_valid matches the native one, holes of a re
     Polygons actual = input;
     polygons_ensure_valid(handle(actual), resolution);
     CHECK(actual == expected);
-    // The native quirk keeps the hole of the removed contour.
-    CHECK(actual.size() == 2);
+    // A removed exterior must not leave its hole as an independent ring.
+    REQUIRE(actual.size() == 1);
+    CHECK(actual.front().is_counter_clockwise());
 
     // The stored C++ view gives the same result.
     PluginStorage storage;

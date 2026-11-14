@@ -578,6 +578,8 @@ namespace Slic3r {
         bool unbake_transformation = false;
         // Receives the text of the profile sections entry, when not null and when the archive has this entry.
         std::string *profile_sections = nullptr;
+        // The delegated loader performs its own mesh finalization.
+        bool loaded_by_bbs_importer = false;
 
         _3MF_Importer();
         ~_3MF_Importer();
@@ -825,6 +827,7 @@ namespace Slic3r {
                                                    0);
                         if(!result)
                             throw Slic3r::FileIOError(e.what());
+                        loaded_by_bbs_importer = true;
                         return true;
                     }
                     catch (const std::exception& e)
@@ -4213,11 +4216,15 @@ bool load_3mf(const char *path,
     // All import should use "C" locales for number formatting.
     CNumericLocalesSetter locales_setter;
     _3MF_Importer         importer;
+    const size_t first_object = model->objects().size();
     importer.unbake_transformation = unbake_transformation;
     importer.profile_sections = profile_sections;
     bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
     importer.log_errors();
     handle_legacy_project_loaded(importer.version(), config, importer.prusaslicer_generator_version());
+
+    if (res && !importer.loaded_by_bbs_importer)
+        model->repair_imported_meshes(first_object);
 
     return res;
 }

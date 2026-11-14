@@ -3,6 +3,8 @@ This is the command-line application entry point. It parses options, loads model
 and configuration inputs, applies requested model operations, then either runs
 the selected exports or starts the graphical application. FFF and SLA have
 different processing and output paths; GUI startup is not an export action.
+Mesh diagnostics name the affected volumes and remain visible on the CLI even
+when its default log filter suppresses warning-level records.
 
 For FFF, slicing prepares the generated command reference before file export.
 Statistics-dependent filename values can be resolved only after reading those
@@ -19,6 +21,7 @@ Representative direct calls (branches are not a timeline):
     CLI::run()
         |-- this->setup()
         |-- Model::read_from_file()
+        |-- Model::mesh_validation_warnings(): report preserved mesh defects
         |-- this->export_models()
         |-- print->apply()
         |-- print->validate()
@@ -410,6 +413,11 @@ int CLI::run(int argc, char **argv)
                 ConfigSubstitutionContext config_substitutions(config_substitution_rule);
                 //FIXME should we check the version here? // | Model::LoadAttribute::CheckVersion ?
                 model = Model::read_from_file(file, &config, &config_substitutions, Model::LoadAttribute::AddDefaultInstances);
+                // Default CLI logging hides warning-level records. Keep mesh
+                // diagnostics visible, without duplicating enabled log output.
+                if (!start_gui && get_logging_level() < 2)
+                    for (const std::string &warning : model.mesh_validation_warnings())
+                        boost::nowide::cerr << file << ": Warning: " << warning << std::endl;
                 PrinterTechnology other_printer_technology = get_printer_technology(config);
                 if (printer_technology == ptUnknown) {
                     printer_technology = other_printer_technology;

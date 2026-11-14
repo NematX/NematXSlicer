@@ -2957,6 +2957,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         if (load_model) {
             // The inner model should now be initialized
 
+            for (const std::string &warning : loaded_model.mesh_validation_warnings())
+                notification_manager->push_notification(NotificationType::CustomNotification,
+                    NotificationManager::NotificationLevel::WarningNotificationLevel, warning);
+
             // copy extra fields
             this->model.baked_transformation = loaded_model.baked_transformation;
 

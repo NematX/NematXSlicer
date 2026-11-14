@@ -23,6 +23,16 @@
 #include "PointUtils.hpp"
 #include "Polyline.hpp"
 
+/* Raw mesh-ring normalization removes only exact coordinate degeneracies.
+   Contacts at repeated vertices are split without merging independent rings,
+   so their winding and the caller's fill rule remain meaningful.
+
+       normalize_mesh_polygons
+           |-- remove_same_neighbor: remove explicit zero-length edges
+           |-- split repeated vertices into closed subpaths
+           `-- discard subpaths that cannot describe any area
+*/
+
 namespace Slic3r {
 
 double Polygon::length() const
@@ -807,6 +817,61 @@ bool remove_same_neighbor(Polygons &polygons)
     return exist;
 }
 
+void normalize_mesh_polygons(Polygons &polygons)
+{
+    // Polygon's move constructor may trim a near-closing point. Transfer point
+    // arrays instead so exact normalization never introduces that tolerance.
+    std::vector<Points> normalized_points;
+    normalized_points.reserve(polygons.size());
+    for (Polygon &source : polygons) {
+        std::vector<Points> pending;
+        pending.emplace_back(std::move(source.points));
+        while (!pending.empty()) {
+            Polygon ring;
+            ring.points = std::move(pending.back());
+            pending.pop_back();
+            remove_same_neighbor(ring);
+            if (ring.size() < 3)
+                continue;
+
+            ankerl::unordered_dense::map<Point, size_t, PointHash> seen;
+            bool split = false;
+            for (size_t i = 0; i < ring.size(); ++i) {
+                const std::pair<decltype(seen)::iterator, bool> inserted = seen.emplace(ring.points[i], i);
+                if (!inserted.second) {
+                    const size_t start = inserted.first->second;
+                    Points part(ring.points.begin() + start, ring.points.begin() + i);
+                    Points rest(ring.points.begin(), ring.points.begin() + start);
+                    rest.insert(rest.end(), ring.points.begin() + i, ring.points.end());
+                    pending.emplace_back(std::move(rest));
+                    pending.emplace_back(std::move(part));
+                    split = true;
+                    break;
+                }
+            }
+            if (split)
+                continue;
+
+            // Signed zero area alone can also describe crossing lobes. Only
+            // discard a ring proven collinear; leave other intersections to
+            // the caller's existing fill-rule operation.
+            bool collinear = true;
+            for (size_t i = 2; i < ring.size(); ++i) {
+                if (int128::orient(ring.points.front(), ring.points[1], ring.points[i]) != 0) {
+                    collinear = false;
+                    break;
+                }
+            }
+            if (!collinear)
+                normalized_points.emplace_back(std::move(ring.points));
+        }
+    }
+    Polygons normalized(normalized_points.size());
+    for (size_t i = 0; i < normalized.size(); ++i)
+        normalized[i].points = std::move(normalized_points[i]);
+    polygons.swap(normalized);
+}
+
 // note: prefer using ExPolygons.
 void ensure_valid(Polygons &polygons, coord_t resolution /*= SCALED_EPSILON*/) {
     for (size_t i = 0; i < polygons.size(); ++i) {
@@ -816,7 +881,7 @@ void ensure_valid(Polygons &polygons, coord_t resolution /*= SCALED_EPSILON*/) {
             // if erase contour, also erase its holes.
             if (ccw) {
                 for (size_t hole_idx = i + 1; hole_idx < polygons.size(); ++hole_idx) {
-                    if (polygons[i].is_clockwise()) {
+                    if (polygons[hole_idx].is_clockwise()) {
                         polygons.erase(polygons.begin() + hole_idx);
                         --hole_idx;
                     } else {

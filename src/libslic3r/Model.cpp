@@ -51,6 +51,8 @@
 /*
 Model stores the scene for the GUI and callers without a GUI.
 Loading reads geometry and project data through the format loaders.
+Each loader finalizes its decoded volumes after annotations have been read:
+unpainted meshes use ADMesh repair and painted meshes are only validated.
 Editing changes objects, their placement, local settings or painting data.
 Callers must prevent concurrent access while the model is being changed.
 
@@ -72,6 +74,10 @@ Representative direct calls (branches are not a timeline):
         |-- load_3mf()
         `-- load_svg()
 
+    Model::repair_imported_meshes()
+        |-- TriangleMesh::repair(): replace only an unpainted usable candidate
+        `-- mesh_validation_warnings(): inspect and report remaining defects
+
     Model::merge_objects_into_multipart()
         |-- this->add_object()
         |-- merged->add_instance()
@@ -82,6 +88,9 @@ Representative direct calls (branches are not a timeline):
 */
 
 namespace Slic3r {
+
+// Describe a volume's remaining mesh defects without changing its face indices.
+static std::string mesh_validation_warning(const ModelObject &object, const ModelVolume &volume);
 
 Model& Model::assign_copy(const Model &rhs)
 {
@@ -307,6 +316,51 @@ Model Model::read_from_archive(const std::string& input_file,
     handle_legacy_sla(*config);
 
     return model;
+}
+
+void Model::repair_imported_meshes(size_t first_object)
+{
+    for (size_t idx = first_object; idx < m_objects.size(); ++idx) {
+        ModelObject &object = *m_objects[idx];
+        for (ModelVolume *volume : object.volumes) {
+            const bool painted = volume->is_fdm_support_painted() || volume->is_mm_painted() ||
+                                 !volume->facets_annotation_keys().empty();
+            if (!painted) {
+                TriangleMesh candidate(volume->mesh());
+                if (candidate.repair()) {
+                    volume->set_mesh(std::move(candidate));
+                    volume->calculate_convex_hull();
+                    object.invalidate_bounding_box();
+                }
+            }
+            const std::string warning = mesh_validation_warning(object, *volume);
+            if (!warning.empty())
+                BOOST_LOG_TRIVIAL(warning) << warning;
+        }
+    }
+}
+
+std::vector<std::string> Model::mesh_validation_warnings() const
+{
+    std::vector<std::string> warnings;
+    for (const ModelObjectUPtr &object : m_objects)
+        for (const ModelVolume *volume : object->volumes) {
+            std::string warning = mesh_validation_warning(*object, *volume);
+            if (!warning.empty())
+                warnings.push_back(std::move(warning));
+        }
+    return warnings;
+}
+
+static std::string mesh_validation_warning(const ModelObject &object, const ModelVolume &volume)
+{
+    const MeshValidationResult validation = volume.mesh().validate();
+    if (validation.valid())
+        return {};
+    return "Mesh validation: object \"" + object.name + "\", volume \"" + volume.name +
+           "\": invalid elements=" + std::to_string(validation.invalid_elements) +
+           ", degenerate facets=" + std::to_string(validation.degenerate_facets) +
+           ", open or inconsistently oriented edges=" + std::to_string(validation.open_edges) + ".";
 }
 
 ModelObject* Model::add_object()

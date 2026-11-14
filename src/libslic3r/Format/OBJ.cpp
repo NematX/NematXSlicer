@@ -107,6 +107,9 @@ bool load_obj(const char *path, TriangleMesh *meshptr)
     }
     if (meshptr->volume() < 0)
         meshptr->flip_triangles();
+    meshptr->repair();
+    if (!meshptr->validate().valid())
+        BOOST_LOG_TRIVIAL(warning) << "Mesh validation: OBJ \"" << path << "\" still has mesh defects.";
     return true;
 }
 

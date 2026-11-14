@@ -114,7 +114,7 @@ bool load_step(const char *path, Model *model /*BBS:, ImportStepProgressFn proFn
 
     for (size_t i = 0; i < occt_object.volumes.size(); ++i) {
         TriangleMesh triangle_mesh;
-        triangle_mesh.from_facets(std::move(occt_object.volumes[i].facets));
+        triangle_mesh.from_facets(std::move(occt_object.volumes[i].facets), false);
         ModelVolume* new_volume = new_object->add_volume(std::move(triangle_mesh));
 
         new_volume->name = occt_object.volumes[i].volume_name.empty()
@@ -125,6 +125,7 @@ bool load_step(const char *path, Model *model /*BBS:, ImportStepProgressFn proFn
         new_volume->source.volume_idx = (int)new_object->volumes.size() - 1;
     }
 
+    model->repair_imported_meshes(model->objects().size() - 1);
     return true;
 }
 

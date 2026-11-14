@@ -60,6 +60,16 @@
 #include "SVG.hpp"
 #endif
 
+/* Mesh sections and projected slabs share exact-degeneracy preparation.
+   A filtered working copy is needed only when the source has a zero-length
+   triangle edge; source indices remain available to painting selections.
+   Both paths normalize their raw rings without adding offsets or merging them.
+
+       slice_mesh -> mesh_without_degenerate_faces -> make_loops
+       slice_mesh_slabs -> mesh_without_degenerate_faces -> make_slab_loops
+       make_loops / make_slab_loops -> normalize_mesh_polygons
+*/
+
 namespace Slic3r {
 
 class IntersectionReference
@@ -1433,6 +1443,7 @@ static std::vector<Polygons> make_loops(
 
                 Polygons &polygons = layers[line_idx];
                 polygons = make_loops(lines[line_idx]);
+                normalize_mesh_polygons(polygons);
 
                 auto this_mode = line_idx < params.slicing_mode_normal_below_layer ? params.mode_below : params.mode;
                 if (! polygons.empty()) {
@@ -1586,10 +1597,15 @@ static std::vector<Polygons> make_slab_loops(
                             svg.Close();
                         }
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
+                        // Chaining can legitimately collapse every loop to a
+                        // line or point after coordinate quantization.
+                        if (loops.empty() && open_polylines.empty())
+                            continue;
                         assert(! loops.empty());
                         assert(open_polylines.empty());
                         if (! open_polylines.empty())
                             BOOST_LOG_TRIVIAL(trace) << "make_slab_loops - chaining failed. #" << open_polylines.size() << " open polylines";
+                        normalize_mesh_polygons(loops);
                     }
                 }
             }
@@ -1809,13 +1825,15 @@ static std::vector<stl_vertex> transform_mesh_vertices_for_slicing(const indexed
 }
 
 std::vector<Polygons> slice_mesh(
-    const indexed_triangle_set       &mesh,
+    const indexed_triangle_set       &source_mesh,
     // Unscaled Zs
     const std::vector<float>         &zs,
     const MeshSlicingParams          &params,
     std::function<void()>             throw_on_cancel)
 {
     BOOST_LOG_TRIVIAL(debug) << "slice_mesh to polygons";
+    indexed_triangle_set scratch;
+    const indexed_triangle_set &mesh = mesh_without_degenerate_faces(source_mesh, scratch);
        
     std::vector<IntersectionLines> lines;
 
@@ -1886,11 +1904,13 @@ std::vector<Polygons> slice_mesh(
 
 // Specialized version for a single slicing plane only, running on a single thread.
 Polygons slice_mesh(
-    const indexed_triangle_set       &mesh,
+    const indexed_triangle_set       &source_mesh,
     // Unscaled Zs
     const float                       plane_z,
     const MeshSlicingParams          &params)
 {
+    indexed_triangle_set scratch;
+    const indexed_triangle_set &mesh = mesh_without_degenerate_faces(source_mesh, scratch);
     std::vector<IntersectionLines> lines;
 
     {
@@ -2035,7 +2055,7 @@ std::vector<ExPolygons> slice_mesh_ex(
 // with the exception that the triangle set this function processes may not cover the whole top resp. bottom surface.
 // top resp. bottom surfaces are calculated only if out_top resp. out_bottom is not null.
 void slice_mesh_slabs(
-    const indexed_triangle_set       &mesh,
+    const indexed_triangle_set       &source_mesh,
     // Unscaled Zs
     const std::vector<float>         &zs,
     const Transform3d                &trafo,
@@ -2044,6 +2064,8 @@ void slice_mesh_slabs(
     std::function<void()>             throw_on_cancel)
 {
     BOOST_LOG_TRIVIAL(debug) << "slice_mesh_slabs to polygons";
+    indexed_triangle_set scratch;
+    const indexed_triangle_set &mesh = mesh_without_degenerate_faces(source_mesh, scratch);
 
 #ifdef EXPENSIVE_DEBUG_CHECKS
     {

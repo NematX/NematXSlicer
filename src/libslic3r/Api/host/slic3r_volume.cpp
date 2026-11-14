@@ -189,7 +189,8 @@ static std::vector<Polygons> project_mmu_painting_to_polygons(const PrintObject 
         if (!volume->is_model_part() || !volume->is_mm_painted())
             continue;
 
-        const indexed_triangle_set painted = volume->mm_segmentation_facets.get_facets_strict(*volume, type);
+        indexed_triangle_set painted = volume->mm_segmentation_facets.get_facets_strict(*volume, type);
+        its_remove_degenerate_faces(painted, false);
         if (painted.indices.empty())
             continue;
 
@@ -582,6 +583,9 @@ int32_t triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
         std::vector<float> zs(z_mm_by_layer, z_mm_by_layer + layer_count);
         MeshSlicingParamsEx native_params = to_mesh_slicing_params(params);
         indexed_triangle_set its = to_triangle_mesh(mesh)->its;
+        // This mesh is already a private working copy. Filter it here so the
+        // shared slicer does not need a second copy of the same dirty input.
+        its_remove_degenerate_faces(its, false);
         if (native_params.trafo.rotation().determinant() < 0.)
             its_flip_triangles(its);
         std::vector<Polygons> sliced = slice_mesh(its, zs, native_params, throw_on_cancel);

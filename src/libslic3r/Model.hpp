@@ -1370,6 +1370,14 @@ public:
         LoadAttributes options = LoadAttribute::AddDefaultInstances,
         std::string* profile_sections = nullptr);
 
+    // Finalize newly decoded volumes after all their painting data is known.
+    // Unpainted volumes use import repair; painted volumes keep their face data.
+    // Remaining defects are logged with object and volume names.
+    void repair_imported_meshes(size_t first_object = 0);
+    // Inspect current volumes and return one diagnostic per invalid volume,
+    // without changing geometry or painting. GUI callers may display these warnings.
+    std::vector<std::string> mesh_validation_warnings() const;
+
     bool equals(const Model& rhs) const;
 
     // Add a new ModelObject to this Model, generate a new ID for this ModelObject.

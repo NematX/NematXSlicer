@@ -240,8 +240,10 @@ SLIC3R_HOST_API c_vec3f triangle_mesh_vertex_at(const triangle_mesh_handle *mesh
 SLIC3R_HOST_API c_triangle_indices triangle_mesh_triangle_at(const triangle_mesh_handle *mesh, uint32_t idx);
 
 /* Project every transformed mesh triangle onto XY and store the raw polygons
-   in storage. The returned collection belongs to storage and may be empty.
-   NULL reports an invalid handle, storage, or non-finite transformation. */
+    in storage. The returned collection belongs to storage and may be empty.
+    Native and API calls share exact-degeneracy filtering on a working copy and
+    ring normalization. The borrowed mesh and its face indices are not changed.
+    NULL reports invalid arguments or an internal projection failure. */
 SLIC3R_HOST_API polygon_collection_handle *triangle_mesh_project_to_polygons(
     storage_handle *storage, const triangle_mesh_handle *mesh, c_matrix4d transform);
 
@@ -259,7 +261,10 @@ typedef enum raw_mesh_slice_status {
 /*
 Slice a TriangleMesh into raw polygon loops at object-local Z positions, with
 the low-level slicer of the host (slice_mesh): no union, offset or simplification
-is applied to the loops. The triangles are flipped when the determinant of the
+is applied to the loops. Exact duplicate vertices in each ring are normalized
+by the same native helper used for projections. Degenerate source faces are
+filtered only in a working copy, preserving borrowed mesh data and paintings.
+The triangles are flipped when the determinant of the
 transform is negative, so a mirroring transform keeps outward-facing triangles.
 RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR keeps its native raw meaning
 here (the largest raw loop of each layer by absolute area, made counter-clockwise; a

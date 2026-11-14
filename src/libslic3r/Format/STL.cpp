@@ -30,7 +30,7 @@ namespace Slic3r {
 bool load_stl(const char *path, Model *model, const char *object_name_in)
 {
     TriangleMesh mesh;
-    if (! mesh.ReadSTLFile(path)) {
+    if (! mesh.ReadSTLFile(path, false)) {
 //    die "Failed to open $file\n" if !-e $path;
         return false;
     }
@@ -47,6 +47,7 @@ bool load_stl(const char *path, Model *model, const char *object_name_in)
        object_name.assign(object_name_in);
 
     model->add_object(object_name.c_str(), path, std::move(mesh));
+    model->repair_imported_meshes(model->objects().size() - 1);
     return true;
 }
 

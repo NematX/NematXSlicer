@@ -31,6 +31,12 @@
 #include "Point.hpp"
 #include "Polygon.hpp"
 
+/* TriangleMesh owns indexed 3D data and statistics. validate() is read-only;
+   repair() applies ADMesh to an unpainted import candidate. Geometry operations
+   instead use mesh_without_degenerate_faces(source, scratch), whose reference
+   borrows either source or scratch without changing source face associations.
+*/
+
 namespace Slic3r {
 
 class TriangleMesh;
@@ -104,6 +110,15 @@ struct TriangleMeshStats {
     bool repaired() const { return repaired_errors.repaired(); }
 };
 
+// Validation inspects mesh data without repairing it. Open edges also include
+// unmatched orientations; this is not a test for all geometric self-intersections.
+struct MeshValidationResult {
+    size_t invalid_elements = 0;
+    size_t degenerate_facets = 0;
+    size_t open_edges = 0;
+    bool valid() const { return invalid_elements == 0 && degenerate_facets == 0 && open_edges == 0; }
+};
+
 class TriangleMesh
 {
 public:
@@ -115,6 +130,11 @@ public:
     void clear() { this->its.clear(); m_stats.clear(); }
     void from_facets(std::vector<stl_facet> &&facets, bool repair = true);
     bool ReadSTLFile(const char* input_file, bool repair = true);
+    // Inspect coordinates, indices, zero-length triangle edges and connectivity without mutation.
+    MeshValidationResult validate() const;
+    // Apply the import repair to a private candidate. Keep this mesh if repair
+    // produces no usable faces; otherwise replace it and retain repair statistics.
+    bool repair();
     bool write_ascii(const char* output_file);
     bool write_binary(const char* output_file);
     float volume();
@@ -182,6 +202,12 @@ private:
     TriangleMeshStats m_stats;
     Vec3d m_init_shift {0.0, 0.0, 0.0}; // BBS, for import bbs 3mf...
 };
+
+// Borrow the source if clean; otherwise put a minimally filtered copy in scratch
+// and borrow that copy. Only exact zero-length triangle edges are removed.
+// Source indices and vertices never change; scratch must outlive the returned reference.
+const indexed_triangle_set &mesh_without_degenerate_faces(
+    const indexed_triangle_set &source, indexed_triangle_set &scratch);
 
 // Index of face indices incident with a vertex index.
 struct VertexFaceIndex

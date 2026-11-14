@@ -50,7 +50,20 @@
 #include "TriangleMeshSlicer.hpp"
 #include "Utils.hpp"
 
+/* TriangleMesh owns indexed geometry and its derived statistics. Import repair
+   uses ADMesh on a candidate so failure cannot discard the source. Validation
+   never changes indices, which lets painted volumes retain their face data.
+   Local slicing preparation uses only the degenerate-face helpers, not ADMesh.
+
+       TriangleMesh::repair -> from_facets -> trianglemesh_repair_on_import
+       TriangleMesh::validate -> its_num_degenerate_faces / its_face_neighbors
+       its_remove_degenerate_faces -> face_has_zero_length_edge
+*/
+
 namespace Slic3r {
+
+// Test exact zero-length edges without moving or welding distinct vertices.
+static bool face_has_zero_length_edge(const indexed_triangle_set &its, const Vec3i32 &face);
 
 static void update_bounding_box(const indexed_triangle_set &its, TriangleMeshStats &out)
 {
@@ -212,6 +225,53 @@ void TriangleMesh::from_facets(std::vector<stl_facet> &&facets, bool repair)
 
     stl_generate_shared_vertices(&stl, this->its);
     fill_initial_stats(this->its, this->m_stats);
+    m_stats.repaired_errors = {stl.stats.edges_fixed, stl.stats.degenerate_facets,
+                              stl.stats.facets_removed, stl.stats.facets_reversed,
+                              stl.stats.backwards_edges};
+}
+
+MeshValidationResult TriangleMesh::validate() const
+{
+    MeshValidationResult result;
+    for (const Vec3f &vertex : its.vertices)
+        if (!vertex.allFinite())
+            ++result.invalid_elements;
+    for (const Vec3i32 &face : its.indices)
+        for (int vertex : face)
+            if (vertex < 0 || size_t(vertex) >= its.vertices.size())
+                ++result.invalid_elements;
+    if (result.invalid_elements != 0)
+        return result;
+    result.degenerate_facets = size_t(its_num_degenerate_faces(its));
+    result.open_edges = its_num_open_edges(its);
+    return result;
+}
+
+bool TriangleMesh::repair()
+{
+    const MeshValidationResult validation = validate();
+    if (its.indices.empty() || validation.invalid_elements != 0 ||
+        validation.degenerate_facets == its.indices.size())
+        return false;
+    std::vector<stl_facet> facets;
+    facets.reserve(its.indices.size());
+    for (const Vec3i32 &face : its.indices) {
+        stl_facet facet{};
+        for (int i = 0; i < 3; ++i)
+            facet.vertex[i] = its.vertices[face(i)];
+        facet.normal = (facet.vertex[1] - facet.vertex[0]).cross(facet.vertex[2] - facet.vertex[0]);
+        if (facet.normal.squaredNorm() > 0.f)
+            facet.normal.normalize();
+        facets.push_back(facet);
+    }
+    TriangleMesh candidate;
+    candidate.from_facets(std::move(facets), true);
+    if (candidate.empty() || candidate.validate().invalid_elements != 0)
+        return false;
+    candidate.m_stats.repaired_errors.merge(m_stats.repaired_errors);
+    candidate.m_init_shift = m_init_shift;
+    *this = std::move(candidate);
+    return true;
 }
 
 bool TriangleMesh::ReadSTLFile(const char* input_file, bool repair)
@@ -778,15 +838,15 @@ void its_flip_triangles(indexed_triangle_set &its)
 
 int its_num_degenerate_faces(const indexed_triangle_set &its)
 {
-    return std::count_if(its.indices.begin(), its.indices.end(), [](auto &face) {
-        return face(0) == face(1) || face(0) == face(2) || face(1) == face(2);
+    return std::count_if(its.indices.begin(), its.indices.end(), [&its](const Vec3i32 &face) {
+        return face_has_zero_length_edge(its, face);
     });
 }
 
 int its_remove_degenerate_faces(indexed_triangle_set &its, bool shrink_to_fit)
 {
-    auto it = std::remove_if(its.indices.begin(), its.indices.end(), [](auto &face) {
-        return face(0) == face(1) || face(0) == face(2) || face(1) == face(2);
+    auto it = std::remove_if(its.indices.begin(), its.indices.end(), [&its](const Vec3i32 &face) {
+        return face_has_zero_length_edge(its, face);
     });
 
     int removed = std::distance(it, its.indices.end());
@@ -796,6 +856,24 @@ int its_remove_degenerate_faces(indexed_triangle_set &its, bool shrink_to_fit)
         its.indices.shrink_to_fit();
 
     return removed;
+}
+
+static bool face_has_zero_length_edge(const indexed_triangle_set &its, const Vec3i32 &face)
+{
+    return face(0) == face(1) || face(0) == face(2) || face(1) == face(2) ||
+           its.vertices[face(0)] == its.vertices[face(1)] ||
+           its.vertices[face(0)] == its.vertices[face(2)] ||
+           its.vertices[face(1)] == its.vertices[face(2)];
+}
+
+const indexed_triangle_set &mesh_without_degenerate_faces(
+    const indexed_triangle_set &source, indexed_triangle_set &scratch)
+{
+    if (its_num_degenerate_faces(source) == 0)
+        return source;
+    scratch = source;
+    its_remove_degenerate_faces(scratch, false);
+    return scratch;
 }
 
 int its_compactify_vertices(indexed_triangle_set &its, bool shrink_to_fit)

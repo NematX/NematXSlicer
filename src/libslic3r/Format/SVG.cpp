@@ -103,6 +103,7 @@ bool load_svg(const std::string &input_file, Model &output_model)
     }
     volume->name = object->name; // copy
     volume->emboss_shape = std::move(emboss_shape);
+    output_model.repair_imported_meshes(output_model.objects().size() - 1);
     object->invalidate_bounding_box();
     return true;
 }

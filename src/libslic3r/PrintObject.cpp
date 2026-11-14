@@ -587,8 +587,12 @@ bool PrintObject::update_layer_height_profile(const ModelObject& model_object, c
 }
 
 template<class LayerPtrContainer>
-static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers, const indexed_triangle_set &custom_facets, const Transform3f &tr, bool seam, std::vector<Polygons> &out)
+// Project an already selected patch. Filter only a local copy, retain its open
+// boundaries, and normalize generated rings with the same helper as mesh slices.
+static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers, const indexed_triangle_set &source_facets, const Transform3f &tr, bool seam, std::vector<Polygons> &out)
 {
+    indexed_triangle_set scratch;
+    const indexed_triangle_set &custom_facets = mesh_without_degenerate_faces(source_facets, scratch);
     if (custom_facets.indices.empty())
         return;
 
@@ -614,28 +618,6 @@ static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers,
             assert(pts.size() <= 5);
         }
 
-        bool normalize_for_polygon()
-        {
-            // A slab boundary may pass exactly through a triangle vertex. In
-            // that case the projection builder can append the same scaled
-            // coordinate twice, including as an explicit closing point.
-            // Polygon stores a closed contour implicitly, so remove those
-            // duplicate coordinates before constructing the Polygon object.
-            size_t dst_idx = 0;
-            for (size_t src_idx = 0; src_idx < pts.size(); ++src_idx) {
-                if (dst_idx == 0 || !pts[src_idx].coincides_with_epsilon(pts[dst_idx - 1])) {
-                    if (dst_idx != src_idx)
-                        pts[dst_idx] = pts[src_idx];
-                    ++dst_idx;
-                }
-            }
-            pts.resize(dst_idx);
-
-            if (pts.size() > 1 && pts.front().coincides_with_epsilon(pts.back()))
-                pts.pop_back();
-
-            return pts.size() >= 3;
-        }
     };
 
     // Structure to collect projected polygons. One element for each triangle.
@@ -778,6 +760,21 @@ static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers,
     // Make sure that the output vector can be used.
     out.resize(layers.size());
 
+    // Allocate each layer once: reallocating a Polygon vector can invoke its
+    // tolerant move constructor and trim a near-closing vertex before cleanup.
+    std::vector<size_t> next_polygon(out.size(), 0);
+    std::vector<size_t> counts(out.size(), 0);
+    for (const TriangleProjections &triangle : projections_of_triangles)
+        for (size_t i = 0; i < triangle.polygons.size() && triangle.first_layer_id + i < out.size(); ++i)
+            ++counts[triangle.first_layer_id + i];
+    for (size_t i = 0; i < out.size(); ++i) {
+        next_polygon[i] = out[i].size();
+        Polygons combined(out[i].size() + counts[i]);
+        for (size_t j = 0; j < out[i].size(); ++j)
+            combined[j].points.swap(out[i][j].points);
+        out[i].swap(combined);
+    }
+
     // Now append the collected polygons to respective layers.
     for (auto& trg : projections_of_triangles) {
         int layer_id = int(trg.first_layer_id);
@@ -785,11 +782,12 @@ static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers,
             if (layer_id >= int(out.size()))
                 break; // part of triangle could be projected above top layer
             assert(! poly.pts.empty());
-            if (poly.normalize_for_polygon())
-                out[layer_id].emplace_back(std::move(poly.pts));
+            out[layer_id][next_polygon[layer_id]++].points.swap(poly.pts);
             ++layer_id;
         }
     }
+    for (Polygons &polygons : out)
+        normalize_mesh_polygons(polygons);
 }
 
 std::vector<Polygons> PrintObject::project_and_append_custom_facets(
@@ -801,7 +799,8 @@ std::vector<Polygons> PrintObject::project_and_append_custom_facets(
     std::vector<Polygons> out;
     for (const ModelVolume* mv : this->model_object()->volumes) {
         if (mv->is_model_part()) {
-            const indexed_triangle_set custom_facets = mv->supported_facets.get_facets_strict(*mv, type);
+            indexed_triangle_set custom_facets = mv->supported_facets.get_facets_strict(*mv, type);
+            its_remove_degenerate_faces(custom_facets, false);
             if (! custom_facets.indices.empty()) {
                 std::vector<Polygons> projected;
                 // Support blockers or enforcers. Project downward facing painted areas upwards to their respective slicing plane.
@@ -836,7 +835,8 @@ std::vector<Polygons> PrintObject::project_and_append_custom_facets(
         // painting: selected mesh triangles are projected through all touched
         // layer slabs. Plugins can then interpret the produced polygons inside
         // their own slicing step without needing to know TriangleSelector.
-        const indexed_triangle_set custom_facets = annotation->get_facets_strict(*mv, type);
+        indexed_triangle_set custom_facets = annotation->get_facets_strict(*mv, type);
+        its_remove_degenerate_faces(custom_facets, false);
         if (!custom_facets.indices.empty())
             project_triangles_to_slabs(this->layers(), custom_facets,
                 (this->trafo_centered() * mv->get_matrix()).cast<float>(),

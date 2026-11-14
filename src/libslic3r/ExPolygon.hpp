@@ -161,6 +161,10 @@ ExPolygons to_expolygons(const Polygons &polys);
 ExPolygons to_expolygons(Polygons &&polys);
 
 void translate(ExPolygons &expolys, const Point &p);
+// Apply mesh-ring normalization while keeping holes attached to their exterior.
+// An exterior with no area removes the whole group. A split exterior reassigns
+// its holes through the existing surface boolean operations.
+void normalize_mesh_expolygons(ExPolygons &expolys);
 void polygons_append(Polygons &dst, const ExPolygon &src);
 void polygons_append(Polygons &dst, const ExPolygons &src);
 void polygons_append(Polygons &dst, ExPolygon &&src);

@@ -1132,9 +1132,11 @@ bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionCo
 {
     CNumericLocalesSetter locales_setter; // use "C" locales and point as a decimal separator
 
+    const size_t first_object = model->objects().size();
+    bool loaded = false;
     if (boost::iends_with(path, ".amf.xml"))
         // backward compatibility with older slic3r output
-        return load_amf_file(path, config, config_substitutions, model, profile_sections);
+        loaded = load_amf_file(path, config, config_substitutions, model, profile_sections);
     else if (boost::iends_with(path, ".amf"))
     {
         boost::nowide::ifstream file(path, boost::nowide::ifstream::binary);
@@ -1145,10 +1147,11 @@ bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionCo
         file.read(zip_mask.data(), 2);
         file.close();
 
-        return (zip_mask == "PK") ? load_amf_archive(path, config, config_substitutions, model, check_version, profile_sections) : load_amf_file(path, config, config_substitutions, model, profile_sections);
+        loaded = (zip_mask == "PK") ? load_amf_archive(path, config, config_substitutions, model, check_version, profile_sections) : load_amf_file(path, config, config_substitutions, model, profile_sections);
     }
-    else
-        return false;
+    if (loaded)
+        model->repair_imported_meshes(first_object);
+    return loaded;
 }
 
 bool store_amf(std::string &path, Model *model, const DynamicPrintConfig *config, OptionStoreAmf options)

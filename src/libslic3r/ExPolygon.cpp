@@ -31,7 +31,71 @@
 #include "Polygon.hpp"
 #include "SVG.hpp"
 
+/* ExPolygon keeps an exterior and its holes together. Mesh-ring normalization
+   preserves this grouping when exact degeneracies collapse or split a contour.
+   General simplification still uses the caller's existing resolution.
+
+       ensure_valid -> normalize_mesh_expolygons -> normalize_mesh_polygons
+                    -> expolygons_simplify -> normalize_mesh_expolygons
+*/
+
 namespace Slic3r {
+
+void normalize_mesh_expolygons(ExPolygons &expolys)
+{
+    std::vector<ExPolygons> groups;
+    groups.reserve(expolys.size());
+    size_t count = 0;
+    for (ExPolygon &source : expolys) {
+        Polygons contours(1);
+        contours.front().points.swap(source.contour.points);
+        normalize_mesh_polygons(contours);
+        if (contours.empty())
+            continue;
+        normalize_mesh_polygons(source.holes);
+        if (contours.size() == 1) {
+            ExPolygons group(1);
+            group.front().contour.points.swap(contours.front().points);
+            group.front().holes.swap(source.holes);
+            groups.emplace_back(std::move(group));
+        } else {
+            // Use Clipper directly: the general surface wrappers also remove
+            // narrow areas by tolerance, which exact normalization must retain.
+            ClipperLib::Clipper clipper(ClipperLib::ioPreserveCollinear);
+            clipper.CleanDistance(0.);
+            clipper.AddPaths(ClipperUtils::PolygonsProvider(contours), ClipperLib::ptSubject, true);
+            clipper.AddPaths(ClipperUtils::PolygonsProvider(source.holes), ClipperLib::ptClip, true);
+            ClipperLib::PolyTree tree;
+            if (!clipper.Execute(ClipperLib::ctDifference, tree, ClipperLib::pftNonZero))
+                throw Slic3r::RuntimeError("Cannot assign holes to normalized mesh contours.");
+            std::vector<ClipperLib::PolyNode *> exteriors;
+            for (ClipperLib::PolyNode *node = tree.GetFirst(); node != nullptr; node = node->GetNext())
+                if (!node->IsHole())
+                    exteriors.push_back(node);
+            ExPolygons surfaces(exteriors.size());
+            for (size_t i = 0; i < exteriors.size(); ++i) {
+                ClipperLib::PolyNode &node = *exteriors[i];
+                surfaces[i].contour.points.swap(node.Contour);
+                surfaces[i].holes.resize(node.ChildCount());
+                for (size_t j = 0; j < node.Childs.size(); ++j)
+                    surfaces[i].holes[j].points.swap(node.Childs[j]->Contour);
+            }
+            groups.emplace_back(std::move(surfaces));
+        }
+        count += groups.back().size();
+    }
+    // Allocate once and swap coordinates, bypassing Polygon's tolerant move
+    // constructor for both untouched contours and their normalized holes.
+    ExPolygons normalized(count);
+    size_t index = 0;
+    for (ExPolygons &group : groups)
+        for (ExPolygon &surface : group) {
+            normalized[index].contour.points.swap(surface.contour.points);
+            normalized[index].holes.swap(surface.holes);
+            ++index;
+        }
+    expolys.swap(normalized);
+}
 
 bool operator==(const ExPolygon &lhs, const ExPolygon &rhs)
 {
@@ -1054,7 +1118,9 @@ bool has_duplicate_points(const ExPolygons &expolys)
 }
 
 void ensure_valid(ExPolygons &expolygons, coord_t resolution /*= SCALED_EPSILON*/) {
+    normalize_mesh_expolygons(expolygons);
     expolygons_simplify(expolygons, resolution);
+    normalize_mesh_expolygons(expolygons);
 }
 
 void expolygons_simplify(ExPolygons &expolygons, coord_t resolution) {
