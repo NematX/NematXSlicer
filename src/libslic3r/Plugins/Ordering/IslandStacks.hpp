@@ -25,6 +25,8 @@ provisional stack vector, including middle sibling insertions. Clearance compare
 earlier stack with lower layers of a later stack at their real Z difference;
 equal-Z auxiliary footprints alone do not merge stacks.
 Clearance graphs include the printer's radius and height as their final point.
+An optional clearance_tool adds that tool's profile to every geometric comparison
+without changing source tools or the emitted tool order.
 max_height is positive and uses scaled coordinate units, not millimeters.
 A blocked stack is split by emitting the lowest remaining Z across all stacks
 before trying whole stacks again.
@@ -56,7 +58,8 @@ using ObjectsLayerToPrint = std::vector<ObjectLayerToPrint>;
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage, bool complete_islands = true);
+    storage_handle *storage, bool complete_islands = true,
+    extruder_index_t clearance_tool = EXTRUDER_ID_UNKNOWN);
 
 }}}
 #endif

@@ -20,8 +20,9 @@ Custom G-code PrintRecord reader
 ================================
 
 The Model publishes custom height markers as a column-oriented DynamicConfig.
-This file is the single decoder used by all pipeline plugins that consume
-those markers. It transforms the columnar record into a validated
+This file decodes those markers for consumers requiring validated rows.
+ByObjectPlanBuilder.cpp separately reads their geometric barriers and ignores
+stale tool selections under its own policy. This decoder transforms the record into a validated
 `CustomGCodeTable` and provides the common rules for matching rows to plan
 layers and determining the printer mode.
 

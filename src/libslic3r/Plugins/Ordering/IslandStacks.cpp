@@ -30,6 +30,8 @@ their histories in that window. A lead above max_height is a collision without
 a graph query only inside the cached radius envelope; far histories stay separate
 for emission to order. Intersecting any layer is equivalent to intersecting their union.
 Tool ordering is applied only after grouping.
+An optional selected tool adds its clearance profile to those of the source
+tools for every geometric query; it does not change tool ordering or source data.
 If no complete remaining stack is safe, one group prints the lowest remaining Z
 across all stacks. This breaks history and parent-order deadlocks without adding lead.
 
@@ -59,13 +61,15 @@ struct Unit
 };
 
 // Compare owned translated slices using the larger clearance requested by either
-// unit's tools. Unknown tools use every profile. The positive requested height
+// unit's tools and the optional clearance_tool. Unknown source tools use every profile.
+// A specified clearance_tool indexes extruder_min_dist. The positive requested height
 // does not exceed max_height or the cached final graph height: nearby larger leads
 // are collisions before this geometric query. The cached maximum radius lets bounding boxes
 // reject distances beyond every profile before inverse queries. Geometry allocation
 // and API failures propagate without changing source layers.
 bool too_close(const Unit &island, const Unit &other, coord_t height,
-    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height, storage_handle *storage);
+    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height,
+    extruder_index_t clearance_tool, storage_handle *storage);
 
 } // namespace
 
@@ -73,16 +77,17 @@ bool too_close(const Unit &island, const Unit &other, coord_t height,
 // Admit continuations by their actual top lead and merge obstructing histories
 // using real height differences. Exhausted stacks remain visible for proximity.
 // Input excludes work already emitted by the caller. Returned selections borrow
-// source views; allocation, invalid tool identities and API failures propagate.
+// source views; clearance_tool adds a profile without changing their tool identities.
+// Allocation, invalid tool identities and API failures propagate.
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage, bool complete_islands);
+    storage_handle *storage, bool complete_islands, extruder_index_t clearance_tool);
 
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage, bool complete_islands)
+    storage_handle *storage, bool complete_islands, extruder_index_t clearance_tool)
 {
     coord_t graph_radius = 0;
     double graph_height = std::numeric_limits<double>::max();
@@ -251,7 +256,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                         if (dz > 0) {
                             tested_stacks.insert(stack);
                             if (too_close(units[current], units[other], dz,
-                                    extruder_min_dist, graph_radius, graph_height, storage))
+                                    extruder_min_dist, graph_radius, graph_height, clearance_tool, storage))
                                 collisions.insert(stack);
                         }
                     }
@@ -399,7 +404,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                     for (size_t other : level->second) {
                         if (emitted[other] || stack_by_unit[other] == stack)
                             continue;
-                        if (too_close(units[island], units[other], z - level->first, extruder_min_dist, graph_radius, graph_height, storage)) {
+                        if (too_close(units[island], units[other], z - level->first, extruder_min_dist, graph_radius, graph_height, clearance_tool, storage)) {
                             ready = false;
                             break;
                         }
@@ -508,7 +513,8 @@ std::vector<ObjectsLayerToPrint> separate_islands(
 
 namespace {
 bool too_close(const Unit &island, const Unit &other, coord_t height,
-    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height, storage_handle *storage)
+    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height,
+    extruder_index_t clearance_tool, storage_handle *storage)
 {
     assert(double(height) * SCALING_FACTOR <= graph_height);
     // LINEAR and SQUARE inverses stay within the last X; SPLINE overshoot is clamped to this bounding-box radius.
@@ -534,6 +540,10 @@ bool too_close(const Unit &island, const Unit &other, coord_t height,
                     double(height) * SCALING_FACTOR)));
             }
         }
+    }
+    if (clearance_tool != EXTRUDER_ID_UNKNOWN) {
+        const GraphData &graph = extruder_min_dist.at(size_t(clearance_tool));
+        min_dist = std::max(min_dist, scale_i(graph.inverse_interpolate(double(height) * SCALING_FACTOR)));
     }
     min_dist = std::min(min_dist, radius);
     inflated = other.bb;

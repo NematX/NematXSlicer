@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -30,6 +31,7 @@
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -2658,8 +2660,10 @@ void run_island_plan_builder(Print &print);
 // Check every source role exactly once at its source Z and translated position,
 // then check parents and the lead of every previously printed rectangular unit
 // from another group against a forward evaluation of the augmented graphs.
+// At and above tool_change_z, selected_tool also limits the allowed height lead.
 // The print owns all source pointers; Catch reports missing or repeated work.
-void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &config);
+void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &config,
+    coord_t tool_change_z = std::numeric_limits<coord_t>::max(), extruder_index_t selected_tool = EXTRUDER_ID_UNKNOWN);
 
 // Clone synthetic stack selections into an owned plan and apply the supplied
 // shared tool orders. Sources must outlive the result; allocation failures propagate.
@@ -3244,6 +3248,204 @@ TEST_CASE("Whole-copy units use the plate-wide stack process in every mode",
     }
 }
 
+// Height rows split every copy and global skirt at the same scaled Z, even when
+// later consumers are not invoked. Independent source checks retain every role,
+// parent and geometric clearance constraint across the resulting groups.
+TEST_CASE("Height G-code barriers partition the complete By object plan",
+          "[plugins][printing-plan][ordering][object-step][custom-gcode][height-bands]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool islands = GENERATE(false, true);
+    const CustomGCode::Type barrier_type = GENERATE(CustomGCode::PausePrint, CustomGCode::ColorChange,
+        CustomGCode::ToolChange, CustomGCode::Template, CustomGCode::Custom);
+    bool prefix = false, tail = false, grids = false, skirt = false, tool_change = false, source_large = false;
+    bool production_skirt = false, multi_extruder = false, incompatible = false, stale = false, sorted_prefix = false;
+    bool draft_shield = false, single_record = false;
+    double barrier = 1.;
+    SECTION("All event kinds and repeated heights") {}
+    SECTION("Barrier intersects the shared prefix") { prefix = true; grids = true; barrier = 0.3; }
+    SECTION("Split prefix preserves copy sorting") { prefix = true; grids = true; barrier = 0.3; sorted_prefix = true; }
+    SECTION("Barrier intersects the by-layer tail") { tail = true; }
+    SECTION("Copies use different layer grids") { grids = true; }
+    SECTION("Global skirt spans the barrier") { skirt = true; }
+    SECTION("Production skirt keeps its published source Z") { skirt = true; production_skirt = true; }
+    SECTION("Production draft shield keeps its published source Z") { skirt = true; production_skirt = true; draft_shield = true; }
+    SECTION("Selected tool enlarges clearance") { tool_change = true; }
+    SECTION("Source tool retains its larger clearance") { tool_change = true; source_large = true; }
+    SECTION("MultiExtruder plan does not widen clearance") { tool_change = true; multi_extruder = true; grids = true; }
+    SECTION("Incompatible record mode does not widen clearance") { tool_change = true; incompatible = true; }
+    SECTION("SingleExtruder record does not widen clearance") { tool_change = true; incompatible = true; single_record = true; }
+    SECTION("Disabled consumers accept a stale tool number") { tool_change = true; stale = true; }
+    CAPTURE(islands, prefix, tail, grids, skirt, tool_change);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_islands", islands ? "1" : "0"}, {"complete_objects_step", "0.6"},
+        {"complete_objects_one_first_layer", prefix ? "1" : "0"},
+        {"complete_objects_step_max_z", tail ? "0.7" : "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", skirt ? "1" : "0"}, {"skirt_height", "8"}, {"skirt_distance", "2"},
+        {"skirt_per_object", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
+        {"bottom_solid_layers", "0"}, {"extruder_clearance_radius", skirt ? "0" : "10"},
+        {"extruder_clearance_height", "10"}});
+    const GraphData small(0, 2, GraphData::LINEAR, {{0., 0.}, {1., 10.}});
+    const GraphData large(0, 2, GraphData::LINEAR, {{0., 0.}, {9., 0.1}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs(source_large ?
+        std::vector<GraphData>{large, small, large} : std::vector<GraphData>{small, multi_extruder ? small : large, large}));
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.4,0.4");
+    config.set_deserialize_strict("min_layer_height", "0.05,0.05,0.05");
+    config.set_deserialize_strict("max_layer_height", "0.3,0.3,0.3");
+    if (sorted_prefix)
+        config.set_deserialize_strict("complete_objects_sort", "lowy");
+    if (draft_shield)
+        config.set_deserialize_strict("draft_shield", "enabled");
+    Model model;
+    Print print;
+    const TriangleMesh mesh = make_cube(2., 2., 1.6);
+    Test::init_print(grids ? std::vector<TriangleMesh>{mesh, mesh} : std::vector<TriangleMesh>{mesh}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., sorted_prefix ? 100. : 30., 0.));
+    if (grids) {
+        model.objects()[1].instances.front()->set_offset(Vec3d(multi_extruder ? 35. : 100., 30., 0.));
+        model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
+        if (multi_extruder)
+            model.objects()[1].config.set_deserialize_strict("perimeter_extruder", "2");
+        if (prefix)
+            model.objects()[1].config.set_deserialize_strict("first_layer_height", "0.4");
+    } else {
+        model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(
+            Vec3d(tool_change ? 35. : 100., 30., 0.));
+    }
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    // Publish after slicing so this probe exercises the builder, not event consumers.
+    // This synthetic regression materializes the reusable skirt outline at later
+    // Z values. The separate production case leaves the generated sources intact.
+    if (skirt && !production_skirt) {
+        PrintObject &auxiliary = print.mutable_auxiliary_object();
+        REQUIRE_FALSE(auxiliary.auxiliary_layers().empty());
+        const Layer &source = auxiliary.auxiliary_layers().front();
+        const ExPolygons slices = source.lslices();
+        for (double z : {0.6, 1., 1.4}) {
+            std::unique_ptr<IslandStackTestLayer> layer(new IslandStackTestLayer(z, slices, &auxiliary, 0.2));
+            for (size_t idx = 0; idx < source.islands().size(); ++idx)
+                for (const LayerRegionIsland &source_region : source.island(idx).regions_islands()) {
+                    LayerRegionIsland &region = layer->island(idx).add_region_island({}, 0);
+                    for (const auto &[role, root] : source_region.extrusion_buckets())
+                        region.mutable_extrusion(role).append(root);
+                }
+            auxiliary.mutable_auxiliary_layers().push_back(std::move(layer));
+        }
+    }
+    CustomGCode::Info events;
+    events.mode = incompatible ? (single_record ? CustomGCode::SingleExtruder : CustomGCode::MultiExtruder) : CustomGCode::MultiAsSingle;
+    const CustomGCode::Type type = tool_change ? CustomGCode::ToolChange : barrier_type;
+    const int selected = stale ? 99 : multi_extruder ? 3 : tool_change ? 2 : 1;
+    for (size_t duplicate = 0; duplicate < 2; ++duplicate)
+        events.gcodes.push_back({scale_to_layer_coord(barrier), type, duplicate == 1 ? selected : 1, "#FF0000", "M117 barrier"});
+    events.gcodes.push_back({scale_to_layer_coord(0.01), CustomGCode::Custom, 1, "", "M117 before"});
+    events.gcodes.push_back({scale_to_layer_coord(5.), CustomGCode::Custom, 1, "", "M117 above"});
+    std::stable_sort(events.gcodes.begin(), events.gcodes.end());
+    DynamicConfig record = CustomGCode::make_print_record(events);
+    print.records().get_or_add(CustomGCode::PrintRecordChannel).swap(record);
+    Orchestrator &host = Orchestrator::instance();
+    struct ConsumerActivationGuard {
+        Orchestrator &host;
+        std::array<std::pair<Plugin *, bool>, 3> states{};
+        // Snapshot all three borrowed plugin handles before disabling any of them.
+        // The caller keeps the host alive until restoration during scope exit.
+        ConsumerActivationGuard(Orchestrator &host, bool disable) : host(host)
+        {
+            if (!disable)
+                return;
+            size_t idx = 0;
+            for (const char *id : {"ordering.custom_gcode_tool_overrides", "ordering.custom_gcode_event_tools", "gcode.custom_gcode_per_print_z"}) {
+                Plugin *plugin = host.get_plugin(id);
+                states[idx++] = {plugin, host.active_plugins().count(plugin) != 0};
+            }
+            for (const std::pair<Plugin *, bool> &state : states)
+                host.set_plugin_active(state.first, false);
+        }
+        // Restore each saved activation state on normal exit or assertion/exception
+        // unwinding; null entries mean this guard made no change.
+        ~ConsumerActivationGuard()
+        {
+            for (const std::pair<Plugin *, bool> &state : states)
+                if (state.first != nullptr)
+                    host.set_plugin_active(state.first, state.second);
+        }
+    };
+    {
+        ConsumerActivationGuard guard(host, stale);
+        run_island_plan_builder(print);
+    }
+    const extruder_index_t clearance_tool = incompatible || multi_extruder ? EXTRUDER_ID_UNKNOWN : stale ? 2 : tool_change ? 1 : 0;
+    check_island_plan_oracles(print, config, scale_to_layer_coord(barrier), clearance_tool);
+    const PrintingPlan &plan = *print.printing_plan();
+    if (multi_extruder) {
+        std::set<extruder_index_t> tools;
+        for (const PrintingGroup &group : plan.groups)
+            for (const PrintingLayerGroup &layer : group.layers)
+                for (const PrintingToolGroup &tool : layer.tool_groups)
+                    if (!tool.extrusions.empty())
+                        tools.insert(tool.extruder_id);
+        CHECK(tools == (std::set<extruder_index_t>{0, 1}));
+    }
+    if (sorted_prefix) {
+        REQUIRE(plan.groups.size() >= 2);
+        const PrintingGroup &prefix_group = plan.groups[1];
+        REQUIRE(prefix_group.printing_catalog_ids.size() == 2);
+        CHECK(plan.object_instances[prefix_group.printing_catalog_ids[0]].object == &print.object(1));
+        CHECK(plan.object_instances[prefix_group.printing_catalog_ids[1]].object == &print.object(0));
+        REQUIRE_FALSE(prefix_group.layers.empty());
+        REQUIRE_FALSE(prefix_group.layers.front().tool_groups.empty());
+        const PrintingToolGroup &tool = prefix_group.layers.front().tool_groups.front();
+        REQUIRE_FALSE(tool.extrusions.empty());
+        CHECK(tool.extrusions.front().printing_catalog_id == prefix_group.printing_catalog_ids[0]);
+    }
+    bool reached = false;
+    size_t below = 0, above = 0, skirt_below = 0, skirt_above = 0;
+    for (const PrintingGroup &group : plan.groups) {
+        REQUIRE_FALSE(group.layers.empty());
+        const bool upper_group = group.layers.front().print_z >= scale_to_layer_coord(barrier);
+        if (upper_group && (incompatible || multi_extruder))
+            CHECK(group.printing_catalog_ids.size() == 1);
+        for (const PrintingLayerGroup &layer : group.layers) {
+            const bool upper = layer.print_z >= scale_to_layer_coord(barrier);
+            CHECK(upper == upper_group);
+            if (upper) { reached = true; ++above; }
+            else { CHECK_FALSE(reached); ++below; }
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions)
+                    if (extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE) {
+                        if (upper) ++skirt_above;
+                        else ++skirt_below;
+                    }
+        }
+    }
+    CHECK(below > 0);
+    CHECK(above > 0);
+    if (skirt && !production_skirt) {
+        CHECK(skirt_below > 0);
+        CHECK(skirt_above > 0);
+    }
+    if (production_skirt) {
+        REQUIRE(print.auxiliary_object() != nullptr);
+        REQUIRE_FALSE(print.auxiliary_object()->auxiliary_layers().empty());
+        for (const Layer &layer : print.auxiliary_object()->auxiliary_layers())
+            CHECK(layer.scaled_print_z() == scale_to_layer_coord(0.2));
+        CHECK(skirt_below > 0);
+        CHECK(skirt_above == 0);
+    }
+    // Same-Z rows do not create repeated groups; empty outer bands create none.
+    const size_t groups = plan.groups.size();
+    events.gcodes = {{scale_to_layer_coord(barrier), type, selected, "", ""}};
+    record = CustomGCode::make_print_record(events);
+    print.records().get_or_add(CustomGCode::PrintRecordChannel).swap(record);
+    run_island_plan_builder(print);
+    CHECK(print.printing_plan()->groups.size() == groups);
+}
+
 // Different first-layer heights require one shared prefix across close copies;
 // the whole-plan oracles verify coverage, parents and clearance after that prefix.
 TEST_CASE("Shared first layers reach the highest first layer across close copies",
@@ -3800,7 +4002,8 @@ void run_island_plan_builder(Print &print)
     plugin->run(run);
 }
 
-void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &config)
+void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &config,
+    coord_t tool_change_z, extruder_index_t selected_tool)
 {
     REQUIRE(print.printing_plan() != nullptr);
     const PrintingPlan &plan = *print.printing_plan();
@@ -3905,7 +4108,10 @@ void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &con
                             box.min.y() - previous.box.max.y(), previous.box.min.y() - box.max.y())));
                         const double distance = std::hypot(dx, dy);
                         double allowed = height;
-                        for (extruder_index_t id : {tool.extruder_id, previous.tool}) {
+                        std::vector<extruder_index_t> clearance_tools{tool.extruder_id, previous.tool};
+                        if (selected_tool != EXTRUDER_ID_UNKNOWN && layer.print_z >= tool_change_z)
+                            clearance_tools.push_back(selected_tool);
+                        for (extruder_index_t id : clearance_tools) {
                             if (id == EXTRUDER_ID_UNKNOWN) {
                                 for (const GraphData &graph : graphs)
                                     allowed = std::min(allowed, graph.interpolate(distance));
