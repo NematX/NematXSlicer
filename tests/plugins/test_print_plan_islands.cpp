@@ -28,8 +28,8 @@ layer in another group still fails the coverage check. Emitted Z markers must
 match every plan layer in order before island scheduling is checked.
 Two-copy checks reconstruct each instance independently; height-limit checks also
 require a shared final group in increasing Z and no upper layers in island stacks.
-Stack groups advance through the copies in order, so no copy leads by more than
-one stack before the shared by-layer tail.
+Plate-wide groups may contain several copies. Their source coverage and parent
+order are checked independently of the stack order.
 
     TEST_CASE: select clearance shape and expected scheduling
     `-- check_scene: build boxes, process and export with the production host
@@ -190,24 +190,18 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
                 }
         }
     CHECK(marker == markers.size());
-    // Skip first-pass groups and the shared tail when checking stack-major progress.
-    std::vector<size_t> completed_stacks(copies, 0);
-    size_t next_instance = 0;
+    // Every island stack names exactly the physical instances it actually prints.
     for (size_t idx = copies; idx < print.printing_plan()->groups.size(); ++idx) {
         const Printing::PrintingGroup &group = print.printing_plan()->groups[idx];
         if (max_z > 0. && max_z <= 5. && idx + 1 == print.printing_plan()->groups.size())
             break;
-        REQUIRE(group.printing_catalog_ids.size() == 1);
-        const uint32_t instance = print.printing_plan()->object_instances[group.printing_catalog_ids.front()].object_instance_idx;
-        REQUIRE(instance < copies);
-        CHECK(instance == next_instance);
-        next_instance = (next_instance + 1) % copies;
-        ++completed_stacks[instance];
-        const std::pair<std::vector<size_t>::const_iterator, std::vector<size_t>::const_iterator> bounds =
-            std::minmax_element(completed_stacks.cbegin(), completed_stacks.cend());
-        CHECK(*bounds.second - *bounds.first <= 1);
+        std::set<uint32_t> printed;
+        for (const Printing::PrintingLayerGroup &layer : group.layers)
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    printed.insert(extrusion.printing_catalog_id);
+        CHECK(printed == std::set<uint32_t>(group.printing_catalog_ids.begin(), group.printing_catalog_ids.end()));
     }
-    CHECK(next_instance == 0);
     if (max_z > 0. && max_z <= 5.) {
         const Printing::PrintingGroup &tail = print.printing_plan()->groups.back();
         REQUIRE(tail.printing_catalog_ids.size() == copies);

@@ -9,26 +9,32 @@
 
 /*
 Island stacks for the By object builder borrow source layers and island handles.
-Collect object and object-wide auxiliary layers by increasing print Z, pairing
-equal-Z layers in ObjectLayerToPrint, then call separate_islands. Its result is
-an ordered vector of stacks; each stack contains selected islands by source layer.
-Source layers and clearance graphs must outlive both the call and its result.
-The caller clones each stack separately for every physical object instance.
-start_z and max_height use scaled coordinate units, not millimeters.
+Collect object and auxiliary layers for every physical instance. Each selection
+holds one layer, or an object and auxiliary layer at the same Z. Call separate_islands
+after collecting every selection. Its result is an ordered
+vector of stacks; each stack contains selected islands by source layer and instance.
+Source layers must outlive the call and its result; graphs are borrowed during the call.
+The caller emits one group per stack, cloning each selection at its instance shift.
+Instance ids distinguish copies even when their source island handles are equal.
+Clearance graphs include the printer's radius and height as their final point.
+max_height is positive and uses scaled coordinate units, not millimeters. A blocked stack is split
+by emitting the lowest remaining Z across all stacks before trying whole stacks again.
 
     ObjectLayerToPrint level;
     level.object_layer = object.layer(1);
-    auto stacks = separate_islands({level}, scale_i(0.2), scale_i(1.),
+    auto stacks = separate_islands({level}, scale_i(1.),
                                    clearance_graphs, EXTRUDER_ID_UNKNOWN, storage);
 */
 namespace slic3r_api { namespace Ordering { namespace IslandStacks {
 
 struct ObjectLayerToPrint
 {
+    uint32_t instance_id = 0;
+    c_point shift = {};
     Layer object_layer;
     Layer auxiliary_layer;
     std::set<const layer_island_handle *> islands;
-    bool allow_wipe_tower = false;
+    // Shared tool order of all selections at this Z in the returned stack.
     std::vector<extruder_index_t> extruders_order;
 
     // Borrow the object layer when present, otherwise its auxiliary companion.
@@ -36,9 +42,9 @@ struct ObjectLayerToPrint
 };
 using ObjectsLayerToPrint = std::vector<ObjectLayerToPrint>;
 
-// Group printable islands by clearance and extruder into height-limited stacks.
+// Group plate-coordinate islands by clearance into height-limited stacks.
 std::vector<ObjectsLayerToPrint> separate_islands(
-    const ObjectsLayerToPrint object_layers, coord_t start_z, coord_t max_height,
+    const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
     storage_handle *storage);
 

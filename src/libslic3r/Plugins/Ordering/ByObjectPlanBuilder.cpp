@@ -24,7 +24,7 @@
 
 /*
 Provides the By object plan builder to the ordering chain. Borrowed print layers
-are cloned through PlanBuilderCommon into owned groups per physical instance.
+are cloned through PlanBuilderCommon into owned groups with physical instance ids.
 With a positive height step, the first object layer is printed for every instance,
 then each instance contributes a group for each nonempty Z interval. The interval
 height is capped by the printer clearance height. Auxiliary layers at or below
@@ -32,12 +32,10 @@ the first object layer belong to its first group; others follow their Z interval
 With a positive step and height limit, intervals stop at that limit. Remaining
 layers from all instances share a final group in increasing Z, using the same
 construction as By layer. Layer zero and its auxiliaries always stay in the first
-pass, even above the limit. With island scheduling, object-wide layers form stacks
-once per object, then each stack is cloned for every physical instance before
-the next stack starts. Support islands join the same clearance and lower-island
-searches as object islands.
-Instance-owned auxiliaries do not change the shared stacks and are attached by Z.
-When no stack exists below the height limit, they join their instance's first pass.
+pass, even above the limit. With island scheduling, translated islands from all
+physical instances form plate-wide stacks. Support and instance-owned auxiliaries
+join the same clearance search; lower-island links remain within their instance.
+Each stack becomes one group, with several instances when close copies join.
 Global auxiliary geometry below the height limit precedes the instance groups;
 geometry at or above the limit joins the final group. Without a limit, all global
 auxiliary geometry precedes the instance groups. Local auxiliary layers
@@ -54,7 +52,7 @@ Their activation rules keep them editable only for the selected By object mode.
                 append_layer_instance_extrusions() -> copy and shift geometry
                 sort_layer_groups_by_print_z() -> order each instance's layers
                 append_by_layer_object_layers() -> merge the remaining instance layers
-                append_island_groups() -> clone object-wide stacks for every instance
+                append_island_groups() -> emit plate-wide stacks with instance filters
                     IslandStacks::separate_islands() -> group and follow source islands
 */
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
@@ -78,10 +76,9 @@ void initialize_by_object_settings(orchestrator_handle *orch);
 // and allocation failures propagate; the borrowed print is unchanged.
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx);
 
-// Build stacks once per object from non-first layers below the optional limit,
-// then clone each stack for all instances before advancing to the next stack.
-// Owned auxiliaries follow stack Z ranges, or the instance's first pass when
-// no stack exists. They never change the shared search. Clearance profiles are copied
+// Build plate-wide stacks from non-first layers below the optional limit,
+// including each copy's owned auxiliaries, then clone their selected islands into
+// one group per stack. Clearance profiles are copied
 // with the printer radius and height as their final point. Source views remain borrowed;
 // cancellation, invalid owners and allocation failures propagate.
 void append_island_groups(const Print &print, PrintingPlan &plan,
@@ -248,144 +245,95 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
         owned_clearance.emplace_back(points, graph.type());
         extruder_clearance.push_back(owned_clearance.back().view());
     }
-    std::set<const object_handle *> separate_islands_done;
-    for (const SourceInstance &first_source : instances) {
+    ObjectsLayerToPrint object_and_support_layers;
+    std::map<uint32_t, const SourceInstance *> sources;
+    for (const SourceInstance &source : instances) {
         throw_if_cancelled(run_ctx);
-        if (!separate_islands_done.insert(first_source.object.handle()).second)
-            continue;
-        const Object object = first_source.object;
+        const Object object = source.object;
+        const uint32_t catalog_id = plan.find_or_add_object_instance(object, source.object_instance_idx);
+        sources.emplace(catalog_id, &source);
         const coord_t first_z = object.layer_count() == 0 ? 0 : object.layer(0).print_z();
-        std::vector<Layer> object_layers, auxiliary_layers;
         for (uint32_t idx = 1; idx < object.layer_count(); ++idx) {
             const Layer layer = object.layer(idx);
-            if (object_step_max_z == 0 || layer.print_z() < object_step_max_z)
-                object_layers.push_back(layer);
+            if (object_step_max_z > 0 && layer.print_z() >= object_step_max_z)
+                continue;
+            ObjectLayerToPrint selection;
+            selection.instance_id = catalog_id;
+            selection.shift = source.shift;
+            selection.object_layer = layer;
+            object_and_support_layers.push_back(std::move(selection));
         }
         for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx) {
             const Layer layer = object.auxiliary_layer(idx);
             const std::optional<uint32_t> owner = layer_instance_owner(layer);
             if (owner && *owner >= object.instance_count())
                 throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
-            if (!owner && layer.print_z() > first_z &&
-                (object_step_max_z == 0 || layer.print_z() < object_step_max_z))
-                auxiliary_layers.push_back(layer);
-        }
-        // Pair object and support layers at equal Z, retaining the source order.
-        ObjectsLayerToPrint object_and_support_layers;
-        size_t object_idx = 0, auxiliary_idx = 0;
-        while (object_idx < object_layers.size() || auxiliary_idx < auxiliary_layers.size()) {
-            ObjectLayerToPrint layer;
-            if (object_idx < object_layers.size() && (auxiliary_idx == auxiliary_layers.size() ||
-                    object_layers[object_idx].print_z() <= auxiliary_layers[auxiliary_idx].print_z()))
-                layer.object_layer = object_layers[object_idx++];
-            if (auxiliary_idx < auxiliary_layers.size() && (!layer.object_layer.valid() ||
-                    auxiliary_layers[auxiliary_idx].print_z() == layer.object_layer.print_z()))
-                layer.auxiliary_layer = auxiliary_layers[auxiliary_idx++];
-            object_and_support_layers.push_back(std::move(layer));
-        }
-        // No writer exists at ordering time, so no current tool is known.
-        const std::vector<ObjectsLayerToPrint> stacks = IslandStacks::separate_islands(
-            object_and_support_layers, 0, height_step_range, extruder_clearance,
-            EXTRUDER_ID_UNKNOWN, run_ctx->plugin_storage);
-        if (stacks.empty()) {
-            // Without a stack, higher owned auxiliaries join the copy's first pass.
-            for (const SourceInstance &source : instances) {
-                if (source.object.handle() != object.handle())
-                    continue;
-                throw_if_cancelled(run_ctx);
-                const uint32_t catalog_id = plan.find_or_add_object_instance(object, source.object_instance_idx);
-                for (uint32_t idx = 0; idx < plan.group_count(); ++idx) {
-                    PrintingGroup group = plan.group(idx);
-                    if (group.object_instance_count() != 1 || group.printing_catalog_id(0) != catalog_id)
-                        continue;
-                    std::map<coord_t, uint32_t> indices;
-                    for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx)
-                        indices.emplace(group.layer_group(layer_idx).print_z(), layer_idx);
-                    for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
-                        const Layer layer = object.auxiliary_layer(layer_idx);
-                        const std::optional<uint32_t> owner = layer_instance_owner(layer);
-                        if (!owner || *owner != source.object_instance_idx || layer.print_z() <= first_z ||
-                            (object_step_max_z > 0 && layer.print_z() >= object_step_max_z))
-                            continue;
-                        PrintingLayerGroup layers = layer_group_for_print_z(group, indices, layer.print_z(), run_ctx);
-                        append_layer_once(layers, layer, run_ctx);
-                        append_layer_instance_extrusions(plan, layers, layer, source.shift, catalog_id, run_ctx);
-                    }
-                    sort_layer_groups_by_print_z(group, run_ctx);
-                    break;
-                }
-            }
-            continue;
-        }
-        std::vector<const SourceInstance *> object_instances;
-        std::vector<std::vector<std::vector<Layer>>> owned_layers(object.instance_count(),
-            std::vector<std::vector<Layer>>(stacks.size()));
-        for (const SourceInstance &source : instances) {
-            if (source.object.handle() != object.handle())
+            if ((owner && *owner != source.object_instance_idx) || layer.print_z() <= first_z ||
+                (object_step_max_z > 0 && layer.print_z() >= object_step_max_z))
                 continue;
-            object_instances.push_back(&source);
-            // Owned auxiliaries never affect shared stacks. In print order choose
-            // the first range containing Z, else the first starting above Z,
-            // else the last stack. Layer-zero auxiliaries remain in the first pass.
-            for (uint32_t idx = 0; idx < object.auxiliary_layer_count(); ++idx) {
-                const Layer layer = object.auxiliary_layer(idx);
-                const std::optional<uint32_t> owner = layer_instance_owner(layer);
-                if (!owner || *owner != source.object_instance_idx || layer.print_z() <= first_z ||
-                    (object_step_max_z > 0 && layer.print_z() >= object_step_max_z))
+            ObjectLayerToPrint selection;
+            selection.instance_id = catalog_id;
+            selection.shift = source.shift;
+            selection.auxiliary_layer = layer;
+            object_and_support_layers.push_back(std::move(selection));
+        }
+    }
+    // Continue the preceding plan group's last tool when the first pass supplies one.
+    extruder_index_t previous_tool = EXTRUDER_ID_UNKNOWN;
+    for (uint32_t idx = plan.group_count(); idx > 0 && previous_tool == EXTRUDER_ID_UNKNOWN; --idx) {
+        PrintingGroup previous = plan.group(idx - 1);
+        for (uint32_t layer_idx = previous.layer_group_count(); layer_idx > 0; --layer_idx) {
+            PrintingLayerGroup layer = previous.layer_group(layer_idx - 1);
+            if (layer.tool_group_count() != 0) {
+                previous_tool = layer.tool_group(layer.tool_group_count() - 1).extruder_id();
+                break;
+            }
+        }
+    }
+    const std::vector<ObjectsLayerToPrint> stacks = IslandStacks::separate_islands(
+        object_and_support_layers, height_step_range, extruder_clearance,
+        previous_tool, run_ctx->plugin_storage);
+    for (const ObjectsLayerToPrint &stack : stacks) {
+        throw_if_cancelled(run_ctx);
+        PrintingGroup group = plan.append_group();
+        if (!group.valid())
+            continue;
+        std::set<uint32_t> catalog_ids;
+        std::map<coord_t, uint32_t> indices;
+        for (const ObjectLayerToPrint &selection : stack) {
+            const uint32_t catalog_id = selection.instance_id;
+            const SourceInstance &source = *sources.at(catalog_id);
+            if (catalog_ids.insert(catalog_id).second)
+                group.append_printing_catalog_id(plan, catalog_id);
+            for (const Layer &layer : {selection.object_layer, selection.auxiliary_layer}) {
+                if (!layer.valid())
                     continue;
-                size_t selected = stacks.size();
-                for (size_t stack_idx = 0; stack_idx < stacks.size(); ++stack_idx)
-                    if (layer.print_z() >= stacks[stack_idx].front().layer().print_z() &&
-                        layer.print_z() <= stacks[stack_idx].back().layer().print_z()) {
-                        selected = stack_idx;
+                std::vector<uint32_t> island_indices;
+                for (uint32_t idx = 0; idx < layer.island_count(); ++idx)
+                    if (selection.islands.count(layer.island(idx).handle()) != 0)
+                        island_indices.push_back(idx);
+                LayerExtrusionFilter filter;
+                filter.island_indices = &island_indices;
+                PrintingLayerGroup layers = layer_group_for_print_z(group, indices, layer.print_z(), run_ctx);
+                append_layer_once(layers, layer, run_ctx);
+                append_layer_instance_extrusions(plan, layers, layer, source.shift, catalog_id, run_ctx, filter);
+            }
+        }
+        // IslandStacks supplies the shared tool order for every selected Z.
+        std::set<coord_t> ordered_z;
+        for (const ObjectLayerToPrint &selection : stack) {
+            const coord_t z = selection.layer().print_z();
+            if (!ordered_z.insert(z).second)
+                continue;
+            PrintingLayerGroup layer = group.layer_group(indices.at(z));
+            for (uint32_t target = 0; target < selection.extruders_order.size(); ++target)
+                for (uint32_t tool = target; tool < layer.tool_group_count(); ++tool)
+                    if (layer.tool_group(tool).extruder_id() == selection.extruders_order[target]) {
+                        layer.move_tool_group(tool, target);
                         break;
                     }
-                if (selected == stacks.size()) {
-                    for (size_t stack_idx = 0; stack_idx < stacks.size(); ++stack_idx)
-                        if (stacks[stack_idx].front().layer().print_z() > layer.print_z()) {
-                            selected = stack_idx;
-                            break;
-                        }
-                }
-                if (selected == stacks.size())
-                    selected = stacks.size() - 1;
-                owned_layers[source.object_instance_idx][selected].push_back(layer);
-            }
         }
-        // Complete each stack for all copies before any copy advances to the next one.
-        for (size_t stack_idx = 0; stack_idx < stacks.size(); ++stack_idx) {
-            for (const SourceInstance *source_ptr : object_instances) {
-                const SourceInstance &source = *source_ptr;
-                throw_if_cancelled(run_ctx);
-                const uint32_t catalog_id = plan.find_or_add_object_instance(object, source.object_instance_idx);
-                PrintingGroup group = plan.append_group();
-                if (!group.valid())
-                    continue;
-                group.append_printing_catalog_id(plan, catalog_id);
-                std::map<coord_t, uint32_t> indices;
-                for (const ObjectLayerToPrint &selection : stacks[stack_idx]) {
-                    for (const Layer &layer : {selection.object_layer, selection.auxiliary_layer}) {
-                        if (!layer.valid())
-                            continue;
-                        std::vector<uint32_t> island_indices;
-                        for (uint32_t idx = 0; idx < layer.island_count(); ++idx)
-                            if (selection.islands.count(layer.island(idx).handle()) != 0)
-                                island_indices.push_back(idx);
-                        LayerExtrusionFilter filter;
-                        filter.island_indices = &island_indices;
-                        PrintingLayerGroup layers = layer_group_for_print_z(group, indices, layer.print_z(), run_ctx);
-                        append_layer_once(layers, layer, run_ctx);
-                        append_layer_instance_extrusions(plan, layers, layer, source.shift, catalog_id, run_ctx, filter);
-                    }
-                }
-                for (const Layer &layer : owned_layers[source.object_instance_idx][stack_idx]) {
-                    PrintingLayerGroup layers = layer_group_for_print_z(group, indices, layer.print_z(), run_ctx);
-                    append_layer_once(layers, layer, run_ctx);
-                    append_layer_instance_extrusions(plan, layers, layer, source.shift, catalog_id, run_ctx);
-                }
-                sort_layer_groups_by_print_z(group, run_ctx);
-            }
-        }
+        sort_layer_groups_by_print_z(group, run_ctx);
     }
 }
 
