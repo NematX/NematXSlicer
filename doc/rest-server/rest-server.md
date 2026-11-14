@@ -1779,9 +1779,10 @@ the API is always accepted again on the same scene), `mode_tool_change`,
 `extruder_range`, `invalid_color`, `empty_message`, `empty_gcode`, or
 `duplicate_z` (two items fall at the same rounded `z`; `item` is the later
 one). `z` is bounded by the scene height and must stay below 10000 mm once rounded; a scene
-top of 10000 mm or more refuses every item. With sequential printing (`complete_objects`) a
-non-empty list is refused with no `details`; an empty list is always accepted. The
-stored list is sorted by `z`.
+top of 10000 mm or more refuses every item. By object accepts height G-codes too:
+their heights split the plate's work into bands, and each eligible event is emitted once
+at the first printing-plan layer at or above its height. An empty list is always
+accepted. The stored list is sorted by `z`.
 
 **Warnings.** Accepted values that need attention are reported by both routes in
 `warnings`, each `{"item": i, "reason": r}` or a bare `{"reason": r}`:
@@ -1792,9 +1793,8 @@ an empty value is accepted). This warning still uses the legacy writer's
 defaults, not `gcode_firmware_plugin`, so it can disagree with the selected
 firmware's actual fallback. It does not suppress an item or change the output.
 Other warnings are
-`above_objects` (the scene changed and now ends below the item),
-`sequential_print` (sequential printing was enabled after the list was set;
-the engine ignores it), and `mode_mismatch` (the list holds a color or tool change
+`above_objects` (the scene changed and now ends below the item), and
+`mode_mismatch` (the list holds a color or tool change
 and its stored mode and the current mode differ on whether the print is
 `multi_extruder`: this is exactly when the engine ignores the color and tool
 changes of the list).

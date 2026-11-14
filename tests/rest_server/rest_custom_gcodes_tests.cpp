@@ -258,15 +258,16 @@ TEST_CASE("REST custom G-codes validate requests", "[rest_custom_gcode]")
             {"reason", refusal.second.second}}));
     }
 
-    // Sequential printing refuses a non-empty list but accepts an empty one.
+    // By object accepts the same validated list and still accepts clearing it.
     const std::shared_ptr<SessionContext> session = find_session(fixture, route.substr(9));
     set_options(session, {{"print_plan_builder", "ordering.plan_builder.by_object"}});
-    const nlohmann::json sequential = set_error(fixture, route, {{"items", {valid_item}}},
-        http::status::unprocessable_entity, "invalid_custom_gcode");
-    CHECK_FALSE(sequential.contains("details"));
+    const nlohmann::json accepted = set_custom_gcodes(fixture, route, nlohmann::json::array({valid_item}));
+    for (const nlohmann::json &warning : accepted.at("warnings"))
+        CHECK(warning.at("reason") != "sequential_print");
+    CHECK(get_custom_gcodes(fixture, route).at("items").size() == 1);
     set_custom_gcodes(fixture, route, nlohmann::json::array());
 
-    // Rejected requests leave the list untouched; reads need a body-less GET.
+    // Clearing leaves no items; reads need a body-less GET.
     CHECK(get_custom_gcodes(fixture, route).at("items").empty());
     require_error(fixture.request(http::verb::get, route + "/get_custom_gcodes", "{}", "application/json"),
         http::status::bad_request, "invalid_request");
