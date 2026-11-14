@@ -3040,7 +3040,7 @@ TEST_CASE("Island stacks include owned auxiliary units for their instance only",
         CAPTURE(z, limit);
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-            {"complete_objects_step", "0.5"}, {"complete_islands", "1"}, {"layer_height", "0.2"},
+            {"complete_objects_step", "0.5"}, {"complete_islands", "1"}, {"complete_objects_one_first_layer", "1"}, {"layer_height", "0.2"},
             {"complete_objects_step_max_z", std::to_string(limit)},
             {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
         Model model;
@@ -3112,7 +3112,7 @@ TEST_CASE("Plate-wide island stacks group close copies and different layer grids
     SECTION("Close copies have a shared by-layer tail") { limit = 0.9; }
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-        {"complete_objects_step", std::to_string(step)}, {"complete_islands", "1"}, {"layer_height", "0.2"},
+        {"complete_objects_step", std::to_string(step)}, {"complete_islands", "1"}, {"complete_objects_one_first_layer", "1"}, {"layer_height", "0.2"},
         {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
         {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
         {"bottom_solid_layers", "0"}, {"complete_objects_step_max_z", std::to_string(limit)},
@@ -3141,9 +3141,9 @@ TEST_CASE("Plate-wide island stacks group close copies and different layer grids
     run_island_plan_builder(print);
     check_island_plan_oracles(print, config);
     const PrintingPlan &plan = *print.printing_plan();
-    REQUIRE(plan.groups.size() > 2);
+    REQUIRE(plan.groups.size() > 1);
     bool shared = false;
-    for (size_t idx = 2; idx < plan.groups.size(); ++idx) {
+    for (size_t idx = 1; idx < plan.groups.size(); ++idx) {
         if (limit > 0. && idx + 1 == plan.groups.size())
             break;
         shared |= plan.groups[idx].printing_catalog_ids.size() == 2;
@@ -3152,9 +3152,9 @@ TEST_CASE("Plate-wide island stacks group close copies and different layer grids
     }
     CHECK(shared == !far);
     if (multi_tools) {
-        const extruder_index_t first_pass_end = plan.groups[1].layers.back().tool_groups.back().extruder_id;
+        const extruder_index_t first_pass_end = plan.groups[0].layers.back().tool_groups.back().extruder_id;
         extruder_index_t previous = first_pass_end;
-        for (size_t idx = 2; idx < plan.groups.size(); ++idx)
+        for (size_t idx = 1; idx < plan.groups.size(); ++idx)
             for (const PrintingLayerGroup &layer : plan.groups[idx].layers) {
                 REQUIRE(layer.tool_groups.size() == 2);
                 if (previous != EXTRUDER_ID_UNKNOWN)
@@ -3173,6 +3173,162 @@ TEST_CASE("Plate-wide island stacks group close copies and different layer grids
     }
 }
 
+// Literal plate layouts distinguish complete copies, height-limited stacks,
+// shared first layers and the final by-layer tail, while source oracles check all work.
+TEST_CASE("Whole-copy units use the plate-wide stack process in every mode",
+          "[plugins][printing-plan][ordering][print-sequence][object-step][plate-copy-units]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    struct Case { double step; double limit; bool first; bool close; size_t groups; };
+    const Case cases[] = {{0., 0., false, false, 2}, {0., 0., false, true, 1},
+        {0.4, 0., false, false, 3}, {0., 0., true, false, 3}, {0., 0., true, true, 2},
+        {0., 0.5, false, false, 3}, {0.4, 0.5, false, false, 3},
+        {0., 0.1, false, false, 1}, {0., 0.1, true, false, 2}};
+    for (const Case &test : cases) {
+        CAPTURE(test.step, test.limit, test.first, test.close);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"complete_objects_sort", "object"}, {"complete_islands", "0"},
+            {"complete_objects_step", std::to_string(test.step)},
+            {"complete_objects_step_max_z", std::to_string(test.limit)},
+            {"complete_objects_one_first_layer", test.first ? "1" : "0"},
+            {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "0"},
+            {"brim_width", "0"}, {"wipe_tower", "0"}, {"perimeters", "1"},
+            {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+            {"extruder_clearance_radius", "10"}, {"extruder_clearance_height", "1"}});
+        config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+            GraphData::LINEAR, {{0., 0.}, {4., 0.8}})}));
+        Model model;
+        Print print;
+        TriangleMesh mesh = make_cube(2., 2., 0.8);
+        TriangleMesh island = make_cube(2., 2., 0.8);
+        island.translate(Vec3f(20.f, 0.f, 0.f));
+        mesh.merge(island);
+        Test::init_print({mesh}, print, model, config);
+        model.objects().front().instances.front()->set_offset(Vec3d(30., 30., 0.));
+        model.objects().front().add_instance(*model.objects().front().instances.front())->set_offset(
+            Vec3d(30., test.close ? 33. : 100., 0.));
+        print.apply(model, config);
+        print.set_status_silent();
+        print.process();
+        run_island_plan_builder(print);
+        check_island_plan_oracles(print, config);
+        const PrintingPlan &plan = *print.printing_plan();
+        REQUIRE(plan.groups.size() == test.groups);
+        if (test.first) {
+            REQUIRE(plan.groups.front().printing_catalog_ids.size() == 2);
+            REQUIRE(plan.groups.front().layers.size() == 1);
+            CHECK(plan.groups.front().layers.front().print_z == scale_to_layer_coord(0.2));
+        }
+        if (test.limit > 0.) {
+            REQUIRE(plan.groups.back().printing_catalog_ids.size() == 2);
+            for (const PrintingLayerGroup &layer : plan.groups.back().layers)
+                CHECK(unscaled(layer.print_z) >= test.limit - 0.00001);
+            for (size_t idx = test.first ? 1 : 0; idx + 1 < plan.groups.size(); ++idx)
+                for (const PrintingLayerGroup &layer : plan.groups[idx].layers)
+                    CHECK(unscaled(layer.print_z) < test.limit);
+        } else if (!test.close) {
+            for (size_t idx = test.first ? 1 : 0; idx < plan.groups.size(); ++idx)
+                REQUIRE(plan.groups[idx].printing_catalog_ids.size() == 1);
+            if (test.step == 0.)
+                for (size_t copy = 0; copy < 2; ++copy) {
+                    const PrintingGroup &group = plan.groups[copy + (test.first ? 1 : 0)];
+                    CHECK(plan.object_instances[group.printing_catalog_ids.front()].object_instance_idx == copy);
+                    CHECK(group.layers.size() == (test.first ? 3 : 4));
+                    for (const PrintingLayerGroup &layer : group.layers)
+                        CHECK(layer.tool_groups.front().extrusions.size() == 4);
+                }
+        }
+    }
+}
+
+// Different first-layer heights require one shared prefix across close copies;
+// the whole-plan oracles verify coverage, parents and clearance after that prefix.
+TEST_CASE("Shared first layers reach the highest first layer across close copies",
+          "[plugins][printing-plan][ordering][object-step][plate-copy-units]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool global_brim = GENERATE(false, true);
+    CAPTURE(global_brim);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_one_first_layer", "1"}, {"complete_islands", "0"},
+        {"complete_objects_step", "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "10"}, {"extruder_clearance_height", "1"}});
+    if (global_brim)
+        config.set_deserialize_strict({{"brim_width", "1"}, {"brim_per_object", "0"},
+            {"complete_objects_step_max_z", "0.1"}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {4., 0.8}})}));
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 0.8), make_cube(2., 2., 0.8)}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(30., 33., 0.));
+    model.objects()[1].config.set_deserialize_strict("first_layer_height", "0.4");
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    REQUIRE(print.object(0).layer(0).scaled_print_z() != print.object(1).layer(0).scaled_print_z());
+    run_island_plan_builder(print);
+    check_island_plan_oracles(print, config);
+    const PrintingPlan &plan = *print.printing_plan();
+    REQUIRE(plan.groups.front().layers.size() == 2);
+    CHECK(plan.groups.front().layers[0].print_z == scale_to_layer_coord(0.2));
+    CHECK(plan.groups.front().layers[1].print_z == scale_to_layer_coord(0.4));
+    REQUIRE(plan.groups.front().printing_catalog_ids.size() == 2);
+    if (global_brim) {
+        size_t global_extrusions = 0;
+        for (size_t idx = 0; idx < plan.groups.size(); ++idx)
+            for (const PrintingLayerGroup &layer : plan.groups[idx].layers)
+                for (const PrintingToolGroup &tool : layer.tool_groups)
+                    for (const PrintingExtrusion &extrusion : tool.extrusions)
+                        if (extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE) {
+                            ++global_extrusions;
+                            CHECK(idx == 0);
+                            CHECK(layer.print_z == scale_to_layer_coord(0.2));
+                        }
+        REQUIRE(global_extrusions > 0);
+    }
+    for (size_t idx = 1; idx < plan.groups.size(); ++idx)
+        for (const PrintingLayerGroup &layer : plan.groups[idx].layers)
+            CHECK(layer.print_z > scale_to_layer_coord(0.4));
+}
+
+// Ready stacks prefer the current tool even when its copy has a later sort rank.
+TEST_CASE("Ready stacks continue the tool before copy rank",
+          "[plugins][printing-plan][ordering][island-stacks]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    IslandStackTestLayer first(0.2, {rectangle_expolygon(0., 0., 1., 1.)});
+    IslandStackTestLayer second(0.2, {rectangle_expolygon(20., 0., 21., 1.)});
+    add_stack_test_extrusion(first.island(0), 0);
+    add_stack_test_extrusion(second.island(0), 1);
+    ObjectLayerToPrint a, b;
+    a.instance_id = 0;
+    a.copy_rank = 0;
+    a.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&first));
+    b.instance_id = 1;
+    b.copy_rank = 1;
+    b.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(&second));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const GraphData graph(0, 2, GraphData::LINEAR, {{0., 0.}, {1., 1.}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({graph, graph}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{view.get("extruder_clearance").graph(0).value(),
+        view.get("extruder_clearance").graph(1).value()};
+    for (const bool islands : {false, true}) {
+        PluginStorage storage;
+        const std::vector<ObjectsLayerToPrint> stacks = separate_islands({a, b}, scale_i(1.), graphs, 1,
+            reinterpret_cast<storage_handle *>(&storage), islands);
+        REQUIRE(stacks.size() == 2);
+        CHECK(stacks[0].front().instance_id == 1);
+        CHECK(stacks[1].front().instance_id == 0);
+    }
+}
+
 // History-dependent rectangles exercise safe emission when current tops alone
 // do not describe older geometry, and when a later merge crosses parent paths.
 TEST_CASE("Island stack histories always produce a safe complete plan",
@@ -3188,7 +3344,7 @@ TEST_CASE("Island stack histories always produce a safe complete plan",
     const size_t object_count = scene == Scene::SupportGrid ? 1 : 2;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-        {"complete_objects_step", "0.6"}, {"complete_islands", "1"}, {"layer_height", "0.2"},
+        {"complete_objects_step", "0.6"}, {"complete_islands", "1"}, {"complete_objects_one_first_layer", "1"}, {"layer_height", "0.2"},
         {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
         {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"},
         {"bottom_solid_layers", "0"}, {"extruder_clearance_radius", "20"}, {"extruder_clearance_height", "10"}});
@@ -3256,8 +3412,8 @@ TEST_CASE("Island stack histories always produce a safe complete plan",
     run_island_plan_builder(print);
     check_island_plan_oracles(print, config);
     const PrintingPlan &plan = *print.printing_plan();
-    REQUIRE(plan.groups.size() > object_count);
-    const PrintingGroup &first = plan.groups[object_count];
+    REQUIRE(plan.groups.size() > 1);
+    const PrintingGroup &first = plan.groups[1];
     if (scene == Scene::Rotating || scene == Scene::BridgeSplitCycle) {
         // Interleaved geometry and cyclic stack dependencies both require a
         // lowest-Z prefix before the remaining histories can be emitted safely.
@@ -3269,9 +3425,9 @@ TEST_CASE("Island stack histories always produce a safe complete plan",
     } else {
         // Comparing non-parent open stacks joins these nearby histories before
         // emission, so no single-Z fallback is needed.
-        for (size_t idx = object_count; idx < plan.groups.size(); ++idx)
+        for (size_t idx = 1; idx < plan.groups.size(); ++idx)
             CHECK(plan.groups[idx].layers.size() > 1);
-        CHECK(plan.groups.size() == object_count + 1);
+        CHECK(plan.groups.size() == 2);
     }
 }
 
@@ -3347,6 +3503,15 @@ void check_island_plan_oracles(const Print &print, const DynamicPrintConfig &con
                                     Source{layer, &island, object.instances()[instance].shift});
         }
     }
+    // Global auxiliaries have no catalog instance and retain plate coordinates.
+    if (const PrintObject *auxiliary = print.auxiliary_object())
+        for (const Layer &layer : auxiliary->auxiliary_layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const auto &[role, root] : region.extrusion_buckets())
+                        if (!root.empty())
+                            expected.emplace(RoleKey{&region, PRINTING_OBJECT_INSTANCE_ID_NONE, role},
+                                Source{&layer, &island, Point(0, 0)});
     const double radius = config.opt_float("extruder_clearance_radius");
     const double height = config.opt_float("extruder_clearance_height");
     std::vector<GraphData> graphs;

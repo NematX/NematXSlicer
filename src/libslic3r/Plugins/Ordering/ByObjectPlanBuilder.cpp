@@ -25,23 +25,24 @@
 /*
 Provides the By object plan builder to the ordering chain. Borrowed print layers
 are cloned through PlanBuilderCommon into owned groups with physical instance ids.
-With a positive height step, the first object layer is printed for every instance,
-then each instance contributes a group for each nonempty Z interval. The interval
-height is capped by the printer clearance height. Auxiliary layers at or below
-the first object layer belong to its first group; others follow their Z interval.
-With a positive step and height limit, intervals stop at that limit. Remaining
-layers from all instances share a final group in increasing Z, using the same
-construction as By layer. Layer zero and its auxiliaries always stay in the first
-pass, even above the limit. With island scheduling, translated islands from all
-physical instances form plate-wide stacks. Support and instance-owned auxiliaries
-join the same clearance search; lower-island links remain within their instance.
+All modes use translated plate-wide units and the same stack process. Island mode
+uses one island per unit; otherwise all islands of one copy at a Z form one unit,
+including its selected auxiliary layers. The height lead is capped by the printer
+clearance height, or uses that height when the step is zero. An optional first group
+contains every copy's object and auxiliary layers up to the highest index-zero object layer.
+That group remains unconditional even above a height limit. Other layers at or above
+the limit share a final group in increasing Z using the By layer construction.
+Support and instance-owned auxiliaries join the clearance search; lower links
+remain within their instance. Whole-copy units link to the previous available Z.
 Each stack becomes one group, with several instances when close copies join.
-Global auxiliary geometry below the height limit precedes the instance groups;
-geometry at or above the limit joins the final group. Without a limit, all global
-auxiliary geometry precedes the instance groups. Local auxiliary layers
+Global auxiliary geometry inside the shared first-layer prefix joins the first
+group in increasing Z, even above the height limit. Outside that prefix, global
+geometry below the limit precedes the stacks, and geometry at or above the limit
+joins the final group. Without a limit, all global geometry outside the prefix
+precedes the stacks. Local auxiliary layers
 marked with an owner are included only for that instance; unmarked local layers
 are reproduced for every copy. Sources remain unchanged.
-The provider owns the object order, height step, height limit and island settings.
+The provider owns object order, height step, height limit, island and first-layer settings.
 Their activation rules keep them editable only for the selected By object mode.
 
     register_by_object_plan_builder_plugin() -> register the alternative provider
@@ -64,26 +65,26 @@ namespace {
 using namespace PlanBuilderCommon;
 const char *k_no_dependencies[] = { nullptr };
 const char *k_defined_config_keys[] = {
-    "complete_objects_sort", "complete_objects_step", "complete_objects_step_max_z", "complete_islands"
+    "complete_objects_sort", "complete_objects_step", "complete_objects_step_max_z", "complete_islands",
+    "complete_objects_one_first_layer"
 };
 
 // Publish copied option definitions and activation rules to the borrowed host; registration failures follow the host API.
 void initialize_by_object_settings(orchestrator_handle *orch);
 
-// Replace the plan with cloned instance groups, selecting layer zero first and then
-// half-open Z intervals when the step is positive. A positive height limit caps
-// intervals and merges the remainder by Z. Invalid auxiliary owners, cancellation
+// Replace the plan with plate-wide stacks, optionally sharing all copy layers up
+// to the highest first object layer. A positive height limit merges the remainder by Z. Invalid auxiliary owners, cancellation
 // and allocation failures propagate; the borrowed print is unchanged.
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx);
 
-// Build plate-wide stacks from non-first layers below the optional limit,
+// Build plate-wide stacks from selected layers below the optional limit,
 // including each copy's owned auxiliaries, then clone their selected islands into
 // one group per stack. Clearance profiles are copied
 // with the printer radius and height as their final point. Source views remain borrowed;
 // cancellation, invalid owners and allocation failures propagate.
 void append_island_groups(const Print &print, PrintingPlan &plan,
     const std::vector<SourceInstance> &instances, coord_t height_step_range,
-    coord_t object_step_max_z, const plugin_run_context *run_ctx);
+    coord_t object_step_max_z, coord_t first_group_z, const plugin_run_context *run_ctx);
 
 void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_run_context *run_ctx)
 {
@@ -95,49 +96,31 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
         ordered_source_instances_for_object_plan(print, run_ctx);
 
     const double object_step = print.config().float_or_default("complete_objects_step", 0.);
-    const coord_t height_step_range = object_step > 0. ? scale_to_layer_coord(std::min(
-        object_step, print.config().float_or_default("extruder_clearance_height", 0.))) : 0;
-    // Validation rejects positive steps whose capped height scales to zero.
-    const bool with_step = height_step_range > 0;
-    const bool with_islands = with_step && print.config().bool_or_default("complete_islands", false);
+    const double clearance_height = print.config().float_or_default("extruder_clearance_height", 0.);
+    const coord_t height_step_range = scale_to_layer_coord(object_step > 0. ?
+        std::min(object_step, clearance_height) : clearance_height);
+    const bool first_layer_group = print.config().bool_or_default("complete_objects_one_first_layer", false);
+    coord_t first_group_z = std::numeric_limits<coord_t>::lowest();
+    if (first_layer_group)
+        for (const SourceInstance &source : instances)
+            if (source.object.layer_count() != 0)
+                first_group_z = std::max(first_group_z, source.object.layer(0).print_z());
     const double max_z = print.config().float_or_default("complete_objects_step_max_z", 0.);
-    const coord_t object_step_max_z = with_step && max_z > 0. ? scale_to_layer_coord(max_z) : 0;
+    const coord_t object_step_max_z = max_z > 0. ? scale_to_layer_coord(max_z) : 0;
     LayerExtrusionFilter lower_filter;
     if (object_step_max_z > 0)
         lower_filter.print_z_interval = std::make_pair(std::numeric_limits<coord_t>::lowest(), object_step_max_z);
-    append_print_auxiliary_group(print, plan, run_ctx, lower_filter);
-    bool first_layers = true;
-    coord_t z_start = 0, z_end = height_step_range;
-    bool is_layers = true;
-    while (is_layers && (first_layers || object_step_max_z == 0 || z_start + EPSILON < object_step_max_z)) {
-        if (with_islands && !first_layers) {
-            append_island_groups(print, plan, instances, height_step_range, object_step_max_z, run_ctx);
-            break;
-        }
-        if (object_step_max_z > 0)
-            z_end = std::min(z_end, object_step_max_z);
-        is_layers = false;
+    if (!first_layer_group)
+        append_print_auxiliary_group(print, plan, run_ctx, lower_filter);
+    if (first_layer_group) {
+        PrintingGroup group(nullptr);
+        std::map<coord_t, uint32_t> indices;
         for (const SourceInstance &source : instances) {
             throw_if_cancelled(run_ctx);
-            const coord_t first_layer_z = source.object.layer_count() == 0 ? 0 : source.object.layer(0).print_z();
-            std::vector<Layer> layers_to_print_range;
-            for (uint32_t layer_idx = 0; layer_idx < source.object.layer_count(); ++layer_idx) {
-                const Layer layer = source.object.layer(layer_idx);
-                if (with_step) {
-                    // PrintObjectSlice.cpp assigns object layer ids from their sorted list index.
-                    // if first_layer then only id==0, else only id != 0
-                    if (first_layers != (layer_idx == 0))
-                        continue;
-                    if (!first_layers && layer.print_z() >= z_end)
-                        is_layers = true;
-                    // keep only layers that are in our current printing range
-                    if (!first_layers && (layer.print_z() < z_start || layer.print_z() >= z_end))
-                        continue;
-                }
-                layers_to_print_range.push_back(layer);
-            }
-            // Auxiliary ids describe insertion order, not their sorted Z position.
-            // Their first-layer geometry travels with layer zero; the rest follows Z.
+            std::vector<Layer> layers;
+            for (uint32_t idx = 0; idx < source.object.layer_count(); ++idx)
+                if (source.object.layer(idx).print_z() <= first_group_z)
+                    layers.push_back(source.object.layer(idx));
             for (uint32_t layer_idx = 0; layer_idx < source.object.auxiliary_layer_count(); ++layer_idx) {
                 const Layer layer = source.object.auxiliary_layer(layer_idx);
                 const std::optional<uint32_t> owner = layer_instance_owner(layer);
@@ -145,78 +128,64 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
                     throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
                 if (owner && *owner != source.object_instance_idx)
                     continue;
-                if (with_step) {
-                    if (first_layers != (layer.print_z() <= first_layer_z))
-                        continue;
-                    if (!first_layers && layer.print_z() >= z_end)
-                        is_layers = true;
-                    if (!first_layers && (layer.print_z() < z_start || layer.print_z() >= z_end))
-                        continue;
-                }
-                layers_to_print_range.push_back(layer);
+                if (layer.print_z() <= first_group_z)
+                    layers.push_back(layer);
             }
-            if (with_step && layers_to_print_range.empty())
+            if (layers.empty())
                 continue;
-            /* Each physical copy has a group that later stages consume independently. */
-            throw_if_cancelled(run_ctx);
-            PrintingGroup group = plan.append_group();
-            if (!group.valid())
-                continue;
-
+            if (!group.valid()) {
+                group = plan.append_group();
+                if (!group.valid())
+                    return;
+            }
             const uint32_t printing_catalog_id =
                 plan.find_or_add_object_instance(source.object, source.object_instance_idx);
             group.append_printing_catalog_id(plan, printing_catalog_id);
-            std::map<coord_t, uint32_t> layer_index_by_print_z;
-
-            /* Shift object-local geometry into this physical instance's position. */
-            LayerExtrusionFilter filter;
-            if (with_step && !first_layers)
-                filter.print_z_interval = std::make_pair(z_start, z_end);
-            for (const Layer &layer : layers_to_print_range) {
+            for (const Layer &layer : layers) {
                 throw_if_cancelled(run_ctx);
                 PrintingLayerGroup layer_group =
                     layer_group_for_print_z(
-                        group, layer_index_by_print_z, layer.print_z(), run_ctx);
+                        group, indices, layer.print_z(), run_ctx);
                 append_layer_once(layer_group, layer, run_ctx);
                 append_layer_instance_extrusions(
-                    plan, layer_group, layer, source.shift, printing_catalog_id, run_ctx, filter);
+                    plan, layer_group, layer, source.shift, printing_catalog_id, run_ctx);
             }
 
+        }
+        if (group.valid()) {
+            LayerExtrusionFilter prefix_filter;
+            prefix_filter.print_z_interval = std::make_pair(std::numeric_limits<coord_t>::lowest(), first_group_z + 1);
+            append_print_auxiliary_layers_to_group(print, plan, group, indices, run_ctx, prefix_filter);
             sort_layer_groups_by_print_z(group, run_ctx);
         }
-        if (!with_step)
-            break;
-        if (first_layers) {
-            first_layers = false;
-            is_layers = true;
-        } else {
-            z_start = z_end;
-            z_end += height_step_range;
-        }
+        // Global work above the shared prefix must not precede that prefix.
+        lower_filter.print_z_interval = std::make_pair(first_group_z + 1,
+            object_step_max_z > 0 ? object_step_max_z : std::numeric_limits<coord_t>::max());
+        append_print_auxiliary_group(print, plan, run_ctx, lower_filter);
     }
+    append_island_groups(print, plan, instances, height_step_range, object_step_max_z, first_group_z, run_ctx);
     if (object_step_max_z > 0) {
-        // The first pass is unconditional; do not clone it again when the limit is below it.
         bool has_remaining = false;
         for (const SourceInstance &source : instances) {
-            const coord_t first_z = source.object.layer_count() == 0 ? 0 : source.object.layer(0).print_z();
-            for (uint32_t idx = 1; idx < source.object.layer_count(); ++idx)
-                has_remaining |= source.object.layer(idx).print_z() >= object_step_max_z;
+            for (uint32_t idx = 0; idx < source.object.layer_count(); ++idx)
+                has_remaining |= source.object.layer(idx).print_z() > first_group_z && source.object.layer(idx).print_z() >= object_step_max_z;
             for (uint32_t idx = 0; idx < source.object.auxiliary_layer_count(); ++idx) {
                 const coord_t z = source.object.auxiliary_layer(idx).print_z();
-                has_remaining |= z > first_z && z >= object_step_max_z;
+                has_remaining |= z > first_group_z && z >= object_step_max_z;
             }
         }
         const Object auxiliary = print.auxiliary_object();
         for (uint32_t idx = 0; idx < auxiliary.auxiliary_layer_count(); ++idx)
-            has_remaining |= auxiliary.auxiliary_layer(idx).print_z() >= object_step_max_z;
+            has_remaining |= auxiliary.auxiliary_layer(idx).print_z() > first_group_z &&
+                auxiliary.auxiliary_layer(idx).print_z() >= object_step_max_z;
         if (has_remaining) {
             PrintingGroup group = plan.append_group();
             if (!group.valid())
                 return;
             std::map<coord_t, uint32_t> indices;
             LayerExtrusionFilter filter;
-            filter.print_z_interval = std::make_pair(object_step_max_z, std::numeric_limits<coord_t>::max());
-            append_by_layer_object_layers(print, plan, group, indices, run_ctx, filter, true);
+            filter.print_z_interval = std::make_pair(std::max(object_step_max_z, first_group_z + 1), std::numeric_limits<coord_t>::max());
+            append_by_layer_object_layers(print, plan, group, indices, run_ctx, filter, false);
             append_print_auxiliary_layers_to_group(print, plan, group, indices, run_ctx, filter);
             sort_layer_groups_by_print_z(group, run_ctx);
         }
@@ -225,7 +194,7 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
 
 void append_island_groups(const Print &print, PrintingPlan &plan,
     const std::vector<SourceInstance> &instances, coord_t height_step_range,
-    coord_t object_step_max_z, const plugin_run_context *run_ctx)
+    coord_t object_step_max_z, coord_t first_group_z, const plugin_run_context *run_ctx)
 {
     using IslandStacks::ObjectLayerToPrint;
     using IslandStacks::ObjectsLayerToPrint;
@@ -247,18 +216,19 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
     }
     ObjectsLayerToPrint object_and_support_layers;
     std::map<uint32_t, const SourceInstance *> sources;
-    for (const SourceInstance &source : instances) {
+    for (uint32_t rank = 0; rank < instances.size(); ++rank) {
+        const SourceInstance &source = instances[rank];
         throw_if_cancelled(run_ctx);
         const Object object = source.object;
         const uint32_t catalog_id = plan.find_or_add_object_instance(object, source.object_instance_idx);
         sources.emplace(catalog_id, &source);
-        const coord_t first_z = object.layer_count() == 0 ? 0 : object.layer(0).print_z();
-        for (uint32_t idx = 1; idx < object.layer_count(); ++idx) {
+        for (uint32_t idx = 0; idx < object.layer_count(); ++idx) {
             const Layer layer = object.layer(idx);
-            if (object_step_max_z > 0 && layer.print_z() >= object_step_max_z)
+            if (layer.print_z() <= first_group_z || (object_step_max_z > 0 && layer.print_z() >= object_step_max_z))
                 continue;
             ObjectLayerToPrint selection;
             selection.instance_id = catalog_id;
+            selection.copy_rank = rank;
             selection.shift = source.shift;
             selection.object_layer = layer;
             object_and_support_layers.push_back(std::move(selection));
@@ -268,11 +238,12 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
             const std::optional<uint32_t> owner = layer_instance_owner(layer);
             if (owner && *owner >= object.instance_count())
                 throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
-            if ((owner && *owner != source.object_instance_idx) || layer.print_z() <= first_z ||
+            if ((owner && *owner != source.object_instance_idx) || layer.print_z() <= first_group_z ||
                 (object_step_max_z > 0 && layer.print_z() >= object_step_max_z))
                 continue;
             ObjectLayerToPrint selection;
             selection.instance_id = catalog_id;
+            selection.copy_rank = rank;
             selection.shift = source.shift;
             selection.auxiliary_layer = layer;
             object_and_support_layers.push_back(std::move(selection));
@@ -292,7 +263,7 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
     }
     const std::vector<ObjectsLayerToPrint> stacks = IslandStacks::separate_islands(
         object_and_support_layers, height_step_range, extruder_clearance,
-        previous_tool, run_ctx->plugin_storage);
+        previous_tool, run_ctx->plugin_storage, print.config().bool_or_default("complete_islands", false));
     for (const ObjectsLayerToPrint &stack : stacks) {
         throw_if_cancelled(run_ctx);
         PrintingGroup group = plan.append_group();
@@ -378,12 +349,8 @@ void initialize_by_object_settings(orchestrator_handle *orch)
     def.default_serialized_value = "0";
     def.aliases = { &step_alias, 1 };
     def.label = "Object step height";
-    def.tooltip = "When multiple objects are present, instead of jumping from one to another at each layer"
-        " the printer will continue to print the current object layers up to this height before moving to the next object."
-        " (first layers will be still printed one by one)."
-        "\nThe step is capped by 'extruder_clearance_height'. The 'extruder_clearance' graph describes the nozzle clearance."
-        " If the step exceeds the graph height, islands cannot be separated."
-        "\nIn By object mode, set to 0 to complete each object before moving to the next.";
+    def.tooltip = "Limit the height lead between object stacks. The step is capped by 'extruder_clearance_height'."
+        "\n0 = the lead allowed by the clearance graph.";
     def.sidetext = "mm";
     orchestrator_create_option_def(orch, &def);
 
@@ -419,16 +386,28 @@ void initialize_by_object_settings(orchestrator_handle *orch)
     def.default_serialized_value = "0";
     def.aliases = { &islands_alias, 1 };
     def.label = "Print islands separately";
-    def.tooltip = "When using 'complete_objects_step', consider each object island as a separate object, if far enough."
+    def.tooltip = "Consider each object island as a separate unit, with or without a height step, if far enough."
         "\nTwo islands are considered separate if they are farther than the extruder clearance.";
     orchestrator_create_option_def(orch, &def);
 
+    def = raw_config_option_def_init();
+    def.opt_key = "complete_objects_one_first_layer";
+    def.type = RAW_CO_BOOL;
+    def.container_type = RAW_CONTAINER_TYPE_PLATER;
+    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    def.printer_technology = RAW_PT_FFF;
+    def.invalidates_step = STEP_ORDERING;
+    def.category = RAW_OPTION_CATEGORY_OUTPUT;
+    def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
+    def.default_serialized_value = "0";
+    def.label = "Print first layers together";
+    def.tooltip = "Print every copy's object and auxiliary layers together up to the highest first object layer, in increasing Z, before starting the stacks.";
+    orchestrator_create_option_def(orch, &def);
+
     const GuiCondition by_object = string_equals("print_plan_builder", "ordering.plan_builder.by_object");
-    for (const char *key : { "complete_objects_sort", "complete_objects_step" })
+    for (const char *key : { "complete_objects_sort", "complete_objects_step", "complete_objects_step_max_z",
+            "complete_islands", "complete_objects_one_first_layer" })
         GuiRule::activate(key).when(by_object).scope(RAW_PRESET_TYPE_FFF_PRINT).add_to(orch);
-    const GuiCondition with_step = all_of({ by_object, non_zero("complete_objects_step") });
-    for (const char *key : { "complete_objects_step_max_z", "complete_islands" })
-        GuiRule::activate(key).when(with_step).scope(RAW_PRESET_TYPE_FFF_PRINT).add_to(orch);
 }
 
 class ByObjectPlanBuilder : public PluginBase
@@ -449,7 +428,7 @@ private:
     // Return the display name without effects.
     const char *name_impl() const noexcept override { return "By object"; }
     // Describe the owned group arrangement without effects.
-    const char *description_impl() const noexcept override { return "Creates object instance groups for whole objects or height steps."; }
+    const char *description_impl() const noexcept override { return "Creates plate-wide stacks of object copies or islands, with optional shared first layers and a final by-layer height limit."; }
     // Join the plan builder alternatives without declaring another selector.
     const char *exclusive_group_impl() const noexcept override { return "ordering.plan_builder"; }
     // Run in ordering without effects.
@@ -460,13 +439,13 @@ private:
     int32_t priority_impl() const noexcept override { return 0; }
     // Leave By layer as the preferred default.
     int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
-    // Report the count or copy the four owned setting names into caller-owned storage.
+    // Report the count or copy the five owned setting names into caller-owned storage.
     int32_t defined_config_keys(const char **keys) const noexcept override
     {
         if (keys != nullptr)
-            for (size_t idx = 0; idx < 4; ++idx)
+            for (size_t idx = 0; idx < 5; ++idx)
                 keys[idx] = k_defined_config_keys[idx];
-        return 4;
+        return 5;
     }
     // Report setting types so changes to the step cap or nozzle graph invalidate ordering too.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
@@ -479,8 +458,9 @@ private:
             keys[4] = raw_used_config_key{ "extruder_clearance_height", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[5] = raw_used_config_key{ "extruder_clearance", RAW_CO_VECTOR_GRAPH, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[6] = raw_used_config_key{ "extruder_clearance_radius", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
+            keys[7] = raw_used_config_key{ "complete_objects_one_first_layer", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
         }
-        return 7;
+        return 8;
     }
     // Define the provider's settings and rules once without taking ownership of host storage.
     void inilialize_impl(storage_handle *) const override

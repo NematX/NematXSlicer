@@ -325,8 +325,9 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
 
     set("complete_objects_sort", seq);
     set("complete_objects_step", seq);
-    set("complete_objects_step_max_z", parallel_ok);
-    set("complete_islands", parallel_ok);
+    set("complete_objects_step_max_z", seq);
+    set("complete_islands", seq);
+    set("complete_objects_one_first_layer", seq);
     set("standby_temperature_delta", b("ooze_prevention"));
     set("wipe_tower", have_wipe);
     set("wipe_tower_per_object", !spiral);
@@ -426,7 +427,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     for (const char *key : { "spiral_vase", "external_perimeters_first", "perimeter_loop",
                              "overhangs", "perimeter_reverse", "thin_walls", "only_one_perimeter_top",
                              "support_material", "support_material_auto", "ooze_prevention",
-                              "wipe_tower", "wipe_tower_per_object", "complete_islands", "avoid_crossing_perimeters",
+                               "wipe_tower", "wipe_tower_per_object", "complete_islands", "complete_objects_one_first_layer", "avoid_crossing_perimeters",
                              "avoid_crossing_curled_overhangs", "avoid_travel_island",
                              "milling_post_process", "infill_dense", "gap_fill_enabled",
                              "infill_filled_bottom", "infill_filled_solid", "infill_filled_top",

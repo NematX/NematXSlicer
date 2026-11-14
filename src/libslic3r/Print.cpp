@@ -1208,9 +1208,9 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
     const double object_step = object_step_height(*this);
-    if (print_by_object(m_config) && object_step > 0. && scale_to_layer_coord(std::min(
-        object_step, m_config.extruder_clearance_height.value)) == 0)
-        return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The By object height step capped by the extruder clearance height must be greater than zero at layer precision.") };
+    if (print_by_object(m_config) && scale_to_layer_coord(object_step > 0. ? std::min(
+        object_step, m_config.extruder_clearance_height.value) : m_config.extruder_clearance_height.value) == 0)
+        return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The By object height lead must be greater than zero at layer precision: the height step capped by the extruder clearance height, or the extruder clearance height when the step is zero.") };
     if (print_by_object(m_config) && object_step > 0. && this->has_wipe_tower())
         return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("A wipe tower is not supported with a positive By object height step.") };
 

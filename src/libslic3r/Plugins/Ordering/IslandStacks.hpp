@@ -9,16 +9,20 @@
 
 /*
 Island stacks for the By object builder borrow source layers and island handles.
-Collect object and auxiliary layers for every physical instance. Each selection
+Collect object and auxiliary layers in copy order for every physical instance. Each selection
 holds one layer, or an object and auxiliary layer at the same Z. Call separate_islands
 after collecting every selection. Its result is an ordered
 vector of stacks; each stack contains selected islands by source layer and instance.
 Source layers must outlive the call and its result; graphs are borrowed during the call.
 The caller emits one group per stack, cloning each selection at its instance shift.
 Instance ids distinguish copies even when their source island handles are equal.
+copy_rank orders ready stacks after tool continuation. With complete_islands false, all
+selected islands of one instance at a Z share a unit, linked to its previous Z unit.
+With complete_islands true, source lower-island links define parents instead.
 Clearance graphs include the printer's radius and height as their final point.
-max_height is positive and uses scaled coordinate units, not millimeters. A blocked stack is split
-by emitting the lowest remaining Z across all stacks before trying whole stacks again.
+max_height is positive and uses scaled coordinate units, not millimeters.
+A blocked stack is split by emitting the lowest remaining Z across all stacks
+before trying whole stacks again.
 
     ObjectLayerToPrint level;
     level.object_layer = object.layer(1);
@@ -30,6 +34,7 @@ namespace slic3r_api { namespace Ordering { namespace IslandStacks {
 struct ObjectLayerToPrint
 {
     uint32_t instance_id = 0;
+    uint32_t copy_rank = 0;
     c_point shift = {};
     Layer object_layer;
     Layer auxiliary_layer;
@@ -46,7 +51,7 @@ using ObjectsLayerToPrint = std::vector<ObjectLayerToPrint>;
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage);
+    storage_handle *storage, bool complete_islands = true);
 
 }}}
 #endif

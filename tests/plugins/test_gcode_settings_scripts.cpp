@@ -1429,6 +1429,8 @@ TEST_CASE("Exported scripts read the legacy export variables",
         Model model;
         Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
                          print, model, config);
+        model.objects()[0].instances.front()->set_offset(Vec3d(40., 40., 0.));
+        model.objects()[1].instances.front()->set_offset(Vec3d(100., 40., 0.));
         for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"})
             model.objects()[1].config.set_deserialize_strict(key, "2");
         print.apply(model, config);

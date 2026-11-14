@@ -97,6 +97,7 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{whole_objects_key, "ordering.plan_builder.by_object"}, {step_key, std::to_string(step)},
         {limit_key, std::to_string(max_z)}, {islands_key, "1"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"complete_objects_one_first_layer", "1"},
         {"seam_visibility", "0"}, {"skirts", "0"}, {"brim_width", "0"}, {"perimeters", "1"},
         {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
         {"start_gcode", ""}, {"end_gcode", ""}, {"binary_gcode", "0"}});
@@ -191,7 +192,7 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
         }
     CHECK(marker == markers.size());
     // Every island stack names exactly the physical instances it actually prints.
-    for (size_t idx = copies; idx < print.printing_plan()->groups.size(); ++idx) {
+    for (size_t idx = 1; idx < print.printing_plan()->groups.size(); ++idx) {
         const Printing::PrintingGroup &group = print.printing_plan()->groups[idx];
         if (max_z > 0. && max_z <= 5. && idx + 1 == print.printing_plan()->groups.size())
             break;
@@ -211,7 +212,7 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
             CHECK(layer.print_z > previous);
             previous = layer.print_z;
         }
-        for (size_t idx = copies; idx + 1 < print.printing_plan()->groups.size(); ++idx)
+        for (size_t idx = 1; idx + 1 < print.printing_plan()->groups.size(); ++idx)
             for (const Printing::PrintingLayerGroup &layer : print.printing_plan()->groups[idx].layers)
                 CHECK(unscaled(layer.print_z) < max_z);
     }

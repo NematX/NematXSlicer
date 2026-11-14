@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -11,8 +12,10 @@
 
 /*
 Builds plate-wide island stacks for the By object builder from borrowed layers.
-A unit is one printable source island of one physical instance. All units and Z
-levels are collected before lower-island links are resolved within each instance.
+A unit contains either one printable island or every selected island of a physical
+instance at one Z. Members retain their source selection and island for filtered emission.
+All units and Z levels are collected before lower-island links are resolved
+within each instance.
 Temporary translated polygons belong to this call; returned selections borrow
 their source layers and islands and retain the physical instance identity.
 Each level groups islands without enough nozzle clearance, regardless of tool.
@@ -31,12 +34,19 @@ across all stacks. This breaks history and parent-order deadlocks without adding
 namespace slic3r_api { namespace Ordering { namespace IslandStacks {
 
 namespace {
-struct Unit
+struct Member
 {
     size_t source = 0;
-    Layer layer;
     LayerIsland island;
+};
+
+struct Unit
+{
+    std::vector<Member> members;
+    Layer layer;
+    coord_t bottom_z = 0;
     uint32_t instance_id = 0;
+    uint32_t copy_rank = 0;
     c_bounding_box bb;
     PluginCommon::polygon_work::ExPolygons slices;
     std::set<extruder_index_t> extruders;
@@ -47,6 +57,8 @@ struct GroupedIslands
 {
     std::vector<size_t> islands;
     c_bounding_box bb;
+    uint32_t copy_rank = 0;
+    size_t member_count = 0;
 };
 
 // Compare owned translated slices using the larger clearance requested by either
@@ -66,16 +78,17 @@ bool too_close(const Unit &island, const Unit &other, coord_t height,
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage);
+    storage_handle *storage, bool complete_islands);
 
 std::vector<ObjectsLayerToPrint> separate_islands(
     const ObjectsLayerToPrint object_layers, coord_t max_height,
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
-    storage_handle *storage)
+    storage_handle *storage, bool complete_islands)
 {
     std::vector<Unit> units;
     std::map<coord_t, std::vector<size_t>> levels;
     std::map<std::pair<uint32_t, const layer_island_handle *>, size_t> unit_by_island;
+    std::map<std::pair<uint32_t, coord_t>, size_t> unit_by_level;
     // Finish the unit table before resolving links so every identity stays stable.
     for (size_t source = 0; source < object_layers.size(); ++source) {
         const ObjectLayerToPrint &selection = object_layers[source];
@@ -90,10 +103,11 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                 if (!has_extrusions)
                     continue;
                 Unit unit;
-                unit.source = source;
+                unit.members.push_back(Member{source, island});
                 unit.layer = layer;
-                unit.island = island;
+                unit.bottom_z = layer.bottom_z();
                 unit.instance_id = selection.instance_id;
+                unit.copy_rank = selection.copy_rank;
                 unit.bb = island.bounding_box();
                 unit.bb.min.x += selection.shift.x;
                 unit.bb.max.x += selection.shift.x;
@@ -117,18 +131,43 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                         throw std::invalid_argument("LayerRegionIsland contains an invalid negative extruder ID");
                     unit.extruders.insert(tool);
                 }
-                levels[layer.print_z()].push_back(units.size());
-                unit_by_island.emplace(std::make_pair(unit.instance_id, island.handle()), units.size());
-                units.push_back(std::move(unit));
+                const auto key = std::make_pair(unit.instance_id, layer.print_z());
+                const auto existing = unit_by_level.find(key);
+                if (!complete_islands && existing != unit_by_level.end()) {
+                    Unit &target = units[existing->second];
+                    target.members.insert(target.members.end(), unit.members.begin(), unit.members.end());
+                    bounding_box_merge(target.bb, unit.bb);
+                    target.slices.insert(target.slices.end(), std::make_move_iterator(unit.slices.begin()),
+                        std::make_move_iterator(unit.slices.end()));
+                    target.extruders.insert(unit.extruders.begin(), unit.extruders.end());
+                    target.bottom_z = std::min(target.bottom_z, unit.bottom_z);
+                } else {
+                    levels[layer.print_z()].push_back(units.size());
+                    if (complete_islands)
+                        unit_by_island.emplace(std::make_pair(unit.instance_id, island.handle()), units.size());
+                    unit_by_level.emplace(key, units.size());
+                    units.push_back(std::move(unit));
+                }
             }
         }
     }
-    for (Unit &unit : units)
-        for (const LayerIsland &parent : unit.island.lower_islands()) {
-            const auto found = unit_by_island.find(std::make_pair(unit.instance_id, parent.handle()));
-            if (found != unit_by_island.end())
-                unit.parents.push_back(found->second);
+    if (complete_islands) {
+        for (Unit &unit : units)
+            for (const Member &member : unit.members)
+                for (const LayerIsland &parent : member.island.lower_islands()) {
+                    const auto found = unit_by_island.find(std::make_pair(unit.instance_id, parent.handle()));
+                    if (found != unit_by_island.end())
+                        unit.parents.push_back(found->second);
+                }
+    } else {
+        std::map<uint32_t, size_t> previous;
+        for (const auto &[key, idx] : unit_by_level) {
+            const auto parent = previous.find(key.first);
+            if (parent != previous.end())
+                units[idx].parents.push_back(parent->second);
+            previous[key.first] = idx;
         }
+    }
 
     std::vector<std::vector<size_t>> ordered_layers_islands_to_print;
     std::vector<size_t> top_begin;
@@ -160,24 +199,30 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                     // collide -> add it
                     group.islands.push_back(island);
                     bounding_box_merge(group.bb, units[island].bb);
+                    group.copy_rank = std::min(group.copy_rank, units[island].copy_rank);
+                    group.member_count += units[island].members.size();
                     added = group_idx;
                 } else {
                     // merge the groups
                     GroupedIslands &main_group = grouped_islands[added];
                     main_group.islands.insert(main_group.islands.end(), group.islands.begin(), group.islands.end());
                     bounding_box_merge(main_group.bb, group.bb);
+                    main_group.copy_rank = std::min(main_group.copy_rank, group.copy_rank);
+                    main_group.member_count += group.member_count;
                     grouped_islands.erase(grouped_islands.begin() + group_idx--);
                 }
             }
             if (added == size_t(-1))
-                grouped_islands.push_back(GroupedIslands{{island}, units[island].bb});
+                grouped_islands.push_back(GroupedIslands{{island}, units[island].bb, units[island].copy_rank, units[island].members.size()});
         };
         for (size_t island : level)
             fn_group_islands(island);
-        // Keep the island-count and area tie-breaks after tool-independent grouping.
+        // Respect the configured copy order before the island-count and area ties.
         std::stable_sort(grouped_islands.begin(), grouped_islands.end(), [](const GroupedIslands &g1, const GroupedIslands &g2) {
-            if (g1.islands.size() != g2.islands.size())
-                return g1.islands.size() > g2.islands.size();
+            if (g1.copy_rank != g2.copy_rank)
+                return g1.copy_rank < g2.copy_rank;
+            if (g1.member_count != g2.member_count)
+                return g1.member_count > g2.member_count;
             const c_point size1 = bounding_box_size(g1.bb), size2 = bounding_box_size(g2.bb);
             return double(size1.x) * double(size1.y) > double(size2.x) * double(size2.y);
         });
@@ -185,7 +230,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
         // need to check if the new printz may close some too tall stacks
         coord_t thickness = 0;
         for (size_t island : level)
-            thickness = std::max(thickness, print_z - units[island].layer.bottom_z());
+            thickness = std::max(thickness, print_z - units[island].bottom_z);
         for (size_t coll_idx = 0; coll_idx < ordered_layers_islands_to_print.size(); ++coll_idx) {
             if (finished[coll_idx])
                 continue;
@@ -277,8 +322,18 @@ std::vector<ObjectsLayerToPrint> separate_islands(
     }
 
     std::vector<ObjectsLayerToPrint> result;
+    std::vector<size_t> stack_order;
+    std::vector<uint32_t> stack_rank(ordered_layers_islands_to_print.size(), std::numeric_limits<uint32_t>::max());
+    for (size_t stack = 0; stack < ordered_layers_islands_to_print.size(); ++stack) {
+        stack_order.push_back(stack);
+        for (size_t island : ordered_layers_islands_to_print[stack])
+            stack_rank[stack] = std::min(stack_rank[stack], units[island].copy_rank);
+    }
+    std::stable_sort(stack_order.begin(), stack_order.end(), [&](size_t a, size_t b) {
+        return stack_rank[a] < stack_rank[b];
+    });
     extruder_index_t previous_extruder_id = initial_extruder_id;
-    // Prefer safe remaining stacks that continue the tool. If histories block
+    // Prefer ready stacks that continue the tool, then copy rank and the existing order. If histories block
     // every complete stack, the lowest remaining level makes progress safely.
     std::vector<bool> emitted(units.size(), false);
     size_t remaining = units.size();
@@ -288,7 +343,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
         coord_t lowest_front_z = std::numeric_limits<coord_t>::max();
         coord_t second_front_z = std::numeric_limits<coord_t>::max();
         size_t lowest_front_stack = size_t(-1);
-        for (size_t stack = 0; stack < ordered_layers_islands_to_print.size(); ++stack) {
+        for (size_t stack : stack_order) {
             if (ordered_layers_islands_to_print[stack].empty())
                 continue;
             const coord_t z = units[ordered_layers_islands_to_print[stack].front()].layer.print_z();
@@ -301,7 +356,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
             }
         }
         size_t selected = size_t(-1);
-        for (size_t stack = 0; stack < ordered_layers_islands_to_print.size(); ++stack) {
+        for (size_t stack : stack_order) {
             if (ordered_layers_islands_to_print[stack].empty())
                 continue;
             bool ready = true;
@@ -365,15 +420,17 @@ std::vector<ObjectsLayerToPrint> separate_islands(
         // Retain a separate source selection per instance, source layer and Z.
         const auto fn_add_group_into = [&](size_t island) {
             const Unit &unit = units[island];
-            const ObjectLayerToPrint &source = object_layers[unit.source];
-            if (selections.empty() || selections.back().instance_id != source.instance_id ||
-                !selections.back().object_layer.same_handle(source.object_layer) ||
-                !selections.back().auxiliary_layer.same_handle(source.auxiliary_layer)) {
-                selections.push_back(source);
-                selections.back().islands.clear();
-                selections.back().extruders_order.clear();
+            for (const Member &member : unit.members) {
+                const ObjectLayerToPrint &source = object_layers[member.source];
+                if (selections.empty() || selections.back().instance_id != source.instance_id ||
+                    !selections.back().object_layer.same_handle(source.object_layer) ||
+                    !selections.back().auxiliary_layer.same_handle(source.auxiliary_layer)) {
+                    selections.push_back(source);
+                    selections.back().islands.clear();
+                    selections.back().extruders_order.clear();
+                }
+                selections.back().islands.insert(member.island.handle());
             }
-            selections.back().islands.insert(unit.island.handle());
         };
         for (size_t island : printable)
             fn_add_group_into(island);
