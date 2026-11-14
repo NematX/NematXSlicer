@@ -24,8 +24,11 @@ ranked by estimated outside length plus weighted inside length, with stable ties
 Inside estimates use weighted chord length wholly inside their component;
 endpoint attachments within 1.5 spacings are likewise priced as inside material;
 other connectors use clipped inside and outside portions across all components.
-Same-component paths use that component alone; different choices use the combined
-boundary. The option without domains follows expanded obstacle contours.
+Same-component paths use that component alone. Paths between distinct components
+reach selected bridge points within each one and contour forbidden obstacles on the bridge.
+Mixed choices use the nearest ring exit/entry to the free endpoint and contour
+obstacles on the remaining connector. Estimates and routes share selected points.
+The option without domains follows expanded obstacle contours.
 If both endpoints have the same domain candidate, that option requires its chord to stay
 within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length allowance.
 Every route is checked against original forbidden material, exact endpoints and
@@ -67,10 +70,11 @@ public:
     // A direct result may be an accepted hypothesis, a Z-only move, or the counted fallback after all hypotheses fail.
     // Cancellation and geometry errors propagate.
     std::vector<c_point> path(size_t t, const PendingTravel &travel);
-    // Count accepted same-component paths using their attachments (including interior chords), or combined routes with ring waypoints.
-    // A two-point combined-boundary result after failed placement does not count as a domain route.
+    // Count accepted paths constructed with at least one component's attachment or ring route, including interior chords.
     size_t domain_routes() const { return m_domain_routes; }
-    // Return cumulative ring-routing diagnostics for this worker.
+    // Count accepted paths connecting two distinct components through selected bridge points.
+    size_t bridges() const { return m_bridges; }
+    // Return cumulative ring-routing diagnostics; advanced routing does not update island_jumps. Use bridges() for accepted bridges.
     const AvoidCrossing::RouterCounts &router_counts() const { return m_router_counts; }
     // Return the number of accepted domain or obstacle paths longer than their chord by more than SCALED_EPSILON.
     size_t detours() const { return m_detours; }
@@ -101,6 +105,7 @@ private:
     AvoidCrossing::LayerInputCache &m_layer_inputs;
     std::map<CacheKey, Obstacles> m_obstacles;
     size_t m_domain_routes = 0;
+    size_t m_bridges = 0;
     AvoidCrossing::RouterCounts m_router_counts;
     size_t m_detours = 0;
     size_t m_fallbacks = 0;

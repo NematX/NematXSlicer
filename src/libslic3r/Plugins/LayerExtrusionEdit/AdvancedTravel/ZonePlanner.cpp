@@ -24,7 +24,11 @@ Endpoint attachments within 1.5 spacings are also estimated as inside material;
 bridges and mixed entry/exit legs retain clipped pricing.
 Same-component paths use only that component: the chord between its attachments
 follows the component's rings only where it crosses them.
-Choices with different components use the combined boundary's ring routing.
+Different-component paths join each component's route at bridge points selected
+on the combined boundary, then contour expanded obstacles along the bridge. A mixed
+choice routes within its component to the ring point nearest the free endpoint, then
+contours obstacles to that endpoint. Selected connector points are retained with
+the hypothesis so estimates and constructed routes use the same points.
 The option without either domain follows the chord around expanded obstacles.
 When both endpoints have the same domain candidate, this option is admitted only if its
 chord stays within the material proxy: components grown by 1.5 perimeter spacings,
@@ -36,7 +40,8 @@ complete-path allowance for integer clipping. The reference detour is computed
 at most once; an unusable reference skips only this outside-length bound.
 Rejected hypotheses leave the next ranked choice available. Only exhaustion counts
 a straight fallback; accepted choices using a domain count once as domain routes,
-and accepted paths longer than the chord by SCALED_EPSILON count as detours.
+accepted choices connecting distinct components count as bridges, and accepted
+paths longer than the chord by SCALED_EPSILON count as detours.
 Endpoint membership removes individual unexpanded zones before union and nozzle
 expansion, so overlapping margins do not erase unrelated obstacles. Cached areas
 belong to this worker. The Config view of print settings is copied, its configuration borrowed;
@@ -52,16 +57,17 @@ component. Progress retains the unrounded exit parameter on the original line;
 only output vertices are rounded. Inserted arcs are not classified as entries. The
 component bound and original-area validation reject unsafe obstacle candidates;
 the total detour budget can reject either kind of route. Exhaustion produces
-the counted straight fallback. A source or target in a
-hole whose route crosses the surrounding material cannot be connected through
-the outer contour and also produces a counted straight fallback. A source or
-target inside the expanded margin but outside the original material also causes
-a counted straight fallback when the route needs a missing contour entry or exit.
+the counted straight fallback. A connector endpoint in a hole whose line crosses
+the surrounding material cannot connect through the outer contour. An endpoint
+inside the expanded margin can likewise lack a contour entry or exit. These
+failures reject that connector; other hypotheses can still provide a valid route.
 Cancellation propagates.
 
     path: filter zones, cache domains, rank hypotheses and accept the first validated route
     |-- LayerInputCache::get: resolve spacing and island-jump settings
-    |-- build_boundary / route_on_boundary: index the domain and follow the rings a chord crosses
+    |-- build_boundary: index the combined domain and each component separately
+    |-- append_component_path: route within one component between selected points
+    |   `-- route_on_boundary: follow crossed rings, else keep the chord; no placement or island jumps
     |-- eligible: resolve regional and auxiliary activation
     |-- contains: test filled material, including its border
     |-- endpoint_candidates: choose a component and the option without a domain
@@ -85,7 +91,12 @@ namespace {
 struct Hit { double parameter; work::Point point; size_t edge; };
 // SIZE_MAX denotes the option without a domain; its attachment is the endpoint itself.
 struct Attachment { size_t component; work::Point point; };
-struct Hypothesis { Attachment source, target; double cost; };
+// Connector endpoints are selected once and shared by the estimate and the constructed route.
+struct Hypothesis { Attachment source, target; work::Point exit, entry; double cost; };
+// Append a component's route between already attached points (crossed rings, else a direct chord), retaining exact endpoints and borrowing its cached boundary.
+// Epsilon-near points connect directly; no placement or nearby-ring search occurs. Update routing counts; cancellation propagates.
+void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
+    const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts);
 // Inside estimates stand for a route within a component; outside estimates retain their geometric domain intersections.
 enum class EstimateKind { Inside, Outside };
 struct EstimateSegment { work::Point from, to; EstimateKind kind; };
@@ -109,6 +120,7 @@ bool contains(const work::ExPolygons &areas, const work::Point &point, bool bord
 // Classify an unrounded point against one ring: -1 outside, 0 on an edge, 1 inside, with sub-unit floating-point tolerance.
 int ring_location(const work::Polygon &ring, const work::Vec2d &point);
 // Find the first interval whose exit is strictly after minimum_parameter, returning its entry and the last material exit; contacts do not count.
+// Stable ties follow insertion order (endpoint seeds, then rings/edges); coincident hits keep their retained point/parameter and acquire a known outer edge when missing.
 bool crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
               Hit &entry, Hit &exit, const plugin_run_context *context, double minimum_parameter = 0.);
 // Return whether any nonzero path segment enters filled material; cancellation propagates per component.
@@ -116,6 +128,19 @@ bool blocked(const work::Points &points, const work::ExPolygons &areas, const pl
 // Build both outer-contour arcs including the rounded hits, choosing the shorter; hole hits cannot produce a contour route.
 work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const Hit &exit,
                          const plugin_run_context *context);
+
+void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
+    const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts)
+{
+    if (from.coincides_with_epsilon(to)) {
+        points.push_back(from);
+        points.push_back(to);
+    } else {
+        const work::Points interior = AvoidCrossing::route_on_boundary(boundary, from, to, 0, 0, false, 0.,
+            context->plugin_storage, counts, [context]() { throw_if_cancelled(context); }).points;
+        points.insert(points.end(), interior.begin(), interior.end());
+    }
+}
 
 work::Point nearest_point(const work::ExPolygon &component, const work::Point &point)
 {
@@ -259,10 +284,16 @@ bool crossing(const work::ExPolygon &area, const work::Point &from, const work::
             }
         }
     }
-    std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) { return a.parameter < b.parameter; });
-    hits.erase(std::unique(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
-        return std::abs(a.parameter - b.parameter) < 1e-12;
-    }), hits.end());
+    std::stable_sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) { return a.parameter < b.parameter; });
+    // Endpoint seeds have no edge; retain the geometric hit's edge without moving the seed's point.
+    size_t retained = 0;
+    for (size_t i = 0; i < hits.size(); ++i) {
+        const Hit hit = hits[i];
+        if (retained > 0 && std::abs(hits[retained - 1].parameter - hit.parameter) < 1e-12) {
+            if (hits[retained - 1].edge == SIZE_MAX) hits[retained - 1].edge = hit.edge;
+        } else hits[retained++] = hit;
+    }
+    hits.resize(retained);
     bool found = false;
     for (size_t i = 1; i < hits.size(); ++i) {
         if (hits[i].parameter <= minimum_parameter) continue;
@@ -351,7 +382,6 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     const work::Point target(pending.target.position.x, pending.target.position.y);
     if (source.coincides_with_epsilon(target)) return direct;
     coord_t spacing = scale_i(m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4));
-    bool island_jump = false;
     double jump_weight = 0.;
     for (const travel::TravelEndpoint *endpoint : {&pending.target, &pending.source}) {
         if (!endpoint->region_island.valid() || endpoint->region_island.region_count() == 0) continue;
@@ -360,7 +390,6 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         spacing = layer.perimeter_spacing;
         for (const AvoidCrossing::RegionInput &region : layer.regions)
             if (region.avoid_travel_island) {
-                island_jump = true;
                 jump_weight = region.avoid_travel_island_weight;
                 break;
             }
@@ -389,14 +418,12 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                 "nozzle_diameter", pending.extruder_id, 0.4) * 0.5));
             obstacles.expanded = clipper::offset_ex(m_context->plugin_storage, obstacles.original, double(radius));
         }
-        // The same components serve as containment masks, so interior endpoints need no projection.
+        // Keep components intact for containment, nearest attachments and ring routing.
         work::ExPolygons domain = obstacles.expanded.empty() ? active.attractors :
             clipper::diff_ex(m_context->plugin_storage, active.attractors, obstacles.expanded);
         if (!domain.empty()) {
             obstacles.domain = std::make_unique<AvoidCrossing::Boundary>();
             AvoidCrossing::build_boundary(m_context->plugin_storage, work::ExPolygons(domain), 2 * spacing, *obstacles.domain);
-            for (const work::ExPolygon &component : domain)
-                obstacles.domain->boundary_growth.emplace_back(component, component);
             size_t ring = 0;
             for (const work::ExPolygon &component : domain) {
                 throw_if_cancelled(m_context);
@@ -428,6 +455,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             const EstimateKind source_kind = from.component != SIZE_MAX ? EstimateKind::Inside : EstimateKind::Outside;
             const EstimateKind target_kind = to.component != SIZE_MAX ? EstimateKind::Inside : EstimateKind::Outside;
             std::vector<EstimateSegment> estimate{{source, from.point, source_kind}};
+            work::Point exit = from.point, entry = to.point;
             if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) {
                 work::Point start = from.point, end = to.point;
                 AvoidCrossing::RouterCounts estimate_counts;
@@ -435,21 +463,23 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                     *obstacles.domain, obstacles.component_rings[from.component], obstacles.component_rings[to.component],
                     start, end, jump_weight, estimate_counts, [this]() { throw_if_cancelled(m_context); });
                 if (!bridge) continue;
+                exit = bridge->from;
+                entry = bridge->to;
                 estimate.push_back({from.point, bridge->from, EstimateKind::Inside});
                 estimate.push_back({bridge->from, bridge->to, EstimateKind::Outside});
                 estimate.push_back({bridge->to, to.point, EstimateKind::Inside});
             } else if (from.component != SIZE_MAX && to.component == SIZE_MAX) {
-                const work::Point exit = nearest_point(obstacles.components[from.component], target);
+                exit = nearest_point(obstacles.components[from.component], target);
                 estimate.push_back({from.point, exit, EstimateKind::Inside});
                 estimate.push_back({exit, target, EstimateKind::Outside});
             } else if (from.component == SIZE_MAX && to.component != SIZE_MAX) {
-                const work::Point entry = nearest_point(obstacles.components[to.component], source);
+                entry = nearest_point(obstacles.components[to.component], source);
                 estimate.push_back({source, entry, EstimateKind::Outside});
                 estimate.push_back({entry, to.point, EstimateKind::Inside});
             } else estimate.push_back({from.point, to.point,
                 from.component == SIZE_MAX ? EstimateKind::Outside : EstimateKind::Inside});
             estimate.push_back({to.point, target, target_kind});
-            hypotheses.push_back({from, to, estimate_cost(estimate, obstacles.components, jump_weight, m_context)});
+            hypotheses.push_back({from, to, exit, entry, estimate_cost(estimate, obstacles.components, jump_weight, m_context)});
         }
     // Domain choices precede the option without a domain on equal estimates.
     std::stable_sort(hypotheses.begin(), hypotheses.end(), [](const Hypothesis &a, const Hypothesis &b) { return a.cost < b.cost; });
@@ -469,8 +499,6 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     const c_float_or_percent budget = m_config.float_or_percent_or_default(
         "avoid_crossing_perimeters_max_detour", c_float_or_percent{0., 0});
     const double direct_length = work::Line(source, target).length();
-    bool combined_ready = false;
-    work::Points combined_points;
     for (const Hypothesis &hypothesis : hypotheses) {
         throw_if_cancelled(m_context);
         const Attachment &from = hypothesis.source, &to = hypothesis.target;
@@ -482,24 +510,20 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             points = reference;
         } else if (from.component == to.component) {
             points.push_back(source);
-            if (from.point == to.point) points.push_back(from.point);
-            else {
-                // Endpoints are already attached; zero search radius avoids pulling interior points onto nearby rings.
-                const work::Points interior = AvoidCrossing::route_on_boundary(
-                    *obstacles.component_boundaries[from.component], from.point, to.point, 0, 0, false, 0.,
-                    m_context->plugin_storage, m_router_counts, [this]() { throw_if_cancelled(m_context); }).points;
-                points.insert(points.end(), interior.begin(), interior.end());
-            }
+            append_component_path(points, *obstacles.component_boundaries[from.component], from.point, to.point, m_context, m_router_counts);
             points.push_back(target);
         } else {
-            // Unequal choices share the same combined-boundary micro route; build it at most once per travel.
-            if (!combined_ready) {
-                combined_points = AvoidCrossing::route_on_boundary(*obstacles.domain, source, target, spacing,
-                    2 * spacing, island_jump, jump_weight, m_context->plugin_storage, m_router_counts,
-                    [this]() { throw_if_cancelled(m_context); }).points;
-                combined_ready = true;
-            }
-            points = combined_points;
+            points.push_back(source);
+            if (from.component != SIZE_MAX)
+                append_component_path(points, *obstacles.component_boundaries[from.component], from.point, hypothesis.exit, m_context, m_router_counts);
+            bool changed = false, failed = false;
+            const work::Points connector = detour_around_forbidden(hypothesis.exit, hypothesis.entry,
+                obstacles.expanded, m_context, changed, failed);
+            if (failed) continue;
+            points.insert(points.end(), connector.begin(), connector.end());
+            if (to.component != SIZE_MAX)
+                append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry, to.point, m_context, m_router_counts);
+            points.push_back(target);
         }
         points.erase(std::unique(points.begin(), points.end()), points.end());
         if (points.size() < 2 || points.front() != source || points.back() != target ||
@@ -515,8 +539,8 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         if (!reference_failed && outside_length(points, obstacles.components, m_context) > reference_outside + SCALED_EPSILON) continue;
         std::vector<c_point> result;
         for (const work::Point &point : points) result.push_back({point.x(), point.y()});
-        // Same-component construction uses its attachments; combined routing must supply ring waypoints, not a placement-failure chord.
-        if (domain_route && (from.component == to.component || points.size() > 2)) ++m_domain_routes;
+        if (domain_route) ++m_domain_routes;
+        if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) ++m_bridges;
         if (length > direct_length + SCALED_EPSILON) ++m_detours;
         return result;
     }

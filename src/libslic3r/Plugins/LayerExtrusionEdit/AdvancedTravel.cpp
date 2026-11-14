@@ -32,6 +32,8 @@ Domain and obstacle-only hypotheses are ranked by estimated outside length plus
 weighted inside length. Validation checks forbidden material, endpoints, the budget
 and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
+Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
+connectors follow expanded forbidden contours between their selected points.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
