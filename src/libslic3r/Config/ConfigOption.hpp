@@ -102,7 +102,6 @@ namespace Slic3r {
         size_t data_size() const;
         
         // Evaluate the active range, clamping outside its endpoints; an empty range returns 1.
-        // Public types retain the first stored Y for the lower clamp; SQUARE_INVERSE uses begin_idx.
         // SQUARE_INVERSE compares thresholds exactly, without rounding a larger request down.
         double interpolate(double x_value) const;
         // Copy all points with coordinates swapped, preserving the active range and adapting step direction.

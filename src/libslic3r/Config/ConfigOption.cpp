@@ -1158,9 +1158,8 @@ double GraphData::interpolate(double x_value) const {
     double y_value = 1.0f;
     if (this->data_size() < 1) {
         // nothing
-    } else if (this->graph_points.size() == 1 || this->graph_points[begin_idx].x() >= x_value) {
-        y_value = this->type == GraphType::SQUARE_INVERSE ?
-            this->graph_points[begin_idx].y() : this->graph_points.front().y();
+    } else if (this->data_size() == 1 || this->graph_points[begin_idx].x() >= x_value) {
+        y_value = this->graph_points[begin_idx].y();
     } else if (this->graph_points[end_idx - 1].x() <= x_value) {
         y_value = this->graph_points[end_idx - 1].y();
     } else {
@@ -1203,18 +1202,19 @@ double GraphData::interpolate(double x_value) const {
                     std::vector<float> h(N + 1);
                     std::vector<float> rhs(N + 1);
 
-                    // let's fill in inner equations
-                    for (int i = 1 + begin_idx; i <= N + begin_idx; ++i)
-                        h[i] = this->graph_points[i].x() - this->graph_points[i - 1].x();
+                    // Temporary arrays use active-range indices; only stored points include begin_idx.
+                    for (int i = 1; i <= N; ++i)
+                        h[i] = this->graph_points[begin_idx + i].x() - this->graph_points[begin_idx + i - 1].x();
                     std::fill(diag.begin(), diag.end(), 2.f);
-                    for (int i = 1 + begin_idx; i <= N + begin_idx - 1; ++i) {
+                    for (int i = 1; i <= N - 1; ++i) {
+                        const size_t point_idx = begin_idx + i;
                         mu[i] = h[i] / (h[i] + h[i + 1]);
                         lambda[i] = 1.f - mu[i];
                         rhs[i] = 6 *
-                            (float(this->graph_points[i + 1].y() - this->graph_points[i].y()) /
-                                 (h[i + 1] * (this->graph_points[i + 1].x() - this->graph_points[i - 1].x())) -
-                             float(this->graph_points[i].y() - this->graph_points[i - 1].y()) /
-                                 (h[i] * (this->graph_points[i + 1].x() - this->graph_points[i - 1].x())));
+                            (float(this->graph_points[point_idx + 1].y() - this->graph_points[point_idx].y()) /
+                                 (h[i + 1] * (this->graph_points[point_idx + 1].x() - this->graph_points[point_idx - 1].x())) -
+                             float(this->graph_points[point_idx].y() - this->graph_points[point_idx - 1].y()) /
+                                 (h[i] * (this->graph_points[point_idx + 1].x() - this->graph_points[point_idx - 1].x())));
                     }
 
                     // now fill in the first and last equations, according to boundary conditions:

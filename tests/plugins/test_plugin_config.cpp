@@ -442,6 +442,40 @@ TEST_CASE("Temporary configs create options and clear only dynamic configs", "[p
     CHECK(static_config.option<Slic3r::ConfigOptionInt>("value")->value == 17);
 }
 
+// Check that inactive stored points do not affect endpoint clamps or a single active point.
+TEST_CASE("Graph interpolation clamps to the active range", "[plugins][config][graph]")
+{
+    using Slic3r::GraphData;
+    for (const GraphData::GraphType type : {GraphData::LINEAR, GraphData::SQUARE,
+                                          GraphData::SQUARE_INVERSE, GraphData::SPLINE}) {
+        const GraphData range(1, 3, type, {{0., 90.}, {2., 10.}, {4., 30.}, {6., 80.}});
+        CHECK(range.interpolate(-1.) == 10.);
+        CHECK(range.interpolate(0.) == 10.);
+        CHECK(range.interpolate(2.) == 10.);
+        CHECK(range.interpolate(4.) == 30.);
+        CHECK(range.interpolate(5.) == 30.);
+        CHECK(range.interpolate(7.) == 30.);
+        const GraphData single(1, 2, type, range.graph_points);
+        for (const double x : {-1., 0., 2., 3., 7.})
+            CHECK(single.interpolate(x) == 10.);
+    }
+}
+
+// Compare interior spline values with a graph containing only the active points.
+TEST_CASE("Spline interpolation ignores inactive points when solving the active range",
+          "[plugins][config][graph]")
+{
+    using Slic3r::GraphData;
+    const GraphData pair(1, 3, GraphData::SPLINE, {{0., 90.}, {2., 10.}, {4., 30.}, {6., 80.}});
+    const GraphData active_pair(0, 2, GraphData::SPLINE, pair.data());
+    CHECK(pair.interpolate(3.) == Approx(active_pair.interpolate(3.)));
+    const GraphData range(2, 6, GraphData::SPLINE,
+                         {{-2., 80.}, {0., 90.}, {2., 10.}, {3., 25.}, {5., 15.}, {8., 40.}, {10., 70.}});
+    const GraphData active_range(0, 4, GraphData::SPLINE, range.data());
+    for (const double x : {2.25, 2.75, 3.5, 4.5, 5.5, 7.5})
+        CHECK(range.interpolate(x) == Approx(active_range.interpolate(x)));
+}
+
 // Check inverse graph evaluation and its exclusion from persistent and C API graph types.
 TEST_CASE("Graph inverses preserve point thresholds without exposing the internal step type",
           "[plugins][config][graph]")
