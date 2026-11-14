@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <tuple>
 #include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
 
 /*
@@ -18,17 +19,22 @@ All units and Z levels are collected before lower-island links are resolved
 within each instance.
 Temporary translated polygons belong to this call; returned selections borrow
 their source layers and islands and retain the physical instance identity.
-Each level groups islands without enough nozzle clearance, regardless of tool.
-Lower links extend parent stacks; the current tops of other open stacks participate
-in the clearance search at their actual Z. Height differences close stacks before
-further layers can extend them. Tool ordering is applied only after grouping.
+Levels are visited in increasing Z. Lower links extend stacks while their units
+still have unprocessed children. Exhausted stacks remain visible for clearance.
+An extension that would exceed the height lead over a later stack starts at the
+end instead; its old stack stops accepting children but stays visible for proximity.
+Clearance compares each lower layer of a later stack with all higher layers of
+the earlier stack at the actual height difference. Equal-Z geometry is not a
+height obstacle. New units use the bounded Z-level index; only merges recheck
+their histories in that window. A lead above max_height is a collision without
+a graph query only inside the cached radius envelope; far histories stay separate
+for emission to order. Intersecting any layer is equivalent to intersecting their union.
+Tool ordering is applied only after grouping.
 If no complete remaining stack is safe, one group prints the lowest remaining Z
 across all stacks. This breaks history and parent-order deadlocks without adding lead.
 
     separate_islands() -> collect units, group each Z and update open stacks
-        fn_group_islands() -> combine units without enough nozzle clearance
         too_close() -> compare translated slices at the requested height lead
-        set_finished() -> remove closed units from the parent search
         fn_add_group_into() -> retain source islands and instance placements
 */
 namespace slic3r_api { namespace Ordering { namespace IslandStacks {
@@ -44,7 +50,6 @@ struct Unit
 {
     std::vector<Member> members;
     Layer layer;
-    coord_t bottom_z = 0;
     uint32_t instance_id = 0;
     uint32_t copy_rank = 0;
     c_bounding_box bb;
@@ -53,26 +58,20 @@ struct Unit
     std::vector<size_t> parents;
 };
 
-struct GroupedIslands
-{
-    std::vector<size_t> islands;
-    c_bounding_box bb;
-    uint32_t copy_rank = 0;
-    size_t member_count = 0;
-};
-
 // Compare owned translated slices using the larger clearance requested by either
 // unit's tools. Unknown tools use every profile. The positive requested height
-// does not exceed max_height, which the augmented graphs cover. Bounding boxes
+// does not exceed max_height or the cached final graph height: nearby larger leads
+// are collisions before this geometric query. The cached maximum radius lets bounding boxes
 // reject distances beyond every profile before inverse queries. Geometry allocation
 // and API failures propagate without changing source layers.
 bool too_close(const Unit &island, const Unit &other, coord_t height,
-    const std::vector<GraphData> &extruder_min_dist, storage_handle *storage);
+    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height, storage_handle *storage);
 
 } // namespace
 
-// Collect all plate units before linking parents, then group each Z by clearance
-// and extend or close stacks using lower links and other open stacks' current tops.
+// Collect plate units before following lower links in Z order.
+// Admit continuations by their actual top lead and merge obstructing histories
+// using real height differences. Exhausted stacks remain visible for proximity.
 // Input excludes work already emitted by the caller. Returned selections borrow
 // source views; allocation, invalid tool identities and API failures propagate.
 std::vector<ObjectsLayerToPrint> separate_islands(
@@ -85,6 +84,13 @@ std::vector<ObjectsLayerToPrint> separate_islands(
     const std::vector<GraphData> &extruder_min_dist, extruder_index_t initial_extruder_id,
     storage_handle *storage, bool complete_islands)
 {
+    coord_t graph_radius = 0;
+    double graph_height = std::numeric_limits<double>::max();
+    for (const GraphData &graph : extruder_min_dist) {
+        const ConfigPoint last = graph.point(graph.size() - 1);
+        graph_radius = std::max(graph_radius, scale_i(last.x));
+        graph_height = std::min(graph_height, last.y);
+    }
     std::vector<Unit> units;
     std::map<coord_t, std::vector<size_t>> levels;
     std::map<std::pair<uint32_t, const layer_island_handle *>, size_t> unit_by_island;
@@ -105,7 +111,6 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                 Unit unit;
                 unit.members.push_back(Member{source, island});
                 unit.layer = layer;
-                unit.bottom_z = layer.bottom_z();
                 unit.instance_id = selection.instance_id;
                 unit.copy_rank = selection.copy_rank;
                 unit.bb = island.bounding_box();
@@ -140,7 +145,6 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                     target.slices.insert(target.slices.end(), std::make_move_iterator(unit.slices.begin()),
                         std::make_move_iterator(unit.slices.end()));
                     target.extruders.insert(unit.extruders.begin(), unit.extruders.end());
-                    target.bottom_z = std::min(target.bottom_z, unit.bottom_z);
                 } else {
                     levels[layer.print_z()].push_back(units.size());
                     if (complete_islands)
@@ -170,154 +174,168 @@ std::vector<ObjectsLayerToPrint> separate_islands(
     }
 
     std::vector<std::vector<size_t>> ordered_layers_islands_to_print;
-    std::vector<size_t> top_begin;
-    std::vector<bool> finished;
+    std::vector<bool> closed_for_children;
     std::vector<size_t> stack_by_unit(units.size(), size_t(-1));
-    std::set<size_t> all_islands;
-    // Closed stacks remain in print order but no longer accept lower-link extensions.
-    const auto set_finished = [&](size_t idx) {
-        finished[idx] = true;
-        for (size_t island : ordered_layers_islands_to_print[idx])
-            all_islands.erase(island);
-    };
 
-    // we explore the graph layer per layer.
+    // Exhausted stacks have no more continuations but remain visible for proximity.
+    // Refusing an admission closes only lower-link continuation, never visibility.
     for (const auto &[print_z, level] : levels) {
-        std::vector<GroupedIslands> grouped_islands;
-        // first, we group islands that are too close together
-        const auto fn_group_islands = [&](size_t island) {
-            all_islands.insert(island);
-            size_t added = size_t(-1);
-            for (size_t group_idx = 0; group_idx < grouped_islands.size(); ++group_idx) {
-                GroupedIslands &group = grouped_islands[group_idx];
-                bool collide = false;
-                for (size_t other : group.islands)
-                    collide |= too_close(units[island], units[other], max_height, extruder_min_dist, storage);
-                if (!collide)
-                    continue;
-                if (added == size_t(-1)) {
-                    // collide -> add it
-                    group.islands.push_back(island);
-                    bounding_box_merge(group.bb, units[island].bb);
-                    group.copy_rank = std::min(group.copy_rank, units[island].copy_rank);
-                    group.member_count += units[island].members.size();
-                    added = group_idx;
-                } else {
-                    // merge the groups
-                    GroupedIslands &main_group = grouped_islands[added];
-                    main_group.islands.insert(main_group.islands.end(), group.islands.begin(), group.islands.end());
-                    bounding_box_merge(main_group.bb, group.bb);
-                    main_group.copy_rank = std::min(main_group.copy_rank, group.copy_rank);
-                    main_group.member_count += group.member_count;
-                    grouped_islands.erase(grouped_islands.begin() + group_idx--);
-                }
-            }
-            if (added == size_t(-1))
-                grouped_islands.push_back(GroupedIslands{{island}, units[island].bb, units[island].copy_rank, units[island].members.size()});
-        };
-        for (size_t island : level)
-            fn_group_islands(island);
+        std::vector<size_t> ordered_level = level;
         // Respect the configured copy order before the island-count and area ties.
-        std::stable_sort(grouped_islands.begin(), grouped_islands.end(), [](const GroupedIslands &g1, const GroupedIslands &g2) {
+        std::stable_sort(ordered_level.begin(), ordered_level.end(), [&](size_t a, size_t b) {
+            const Unit &g1 = units[a], &g2 = units[b];
             if (g1.copy_rank != g2.copy_rank)
                 return g1.copy_rank < g2.copy_rank;
-            if (g1.member_count != g2.member_count)
-                return g1.member_count > g2.member_count;
+            if (g1.members.size() != g2.members.size())
+                return g1.members.size() > g2.members.size();
             const c_point size1 = bounding_box_size(g1.bb), size2 = bounding_box_size(g2.bb);
             return double(size1.x) * double(size1.y) > double(size2.x) * double(size2.y);
         });
 
-        // need to check if the new printz may close some too tall stacks
-        coord_t thickness = 0;
-        for (size_t island : level)
-            thickness = std::max(thickness, print_z - units[island].bottom_z);
-        for (size_t coll_idx = 0; coll_idx < ordered_layers_islands_to_print.size(); ++coll_idx) {
-            if (finished[coll_idx])
-                continue;
-            for (size_t check = coll_idx + 1; check < ordered_layers_islands_to_print.size(); ++check) {
-                if (ordered_layers_islands_to_print[check].empty())
-                    continue;
-                const coord_t top = units[ordered_layers_islands_to_print[coll_idx].back()].layer.print_z();
-                const coord_t bottom = units[ordered_layers_islands_to_print[check].front()].layer.print_z();
-                // A later stack starting above this top also closes it. Different
-                // layer grids can therefore fragment otherwise continuous stacks.
-                if (top - bottom > max_height - thickness || top < bottom) {
-                    set_finished(coll_idx);
-                    break;
+        for (size_t island : ordered_level) {
+            std::set<size_t> parents, candidate_stacks, collisions;
+            for (size_t parent : units[island].parents)
+                if (!closed_for_children[stack_by_unit[parent]])
+                    parents.insert(stack_by_unit[parent]);
+            size_t destination = ordered_layers_islands_to_print.size();
+            bool inserting = false;
+            if (!parents.empty()) {
+                destination = *parents.rbegin();
+                bool sibling = false;
+                for (size_t previous : ordered_layers_islands_to_print[destination])
+                    if (units[previous].layer.print_z() == print_z)
+                        for (size_t parent : units[island].parents)
+                            sibling |= std::find(units[previous].parents.begin(), units[previous].parents.end(), parent) != units[previous].parents.end();
+                if (sibling) {
+                    ++destination;
+                    inserting = true;
+                } else {
+                    candidate_stacks.insert(destination);
                 }
             }
-        }
-
-        for (GroupedIslands &group : grouped_islands) {
-            std::set<size_t> still_needed, nearby_stacks;
-            for (size_t island : group.islands)
-                for (size_t parent : units[island].parents)
-                    if (all_islands.count(parent))
-                        still_needed.insert(stack_by_unit[parent]);
-            for (size_t island : group.islands) {
-                // Every other open stack participates, including support of the
-                // same copy on another Z grid. Parent stacks attach through lower
-                // links rather than through these proximity comparisons.
-                for (size_t stack = 0; stack < ordered_layers_islands_to_print.size(); ++stack) {
-                    if (finished[stack] || still_needed.count(stack) || ordered_layers_islands_to_print[stack].empty())
+            // A new top must stay within max_height above each later stack's first Z
+            // in this provisional order, including middle sibling insertions.
+            const auto admission_fits = [&](size_t position, coord_t new_top, bool insert) {
+                for (size_t later = position + (insert ? 0 : 1); later < ordered_layers_islands_to_print.size(); ++later)
+                    if (!candidate_stacks.count(later) && !ordered_layers_islands_to_print[later].empty() &&
+                        new_top - units[ordered_layers_islands_to_print[later].front()].layer.print_z() > max_height)
+                        return false;
+                return true;
+            };
+            if (!admission_fits(destination, print_z, inserting)) {
+                for (size_t stack : candidate_stacks)
+                    closed_for_children[stack] = true;
+                candidate_stacks.clear();
+                destination = ordered_layers_islands_to_print.size();
+                inserting = false;
+            }
+            // New work only adds pairs with earlier Z in the bounded levels index.
+            // After a merge, ordering changes may also expose the opposite direction.
+            // A negative window result remains valid for this unit and stack until
+            // their relative provisional order changes; new merged units still run.
+            std::set<std::tuple<size_t, size_t, bool>> compared_windows;
+            const auto compare_window = [&](size_t current, bool merged) {
+                const coord_t z = units[current].layer.print_z();
+                std::set<size_t> tested_stacks;
+                for (auto at = levels.lower_bound(z - max_height); at != levels.end() && at->first <= z + (merged ? max_height : 0); ++at) {
+                    if (at->first == z)
                         continue;
-                    const std::vector<size_t> &previous_layers = ordered_layers_islands_to_print[stack];
-                    for (size_t idx = top_begin[stack]; idx < previous_layers.size(); ++idx) {
-                        const size_t other = previous_layers[idx];
-                        if (too_close(units[island], units[other], max_height, extruder_min_dist, storage))
-                            nearby_stacks.insert(stack);
+                    for (size_t other : at->second) {
+                        const size_t stack = stack_by_unit[other];
+                        if (stack == size_t(-1) || candidate_stacks.count(stack) || collisions.count(stack))
+                            continue;
+                        const bool other_later = stack >= destination;
+                        if (compared_windows.count({current, stack, other_later}))
+                            continue;
+                        const coord_t dz = other_later ? z - at->first : at->first - z;
+                        if (dz > 0) {
+                            tested_stacks.insert(stack);
+                            if (too_close(units[current], units[other], dz,
+                                    extruder_min_dist, graph_radius, graph_height, storage))
+                                collisions.insert(stack);
+                        }
                     }
                 }
+                for (size_t stack : tested_stacks)
+                    if (!collisions.count(stack))
+                        compared_windows.emplace(current, stack, stack >= destination);
+            };
+            compare_window(island, false);
+            bool merging = !collisions.empty();
+            bool reopen_destination = false;
+            while (!collisions.empty()) {
+                candidate_stacks.insert(collisions.begin(), collisions.end());
+                candidate_stacks.insert(parents.begin(), parents.end());
+                collisions.clear();
+                destination = *candidate_stacks.begin();
+                inserting = false;
+                coord_t top = print_z, first_z = print_z;
+                c_bounding_box merged_box = units[island].bb;
+                for (size_t stack : candidate_stacks) {
+                    const std::vector<size_t> &history = ordered_layers_islands_to_print[stack];
+                    top = std::max(top, units[history.back()].layer.print_z());
+                    first_z = std::min(first_z, units[history.front()].layer.print_z());
+                    for (size_t current : history)
+                        bounding_box_merge(merged_box, units[current].bb);
+                }
+                // A merged history that cannot fit at its earliest source position
+                // moves to the end, rather than bypassing the admission rule.
+                reopen_destination = admission_fits(destination, top, false);
+                if (!reopen_destination)
+                    destination = ordered_layers_islands_to_print.size();
+                // Excess lead is not a reason to absorb geometrically remote work.
+                merged_box.min.x -= graph_radius;
+                merged_box.max.x += graph_radius;
+                merged_box.min.y -= graph_radius;
+                merged_box.max.y += graph_radius;
+                for (size_t stack = 0; stack < ordered_layers_islands_to_print.size(); ++stack) {
+                    const std::vector<size_t> &history = ordered_layers_islands_to_print[stack];
+                    if (candidate_stacks.count(stack) || history.empty() || stack >= destination)
+                        continue;
+                    const coord_t dz = units[history.back()].layer.print_z() - first_z;
+                    if (dz > max_height) {
+                        c_bounding_box other_box = units[history.front()].bb;
+                        for (size_t current : history)
+                            bounding_box_merge(other_box, units[current].bb);
+                        if (bounding_box_overlap(merged_box, other_box))
+                            collisions.insert(stack);
+                    }
+                }
+                compare_window(island, true);
+                for (size_t stack : candidate_stacks)
+                    for (size_t current : ordered_layers_islands_to_print[stack])
+                        compare_window(current, true);
             }
-            size_t destination = size_t(-1);
-            if (!nearby_stacks.empty()) {
-                // Nearby stacks must share the same layer-by-layer history.
-                nearby_stacks.insert(still_needed.begin(), still_needed.end());
-                destination = *nearby_stacks.begin();
-                for (size_t stack : nearby_stacks) {
+            if (inserting) {
+                ordered_layers_islands_to_print.emplace(ordered_layers_islands_to_print.begin() + destination);
+                closed_for_children.insert(closed_for_children.begin() + destination, false);
+                for (size_t &stack : stack_by_unit)
+                    if (stack != size_t(-1) && stack >= destination)
+                        ++stack;
+            } else if (destination == ordered_layers_islands_to_print.size()) {
+                ordered_layers_islands_to_print.emplace_back();
+                closed_for_children.push_back(false);
+            }
+            if (merging)
+                for (size_t stack : candidate_stacks) {
                     if (stack == destination)
                         continue;
-                    std::vector<size_t> &target = ordered_layers_islands_to_print[destination];
                     std::vector<size_t> &source = ordered_layers_islands_to_print[stack];
-                    target.insert(target.end(), source.begin(), source.end());
-                    for (size_t island : source)
-                        stack_by_unit[island] = destination;
+                    ordered_layers_islands_to_print[destination].insert(ordered_layers_islands_to_print[destination].end(), source.begin(), source.end());
+                    for (size_t current : source)
+                        stack_by_unit[current] = destination;
                     source.clear();
-                    top_begin[stack] = 0;
-                    finished[stack] = true;
+                    closed_for_children[stack] = true;
                 }
-            } else if (!still_needed.empty()) {
-                // A group following several parents starts after the last parent.
-                destination = *still_needed.rbegin();
-                if (units[ordered_layers_islands_to_print[destination].back()].layer.print_z() == print_z) {
-                    // Separate children of one parent need separate stacks when
-                    // their clearance groups at this level do not touch.
-                    ++destination;
-                    ordered_layers_islands_to_print.emplace(ordered_layers_islands_to_print.begin() + destination);
-                    finished.insert(finished.begin() + destination, false);
-                    top_begin.insert(top_begin.begin() + destination, 0);
-                    for (size_t &stack : stack_by_unit)
-                        if (stack != size_t(-1) && stack >= destination)
-                            ++stack;
-                }
-            }
-            if (destination == size_t(-1)) {
-                destination = ordered_layers_islands_to_print.size();
-                ordered_layers_islands_to_print.emplace_back();
-                finished.push_back(false);
-                top_begin.push_back(0);
-            }
+            if (merging && reopen_destination)
+                closed_for_children[destination] = false;
             std::vector<size_t> &target = ordered_layers_islands_to_print[destination];
-            target.insert(target.end(), group.islands.begin(), group.islands.end());
-            for (size_t island : group.islands)
-                stack_by_unit[island] = destination;
-            std::stable_sort(target.begin(), target.end(), [&](size_t a, size_t b) {
-                return units[a].layer.print_z() < units[b].layer.print_z();
-            });
-            top_begin[destination] = size_t(std::lower_bound(target.begin(), target.end(),
-                units[target.back()].layer.print_z(), [&](size_t island, coord_t z) {
-                    return units[island].layer.print_z() < z;
-                }) - target.begin());
+            target.push_back(island);
+            stack_by_unit[island] = destination;
+            if (merging)
+                std::stable_sort(target.begin(), target.end(), [&](size_t a, size_t b) {
+                    return units[a].layer.print_z() < units[b].layer.print_z();
+                });
         }
     }
 
@@ -381,7 +399,7 @@ std::vector<ObjectsLayerToPrint> separate_islands(
                     for (size_t other : level->second) {
                         if (emitted[other] || stack_by_unit[other] == stack)
                             continue;
-                        if (too_close(units[island], units[other], z - level->first, extruder_min_dist, storage)) {
+                        if (too_close(units[island], units[other], z - level->first, extruder_min_dist, graph_radius, graph_height, storage)) {
                             ready = false;
                             break;
                         }
@@ -490,14 +508,9 @@ std::vector<ObjectsLayerToPrint> separate_islands(
 
 namespace {
 bool too_close(const Unit &island, const Unit &other, coord_t height,
-    const std::vector<GraphData> &extruder_min_dist, storage_handle *storage)
+    const std::vector<GraphData> &extruder_min_dist, coord_t radius, double graph_height, storage_handle *storage)
 {
-    coord_t radius = 0;
-    for (const GraphData &graph : extruder_min_dist) {
-        const ConfigPoint last = graph.point(graph.size() - 1);
-        assert(double(height) * SCALING_FACTOR <= last.y);
-        radius = std::max(radius, scale_i(last.x));
-    }
+    assert(double(height) * SCALING_FACTOR <= graph_height);
     // LINEAR and SQUARE inverses stay within the last X; SPLINE overshoot is clamped to this bounding-box radius.
     c_bounding_box inflated = other.bb;
     inflated.min.x -= radius;

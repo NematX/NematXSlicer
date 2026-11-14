@@ -19,6 +19,11 @@ Instance ids distinguish copies even when their source island handles are equal.
 copy_rank orders ready stacks after tool continuation. With complete_islands false, all
 selected islands of one instance at a Z share a unit, linked to its previous Z unit.
 With complete_islands true, source lower-island links define parents instead.
+Exhausted stacks and stacks closed for children remain visible for proximity.
+Extensions use their actual new top against every later stack's first Z in the
+provisional stack vector, including middle sibling insertions. Clearance compares higher layers of an
+earlier stack with lower layers of a later stack at their real Z difference;
+equal-Z auxiliary footprints alone do not merge stacks.
 Clearance graphs include the printer's radius and height as their final point.
 max_height is positive and uses scaled coordinate units, not millimeters.
 A blocked stack is split by emitting the lowest remaining Z across all stacks

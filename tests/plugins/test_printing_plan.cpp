@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -2638,9 +2639,9 @@ TEST_CASE("Common plan builder filters layer extrusions for one instance",
 // Own a synthetic layer whose islands retain the supplied order for stack tests.
 struct IslandStackTestLayer : Layer
 {
-    // Own polygons at Z without slicing; the optional source object remains borrowed.
-    IslandStackTestLayer(double z, const ExPolygons &slices, PrintObject *object = nullptr)
-        : Layer(1, object, scale_to_layer_coord(0.2), scale_to_layer_coord(z), z - 0.1, true)
+    // Own polygons at Z with the supplied thickness; the optional source object remains borrowed.
+    IslandStackTestLayer(double z, const ExPolygons &slices, PrintObject *object = nullptr, double height = 0.2)
+        : Layer(1, object, scale_to_layer_coord(height), scale_to_layer_coord(z), z - height / 2., true)
     {
         for (const ExPolygon &slice : slices)
             m_islands.emplace_back(new LayerSliceIsland(slice));
@@ -2666,10 +2667,10 @@ PrintingPlan island_stack_test_plan(const std::vector<slic3r_api::Ordering::Isla
 
 // Append an owned rectangular layer with one printable role per island to the
 // chosen source list. The returned reference borrows the object's layer lifetime.
-Layer &append_stack_scene_layer(PrintObject &object, double z, const ExPolygons &slices, bool auxiliary = false);
+Layer &append_stack_scene_layer(PrintObject &object, double z, const ExPolygons &slices, bool auxiliary = false, double height = 0.2);
 
-// Compare stack membership rather than extrusion count: tools do not restrict grouping.
-TEST_CASE("Island stacks group clearance bridges regardless of tools",
+// A single-Z footprint introduces no higher obstacle, regardless of tool count.
+TEST_CASE("Island stacks keep equal-Z footprints separate regardless of tools",
           "[plugins][printing-plan][parallel-islands][island-stacks]")
 {
     using namespace slic3r_api::Ordering::IslandStacks;
@@ -2678,11 +2679,11 @@ TEST_CASE("Island stacks group clearance bridges regardless of tools",
         rectangle_expolygon(8., 0., 9., 1.), rectangle_expolygon(4., 0., 5., 1.)});
     IslandStackTestLayer support(1., {rectangle_expolygon(4., 0., 5., 1.)});
     bool different_tools = false, multi_bridge = false, empty_bridge = false, support_bridge = false;
-    SECTION("A third island merges two clearance groups") {}
-    SECTION("Different tools still merge") { different_tools = true; }
-    SECTION("A two-tool bridge joins single-tool islands") { different_tools = multi_bridge = true; }
+    SECTION("A third island at the same Z stays separate") {}
+    SECTION("Different tools stay separate") { different_tools = true; }
+    SECTION("A two-tool footprint stays separate from single-tool islands") { different_tools = multi_bridge = true; }
     SECTION("An island without extrusions is ignored") { empty_bridge = true; }
-    SECTION("Support islands take part in the same clearance grouping") { support_bridge = true; }
+    SECTION("Support footprints at the same Z stay separate") { support_bridge = true; }
     add_stack_test_extrusion(layer.island(0), 0);
     add_stack_test_extrusion(layer.island(1), different_tools ? 1 : 0);
     if (!empty_bridge && !support_bridge)
@@ -2706,7 +2707,7 @@ TEST_CASE("Island stacks group clearance bridges regardless of tools",
     const std::vector<ObjectsLayerToPrint> stacks = separate_islands({input},
         scale_to_layer_coord(0.4), graphs, EXTRUDER_ID_UNKNOWN,
         reinterpret_cast<storage_handle *>(&storage));
-    REQUIRE(stacks.size() == (empty_bridge ? 2 : 1));
+    REQUIRE(stacks.size() == (empty_bridge ? 2 : 3));
     size_t selected = 0;
     for (const ObjectsLayerToPrint &stack : stacks) {
         REQUIRE(stack.size() == 1);
@@ -2714,7 +2715,9 @@ TEST_CASE("Island stacks group clearance bridges regardless of tools",
     }
     CHECK(selected == (empty_bridge ? 2 : 3));
     if (support_bridge)
-        CHECK(stacks.front().front().auxiliary_layer.handle() == input.auxiliary_layer.handle());
+        CHECK(std::count_if(stacks.begin(), stacks.end(), [&input](const ObjectsLayerToPrint &stack) {
+            return stack.front().islands.count(input.auxiliary_layer.island(0).handle()) != 0;
+        }) == 1);
 }
 
 // Lower links join stacks across layers independently of their tools.
@@ -2836,14 +2839,14 @@ TEST_CASE("Island stacks retain later multi-tool islands as parents",
     CHECK(visits[reinterpret_cast<const layer_island_handle *>(&upper.island(0))] == 1);
 }
 
-// Different Z grids use the same clearance height as equal-Z grouping.
-TEST_CASE("Island stacks compare other copies at their current top Z",
+// An earlier lower stack does not obstruct a later higher single-layer copy.
+TEST_CASE("Island stacks do not group a later copy above all earlier geometry",
           "[plugins][printing-plan][parallel-islands][island-stacks]")
 {
     using namespace slic3r_api::Ordering::IslandStacks;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     bool far = false, above_clearance = false;
-    SECTION("A gap below clearance at max_height joins the older stack") {}
+    SECTION("A gap below clearance at max_height is safe in increasing Z") {}
     SECTION("Far copies stay separate across different Z") { far = true; }
     SECTION("A gap above clearance at max_height stays separate") { above_clearance = true; }
     IslandStackTestLayer lower(1., {rectangle_expolygon(0., 0., 1., 1.)});
@@ -2863,12 +2866,11 @@ TEST_CASE("Island stacks compare other copies at their current top Z",
     PluginStorage storage;
     const std::vector<ObjectsLayerToPrint> stacks = separate_islands({high, low},
         scale_i(0.4), graphs, EXTRUDER_ID_UNKNOWN, reinterpret_cast<storage_handle *>(&storage));
-    REQUIRE(stacks.size() == ((far || above_clearance) ? 2 : 1));
-    if (!far && !above_clearance) {
-        REQUIRE(stacks.front().size() == 2);
-        CHECK(stacks.front()[0].instance_id == 0);
-        CHECK(stacks.front()[1].instance_id == 1);
-    }
+    REQUIRE(stacks.size() == 2);
+    REQUIRE(stacks.front().size() == 1);
+    REQUIRE(stacks.back().size() == 1);
+    CHECK(stacks.front()[0].instance_id == 0);
+    CHECK(stacks.back()[0].instance_id == 1);
 }
 
 // Tool preferences reorder independent stacks only after their clearance groups exist.
@@ -2879,7 +2881,7 @@ TEST_CASE("Island stacks continue the previous end tool instead of alternating",
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     bool mixed_copy = false;
     SECTION("Independent single-tool stacks avoid alternating") {}
-    SECTION("A single-tool copy shares a layer bucket with a two-tool copy") { mixed_copy = true; }
+    SECTION("A single-tool copy stays separate from an equal-Z two-tool copy") { mixed_copy = true; }
     IslandStackTestLayer layer(1., {rectangle_expolygon(0., 0., 1., 1.),
         rectangle_expolygon(20., 0., 21., 1.), rectangle_expolygon(40., 0., 41., 1.),
         rectangle_expolygon(60., 0., 61., 1.)});
@@ -2908,20 +2910,20 @@ TEST_CASE("Island stacks continue the previous end tool instead of alternating",
     PluginStorage storage;
     const std::vector<ObjectsLayerToPrint> stacks = separate_islands(inputs,
         scale_i(0.4), graphs, EXTRUDER_ID_UNKNOWN, reinterpret_cast<storage_handle *>(&storage));
-    REQUIRE(stacks.size() == 4);
+    REQUIRE(stacks.size() == (mixed_copy ? 5 : 4));
     const PrintingPlan plan = island_stack_test_plan(stacks);
-    REQUIRE(plan.groups.size() == 4);
+    REQUIRE(plan.groups.size() == (mixed_copy ? 5 : 4));
     std::vector<extruder_index_t> tools;
     for (size_t idx = 0; idx < stacks.size(); ++idx) {
         const ObjectsLayerToPrint &stack = stacks[idx];
-        REQUIRE(stack.size() == ((mixed_copy && idx == 0) ? 2 : 1));
+        REQUIRE(stack.size() == 1);
         REQUIRE(plan.groups[idx].layers.size() == 1);
         const std::vector<PrintingToolGroup> &tool_groups = plan.groups[idx].layers.front().tool_groups;
         REQUIRE(tool_groups.size() == ((mixed_copy && idx == 0) ? 2 : 1));
         tools.push_back(tool_groups.back().extruder_id);
     }
     if (mixed_copy)
-        CHECK(tools == std::vector<extruder_index_t>{1, 1, 1, 0});
+        CHECK(tools == std::vector<extruder_index_t>{1, 1, 1, 0, 0});
     else
         CHECK(tools == std::vector<extruder_index_t>{0, 0, 1, 1});
 }
@@ -3329,16 +3331,348 @@ TEST_CASE("Ready stacks continue the tool before copy rank",
     }
 }
 
-// History-dependent rectangles exercise safe emission when current tops alone
-// do not describe older geometry, and when a later merge crosses parent paths.
+// Independent source grids and widening layers separate child exhaustion,
+// actual top admission and historical clearance. All scenes check the whole plan.
+TEST_CASE("Stack construction follows children and actual layer heights",
+          "[plugins][printing-plan][ordering][island-stacks][stack-rules]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool islands = GENERATE(false, true);
+    CAPTURE(islands);
+    enum class Scene { Offset, Thick, Jump, Pyramid };
+    Scene scene = Scene::Offset;
+    SECTION("Offset 0.2 and 0.3 grids do not fragment far copies") {}
+    SECTION("A thick continuation fits above a newer stack") { scene = Scene::Thick; }
+    SECTION("A thin layer after a Z jump starts at the end") { scene = Scene::Jump; }
+    SECTION("An inverted pyramid is checked against lower history") { scene = Scene::Pyramid; }
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_one_first_layer", "0"}, {"complete_objects_sort", "object"},
+        {"complete_islands", islands ? "1" : "0"},
+        {"complete_objects_step", scene == Scene::Thick ? "0.4" : "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "10"}, {"extruder_clearance_height", "2"}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {10., 2.}})}));
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 0.8), make_cube(2., 2., 0.8)}, print, model, config);
+    for (ModelObject &object : model.objects())
+        object.instances.front()->set_offset(Vec3d(30., 30., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan())).clear();
+    for (PrintObject &object : print.objects()) {
+        object.mutable_layers().clear();
+        object.mutable_auxiliary_layers().clear();
+    }
+    Layer *previous[2] = {nullptr, nullptr};
+    const auto add = [&](size_t copy, double z, double height, double width) {
+        const double x = copy == 0 ? 0. : scene == Scene::Pyramid ? 21. : 100.;
+        Layer &layer = append_stack_scene_layer(print.object(copy), z,
+            {rectangle_expolygon(x, 0., x + width, 1.)}, false, height);
+        if (previous[copy] != nullptr)
+            layer.island(0).overlaps_below = {{&previous[copy]->island(0), 1.f}};
+        previous[copy] = &layer;
+    };
+    if (scene == Scene::Offset) {
+        for (size_t idx = 1; idx <= 6; ++idx)
+            add(0, 0.2 * idx, 0.2, 1.);
+        for (size_t idx = 1; idx <= 4; ++idx)
+            add(1, 0.3 * idx, 0.3, 1.);
+    } else if (scene == Scene::Thick) {
+        add(0, 0.4, 0.4, 1.);
+        add(1, 0.5, 0.2, 1.);
+        add(0, 0.8, 0.4, 1.);
+    } else if (scene == Scene::Jump) {
+        add(0, 0.4, 0.2, 1.);
+        add(0, 1., 0.2, 1.);
+        add(1, 0.8, 0.2, 1.);
+        add(0, 2., 0.1, 1.);
+    } else {
+        for (size_t idx = 1; idx <= 3; ++idx) {
+            add(0, 0.2 * idx, 0.2, idx == 1 ? 1. : idx == 2 ? 10. : 20.);
+            if (idx == 1)
+                add(1, 0.2, 0.2, 1.);
+        }
+    }
+    run_island_plan_builder(print);
+    check_island_plan_oracles(print, config);
+    const PrintingPlan &plan = *print.printing_plan();
+    REQUIRE(plan.groups.size() == (scene == Scene::Jump ? 3 : scene == Scene::Pyramid ? 1 : 2));
+    if (scene == Scene::Offset || scene == Scene::Thick) {
+        CHECK(plan.groups[0].layers.size() == (scene == Scene::Offset ? 6 : 2));
+        CHECK(plan.groups[1].layers.size() == (scene == Scene::Offset ? 4 : 1));
+    } else if (scene == Scene::Jump) {
+        CHECK(plan.groups[0].layers.size() == 2);
+        CHECK(plan.groups[1].layers.front().print_z == scale_to_layer_coord(0.8));
+        CHECK(plan.groups[2].layers.front().print_z == scale_to_layer_coord(2.));
+    } else {
+        REQUIRE(plan.groups[0].printing_catalog_ids.size() == 2);
+        CHECK(plan.groups[0].layers.size() == 3);
+    }
+}
+
+// Same-Z local skirts can overlap the radius envelope without obstructing the
+// other copy's higher body layers. Coverage includes the real auxiliary sources.
+TEST_CASE("Local first-layer skirts do not merge otherwise clear whole copies",
+          "[plugins][printing-plan][ordering][skirt-brim][stack-rules]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_one_first_layer", "0"}, {"complete_objects_sort", "object"},
+        {"complete_islands", "0"}, {"complete_objects_step", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "6"}, {"min_skirt_length", "0"},
+        {"complete_objects_one_skirt", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "20"}, {"extruder_clearance_height", "1"}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {20., 1.}})}));
+    Model model;
+    Print print;
+    Test::init_print({make_cube(20., 20., 0.8)}, print, model, config);
+    model.objects().front().instances.front()->set_offset(Vec3d(40., 40., 0.));
+    model.objects().front().add_instance(*model.objects().front().instances.front())->set_offset(Vec3d(86.5, 40., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    size_t skirts = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        if (LayerAdhesionProperty::layer_is_normal_skirt(layer))
+            for (const LayerSliceIsland &slice : layer.islands())
+                for (const LayerRegionIsland &region : slice.regions_islands())
+                    for (const auto &[role, root] : region.extrusion_buckets())
+                        if (!root.empty())
+                            ++skirts;
+    REQUIRE(skirts > 0);
+    run_island_plan_builder(print);
+    check_island_plan_oracles(print, config);
+    const PrintingPlan &plan = *print.printing_plan();
+    REQUIRE(plan.groups.size() == 2);
+    for (size_t copy = 0; copy < 2; ++copy) {
+        REQUIRE(plan.groups[copy].printing_catalog_ids.size() == 1);
+        CHECK(plan.object_instances[plan.groups[copy].printing_catalog_ids.front()].object_instance_idx == copy);
+        CHECK(plan.groups[copy].layers.size() == 4);
+    }
+}
+
+// A bounded Z window keeps long, independent and merging copies inexpensive. Only construction
+// is timed; exact source coverage and parent order are checked afterward.
+// Far copies retain 100 layers to catch cubic work. The eight-island merge variant
+// uses ten thicker layers to retain full merging without flaky parallel-suite timings.
+TEST_CASE("Stack construction stays bounded for ten hundred-layer copies",
+          "[plugins][printing-plan][ordering][island-stacks][stack-rules][stack-timing]")
+{
+    using namespace slic3r_api::Ordering::IslandStacks;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool islands = GENERATE(false, true);
+    const bool close = GENERATE(false, true);
+    const size_t island_count = close ? 8 : 1;
+    const size_t layer_count = close ? 10 : 100;
+    const double layer_height = close ? 1. : 0.2;
+    ExPolygons slices;
+    for (size_t idx = 0; idx < island_count; ++idx)
+        slices.push_back(rectangle_expolygon(0., 3. * idx, 1., 3. * idx + 1.));
+    std::vector<std::unique_ptr<IslandStackTestLayer>> layers;
+    for (size_t idx = 0; idx < layer_count; ++idx) {
+        layers.emplace_back(new IslandStackTestLayer(layer_height * (idx + 1), slices, nullptr, layer_height));
+        for (size_t island = 0; island < island_count; ++island) {
+            add_stack_test_extrusion(layers.back()->island(island), 0);
+            if (idx != 0)
+                layers.back()->island(island).overlaps_below = {{&layers[idx - 1]->island(island), 1.f}};
+        }
+    }
+    ObjectsLayerToPrint inputs;
+    for (uint32_t copy = 0; copy < 10; ++copy)
+        for (const std::unique_ptr<IslandStackTestLayer> &layer : layers) {
+            ObjectLayerToPrint input;
+            input.instance_id = input.copy_rank = copy;
+            input.shift.x = scale_i((close ? 1.5 : 100.) * copy);
+            input.object_layer = slic3r_api::Layer(reinterpret_cast<const layer_handle *>(layer.get()));
+            inputs.push_back(input);
+        }
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {10., 20.}})}));
+    const slic3r_api::Config view(reinterpret_cast<const config_handle *>(static_cast<const ConfigBase *>(&config)));
+    const std::vector<slic3r_api::GraphData> graphs{view.get("extruder_clearance").graph(0).value()};
+    PluginStorage storage;
+    const auto begin = std::chrono::steady_clock::now();
+    const std::vector<ObjectsLayerToPrint> stacks = separate_islands(inputs, scale_i(20.), graphs,
+        EXTRUDER_ID_UNKNOWN, reinterpret_cast<storage_handle *>(&storage), islands);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    CAPTURE(islands, close, seconds);
+    CHECK(seconds < 30.);
+    REQUIRE(stacks.size() == (close ? 1 : 10));
+    std::set<std::pair<uint32_t, const layer_island_handle *>> visited;
+    for (const ObjectsLayerToPrint &stack : stacks) {
+        if (!close)
+            REQUIRE(stack.size() == 100);
+        for (const ObjectLayerToPrint &selection : stack) {
+            REQUIRE_FALSE(selection.islands.empty());
+            for (uint32_t idx = 0; idx < selection.object_layer.island_count(); ++idx) {
+                const slic3r_api::LayerIsland island = selection.object_layer.island(idx);
+                if (!selection.islands.count(island.handle()))
+                    continue;
+                CHECK(visited.emplace(selection.instance_id, island.handle()).second);
+                for (const slic3r_api::LayerIsland &parent : island.lower_islands())
+                    CHECK(visited.count({selection.instance_id, parent.handle()}) == 1);
+            }
+        }
+    }
+    CHECK(visited.size() == 10 * layer_count * island_count);
+}
+
+// Joining parents can move a tall history across a short intervening stack.
+// Admission relocates that merge instead of querying a profile above max_height.
+TEST_CASE("A tall merged history respects short intervening stacks",
+          "[plugins][printing-plan][ordering][island-stacks][stack-rules]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool far_copy = GENERATE(false, true);
+    CAPTURE(far_copy);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_one_first_layer", "0"}, {"complete_islands", "1"},
+        {"complete_objects_step", "1"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "10"}, {"extruder_clearance_height", "1"}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {10., 1.}})}));
+    Model model;
+    Print print;
+    Test::init_print(std::vector<TriangleMesh>(far_copy ? 2 : 1, make_cube(2., 2., 0.8)), print, model, config);
+    print.set_status_silent();
+    print.process();
+    slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan())).clear();
+    PrintObject &object = print.object(0);
+    object.mutable_layers().clear();
+    object.mutable_auxiliary_layers().clear();
+    Layer &a = append_stack_scene_layer(object, 0.2, {rectangle_expolygon(0., 0., 1., 1.)});
+    append_stack_scene_layer(object, 0.3, {rectangle_expolygon(200., 0., 201., 1.)});
+    Layer &b = append_stack_scene_layer(object, 0.4, {rectangle_expolygon(100., 0., 101., 1.)});
+    append_stack_scene_layer(object, 0.5, {rectangle_expolygon(110., 0., 111., 1.)});
+    Layer &b2 = append_stack_scene_layer(object, 0.8, {rectangle_expolygon(100., 0., 101., 1.)});
+    b2.island(0).overlaps_below = {{&b.island(0), 1.f}};
+    Layer &b3 = append_stack_scene_layer(object, 1.2, {rectangle_expolygon(100., 0., 101., 1.)});
+    b3.island(0).overlaps_below = {{&b2.island(0), 1.f}};
+    Layer &join = append_stack_scene_layer(object, 1.4, {rectangle_expolygon(0., 0., 111., 1.)});
+    join.island(0).overlaps_below = {{&a.island(0), 1.f}, {&b3.island(0), 1.f}};
+    if (far_copy) {
+        PrintObject &far = print.object(1);
+        far.mutable_layers().clear();
+        far.mutable_auxiliary_layers().clear();
+        Layer &lower = append_stack_scene_layer(far, 0.6, {rectangle_expolygon(400., 0., 401., 1.)});
+        Layer &upper = append_stack_scene_layer(far, 1.3, {rectangle_expolygon(400., 0., 401., 1.)});
+        upper.island(0).overlaps_below = {{&lower.island(0), 1.f}};
+    }
+    run_island_plan_builder(print);
+    check_island_plan_oracles(print, config);
+    const PrintingPlan &plan = *print.printing_plan();
+    REQUIRE(plan.groups.size() == (far_copy ? 3 : 2));
+    REQUIRE(plan.groups[0].layers.size() == 1);
+    CHECK(plan.groups[0].layers[0].print_z == scale_to_layer_coord(0.3));
+    CHECK(plan.groups[1].layers.size() == 6);
+    if (far_copy) {
+        REQUIRE(plan.groups[2].printing_catalog_ids.size() == 1);
+        CHECK(plan.object_instances[plan.groups[2].printing_catalog_ids.front()].object == &print.object(1));
+        REQUIRE(plan.groups[2].layers.size() == 2);
+        CHECK(plan.groups[2].layers[0].print_z == scale_to_layer_coord(0.6));
+        CHECK(plan.groups[2].layers[1].print_z == scale_to_layer_coord(1.3));
+    }
+}
+
+// Split and join paths bring a refused stack into an admitted covering merge.
+// Both copies' following units must continue in the group containing that join.
+TEST_CASE("An admitted covering merge reopens a refused destination",
+          "[plugins][printing-plan][ordering][island-stacks][stack-rules][stack-reopen]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_one_first_layer", "0"}, {"complete_islands", "1"},
+        {"complete_objects_step", "0.4"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "5"}, {"extruder_clearance_height", "0.4"}});
+    config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+        GraphData::LINEAR, {{0., 0.}, {5., 0.4}})}));
+    Model model;
+    Print print;
+    Test::init_print(std::vector<TriangleMesh>(3, make_cube(2., 2., 0.8)), print, model, config);
+    for (ModelObject &object : model.objects())
+        object.instances.front()->set_offset(Vec3d(30., 30., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan())).clear();
+    for (PrintObject &object : print.objects()) {
+        object.mutable_layers().clear();
+        object.mutable_auxiliary_layers().clear();
+    }
+    struct Row { size_t copy; double z; double x; double width; int parent; int second; };
+    const Row rows[] = {
+        {0, 0.8, 76., 5., -1, -1}, {0, 0.8, 44., 1., -1, -1},
+        {0, 1.0, 72., 8., 0, -1}, {0, 1.2, 60., 7., 2, -1},
+        {0, 1.2, 68., 6., -1, -1}, {0, 1.4, 16., 7., 4, 3},
+        {1, 0.83, 16., 10., -1, -1}, {1, 0.83, 48., 8., -1, -1},
+        {1, 1.23, 16., 7., -1, -1}, {1, 1.63, 28., 7., -1, -1},
+        {2, 0.66, 40., 1., -1, -1}, {2, 1.26, 8., 1., -1, -1},
+        {2, 1.26, 40., 10., -1, -1}, {2, 1.46, 4., 6., 11, -1},
+        {2, 1.46, 28., 8., 12, 11}, {2, 1.66, 28., 8., 13, 14}};
+    std::vector<LayerSliceIsland *> units;
+    for (size_t start = 0; start < std::size(rows); ) {
+        size_t end = start;
+        ExPolygons slices;
+        while (end < std::size(rows) && rows[end].copy == rows[start].copy && rows[end].z == rows[start].z) {
+            slices.push_back(rectangle_expolygon(rows[end].x, 0., rows[end].x + rows[end].width, 1.));
+            ++end;
+        }
+        Layer &layer = append_stack_scene_layer(print.object(rows[start].copy), rows[start].z, slices);
+        for (size_t idx = start; idx < end; ++idx)
+            units.push_back(&layer.island(idx - start));
+        start = end;
+    }
+    for (size_t idx = 0; idx < std::size(rows); ++idx)
+        for (int parent : {rows[idx].parent, rows[idx].second})
+            if (parent >= 0)
+                units[idx]->overlaps_below.push_back({units[parent], 1.f});
+    std::vector<const LayerRegionIsland *> tail;
+    for (size_t copy : {size_t(0), size_t(2)}) {
+        LayerSliceIsland *previous = units[copy == 0 ? 5 : 15];
+        for (double z : {1.76, 1.86}) {
+            const double x = copy == 0 ? 28. : 37.;
+            Layer &layer = append_stack_scene_layer(print.object(copy), z, {rectangle_expolygon(x, 0., x + 8., 1.)});
+            layer.island(0).overlaps_below = {{previous, 1.f}};
+            previous = &layer.island(0);
+            tail.push_back(&previous->regions_islands().front());
+        }
+    }
+    run_island_plan_builder(print);
+    check_island_plan_oracles(print, config);
+    const PrintingPlan &plan = *print.printing_plan();
+    std::map<const LayerRegionIsland *, size_t> group_by_source;
+    for (size_t idx = 0; idx < plan.groups.size(); ++idx)
+        for (const PrintingLayerGroup &layer : plan.groups[idx].layers)
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions)
+                    group_by_source.emplace(extrusion.region_island, idx);
+    const size_t joined_group = group_by_source.at(&units[15]->regions_islands().front());
+    CAPTURE(plan.groups.size(), joined_group);
+    CHECK(plan.groups.size() == 4);
+    for (const LayerRegionIsland *source : tail)
+        CHECK(group_by_source.at(source) == joined_group);
+}
+
+// History-dependent rectangles exercise full-history merging and safe emission
+// when a later merge crosses parent paths. Explicit sizes describe each result.
 TEST_CASE("Island stack histories always produce a safe complete plan",
           "[plugins][printing-plan][parallel-islands][island-stacks][plate-island-units]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     enum class Scene { Rotating, BridgeSplitCycle, SupportGrid, MergeAfterSplit };
     Scene scene = Scene::Rotating;
-    SECTION("Rotating rectangles require lowest-level fallback") {}
-    SECTION("A bridge then split joined by another instance requires fallback") { scene = Scene::BridgeSplitCycle; }
+    SECTION("Rotating rectangles merge their full histories") {}
+    SECTION("A bridge then split joined by another instance keeps parent paths") { scene = Scene::BridgeSplitCycle; }
     SECTION("Support of the same copy uses a different Z grid") { scene = Scene::SupportGrid; }
     SECTION("A merge after a split keeps its parents first") { scene = Scene::MergeAfterSplit; }
     const size_t object_count = scene == Scene::SupportGrid ? 1 : 2;
@@ -3414,26 +3748,28 @@ TEST_CASE("Island stack histories always produce a safe complete plan",
     const PrintingPlan &plan = *print.printing_plan();
     REQUIRE(plan.groups.size() > 1);
     const PrintingGroup &first = plan.groups[1];
+    std::vector<size_t> group_sizes;
+    for (const PrintingGroup &group : plan.groups)
+        group_sizes.push_back(group.layers.size());
+    CAPTURE(int(scene), group_sizes);
     if (scene == Scene::Rotating || scene == Scene::BridgeSplitCycle) {
-        // Interleaved geometry and cyclic stack dependencies both require a
-        // lowest-Z prefix before the remaining histories can be emitted safely.
-        REQUIRE(first.layers.size() == 1);
+        // Real-height history comparisons combine rotating layers and preserve
+        // the bridge's separate parent paths without a mandatory initial fallback.
+        CHECK(group_sizes == (scene == Scene::Rotating ? std::vector<size_t>{1, 6} : std::vector<size_t>{1, 3, 3, 1, 1}));
         CHECK(first.layers.front().print_z == scale_to_layer_coord(scene == Scene::Rotating ? 0.3 : 1.));
         REQUIRE(first.printing_catalog_ids.size() == (scene == Scene::Rotating ? 2 : 1));
         REQUIRE(first.layers.front().tool_groups.size() == 1);
-        CHECK(first.layers.front().tool_groups.front().extrusions.size() == 2);
+        CHECK(first.layers.front().tool_groups.front().extrusions.size() == (scene == Scene::Rotating ? 2 : 1));
     } else {
-        // Comparing non-parent open stacks joins these nearby histories before
-        // emission, so no single-Z fallback is needed.
-        for (size_t idx = 1; idx < plan.groups.size(); ++idx)
-            CHECK(plan.groups[idx].layers.size() > 1);
-        CHECK(plan.groups.size() == 2);
+        // Support below a later body is a real obstacle; a later single-layer
+        // copy above a split does not introduce a backwards height obstacle.
+        CHECK(group_sizes == (scene == Scene::SupportGrid ? std::vector<size_t>{1, 3} : std::vector<size_t>{1, 2, 1, 1}));
     }
 }
 
-Layer &append_stack_scene_layer(PrintObject &object, double z, const ExPolygons &slices, bool auxiliary)
+Layer &append_stack_scene_layer(PrintObject &object, double z, const ExPolygons &slices, bool auxiliary, double height)
 {
-    std::unique_ptr<IslandStackTestLayer> layer(new IslandStackTestLayer(z, slices, &object));
+    std::unique_ptr<IslandStackTestLayer> layer(new IslandStackTestLayer(z, slices, &object, height));
     for (size_t idx = 0; idx < slices.size(); ++idx) {
         LayerRegionIsland &region = layer->island(idx).add_region_island({}, 0);
         const Point start = slices[idx].contour.points.front();
