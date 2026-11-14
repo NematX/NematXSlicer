@@ -69,7 +69,7 @@ extruder_index_t custom_gcode_row_extruder_index(const CustomGCodeRow &row,
 /* Resolve the old Undef mode with the same semantic rules as the Model helper. */
 Slic3r::CustomGCode::Mode effective_record_mode(const CustomGCodeTable &table);
 
-/* Infer the active print mode from the final object extrusions in the plan. */
+/* Infer the print mode from the original region-island tools of planned object extrusions. */
 Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrintingPlan &plan);
 
 /* Return true only for extrusion roots sourced from a normal object layer. */

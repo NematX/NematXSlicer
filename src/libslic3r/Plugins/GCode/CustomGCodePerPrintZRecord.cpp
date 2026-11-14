@@ -44,8 +44,8 @@ The normal execution flow is:
     `-- assign each marker once to the first PrintingLayerGroup in plan order
         whose print Z is greater than or equal to the marker Z
 
-`printing_plan_mode()` inspects the tools used by object extrusions, rather
-than support or auxiliary extrusions, to distinguish a true multi-extruder
+`printing_plan_mode()` inspects the original region-island tools of object
+extrusions, rather than substituted plan tools or support and auxiliary tools, to distinguish a true multi-extruder
 plan from a multi-extruder printer operating as a single tool. This distinction
 is used by both marker-ordering and marker-event plugins. Tool values are
 one-based in the stored record and become zero-based when returned to plan
@@ -62,6 +62,12 @@ namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin {
 // first qualifying plan location. Above-plan rows stay unmapped. The table must
 // outlive the result; allocation and plan API failures propagate without mutation.
 CustomGCodePlanRows rows_by_plan(const CustomGCodeTable &table, const ConstPrintingPlan &plan);
+
+// Classify the printer using known tools on the source region islands of object
+// extrusions present in the borrowed plan. Tool overrides leave those sources
+// unchanged, so every consumer sees the same mode. Single-tool printers remain
+// SingleExtruder; API failures propagate without modifying the print or plan.
+Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrintingPlan &plan);
 namespace {
 
 /*
@@ -226,9 +232,14 @@ Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrin
             const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
             for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
                 const ConstPrintingToolGroup tool = layer.tool_group(tool_idx);
-                for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx)
-                    if (printing_extrusion_is_object(plan, group, tool.extrusion(extrusion_idx)))
-                        object_tools.insert(tool.extruder_id());
+                for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx) {
+                    const ConstPrintingExtrusion extrusion = tool.extrusion(extrusion_idx);
+                    if (printing_extrusion_is_object(plan, group, extrusion)) {
+                        const extruder_index_t source_tool = extrusion.region_island().extruder_id();
+                        if (source_tool != EXTRUDER_ID_UNKNOWN)
+                            object_tools.insert(source_tool);
+                    }
+                }
             }
         }
     }

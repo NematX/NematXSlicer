@@ -35,6 +35,8 @@ order are checked independently of the stack order.
 Height-event scenes also publish model rows before slicing and verify one event
 across all copies. Relative-E deposition moves are checked against their emitted
 layer blocks, and upper-copy tool assignments are checked against the final plan.
+Source-tool scenes verify that substituted plan tools do not suppress later color
+scripts, including ToolChange conversion on a single-tool printer.
 
     TEST_CASE: select clearance shape and expected scheduling
     `-- check_scene: build boxes, process and export with the production host
@@ -222,6 +224,97 @@ TEST_CASE("Height events occur once across production copy bands",
     CHECK(deposits_above > 0);
     CHECK(pause_count == (tool_change ? 0 : 1));
     CHECK(color_count == (tool_change ? 0 : 1));
+}
+
+// A tool substitution must not reclassify a single-source-tool model. Export both
+// builders and single-tool conversion through the real consumers and firmware;
+// distinct next_color arguments distinguish the two scripted rows independently.
+TEST_CASE("Source tools preserve color scripts after a height tool change",
+          "[plugins][gcode][custom-per-print-z][custom-gcode][source-tool-mode]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const bool single_tool_printer = GENERATE(false, true);
+    CAPTURE(by_object, single_tool_printer);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0.6"}, {"complete_islands", "1"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"start_gcode", ""}, {"end_gcode", ""}, {"binary_gcode", "0"},
+        {"color_change_gcode", "M117 color {color_change_extruder} {next_color}"}});
+    if (!single_tool_printer) {
+        config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+        config.set_deserialize_strict("filament_diameter", "1.75,1.75");
+        config.set_deserialize_strict("min_layer_height", "0.05,0.05");
+        config.set_deserialize_strict("max_layer_height", "0.3,0.3");
+    }
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 1.6)}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(100., 30., 0.));
+    model.custom_gcode_per_print_z.mode = CustomGCode::MultiAsSingle;
+    const int tool = single_tool_printer ? 1 : 2;
+    model.custom_gcode_per_print_z.gcodes = {
+        {scale_i(0.6), CustomGCode::ToolChange, tool, "#00FF00", ""},
+        {scale_i(1.), CustomGCode::ColorChange, tool, "#FF0000", ""}};
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print);
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    Test::GCode::remove_output_pair(output);
+    const std::string expected_color_script = "M117 color " + std::to_string(tool - 1) + " #FF0000";
+    const std::string expected_conversion_script = "M117 color 0 #00FF00";
+    const std::string expected_color_tag = ";COLOR_CHANGE,T" + std::to_string(tool - 1) + ",#FF0000";
+    size_t color_scripts = 0, conversion_scripts = 0, color_tags = 0, conversion_tags = 0;
+    double z = 0.;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind(";Z:", 0) == 0)
+            z = std::stod(line.substr(3));
+        if (line.rfind("M117 color ", 0) == 0) {
+            if (line.find("#FF0000") != std::string::npos) {
+                ++color_scripts;
+                CHECK(line == expected_color_script);
+                CHECK(z == Approx(1.));
+            } else if (line.find("#00FF00") != std::string::npos) {
+                ++conversion_scripts;
+                CHECK(line == expected_conversion_script);
+                CHECK(z == Approx(0.6));
+            } else {
+                FAIL("Unexpected color script arguments");
+            }
+        }
+        if (line.rfind(";COLOR_CHANGE,", 0) == 0) {
+            if (line.find("#FF0000") != std::string::npos) {
+                ++color_tags;
+                CHECK(line == expected_color_tag);
+            } else if (line.find("#00FF00") != std::string::npos) {
+                ++conversion_tags;
+                CHECK(line == ";COLOR_CHANGE,T0,#00FF00");
+            }
+        }
+    }
+    CHECK(color_scripts == 1);
+    CHECK(color_tags == 1);
+    CHECK(conversion_scripts == (single_tool_printer ? 1 : 0));
+    CHECK(conversion_tags == (single_tool_printer ? 1 : 0));
+    REQUIRE(print.printing_plan() != nullptr);
+    std::set<uint32_t> upper_copies;
+    for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers)
+            if (layer.print_z >= scale_i(0.6))
+                for (const Printing::PrintingToolGroup &visit : layer.tool_groups)
+                    for (const Printing::PrintingExtrusion &extrusion : visit.extrusions) {
+                        CHECK(visit.extruder_id == tool - 1);
+                        upper_copies.insert(extrusion.printing_catalog_id);
+                    }
+    CHECK(upper_copies.size() == 2);
 }
 
 // Each physical copy must retain complete source coverage, including the by-layer tail.
