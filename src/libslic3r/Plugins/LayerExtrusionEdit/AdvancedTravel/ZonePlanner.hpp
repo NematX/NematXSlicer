@@ -18,7 +18,9 @@ Attractors form a routing domain after expanded forbidden material is removed.
 The planner borrows the print and worker layer-input cache to resolve spacing and
 island-jump settings. It owns geometry cached by active set, tool, ignored zones
 and spacing. Domain routes are validated against original forbidden material;
-blocked routes use obstacle routing. If obstacle routing stays straight without
+blocked routes use a contour connector over expanded forbidden components. Path
+validation, the detour budget and counters remain the planner's responsibility.
+If obstacle routing stays straight without
 failure and its chord passes validation against every remaining original forbidden
 area, that chord is accepted without counting a fallback or a domain route.
 A chord inside only the nozzle margin may still require a detour or fallback.

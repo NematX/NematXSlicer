@@ -59,6 +59,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
             `-- ZonePlanner::path: follow crossed domain rings or an interior chord, validate, then use obstacle routing if blocked
+                `-- detour_around_forbidden: connect the chord along expanded obstacle contours
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {

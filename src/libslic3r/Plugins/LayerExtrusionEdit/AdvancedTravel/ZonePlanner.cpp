@@ -44,9 +44,11 @@ Cancellation propagates.
     |-- build_boundary / route_on_boundary: index the domain and follow the rings a chord crosses
     |-- eligible: resolve regional and auxiliary activation
     |-- contains: test filled material, including its border
-    |-- crossing: find first entry and last exit, ignoring contacts
-    |-- contour_arc: walk each contour direction and choose the shorter
+    |-- detour_around_forbidden: connect the chord around expanded components
+    |   |-- crossing: find first entry and last exit, ignoring contacts
+    |   `-- contour_arc: walk each contour direction and choose the shorter
     `-- blocked: validate candidate segments against filled material
+        `-- crossing: shared with detour_around_forbidden to classify material intervals
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
 namespace work = PluginCommon::polygon_work;
@@ -55,6 +57,10 @@ namespace travel = TravelConnection;
 
 namespace {
 struct Hit { double parameter; work::Point point; size_t edge; };
+// Follow shorter outer-contour arcs along the chord through expanded components; return both endpoints, even on failure.
+// Set changed after inserting an arc and failed for a missing arc or exhausted component bound; do not validate original material or count routes. Cancellation propagates.
+work::Points detour_around_forbidden(const work::Point &from, const work::Point &to,
+    const work::ExPolygons &expanded, const plugin_run_context *context, bool &changed, bool &failed);
 // Test filled areas without changing them; holes exclude their interior and borders follow the supplied flag.
 bool contains(const work::ExPolygons &areas, const work::Point &point, bool border = true);
 // Classify an unrounded point against one ring: -1 outside, 0 on an edge, 1 inside, with sub-unit floating-point tolerance.
@@ -67,6 +73,35 @@ bool blocked(const work::Points &points, const work::ExPolygons &areas, const pl
 // Build both outer-contour arcs including the rounded hits, choosing the shorter; hole hits cannot produce a contour route.
 work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const Hit &exit,
                          const plugin_run_context *context);
+
+work::Points detour_around_forbidden(const work::Point &from, const work::Point &to,
+    const work::ExPolygons &expanded, const plugin_run_context *context, bool &changed, bool &failed)
+{
+    work::Points points{from};
+    changed = false;
+    failed = false;
+    double progress = 0.;
+    for (size_t iteration = 0; iteration <= expanded.size(); ++iteration) {
+        size_t first = SIZE_MAX;
+        Hit entry{}, exit{};
+        entry.parameter = std::numeric_limits<double>::max();
+        for (size_t component = 0; component < expanded.size(); ++component) {
+            throw_if_cancelled(context);
+            Hit a, b;
+            if (crossing(expanded[component], from, to, a, b, context, progress) &&
+                a.parameter < entry.parameter) { first = component; entry = a; exit = b; }
+        }
+        if (first == SIZE_MAX) break;
+        if (iteration == expanded.size()) { failed = true; break; }
+        const work::Points arc = contour_arc(expanded[first].contour, entry, exit, context);
+        if (arc.empty()) { failed = true; break; }
+        points.insert(points.end(), arc.begin(), arc.end());
+        progress = exit.parameter;
+        changed = true;
+    }
+    points.push_back(to);
+    return points;
+}
 
 bool contains(const work::ExPolygons &areas, const work::Point &point, const bool border)
 {
@@ -273,30 +308,10 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             [this]() { throw_if_cancelled(m_context); }).points;
         if (blocked(domain_points, obstacles.original, m_context)) domain_points.clear();
     }
-    work::Points points{source};
     bool changed = false, failed = false;
-    double progress = 0.;
-    for (size_t iteration = 0; domain_points.empty() && iteration <= obstacles.expanded.size(); ++iteration) {
-        size_t first = SIZE_MAX;
-        Hit entry{}, exit{};
-        entry.parameter = std::numeric_limits<double>::max();
-        for (size_t component = 0; component < obstacles.expanded.size(); ++component) {
-            throw_if_cancelled(m_context);
-            Hit a, b;
-            if (crossing(obstacles.expanded[component], source, target, a, b, m_context, progress) &&
-                a.parameter < entry.parameter) { first = component; entry = a; exit = b; }
-        }
-        if (first == SIZE_MAX) break;
-        if (iteration == obstacles.expanded.size()) { failed = true; break; }
-        const work::Points arc = contour_arc(obstacles.expanded[first].contour, entry, exit, m_context);
-        if (arc.empty()) { failed = true; break; }
-        points.insert(points.end(), arc.begin(), arc.end());
-        progress = exit.parameter;
-        changed = true;
-    }
-    points.push_back(target);
     const bool domain_route = !domain_points.empty();
-    if (domain_route) points = std::move(domain_points);
+    work::Points points = domain_route ? std::move(domain_points) :
+        detour_around_forbidden(source, target, obstacles.expanded, m_context, changed, failed);
     points.erase(std::unique(points.begin(), points.end()), points.end());
     const bool crosses_forbidden = !failed && blocked(points, obstacles.original, m_context);
     // A rejected domain path does not make a validated, unchanged obstacle route a fallback.

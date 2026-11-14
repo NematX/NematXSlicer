@@ -43,6 +43,8 @@ The direct boundary case indexes sliced dumbbell geometry and checks that ring
 following preserves exact endpoints and stays inside the connected domain.
 Direct square cases check unchanged endpoints on failed placement and safe fallback
 outside the grid; two squares check that weighted island jumps remain optional.
+Direct bridge selection on two squares checks valid points and a bounded-search
+failure for endpoints just outside the facing edges, without approach routing.
 
     test cases: slice scenes and compare owned routes
     |-- compare_layer: sample endpoints with both boundary choices and budgets
@@ -53,6 +55,7 @@ outside the grid; two squares check that weighted island jumps remain optional.
     |-- epsilon/threshold case: compare near projections and measured budgets
     |-- endpoint-projection case: compare unmatched start and end edge scans
     |-- top-shortcut case: compare fallback routing across retained tops
+    |-- direct bridge cases: build_boundary and select_island_bridge with inside and outside endpoints
     `-- direct boundary cases: build_boundary and route_on_boundary without a router
 
 Successful queries report aggregate counts. Catch retains endpoint context for
@@ -184,6 +187,39 @@ TEST_CASE("Direct boundary routing preserves endpoints on placement fallback", "
     REQUIRE(path.size() == 2);
     CHECK(path.points.front() == start);
     CHECK(path.points.back() == end);
+}
+
+// Select a bridge between square islands, or report no bridge when nearby outside endpoints cannot seed both rings.
+TEST_CASE("Direct island bridge selection handles outside endpoints", "[plugins][avoid-crossing-router]")
+{
+    namespace pw = slic3r_api::PluginCommon::polygon_work;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    pw::ExPolygons islands;
+    for (double x : {0., 11.}) {
+        pw::ExPolygon square;
+        square.contour.points = {work::Point(scale_i(x), 0), work::Point(scale_i(x + 10.), 0),
+            work::Point(scale_i(x + 10.), scale_i(10.)), work::Point(scale_i(x), scale_i(10.))};
+        islands.push_back(std::move(square));
+    }
+    port::Boundary boundary;
+    port::build_boundary(handle, std::move(islands), scale_i(0.8), boundary);
+    const bool outside = GENERATE(false, true);
+    CAPTURE(outside);
+    work::Point start(scale_i(outside ? 10.2 : 5.), scale_i(5.));
+    work::Point end(scale_i(outside ? 10.8 : 16.), scale_i(5.));
+    port::RouterCounts counts;
+    const std::optional<port::IslandBridge> bridge = port::select_island_bridge(
+        boundary, 0, 1, start, end, 0., counts, []() {});
+    if (outside) {
+        CHECK_FALSE(bridge.has_value());
+        CHECK(counts.brute_force == 1);
+    } else {
+        REQUIRE(bridge.has_value());
+        CHECK(bridge->from == work::Point(scale_i(10.), scale_i(5.)));
+        CHECK(bridge->to == work::Point(scale_i(11.), scale_i(5.)));
+    }
 }
 
 // Index disjoint islands directly and exercise both weighted bridging and ordinary ring following.

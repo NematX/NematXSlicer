@@ -11,6 +11,8 @@ does not find a shortest path or guarantee that a returned path avoids every bou
 A detour budget may replace any computed detour with the direct segment.
 route_on_boundary also exposes the ring-following operation without layer input
 or a detour budget. Use build_boundary first and pass endpoints in its coordinates.
+select_island_bridge exposes only weighted bridge selection on that same geometry;
+the caller connects the returned points to its endpoints and validates the path.
 
 TravelBoundary.hpp provides internal rings in object-local coordinates and
 external rings in print coordinates. Internal rings follow insets of filled
@@ -53,6 +55,7 @@ storage, input, print view, identity, context and end:
     auto path = router.travel_to(context, end);
 */
 #include <functional>
+#include <optional>
 #include "TravelBoundary.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
@@ -80,6 +83,19 @@ struct RouterCounts
     size_t brute_force = 0;
     size_t epsilon_merge = 0;
 };
+
+struct IslandBridge
+{
+    PluginCommon::work::Point from, to;
+};
+
+// Choose a bridge between two distinct component indexes from Boundary::islands, using bridge length plus weighted endpoint distances.
+// Require nonempty rings and nonnegative weight; cache island grids and update epsilon/brute-force counts. May extend start/end by epsilon.
+// Return owned points in boundary coordinates, or no bridge when the bounded search cannot seed both ring segments (including nearby outside endpoints).
+// Cancellation and allocation failures propagate. No approach routing or radius search is performed.
+std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t start_island, size_t end_island,
+    PluginCommon::work::Point &start, PluginCommon::work::Point &end, double weight,
+    RouterCounts &counts, const std::function<void()> &cancel);
 
 // Return an owned path in boundary's coordinates that follows rings where the placed segment crosses or nears them;
 // otherwise the path is a direct chord, as for empty geometry or failed placement.

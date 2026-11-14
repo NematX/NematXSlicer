@@ -56,7 +56,8 @@ length is checked against the absolute-mm or percentage detour budget.
         |-- segment_intersections: collect crossings and accumulated distances
         |   `-- extend_for_closest_lines: protect nearby projected points
         |-- jump_between_island: score bridges using lazily built island grids
-        |   |-- brute_force_jump: recover when grid queries leave edges unknown
+        |   |-- select_island_bridge: choose points with the weighted bridge score
+        |   |   `-- brute_force_jump: recover when grid queries leave edges unknown
         |   `-- segment_intersections: rebuild approaches around the selected bridge
         |-- get_shortest_direction: select the ring walk by float score
         `-- simplify_travel: coalesce neighbours and remove unobstructed waypoints
@@ -68,6 +69,11 @@ must remain valid. External geometry is requested only when needed. Cancellation
 and allocation failures propagate without returning a partial path.
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {
+// Score grid and vertex-to-edge candidates between distinct nonempty components, retaining their lazy grids and branch counts.
+// Return no bridge if either ring segment cannot be seeded; allow epsilon extension of start/end and require nonnegative weight. Callback and allocation failures propagate.
+std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t start_island, size_t end_island,
+    PluginCommon::work::Point &start, PluginCommon::work::Point &end, double weight,
+    RouterCounts &counts, const std::function<void()> &cancel);
 namespace {
 using namespace PluginCommon::polygon_work;
 using PluginCommon::polygon_work::Point;
@@ -118,8 +124,8 @@ static Direction get_shortest_direction(const Boundary &boundary, const Intersec
 static std::vector<TravelPoint> simplify_travel(const Boundary &boundary, const std::vector<TravelPoint> &travel);
 // Record a projected point on its outgoing edge, using zero distance when it coincides with a vertex.
 static void set_intersection(Intersection &intersection, const Polygon &polygon, size_t edge, const Point &point);
-// Update first and last when grid queries leave an edge unknown, then score vertex-to-edge bridges using weighted approaches.
-static void brute_force_jump(Intersection &first, Intersection &last, const Line &line,
+// Update first and last when grid queries leave an edge unknown, then score vertex-to-edge bridges using weighted approaches; return false if either edge remains unknown.
+static bool brute_force_jump(Intersection &first, Intersection &last, const Line &line,
                              const Polygon &a, const Polygon &b, double weight);
 // Collect, parameterize and sort crossings along a segment, then add nearby protected endpoints.
 static std::vector<Intersection> segment_intersections(const Boundary &boundary, const Point &start, const Point &end, coord_t radius);
@@ -486,7 +492,7 @@ static void set_intersection(Intersection &intersection, const Polygon &polygon,
     } else intersection.distance = float(polygon.points[edge].distance_to(point));
 }
 
-static void brute_force_jump(Intersection &first, Intersection &last, const Line &line,
+static bool brute_force_jump(Intersection &first, Intersection &last, const Line &line,
                              const Polygon &a, const Polygon &b, double weight)
 {
     double shortest = line.length() * (1 + weight), squared = shortest * shortest;
@@ -508,7 +514,7 @@ static void brute_force_jump(Intersection &first, Intersection &last, const Line
             }
         }
     }
-    assert(first.line_idx != size_t(-1) && last.line_idx != size_t(-1));
+    if (first.line_idx == size_t(-1) || last.line_idx == size_t(-1)) return false;
     const Intersection saved_last = last;
     Point point;
     double distance = Line(b.points[last.line_idx], b.points[(last.line_idx + 1) % b.size()]).distance_to_squared(first.point, &point);
@@ -548,6 +554,7 @@ static void brute_force_jump(Intersection &first, Intersection &last, const Line
             }
         }
     }
+    return true;
 }
 
 static std::vector<Intersection> segment_intersections(const Boundary &boundary, const Point &start, const Point &end, coord_t radius)
@@ -573,9 +580,23 @@ static void jump_between_island(Boundary &boundary, Point start, Point end, std:
     assert(intersections.size() > 1);
     if (boundary.islands[intersections.front().border_idx] == boundary.islands[intersections.back().border_idx]) return;
     ++counts.island_jumps;
+    const std::optional<IslandBridge> bridge = select_island_bridge(boundary,
+        boundary.islands[intersections.front().border_idx], boundary.islands[intersections.back().border_idx],
+        start, end, weight, counts, cancel);
+    if (!bridge) return;
+    // Recompute the approaches so ring following connects to the selected bridge endpoints.
+    intersections = segment_intersections(boundary, start, bridge->from, radius);
+    const std::vector<Intersection> tail = segment_intersections(boundary, bridge->to, end, radius);
+    intersections.insert(intersections.end(), tail.begin(), tail.end());
+}
+
+} // namespace
+
+std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t start_island, size_t end_island,
+                                 Point &start, Point &end, double weight,
+                                 RouterCounts &counts, const std::function<void()> &cancel)
+{
     const double straight_distance = start.distance_to(end);
-    size_t start_island = boundary.islands[intersections.front().border_idx];
-    size_t end_island = boundary.islands[intersections.back().border_idx];
     // If one island's box contains the other, look for a hole whose box also contains it to use as the bridge ring.
     if (contains(boundary.bboxes[start_island], boundary.bboxes[end_island])) {
         for (size_t i = start_island + 1; i < boundary.islands.size() && boundary.islands[i] == start_island; ++i) {
@@ -631,7 +652,7 @@ static void jump_between_island(Boundary &boundary, Point start, Point end, std:
     }
     if (first.line_idx >= a.size() || last.line_idx >= b.size()) {
         ++counts.brute_force;
-        brute_force_jump(first, last, Line(start, end), a, b, weight);
+        if (!brute_force_jump(first, last, Line(start, end), a, b, weight)) return std::nullopt;
     } else {
         Point from_start, from_end;
         double distance_start = Line(b.points[last.line_idx], b.points[(last.line_idx + 1) % b.size()]).distance_to_squared(first.point, &from_start);
@@ -696,13 +717,8 @@ static void jump_between_island(Boundary &boundary, Point start, Point end, std:
         }
     }
     assert(first.line_idx != size_t(-1) && last.line_idx != size_t(-1));
-    // Recompute the approaches so ring following connects to the selected bridge endpoints.
-    intersections = segment_intersections(boundary, start, first.point, radius);
-    const std::vector<Intersection> tail = segment_intersections(boundary, last.point, end, radius);
-    intersections.insert(intersections.end(), tail.begin(), tail.end());
+    return IslandBridge{first.point, last.point};
 }
-
-} // namespace
 
 Polyline route_on_boundary(Boundary &boundary, Point real_start, Point real_end, coord_t placement_spacing,
                            coord_t segment_radius, bool island_jump, double jump_weight, storage_handle *storage,
