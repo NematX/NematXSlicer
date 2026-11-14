@@ -15,7 +15,10 @@
 #include "libslic3r/Config/ConfigOption.hpp"
 
 /* This file exposes typed configuration reads and changes to C plugins through handles to host-owned options.
-   Callers must keep the options alive; these functions do not take ownership.
+   Callers must keep the options alive; option reads do not take ownership.
+   Standalone graphs copy plugin points into host memory and are freed explicitly.
+   graph_data_create -> copy points, validate ordering and transfer ownership
+   graph_data_free -> destroy the standalone graph
 
    Serialization reads an option and copies its text into the caller's buffer.
    Call graph:
@@ -286,6 +289,34 @@ int32_t c_float_or_percent_less(const c_float_or_percent *lhs, const c_float_or_
     if (lhs == nullptr || rhs == nullptr)
         return 0;
     return lhs->value < rhs->value || (lhs->value == rhs->value && lhs->percent < rhs->percent);
+}
+
+graph_data_handle *graph_data_create(const c_vec2d *points, uint32_t count, raw_graph_type type)
+{
+    if ((count != 0 && points == nullptr) || type < RAW_GRAPH_TYPE_SQUARE || type > RAW_GRAPH_TYPE_SPLINE)
+        return nullptr;
+    for (uint32_t idx = 0; idx < count; ++idx)
+        if (!std::isfinite(points[idx].x) || !std::isfinite(points[idx].y))
+            return nullptr;
+    try {
+        std::unique_ptr<Slic3r::GraphData> graph = std::make_unique<Slic3r::GraphData>();
+        graph->type = type == RAW_GRAPH_TYPE_SQUARE ? Slic3r::GraphData::SQUARE :
+            type == RAW_GRAPH_TYPE_LINEAR ? Slic3r::GraphData::LINEAR : Slic3r::GraphData::SPLINE;
+        graph->graph_points.reserve(count);
+        for (uint32_t idx = 0; idx < count; ++idx)
+            graph->graph_points.emplace_back(points[idx].x, points[idx].y);
+        graph->end_idx = count;
+        if (!graph->validate())
+            return nullptr;
+        return reinterpret_cast<graph_data_handle *>(graph.release());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void graph_data_free(graph_data_handle *me)
+{
+    delete reinterpret_cast<Slic3r::GraphData *>(me);
 }
 
 uint32_t graph_data_size(const graph_data_handle *me)

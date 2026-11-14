@@ -461,6 +461,40 @@ TEST_CASE("Graph interpolation clamps to the active range", "[plugins][config][g
     }
 }
 
+// Owned host graphs keep copied points alive across owner moves and use host inversion.
+TEST_CASE("Plugins own independent graphs with exact square inversion", "[plugins][config][graph][abi]")
+{
+    CHECK(SLIC3R_PLUGIN_API_CONFIG_OPTION_MAJOR == 3u);
+    CHECK(SLIC3R_PLUGIN_API_CONFIG_OPTION_MINOR == 1u);
+    std::vector<c_vec2d> points{{0., 0.}, {2., 1.}, {8., 5.}};
+    slic3r_api::OwnedGraphData owner(points, RAW_GRAPH_TYPE_SQUARE);
+    const slic3r_api::GraphData view = owner.view();
+    points[1].x = 99.;
+    slic3r_api::OwnedGraphData moved(std::move(owner));
+    CHECK(view.point(1).x == 2.);
+    CHECK(moved.view().type() == RAW_GRAPH_TYPE_SQUARE);
+    CHECK(view.interpolate(3.) == 1.);
+    CHECK(view.inverse_interpolate(1.00005) == 8.);
+    slic3r_api::OwnedGraphData linear({{0., 0.}, {8., 4.}}, RAW_GRAPH_TYPE_LINEAR);
+    CHECK(linear.view().interpolate(4.) == 2.);
+    CHECK(linear.view().inverse_interpolate(2.) == 4.);
+    slic3r_api::OwnedGraphData single({{0., 4.}}, RAW_GRAPH_TYPE_LINEAR);
+    CHECK(single.view().size() == 1);
+    CHECK(single.view().inverse_interpolate(3.) == 0.);
+    CHECK(graph_data_create(nullptr, 1, RAW_GRAPH_TYPE_LINEAR) == nullptr);
+    CHECK(graph_data_create(points.data(), 3, RAW_GRAPH_TYPE_NONE) == nullptr);
+    CHECK(graph_data_create(points.data(), 3, RAW_GRAPH_TYPE_LINEAR) == nullptr);
+    for (const double invalid : {std::numeric_limits<double>::quiet_NaN(),
+                                 std::numeric_limits<double>::infinity(),
+                                 -std::numeric_limits<double>::infinity()}) {
+        const c_vec2d invalid_x{invalid, 0.};
+        const c_vec2d invalid_y{0., invalid};
+        CHECK(graph_data_create(&invalid_x, 1, RAW_GRAPH_TYPE_LINEAR) == nullptr);
+        CHECK(graph_data_create(&invalid_y, 1, RAW_GRAPH_TYPE_LINEAR) == nullptr);
+    }
+    graph_data_free(nullptr);
+}
+
 // Compare interior spline values with a graph containing only the active points.
 TEST_CASE("Spline interpolation ignores inactive points when solving the active range",
           "[plugins][config][graph]")
@@ -2923,9 +2957,11 @@ TEST_CASE("By object builder preserves source plans through the STL export catal
             {"height-limit-above", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "100"}}},
             {"height-limit-local-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}}},
             {"height-limit-global-skirt", {{"complete_objects_step", "1"}, {"complete_objects_step_max_z", "0.6"}, {"skirts", "1"}, {"skirt_height", "4"}, {"complete_objects_one_skirt", "1"}}}}},
-        {{"complete_islands", "complete_objects_step", "complete_objects_step_max_z", "extruder_clearance"}, {
+        {{"complete_islands", "complete_objects_step", "complete_objects_step_max_z", "extruder_clearance", "extruder_clearance_radius"}, {
             {"separate-islands", {{"complete_islands", "1"}}},
             {"island-stacks", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}}},
+            {"zero-radius", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance_radius", "0"}}},
+            {"large-radius", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance_radius", "60"}}},
             {"island-limit", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"complete_objects_step_max_z", "0.6"}}},
             {"flat-clearance", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance", flat_clearance.serialize()}}},
             {"wide-clearance", {{"complete_islands", "1"}, {"complete_objects_step", "0.5"}, {"extruder_clearance", wide_clearance.serialize()}}}}}

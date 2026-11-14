@@ -48,7 +48,7 @@ enum class Expect { Alternate, Invariants, LayerByLayer };
 // Slice and export one clearance variant, then check emitted layer order, exact
 // source coverage and tower height lead. Borrowed region addresses live in Print;
 // failures are reported by Catch and output files are removed before assertions.
-// Shape 0 uses the default graph, 1 is wide and 2 is flat. Close places tower
+// Shapes use the default, wide, flat, zero-radius, over-height, square or over-radius profile. Close places tower
 // centers 6 mm apart rather than 40 mm. Every expectation checks all invariants;
 // Alternate also checks stack run lengths, and LayerByLayer checks ascending global Z.
 void check_scene(const std::string &name, int shape, double step, bool close, Expect expectation,
@@ -59,6 +59,10 @@ TEST_CASE("Parallel islands alternate with intermediate nozzle clearance",
           "[plugins][printing-plan][parallel-islands]")
 {
     check_scene("intermediate", 0, 1., false, Expect::Alternate);
+    check_scene("zero-radius", 3, 1., false, Expect::Alternate);
+    check_scene("profile-beyond-cap", 4, 1., false, Expect::Alternate);
+    check_scene("square-profile", 5, 1., false, Expect::Alternate);
+    check_scene("profile-beyond-radius", 6, 1., false, Expect::Alternate);
 }
 
 // Check the intermediate export and all invariants without accepting expected failures.
@@ -96,12 +100,29 @@ void check_scene(const std::string &name, int shape, double step, bool close, Ex
         {"seam_visibility", "0"}, {"skirts", "0"}, {"brim_width", "0"}, {"perimeters", "1"},
         {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
         {"start_gcode", ""}, {"end_gcode", ""}, {"binary_gcode", "0"}});
-    if (shape == 1)
+    if (shape == 1) {
+        config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(60.));
         config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 3,
             GraphData::GraphType::LINEAR, {{0, 0}, {50, 0.1}, {51, 1.9}})}));
-    if (shape == 2)
+    }
+    if (shape == 2) {
+        config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(60.));
         config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
-            GraphData::GraphType::LINEAR, {{0, 0}, {2, 0.1}})}));
+            GraphData::GraphType::SQUARE, {{0, 0}, {2, 0.1}})}));
+    }
+    if (name == "high-step")
+        config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(1000.));
+    if (shape == 3)
+        config.set_key_value("extruder_clearance_radius", new ConfigOptionFloat(0.));
+    if (shape == 4)
+        config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 4,
+            GraphData::GraphType::LINEAR, {{0, 0}, {2, 1.9}, {3, 40}, {100, 50}})}));
+    if (shape == 5)
+        config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+            GraphData::GraphType::SQUARE, {{0, 0}, {2, 1.9}})}));
+    if (shape == 6)
+        config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 3,
+            GraphData::GraphType::LINEAR, {{0, 0}, {2, 0.5}, {120, 2}})}));
     TriangleMesh mesh = make_cube(20., 60., 1.);
     TriangleMesh first = make_cube(5., 5., 4.);
     TriangleMesh second = make_cube(5., 5., 3.8);

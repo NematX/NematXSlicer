@@ -81,7 +81,8 @@ void build_plan_by_object(const Print &print, PrintingPlan &plan, const plugin_r
 // Build stacks once per object from non-first layers below the optional limit,
 // then clone each stack for all instances before advancing to the next stack.
 // Owned auxiliaries follow stack Z ranges, or the instance's first pass when
-// no stack exists. They never change the shared search. Source views remain borrowed;
+// no stack exists. They never change the shared search. Clearance profiles are copied
+// with the printer radius and height as their final point. Source views remain borrowed;
 // cancellation, invalid owners and allocation failures propagate.
 void append_island_groups(const Print &print, PrintingPlan &plan,
     const std::vector<SourceInstance> &instances, coord_t height_step_range,
@@ -231,10 +232,22 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
 {
     using IslandStacks::ObjectLayerToPrint;
     using IslandStacks::ObjectsLayerToPrint;
+    std::vector<OwnedGraphData> owned_clearance;
     std::vector<GraphData> extruder_clearance;
     const ConfigOption clearance = print.config().get("extruder_clearance");
-    for (uint32_t idx = 0; idx < clearance.size(); ++idx)
-        extruder_clearance.push_back(clearance.graph(idx).value());
+    const double radius = print.config().float_or_default("extruder_clearance_radius", 0.);
+    const double height = print.config().float_or_default("extruder_clearance_height", 0.);
+    for (uint32_t idx = 0; idx < clearance.size(); ++idx) {
+        const GraphData graph = clearance.graph(idx).value();
+        std::vector<c_vec2d> points;
+        // The printer's radius and height cap the usable nozzle profile.
+        for (const ConfigPoint &point : graph.points())
+            if (point.x < radius && point.y < height)
+                points.push_back(c_vec2d{point.x, point.y});
+        points.push_back(c_vec2d{radius, height});
+        owned_clearance.emplace_back(points, graph.type());
+        extruder_clearance.push_back(owned_clearance.back().view());
+    }
     std::set<const object_handle *> separate_islands_done;
     for (const SourceInstance &first_source : instances) {
         throw_if_cancelled(run_ctx);
@@ -517,8 +530,9 @@ private:
             keys[3] = raw_used_config_key{ "complete_islands", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[4] = raw_used_config_key{ "extruder_clearance_height", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
             keys[5] = raw_used_config_key{ "extruder_clearance", RAW_CO_VECTOR_GRAPH, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
+            keys[6] = raw_used_config_key{ "extruder_clearance_radius", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE };
         }
-        return 6;
+        return 7;
     }
     // Define the provider's settings and rules once without taking ownership of host storage.
     void inilialize_impl(storage_handle *) const override

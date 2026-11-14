@@ -45,6 +45,10 @@ to `raw_exclusive_group_def`. The host reads them only when `struct_size`
 includes both fields. Older descriptors and descriptors without `has_mode`
 keep the Advanced/Expert and SuperSlicer visibility flags.
 
+Config-option 3.1 adds `graph_data_create()` and `graph_data_free()` for standalone
+host graphs copied from plugin points. Borrowed configuration graphs remain read-only
+and must not be freed. Existing 3.0 packages remain compatible.
+
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming
 `steps/slic3r_step_support_toolpath.h`, and the exporter header identity
