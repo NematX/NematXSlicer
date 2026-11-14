@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -26,6 +27,8 @@
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/AvoidCrossingInput.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/ZonePlanner.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp"
 
 /*
 This end-to-end gate checks that compatible and zone-based travel providers' settings
@@ -59,8 +62,12 @@ the implicit advanced provider preserves the explicit avoid-crossing baseline ro
 For every baseline, the gate checks
 that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change both planners' routes while keeping their
-endpoints. A separate dumbbell scene checks real travels through its thin bridge,
-segment containment in sliced material, and publication of those detours in G-code.
+endpoints. A separate dumbbell scene checks real travels through its thin bridge, segment
+containment in sliced material, and publication of those detours in G-code.
+The one-perimeter advanced variation also replays published XY gaps with their
+scope provenance to check reachable domain attachments, accepted domain routes
+and zero planner fallbacks. This replay is restricted to the ring scene with top
+avoidance and support disabled; no forbidden-top or support contributors can apply.
 Those bridge assertions apply only to gaps with a source extrusion, identified
 by the provider's ordered-scope traversal. Layer-entry travels have no source
 extrusion and stay straight by design; they are exempt, regardless of Z or point count.
@@ -191,6 +198,8 @@ struct TravelActivation {
 // and return copied routes, support/tower crossing-wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
+// Require the one-perimeter ring scene with top avoidance and support disabled; replay without writing travels and compare XY paths, domain reachability and fallback counts.
+void check_one_perimeter_routes(Print &print, const Result &result, const DynamicPrintConfig &config, Scene scene);
 // Copy reserved travel phases and their source provenance without changing the plan; skip routes below two vertices and count those above two.
 void collect_travels(const ExtrusionEntity &entity, const std::set<const extrusion_entity_handle *> &scopes_with_source, Result &result);
 // Append geometric leaves in child order, skipping consecutive duplicate XY and Z-offset triples.
@@ -621,6 +630,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
     const Result enabled = run_case(baseline, "baseline");
+    std::cout << mode << " baseline: travels=" << enabled.travels.size() << " deviated=" << enabled.deviated << '\n';
     if (mode == "avoid-crossing") {
         DynamicPrintConfig implicit = baseline;
         implicit.erase(selector);
@@ -1049,7 +1059,142 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     REQUIRE_FALSE(Orchestrator::instance().is_plugin_cancelled());
     Test::GCode::remove_output_pair(path);
     Test::GCode::remove_output_pair(exported);
+    if (scene == Scene::Ring && config.opt_int("perimeters") == 1 &&
+        result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced")
+        check_one_perimeter_routes(print, result, config, scene);
     return result;
+}
+
+void check_one_perimeter_routes(Print &print, const Result &result, const DynamicPrintConfig &config, const Scene scene)
+{
+    REQUIRE(scene == Scene::Ring);
+    REQUIRE(config.opt_int("perimeters") == 1);
+    REQUIRE_FALSE(config.opt_bool("avoid_crossing_top"));
+    REQUIRE_FALSE(config.opt_bool("support_material"));
+    namespace travel = slic3r_api::LayerExtrusionEdit::TravelConnection;
+    namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
+    namespace ac = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
+    namespace work = slic3r_api::PluginCommon::polygon_work;
+    Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    const auto scope_key = slic3r_api::printing_extrusion_scope_property_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    using ScopeEntity = slic3r_api::PrintingEntity<slic3r_api::PrintingExtrusionScopeProperty>;
+    PluginStorage storage;
+    plugin_run_context context{};
+    context.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
+    size_t checked = 0, fallbacks = 0, domains = 0, candidates = 0, chords_outside_material = 0;
+    size_t attachments_off_chord = 0;
+    double minimum_ratio = std::numeric_limits<double>::max(), maximum_ratio = 0.;
+    for (uint32_t group = 0; group < plan.groups.size(); ++group)
+        for (uint32_t layer = 0; layer < plan.groups[group].layers.size(); ++layer) {
+            slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&plan.groups[group].layers[layer]));
+            travel::LayerTravelChronology chronology;
+            // Published travel endpoints retain the seam-snapped XY positions; copy their real scope owners for eligibility and dates.
+            slic3r_api::PrintingEntityPropertyTraversal<slic3r_api::PrintingExtrusionScopeProperty> traversal(
+                scope_key, [&chronology, &scope_key, &view](ScopeEntity *previous, ScopeEntity *next) {
+                    if (previous == nullptr || next == nullptr) return;
+                    const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope target(next->entity, scope_key);
+                    if (!target.travel().valid() || target.travel().segment_count() == 0) return;
+                    const c_extrusion_segment first = target.travel().segment(0);
+                    const c_extrusion_segment last = target.travel().segment(target.travel().segment_count() - 1);
+                    travel::PendingTravel gap;
+                    gap.source.position = {first.point_a.x, first.point_a.y, view.print_z(), true};
+                    gap.target.position = {last.point_b.x, last.point_b.y, view.print_z(), true};
+                    gap.source.region_island = previous->printing_extrusion.region_island();
+                    gap.target.region_island = next->printing_extrusion.region_island();
+                    gap.source.printing_catalog_id = previous->printing_extrusion.printing_catalog_id();
+                    gap.target.printing_catalog_id = next->printing_extrusion.printing_catalog_id();
+                    gap.source_extrusion = previous->printing_extrusion;
+                    gap.target_extrusion = next->printing_extrusion;
+                    gap.extruder_id = next->tool_group.extruder_id();
+                    gap.pair_index = chronology.pair_extrusions.size();
+                    chronology.pair_extrusions.push_back({gap.target_extrusion, gap.extruder_id});
+                    chronology.travels.push_back(gap);
+                }, slic3r_api::MatchingEntityDescendants::Skip);
+            traversal.process(view);
+            ac::CompatibilityPlanner compatibility(print_view, plan_view, &context, group, view.print_z());
+            const zones::ChronologySummary summary = zones::summarize(chronology,
+                [&compatibility, &print_view](const travel::PendingTravel &gap) {
+                    return gap.source_extrusion.handle() != nullptr && zones::ZonePlanner::eligible(
+                        compatibility, print_view.config(), true, gap.source, gap.target);
+                });
+            ac::LayerInputCache cache;
+            const zones::ZoneContributorInput input{print_view, plan_view, context, view.print_z(), cache, chronology.travels, summary};
+            zones::DefaultAttractorContributor attractors;
+            zones::DefaultForbiddenTopsContributor tops;
+            zones::PrintedTopsContributor printed_tops;
+            zones::TravelZoneView zone_view({std::cref(attractors), std::cref(tops), std::cref(printed_tops)}, input);
+            zones::ZonePlanner planner(compatibility, zone_view, print_view.config(), true, &context, print_view, cache);
+            for (size_t t = 0; t < chronology.travels.size(); ++t) {
+                const travel::PendingTravel &gap = chronology.travels[t];
+                if (gap.source_extrusion.handle() == nullptr) continue;
+                const std::vector<c_point> route = planner.path(t, gap);
+                REQUIRE(route.size() >= 2);
+                // The published route with these endpoints must match the replay, not merely its point count.
+                bool matched = false;
+                for (const std::vector<coord_t> &published : result.travels) {
+                    if (published.size() != 3 * route.size()) continue;
+                    bool equal = true;
+                    for (size_t point = 0; point < route.size(); ++point)
+                        equal = equal && published[3 * point] == route[point].x && published[3 * point + 1] == route[point].y;
+                    matched = matched || equal;
+                }
+                CHECK(matched);
+                ++checked;
+                const zones::ActiveZones &active = zone_view.query(t, gap);
+                CHECK(active.forbidden_indexes.empty());
+                const work::ExPolygons &areas = active.attractors;
+                const slic3r_api::Layer endpoint_layer = gap.target.region_island.region(0).layer();
+                const ac::LayerInput &layer_input = *cache.get(print_view, endpoint_layer, &context).target;
+                const coord_t spacing = layer_input.perimeter_spacing;
+                REQUIRE_FALSE(layer_input.regions.empty());
+                CHECK(layer_input.regions.front().avoid_travel_island);
+                CHECK(layer_input.regions.front().avoid_travel_island_weight == Approx(1.));
+                for (const travel::TravelEndpoint *endpoint : {&gap.source, &gap.target}) {
+                    const work::Point point(endpoint->position.x, endpoint->position.y);
+                    work::Point attachment = point;
+                    double distance = std::numeric_limits<double>::max();
+                    for (const work::ExPolygon &area : areas) {
+                        if (area.contains(point)) { distance = 0.; attachment = point; break; }
+                        for (size_t index = 0; index <= area.holes.size(); ++index) {
+                            const work::Polygon &ring = index == 0 ? area.contour : area.holes[index - 1];
+                            for (size_t edge = 0; edge < ring.size(); ++edge) {
+                                work::Point nearest;
+                                const double squared = work::Line(ring.points[edge], ring.points[(edge + 1) % ring.size()]).distance_to_squared(point, &nearest);
+                                if (std::sqrt(squared) < distance) { distance = std::sqrt(squared); attachment = nearest; }
+                            }
+                        }
+                    }
+                    if (distance < 1.5 * spacing) ++candidates;
+                    minimum_ratio = std::min(minimum_ratio, distance / spacing);
+                    maximum_ratio = std::max(maximum_ratio, distance / spacing);
+                    const work::Point from(route.front()), to(route.back());
+                    if (from.distance_to(attachment) + attachment.distance_to(to) > from.distance_to(to) + SCALED_EPSILON) {
+                        ++attachments_off_chord;
+                    }
+                }
+                const Layer &material_layer = *reinterpret_cast<const Layer *>(endpoint_layer.handle());
+                ExPolygons material = material_layer.lslices();
+                const Point shift = print.object(0).instances().front().shift;
+                for (ExPolygon &area : material) area.translate(shift);
+                if (!diff_pl(Polylines{Polyline(Points{Point(route.front().x, route.front().y), Point(route.back().x, route.back().y)})}, material).empty()) {
+                    ++chords_outside_material;
+                }
+            }
+            fallbacks += planner.fallbacks();
+            domains += planner.domain_routes();
+        }
+    CHECK(checked > 0);
+    CHECK(fallbacks == 0);
+    CHECK(domains > 0);
+    CHECK(attachments_off_chord > 0);
+    CHECK(candidates == 2 * checked);
+    CHECK(maximum_ratio < 1.5);
+    CHECK(chords_outside_material > 0);
+    std::cout << "one-perimeter replay: checked=" << checked << " fallbacks=" << fallbacks << " domain_routes=" << domains
+        << " endpoint_candidates=" << candidates << " attachment/spacing=" << minimum_ratio << ".." << maximum_ratio
+        << " attachments_off_chord=" << attachments_off_chord << " chords_outside_material=" << chords_outside_material << '\n';
 }
 
 size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role)

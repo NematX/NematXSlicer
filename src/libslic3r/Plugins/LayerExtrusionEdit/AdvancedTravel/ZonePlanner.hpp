@@ -17,15 +17,22 @@ with the planner's settings. Dependencies and context storage must outlive this 
 Attractors form a routing domain after expanded forbidden material is removed.
 The planner borrows the print and worker layer-input cache to resolve spacing and
 island-jump settings. It owns geometry cached by active set, tool, ignored zones
-and spacing. Domain routes are validated against original forbidden material;
-blocked routes use a contour connector over expanded forbidden components. Path
-validation, the detour budget and counters remain the planner's responsibility.
-If obstacle routing stays straight without
-failure and its chord passes validation against every remaining original forbidden
-area, that chord is accepted without counting a fallback or a domain route.
-A chord inside only the nozzle margin may still require a detour or fallback.
-Failed obstacle routing or an excessive detour instead
-returns a counted straight fallback.
+and spacing. Each endpoint offers its containing component (or nearest within
+1.5 spacings) and an option without a domain. Outside endpoints attach at the
+nearest ring point; contained endpoints remain unchanged. Candidate pairs are
+ranked by estimated outside length plus weighted inside length, with stable ties.
+Inside estimates use weighted chord length wholly inside their component;
+endpoint attachments within 1.5 spacings are likewise priced as inside material;
+other connectors use clipped inside and outside portions across all components.
+Same-component paths use that component alone; different choices use the combined
+boundary. The option without domains follows expanded obstacle contours.
+If both endpoints have the same domain candidate, that option requires its chord to stay
+within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length allowance.
+Every route is checked against original forbidden material, exact endpoints and
+the complete-path detour budget. Its actual outside-domain length cannot exceed
+the obstacle-only reference detour's outside length by more than SCALED_EPSILON.
+The reference is computed at most once; an unavailable reference skips only the
+outside-length bound. Rejection tries the next hypothesis, then counts one straight fallback.
 */
 #ifndef slic3r_plugins_advanced_zone_planner_hpp_
 #define slic3r_plugins_advanced_zone_planner_hpp_
@@ -56,23 +63,32 @@ public:
     // Check regional activation only for valid object instances; other endpoints do not veto, and object targets respect first-layer exclusion.
     bool eligible(const TravelConnection::TravelEndpoint &source,
                   const TravelConnection::TravelEndpoint &target) const;
-    // Return exact endpoints; a direct result may be a valid domain or obstacle route, a Z-only move, or a counted fallback.
-    // This includes a clear straight chord accepted after a rejected domain path.
+    // Return the first ranked route passing forbidden-material, endpoint and budget checks, plus the outside-length bound when a usable reference exists.
+    // A direct result may be an accepted hypothesis, a Z-only move, or the counted fallback after all hypotheses fail.
     // Cancellation and geometry errors propagate.
     std::vector<c_point> path(size_t t, const PendingTravel &travel);
-    // Return the number of accepted domain paths, including direct segments.
+    // Count accepted same-component paths using their attachments (including interior chords), or combined routes with ring waypoints.
+    // A two-point combined-boundary result after failed placement does not count as a domain route.
     size_t domain_routes() const { return m_domain_routes; }
     // Return cumulative ring-routing diagnostics for this worker.
     const AvoidCrossing::RouterCounts &router_counts() const { return m_router_counts; }
     // Return the number of accepted domain or obstacle paths longer than their chord by more than SCALED_EPSILON.
     size_t detours() const { return m_detours; }
-    // Return the number of straight fallbacks after failed obstacle routing or a rejected detour budget.
+    // Return the number of straight fallbacks after all ranked hypotheses fail validation or the budget.
     size_t fallbacks() const { return m_fallbacks; }
 
 private:
     struct Obstacles {
         polygon_work::ExPolygons original;
         polygon_work::ExPolygons expanded;
+        // Unioned attractor components after subtracting expanded forbidden material.
+        polygon_work::ExPolygons components;
+        // Components grown by 1.5 perimeter spacings, used to reject chords that leave the near-domain material proxy.
+        polygon_work::ExPolygons material_proxy;
+        // Independently indexed rings for each component, in components order.
+        std::vector<std::unique_ptr<AvoidCrossing::Boundary>> component_boundaries;
+        // First ring index of each component in the combined domain boundary.
+        std::vector<size_t> component_rings;
         std::unique_ptr<AvoidCrossing::Boundary> domain;
     };
     using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t>;

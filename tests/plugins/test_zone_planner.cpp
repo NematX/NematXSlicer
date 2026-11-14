@@ -18,6 +18,11 @@ obstacle routing; a sliced cube supplies real regional provenance and shifted
 instances for domain routing. Segment checks inspect filled material,
 not just route vertices. The fixture selects travel.advanced to keep its settings
 active while slicing, but invokes ZonePlanner directly without production wiring.
+Ranked candidate checks use real layer weights with neighbouring perimeter endpoints,
+nearest ring attachments, budget rejection followed by the option without a domain,
+and repeat queries to check deterministic ordering.
+An endpoint in the expanded nozzle margin checks that an unusable obstacle-only
+reference does not reject a safe domain route around the original material.
 Support obstacle checks slice an overhanging roof and two posts, retaining real support
 printing extrusions. Controlled endpoint chords test each shifted component;
 the support roles are read from the sliced plan, not synthesized.
@@ -578,7 +583,7 @@ TEST_CASE("Zone planner retains interior points and attaches nearby free endpoin
     travel::PendingTravel gap = pending(2., 5., 8., 5.);
     bool direct = true, inside = true, near = false, far = false;
     SECTION("Interior segment") {}
-    SECTION("Interior near the edge") { gap = pending(0.01, 0.01, 9.99, 0.01); direct = false; }
+    SECTION("Interior near the edge") { gap = pending(0.01, 0.01, 9.99, 0.01); }
     SECTION("Z-only with a nonempty domain") { gap = pending(2., 5., 2., 5.); gap.target.position.z = Slic3r::scale_i(0.2); }
     SECTION("Nearby free endpoint") { gap = pending(-0.1, 5., 8., 8.); inside = false; direct = false; near = true; }
     SECTION("Both endpoints far use obstacle routing") {
@@ -624,6 +629,94 @@ TEST_CASE("Zone planner retains interior points and attaches nearby free endpoin
     for (size_t p = 0; p < route.size(); ++p) {
         CHECK(repeated[p].x == route[p].x);
         CHECK(repeated[p].y == route[p].y);
+    }
+}
+
+// Accept a safe domain route when an endpoint inside the expanded margin prevents an obstacle-only reference route.
+TEST_CASE("Zone planner accepts a safe domain route without a usable reference", "[plugins][zone-planner]")
+{
+    Owner owner;
+    const work::ExPolygon obstacle = rectangle(4., -2., 2., 4.);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(-2., -5., 14., 10.)}, 0, SIZE_MAX, {}});
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    const travel::PendingTravel gap = pending(3.9, 0., 10., 0.);
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() > 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.front().y == gap.source.position.y);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(route.back().y == gap.target.position.y);
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(route, {obstacle}, owner.storage);
+}
+
+// Rank nearby perimeter attachments against the chord without a domain, and try the next hypothesis after budget rejection.
+TEST_CASE("Zone planner ranks perimeter neighbours by weight and retries after the budget", "[plugins][zone-planner]")
+{
+    Owner owner;
+    bool domain_expected = true;
+    bool target_on_perimeter = false;
+    std::string weight = "0";
+    SECTION("Low weight uses nearest ring attachments") {}
+    SECTION("Endpoint on perimeter needs no outside attachment") { target_on_perimeter = true; }
+    SECTION("High weight uses the chord without a domain") {
+        domain_expected = false;
+        weight = "2";
+    }
+    SECTION("Budget rejection tries the chord without a domain") {
+        domain_expected = false;
+        owner.config.set_deserialize_strict("avoid_crossing_perimeters_max_detour", "0.1");
+    }
+    owner.config.set_deserialize_strict("avoid_travel_island", "1");
+    owner.config.set_deserialize_strict("avoid_travel_island_weight", weight);
+    owner.print.apply(owner.model, owner.config);
+    owner.print.process();
+    const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&owner.print.object(0).layers().back()));
+    travel::PendingTravel gap = pending(-0.1, 2., target_on_perimeter ? 0. : -0.1, 8.);
+    gap.source.region_island = layer.island(0).get_or_create_full_region_island(0);
+    gap.target.region_island = gap.source.region_island;
+    gap.source.printing_catalog_id = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), 0);
+    gap.target.printing_catalog_id = gap.source.printing_catalog_id;
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 10., 10.)}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() >= 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.front().y == gap.source.position.y);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(route.back().y == gap.target.position.y);
+    CHECK(planner.domain_routes() == size_t(domain_expected));
+    CHECK(planner.fallbacks() == 0);
+    work::Polyline candidate;
+    for (const c_point &point : route) candidate.points.emplace_back(point);
+    const work::Polylines outside = slic3r_api::PluginCommon::clipper::diff_pl(
+        owner.context.plugin_storage, {candidate}, {rectangle(0., 0., 10., 10.)});
+    double outside_length = 0.;
+    for (const work::Polyline &part : outside) outside_length += part.length();
+    // With no obstacles and a chord outside the rectangle, the reference's outside length is the chord length.
+    CHECK(outside_length <= work::Point(route.front()).distance_to(work::Point(route.back())) + Slic3r::SCALED_EPSILON);
+    if (domain_expected) {
+        REQUIRE(route.size() >= size_t(target_on_perimeter ? 3 : 4));
+        CHECK(route[1].x == 0);
+        CHECK(route[1].y == gap.source.position.y);
+        if (!target_on_perimeter) {
+            CHECK(route[route.size() - 2].x == 0);
+            CHECK(route[route.size() - 2].y == gap.target.position.y);
+        }
+    } else CHECK(route.size() == 2);
+    const std::vector<c_point> repeated = planner.path(1, gap);
+    REQUIRE(repeated.size() == route.size());
+    for (size_t i = 0; i < route.size(); ++i) {
+        CHECK(repeated[i].x == route[i].x);
+        CHECK(repeated[i].y == route[i].y);
     }
 }
 
@@ -725,6 +818,8 @@ TEST_CASE("Zone planner resolves island jump settings and validates the resultin
     const bool jump = GENERATE(false, true);
     const bool forbidden = GENERATE(false, true);
     owner.config.set_deserialize_strict("avoid_travel_island", jump ? "1" : "0");
+    // Zero interior weight makes the domain bridge competitive so the enabled jump branch is actually exercised.
+    owner.config.set_deserialize_strict("avoid_travel_island_weight", "0");
     owner.print.apply(owner.model, owner.config);
     owner.print.process();
     const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&owner.print.object(0).layers().back()));

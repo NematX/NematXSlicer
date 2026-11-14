@@ -28,10 +28,10 @@ opt-in and replace static forbidden tops when active; their dates start after
 the last arrival in each original island. Attractors are withdrawn perimeter slices
 dated by source-or-target membership. The advanced planner routes on their union
 minus expanded forbidden zones and validates against the original forbidden zones.
-Blocked domain paths use obstacle routing. If it stays straight without failure,
-a chord clear of original forbidden material is accepted without a fallback or
-a domain-route count. Failed routing or an excessive detour returns a counted
-straight fallback; valid obstacle detours remain accepted routes.
+Domain and obstacle-only hypotheses are ranked by estimated outside length plus
+weighted inside length. Validation checks forbidden material, endpoints, the budget
+and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
+leave the next choice available; only exhaustion counts a straight fallback.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
@@ -58,7 +58,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: follow crossed domain rings or an interior chord, validate, then use obstacle routing if blocked
+            `-- ZonePlanner::path: rank domain/obstacle hypotheses and accept the first validated route
                 `-- detour_around_forbidden: connect the chord along expanded obstacle contours
 */
 
