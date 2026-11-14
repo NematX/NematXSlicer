@@ -877,9 +877,22 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
 4. **Validate, then retry.** Require exact endpoints, no segment crossing original
    forbidden material and the complete-path detour budget. Actual outside-domain
    length must not exceed that of one obstacle-only reference detour by more than
-   `SCALED_EPSILON`. Compute that reference at most once; if unusable, skip only
-   this bound. Rejection tries the next hypothesis; exhaustion returns one counted
-   straight fallback. An accepted `D∅` route is not a fallback. `domain_routes`
+   `SCALED_EPSILON`. Compute that reference at most once per blocker set; if unusable, skip only
+   this bound. Rejection tries the next hypothesis. After exhaustion, only if no
+   hypothesis passed forbidden-material validation, disable the remaining original
+   forbidden component first crossed along the straight chord
+   or, if that chord is clear, along the initial best-ranked estimate polyline (including
+   attachments and bridge), and rebuild obstacles, domains and hypotheses.
+   Budget-only or outside-length rejection keeps the counted straight fallback
+   without deactivation. This includes zone components
+   and slices of the plan's objects. Equal crossing positions prefer zone order,
+   component order, then object-slice order. Disabled components remain in the
+   ignored cache identity and are excluded from validation for this travel only.
+   Each component is disabled at most once; the number crossed by the initial chord
+   or initial best estimate (counting each component once) caps
+   deactivations. No crossed component, or reaching that cap without acceptance,
+   returns one counted straight fallback. `disabled_blockers` counts explicit
+   deactivations across calls, not endpoint exclusions. An accepted `D∅` route is not a fallback. `domain_routes`
    counts accepted domain paths, `bridges` accepted inter-component bridges, and
    `detours` accepted paths longer than the chord by more than `SCALED_EPSILON`.
 
@@ -909,7 +922,7 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
         |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
         |-- append_component_path / route_on_boundary: follow each chosen component
         |-- detour_around_forbidden: contour bridges and free connectors
-        `-- validate all segments: accept, try the next hypothesis, or count one fallback
+        `-- validate all segments: accept, retry hypotheses or remove a crossed blocker within the component bound, then fall back
 ```
 
 ### Crossing wipes and lift

@@ -41,8 +41,16 @@ Each constructed hypothesis must retain exact endpoints, avoid original forbidde
 material and respect the total detour budget. Its length outside the domain cannot
 exceed that of the obstacle-only chord detour by more than SCALED_EPSILON, the
 complete-path allowance for integer clipping. The reference detour is computed
-at most once; an unusable reference skips only this outside-length bound.
-Rejected hypotheses leave the next ranked choice available. Only exhaustion counts
+at most once per active blocker set; an unusable reference skips only this outside-length bound.
+Rejected hypotheses leave the next ranked choice available. After exhaustion with no
+geometrically valid hypothesis, disable the remaining original component first crossed
+along the chord, or, when the chord is clear, along the initial best-ranked estimate, and retry with rebuilt
+geometry. Equal entry parameters prefer zone order, then component order, then platter
+components. Each component can be disabled once per travel; the count crossed by the
+initial chord or best estimate bounds deactivations. Budget-only and outside-length
+rejections do not authorize removal. Disabled material is excluded from validation, and cache keys
+retain disabled zone/component pairs or ignored platter identities. No crossed blocker
+or exhaustion of the component bound counts
 a straight fallback; accepted choices using a domain count once as domain routes,
 accepted choices connecting distinct components count as bridges, and accepted
 paths longer than the chord by SCALED_EPSILON count as detours.
@@ -76,7 +84,7 @@ inside the expanded margin can likewise lack a contour entry or exit. These
 failures reject that connector; other hypotheses can still provide a valid route.
 Cancellation propagates.
 
-    path: filter zones, cache domains, rank hypotheses and accept the first validated route
+    path: filter zones, cache domains and retry ranked hypotheses after bounded blocker removal
     |-- LayerInputCache::get: resolve spacing and island-jump settings
     |-- build_boundary: index the combined domain and each component separately
     |-- append_component_path: route within one component between selected points
@@ -106,8 +114,9 @@ namespace {
 struct Hit { double parameter; work::Point point; size_t edge; };
 // SIZE_MAX denotes the option without a domain; its attachment is the endpoint itself.
 struct Attachment { size_t component; work::Point point; };
-// Connector endpoints are selected once and shared by the estimate and the constructed route.
-struct Hypothesis { Attachment source, target; work::Point exit, entry; double cost; };
+// Connector endpoints are shared by estimation and construction; estimate holds the endpoint/attachment/bridge polyline.
+// The initial best hypothesis's estimate also drives blocker selection and the fixed deactivation cap.
+struct Hypothesis { Attachment source, target; work::Point exit, entry; double cost; work::Points estimate; };
 // Append a component's route between already attached points (crossed rings, else a direct chord), retaining exact endpoints and borrowing its cached boundary.
 // Epsilon-near points connect directly; no placement or nearby-ring search occurs. Update routing counts; cancellation propagates.
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
@@ -445,7 +454,14 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         }
         platter_key = PlatterKey(m_group_idx, m_print_z, ignored_platter);
     }
-    const CacheKey key(active.id, pending.extruder_id, ignored, spacing, platter_key);
+    // Each retry removes one original component; crossings of the initial chord or best estimate bound deactivations.
+    std::vector<std::pair<size_t, size_t>> disabled_zones;
+    size_t deactivation_cap = 0;
+    work::Points initial_best_estimate;
+    for (size_t attempt = 0;; ++attempt) {
+    throw_if_cancelled(m_context);
+    if (use_platter) platter_key = PlatterKey(m_group_idx, m_print_z, ignored_platter);
+    const CacheKey key(active.id, pending.extruder_id, ignored, spacing, platter_key, disabled_zones);
     std::map<CacheKey, Obstacles>::iterator cached = m_obstacles.find(key);
     if (cached == m_obstacles.end()) {
         Obstacles obstacles;
@@ -453,7 +469,9 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             throw_if_cancelled(m_context);
             if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
             const work::ExPolygons &area = m_zones.zone_area(index);
-            obstacles.original.insert(obstacles.original.end(), area.begin(), area.end());
+            for (size_t component = 0; component < area.size(); ++component)
+                if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), std::make_pair(index, component)))
+                    obstacles.original.push_back(area[component]);
         }
         if (use_platter)
             for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
@@ -531,10 +549,27 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                 from.component != SIZE_MAX ? EstimateKind::Inside :
                     use_platter ? EstimateKind::OutsidePart : EstimateKind::Outside});
             estimate.push_back({to.point, target, target_kind});
-            hypotheses.push_back({from, to, exit, entry, estimate_cost(estimate, obstacles.components, jump_weight, m_context)});
+            work::Points estimate_points{source};
+            for (const EstimateSegment &segment : estimate) estimate_points.push_back(segment.to);
+            hypotheses.push_back({from, to, exit, entry, estimate_cost(estimate, obstacles.components, jump_weight, m_context), std::move(estimate_points)});
         }
     // Domain choices precede the option without a domain on equal estimates.
     std::stable_sort(hypotheses.begin(), hypotheses.end(), [](const Hypothesis &a, const Hypothesis &b) { return a.cost < b.cost; });
+    if (attempt == 0) {
+        // Freeze the finite retry budget before removals can change attachments or the ranking.
+        // Retain this polyline even if removals change the best hypothesis: selection and its fixed cap must use the same crossings.
+        initial_best_estimate = hypotheses.empty() ? work::Points{} : hypotheses.front().estimate;
+        for (size_t index : active.forbidden_indexes) {
+            if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
+            for (const work::ExPolygon &component : m_zones.zone_area(index))
+                if (blocked({source, target}, {component}, m_context) || blocked(initial_best_estimate, {component}, m_context)) ++deactivation_cap;
+        }
+        if (use_platter)
+            for (size_t component = 0; component < m_platter_blockers.size(); ++component)
+                if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component) &&
+                    (blocked({source, target}, {m_platter_blockers[component]}, m_context) ||
+                     blocked(initial_best_estimate, {m_platter_blockers[component]}, m_context))) ++deactivation_cap;
+    }
 
     // Build the obstacle-only reference once, even if several domain hypotheses need its outside-length bound.
     bool reference_ready = false, reference_failed = false;
@@ -551,6 +586,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     const c_float_or_percent budget = m_config.float_or_percent_or_default(
         "avoid_crossing_perimeters_max_detour", c_float_or_percent{0., 0});
     const double direct_length = work::Line(source, target).length();
+    bool geometrically_valid = false;
     for (const Hypothesis &hypothesis : hypotheses) {
         throw_if_cancelled(m_context);
         const Attachment &from = hypothesis.source, &to = hypothesis.target;
@@ -580,6 +616,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         points.erase(std::unique(points.begin(), points.end()), points.end());
         if (points.size() < 2 || points.front() != source || points.back() != target ||
             blocked(points, obstacles.original, m_context)) continue;
+        geometrically_valid = true;
         double length = 0.;
         for (size_t i = 1; i < points.size(); ++i) length += work::Line(points[i - 1], points[i]).length();
         if (budget.value > 0.) {
@@ -595,6 +632,53 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) ++m_bridges;
         if (length > direct_length + SCALED_EPSILON) ++m_detours;
         return result;
+    }
+    if (geometrically_valid || attempt >= deactivation_cap) break;
+    // Only geometric failure authorizes removal; prefer chord crossings, then the initial best estimate's attachments and bridge.
+    double first_parameter = std::numeric_limits<double>::max();
+    std::pair<size_t, size_t> first_zone(SIZE_MAX, SIZE_MAX);
+    size_t first_platter = SIZE_MAX;
+    for (size_t candidate = 0; candidate < 2; ++candidate) {
+    const work::Points selection = candidate == 0 ? work::Points{source, target} :
+        initial_best_estimate;
+    for (size_t index : active.forbidden_indexes) {
+        throw_if_cancelled(m_context);
+        if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
+        const work::ExPolygons &area = m_zones.zone_area(index);
+        for (size_t component = 0; component < area.size(); ++component) {
+            const std::pair<size_t, size_t> identity(index, component);
+            for (size_t segment = 1; segment < selection.size(); ++segment) {
+            Hit entry, exit;
+            if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), identity) &&
+                crossing(area[component], selection[segment - 1], selection[segment], entry, exit, m_context) &&
+                double(segment - 1) + entry.parameter < first_parameter) {
+                first_parameter = double(segment - 1) + entry.parameter;
+                first_zone = identity;
+            }
+            }
+        }
+    }
+    if (use_platter)
+        for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+            throw_if_cancelled(m_context);
+            for (size_t segment = 1; segment < selection.size(); ++segment) {
+            Hit entry, exit;
+            if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component) &&
+                crossing(m_platter_blockers[component], selection[segment - 1], selection[segment], entry, exit, m_context) &&
+                double(segment - 1) + entry.parameter < first_parameter) {
+                first_parameter = double(segment - 1) + entry.parameter;
+                first_platter = component;
+            }
+            }
+        }
+    if (first_zone.first != SIZE_MAX || first_platter != SIZE_MAX) break;
+    }
+    if (first_platter != SIZE_MAX)
+        ignored_platter.insert(std::lower_bound(ignored_platter.begin(), ignored_platter.end(), first_platter), first_platter);
+    else if (first_zone.first != SIZE_MAX)
+        disabled_zones.insert(std::lower_bound(disabled_zones.begin(), disabled_zones.end(), first_zone), first_zone);
+    else break;
+    ++m_disabled_blockers;
     }
     ++m_fallbacks;
     return direct;

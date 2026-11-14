@@ -36,6 +36,11 @@ box-selected bridge must leave the mixed hypotheses available.
 Support obstacle checks slice an overhanging roof and two posts, retaining real support
 printing extrusions. Controlled endpoint chords test each shifted component;
 the support roles are read from the sliced plan, not synthesized.
+Bounded blocker removal covers enclosing rings, platter components and blocked U-domain
+attachments. Budget-rejected spanning walls stay active. Equal zone/platter crossings
+prefer the zone; a budget failure after a geometric retry still counts one fallback.
+Only components crossed by the chord or by the initial best estimate are disabled,
+and repeated calls retain deterministic geometry.
 Normal-layer provenance distinguishes synthetic in-part domain scenes from outside
 travels. Regionless and real adhesion/support scenes check platter blockers, ignored
 endpoint parts, both mixed directions and no attachment to a nearby attractor.
@@ -272,31 +277,65 @@ TEST_CASE("Zone planner caches tool margins and endpoint ignored sets independen
     CHECK(view.query(2, pending(0., 0., 10., 0.)).id == view.query(2, pending(0., 0., 10., 0., 1)).id);
     CHECK(planner.detours() == 2);
     CHECK(planner.fallbacks() == 0);
+    CHECK(planner.disabled_blockers() == 0);
     check_clear(small, {area}, owner.storage);
     check_clear(large, {area}, owner.storage);
 }
 
-TEST_CASE("Zone planner counts fallback when either endpoint lies in an obstacle hole", "[plugins][zone-planner]")
+TEST_CASE("Zone planner disables a ring enclosing either endpoint", "[plugins][zone-planner]")
 {
+    const bool target_inside = GENERATE(false, true);
     Owner owner;
     work::ExPolygon ring = rectangle(2., -4., 6., 8.);
     work::Polygon hole = rectangle(3., -3., 4., 6.).contour;
     std::reverse(hole.points.begin(), hole.points.end());
     ring.holes.push_back(hole);
     FixedZones contributor;
+    const work::ExPolygon retained = rectangle(8.8, -0.5, 0.4, 1.);
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {ring, retained}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> result = planner.path(0,
+        target_inside ? pending(0., 0., 5., 0.) : pending(5., 0., 10., 0.));
+    REQUIRE(result.size() >= 2);
+    CHECK((result.size() > 2) == !target_inside);
+    CHECK(planner.fallbacks() == 0);
+    CHECK(planner.disabled_blockers() == 1);
+    CHECK(planner.detours() == size_t(!target_inside));
+    check_clear(result, {retained}, owner.storage);
+}
+
+// Nearby attachments cross the enclosing ring although the chord above the U is clear.
+TEST_CASE("Zone planner disables a blocker crossed only by the best estimate", "[plugins][zone-planner]")
+{
+    Owner owner;
+    const bool budget_rejects = GENERATE(false, true);
+    owner.config.set_deserialize_strict("avoid_crossing_perimeters_max_detour", budget_rejects ? "0.1" : "0");
+    owner.print.apply(owner.model, owner.config);
+    const travel::PendingTravel gap = owner.in_part(pending(0.5, 10.3, 9.5, 10.3));
+    work::ExPolygon domain;
+    for (const std::pair<double, double> &point : std::vector<std::pair<double, double>>{
+             {0., 0.}, {10., 0.}, {10., 10.}, {9., 10.}, {9., 1.}, {1., 1.}, {1., 10.}, {0., 10.}})
+        domain.contour.points.push_back({Slic3r::scale_i(point.first), Slic3r::scale_i(point.second)});
+    work::ExPolygon ring = rectangle(-0.2, -0.2, 10.4, 10.4);
+    work::Polygon hole = rectangle(0., 0., 10., 10.).contour;
+    std::reverse(hole.points.begin(), hole.points.end());
+    ring.holes.push_back(hole);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {domain}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {ring}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
-    const bool target_inside = GENERATE(false, true);
-    const std::vector<c_point> result = planner.path(0,
-        target_inside ? pending(0., 0., 5., 0.) : pending(5., 0., 10., 0.));
-    CHECK(result.size() == 2);
-    CHECK(planner.fallbacks() == 1);
-    CHECK(planner.detours() == 0);
+    const std::vector<c_point> route = planner.path(0, gap);
+    CHECK((route.size() > 2) == !budget_rejects);
+    CHECK(planner.disabled_blockers() == 1);
+    CHECK(planner.domain_routes() == size_t(!budget_rejects));
+    CHECK(planner.fallbacks() == size_t(budget_rejects));
 }
 
-TEST_CASE("Zone planner counts fallback for an endpoint inside only the nozzle margin", "[plugins][zone-planner]")
+TEST_CASE("Zone planner disables a crossed blocker when an endpoint is in its nozzle margin", "[plugins][zone-planner]")
 {
     Owner owner;
     FixedZones contributor;
@@ -308,8 +347,137 @@ TEST_CASE("Zone planner counts fallback for an endpoint inside only the nozzle m
     const std::vector<c_point> result = planner.path(0,
         target_inside ? pending(0., 0., 6.1, 0.) : pending(3.9, 0., 10., 0.));
     CHECK(result.size() == 2);
-    CHECK(planner.fallbacks() == 1);
+    CHECK(planner.fallbacks() == 0);
+    CHECK(planner.disabled_blockers() == 1);
     CHECK(planner.detours() == 0);
+}
+
+// Real object slices supply an enclosing platter component; repeated calls exercise the ignored-component cache identity.
+TEST_CASE("Zone planner disables an enclosing platter component and reuses its ignored set", "[plugins][zone-planner]")
+{
+    Owner owner;
+    owner.model.clear_objects();
+    Slic3r::TriangleMesh mesh = Slic3r::make_cube(20., 2., 0.6);
+    Slic3r::TriangleMesh top = Slic3r::make_cube(20., 2., 0.6);
+    top.translate(0., 18., 0.); mesh.merge(top);
+    for (double x : {0., 18.}) {
+        Slic3r::TriangleMesh side = Slic3r::make_cube(2., 16., 0.6);
+        side.translate(x, 2., 0.); mesh.merge(side);
+    }
+    Slic3r::ModelObject *object = owner.model.add_object();
+    object->add_volume(mesh, Slic3r::ModelVolumeType::MODEL_PART, false);
+    object->add_instance();
+    object->ensure_on_bed();
+    owner.print.apply(owner.model, owner.config);
+    owner.slice();
+    Slic3r::Printing::PrintingPlan &plan = owner.print.mutable_printing_plan();
+    plan.groups.resize(1);
+    plan.groups[0].printing_catalog_ids = {plan.find_or_add_object_instance(owner.print.object(0), 0)};
+    FixedZones contributor;
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    const work::ExPolygons slices = ac::platter_blockers(owner.context.plugin_storage, owner.plan, 0, Slic3r::scale_i(0.6));
+    REQUIRE(slices.size() == 1);
+    REQUIRE(slices.front().holes.size() == 1);
+    double x = 0., y = 0.;
+    for (const work::Point &point : slices.front().contour.points) {
+        x += Slic3r::unscaled(point.x()); y += Slic3r::unscaled(point.y());
+    }
+    x /= slices.front().contour.points.size(); y /= slices.front().contour.points.size();
+    const travel::PendingTravel gap = pending(x, y, x + 14., y);
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    for (size_t t = 0; t < 2; ++t) {
+        const std::vector<c_point> route = planner.path(t, gap);
+        REQUIRE(route.size() == 2);
+        CHECK(route.front().x == gap.source.position.x);
+        CHECK(route.back().x == gap.target.position.x);
+        CHECK(planner.disabled_blockers() == t + 1);
+        CHECK(planner.fallbacks() == 0);
+    }
+}
+
+// Equal chord entry positions must relinquish the zone ring before the solid object, which can then still be avoided.
+TEST_CASE("Zone planner prefers the zone over a platter component at equal entry", "[plugins][zone-planner]")
+{
+    Owner owner;
+    owner.slice();
+    Slic3r::Printing::PrintingPlan &plan = owner.print.mutable_printing_plan();
+    plan.groups.resize(1);
+    plan.groups[0].printing_catalog_ids = {plan.find_or_add_object_instance(owner.print.object(0), 0)};
+    const Slic3r::BoundingBox box = owner.print.object(0).layers().back().lslices().front().contour.bounding_box();
+    const c_point shift = owner.print_view.object(0).instance_shift(0);
+    const double x = Slic3r::unscaled(box.min.x() + shift.x), y = Slic3r::unscaled(box.min.y() + shift.y);
+    work::ExPolygon ring = rectangle(x, y - 2., 26., 24.);
+    work::Polygon hole = rectangle(x + 1., y - 1., 24., 22.).contour;
+    std::reverse(hole.points.begin(), hole.points.end());
+    ring.holes.push_back(hole);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {ring}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> route = planner.path(0, pending(x - 2., y + 10., x + 22., y + 10.));
+    REQUIRE(route.size() > 2);
+    CHECK(planner.disabled_blockers() == 1);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(route, ac::platter_blockers(owner.context.plugin_storage, owner.plan, 0, Slic3r::scale_i(0.6)), owner.storage);
+}
+
+// Nested enclosing rings force successive geometric failures, exhausting exactly the eligible component count before acceptance.
+TEST_CASE("Zone planner disables each enclosing ring once within the retry cap", "[plugins][zone-planner]")
+{
+    const size_t count = GENERATE(size_t(1), size_t(3));
+    Owner owner;
+    FixedZones contributor;
+    work::ExPolygons rings;
+    for (size_t i = 0; i < count; ++i) {
+        const double radius = 2. + 2. * i;
+        work::ExPolygon ring = rectangle(-radius, -radius, 2. * radius, 2. * radius);
+        work::Polygon hole = rectangle(-radius + 0.5, -radius + 0.5, 2. * radius - 1., 2. * radius - 1.).contour;
+        std::reverse(hole.points.begin(), hole.points.end());
+        ring.holes.push_back(hole);
+        rings.push_back(ring);
+    }
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, rings, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    for (size_t t = 0; t < 2; ++t) {
+        CHECK(planner.path(t, pending(0., 0., 10., 0.)).size() == 2);
+        CHECK(planner.disabled_blockers() == (t + 1) * count);
+        CHECK(planner.fallbacks() == 0);
+    }
+}
+
+// Budget-only rejection must not authorize crossing walls; repeated calls preserve both geometry and diagnostics.
+TEST_CASE("Zone planner keeps stacked walls when only the budget rejects detours", "[plugins][zone-planner]")
+{
+    const size_t walls = GENERATE(size_t(0), size_t(1), size_t(4));
+    Owner owner;
+    owner.config.set_deserialize_strict("avoid_crossing_perimeters_max_detour", "0.1");
+    owner.print.apply(owner.model, owner.config);
+    FixedZones contributor;
+    work::ExPolygons areas;
+    for (size_t i = 0; i < walls; ++i) areas.push_back(rectangle(2. + 2. * i, -100., 0.5, 200.));
+    const work::ExPolygon retained = rectangle(4., 2., 1., 1.);
+    areas.push_back(retained);
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, areas, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const travel::PendingTravel gap = pending(0., 0., 12., 0.);
+    const std::vector<c_point> first = planner.path(0, gap);
+    REQUIRE(first.size() == 2);
+    CHECK(planner.disabled_blockers() == 0);
+    CHECK(planner.fallbacks() == size_t(walls != 0));
+    check_clear(first, {retained}, owner.storage);
+    const std::vector<c_point> second = planner.path(1, gap);
+    REQUIRE(second.size() == first.size());
+    for (size_t i = 0; i < first.size(); ++i) {
+        CHECK(first[i].x == second[i].x);
+        CHECK(first[i].y == second[i].y);
+    }
+    CHECK(planner.disabled_blockers() == 0);
 }
 
 TEST_CASE("Zone planner accepts real global adhesion provenance without an object instance", "[plugins][zone-planner]")
@@ -451,6 +619,7 @@ TEST_CASE("Zone planner applies auxiliary eligibility detour budgets and cancell
     const bool rejected = std::string(budget) == "0.1" || std::string(budget) == "1%";
     CHECK((result.size() > 2) == (enabled && !rejected));
     CHECK(planner.fallbacks() == size_t(enabled && rejected));
+    CHECK(planner.disabled_blockers() == 0);
 }
 
 // Check real top components independently so an endpoint's own top cannot erase a disjoint obstacle.
@@ -911,6 +1080,7 @@ TEST_CASE("Zone planner applies budgets eligibility and cancellation to domain p
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK((route.size() > 2) == (enabled && !reject));
     CHECK(planner.fallbacks() == size_t(reject));
+    CHECK(planner.disabled_blockers() == 0);
     CHECK(planner.domain_routes() == size_t(enabled && !reject));
 }
 

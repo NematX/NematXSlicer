@@ -44,8 +44,16 @@ within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length al
 Every route is checked against original forbidden material, exact endpoints and
 the complete-path detour budget. Its actual outside-domain length cannot exceed
 the obstacle-only reference detour's outside length by more than SCALED_EPSILON.
-The reference is computed at most once; an unavailable reference skips only the
-outside-length bound. Rejection tries the next hypothesis, then counts one straight fallback.
+The reference is computed at most once per blocker set; an unavailable reference skips only the
+outside-length bound. Exhausted hypotheses with no geometrically valid route disable
+the first original component crossed along the chord, or the initial best-ranked estimate
+when the chord is clear, rebuild geometry and retry. Budget and outside-length failures
+alone do not authorize deactivation. Equal entry positions prefer zone and
+component order before platter components. Each original component is disabled at most
+once per travel, bounding deactivations by the component count crossed by the initial
+chord or best estimate. Disabled components are excluded from
+validation and retained in the cache identity. No crossed blocker or the retry bound
+ends in one counted straight fallback. disabled_blockers() counts explicit removals only.
 */
 #ifndef slic3r_plugins_advanced_zone_planner_hpp_
 #define slic3r_plugins_advanced_zone_planner_hpp_
@@ -79,7 +87,8 @@ public:
     bool eligible(const TravelConnection::TravelEndpoint &source,
                   const TravelConnection::TravelEndpoint &target) const;
     // Return the first ranked route passing forbidden-material, endpoint and budget checks, plus the outside-length bound when a usable reference exists.
-    // A direct result may be an accepted hypothesis, a Z-only move, or the counted fallback after all hypotheses fail.
+    // Geometrically exhausted hypotheses disable the first original component crossed by the chord, otherwise the initial best estimate, within a fixed crossing-count cap.
+    // A direct result may be accepted, a Z-only move, or the counted fallback when no further crossed blocker can be removed.
     // Cancellation and geometry errors propagate.
     std::vector<c_point> path(size_t t, const PendingTravel &travel);
     // Count accepted paths constructed with at least one component's attachment or ring route, including interior chords.
@@ -90,8 +99,10 @@ public:
     const AvoidCrossing::RouterCounts &router_counts() const { return m_router_counts; }
     // Return the number of accepted domain or obstacle paths longer than their chord by more than SCALED_EPSILON.
     size_t detours() const { return m_detours; }
-    // Return the number of straight fallbacks after all ranked hypotheses fail validation or the budget.
+    // Return the number of straight fallbacks after all ranked hypotheses and bounded blocker retries fail.
     size_t fallbacks() const { return m_fallbacks; }
+    // Count original zone or platter components explicitly disabled after exhausted hypotheses; endpoint exclusions do not count.
+    size_t disabled_blockers() const { return m_disabled_blockers; }
 
 private:
     struct Obstacles {
@@ -109,7 +120,7 @@ private:
     };
     // Present only for travels using slices of the immutable plan's objects; retain group, Z and ignored component identities.
     using PlatterKey = std::tuple<uint32_t, coord_t, std::vector<size_t>>;
-    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t, std::optional<PlatterKey>>;
+    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t, std::optional<PlatterKey>, std::vector<std::pair<size_t, size_t>>>;
     AvoidCrossing::CompatibilityPlanner &m_compatibility;
     TravelZoneView &m_zones;
     Config m_config;
@@ -130,6 +141,7 @@ private:
     AvoidCrossing::RouterCounts m_router_counts;
     size_t m_detours = 0;
     size_t m_fallbacks = 0;
+    size_t m_disabled_blockers = 0;
 };
 
 }}}

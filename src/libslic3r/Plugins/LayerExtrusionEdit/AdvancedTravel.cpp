@@ -36,8 +36,12 @@ Each chosen component supplies its own route along crossed rings; bridges and fr
 connectors follow expanded forbidden contours between their selected points.
 Endpoints without a region or on auxiliary layers offer no domain attachment.
 Travels touching such endpoints include slices of the plan's objects as forbidden
-components, not the synthetic wipe tower;
-containing components are excluded so mixed travels can reach their in-part endpoint.
+components, not the synthetic wipe tower. Endpoint-containing components are excluded
+so mixed travels can reach their in-part endpoint. Geometrically exhausted hypotheses
+retry after disabling the first original component crossed by the chord, or, if the
+chord is clear, by the initial best estimate (attachments and bridge). The cap is
+fixed on the components crossed by these two polylines; budget and
+outside-length rejection alone never disables material.
 The planner borrows this layer group's plan, index and Z to cache those slices.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
@@ -65,7 +69,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: rank domain/obstacle hypotheses and accept the first validated route
+            `-- ZonePlanner::path: rank hypotheses, retry with bounded blocker removal, accept a validated route
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
                 `-- detour_around_forbidden: connect the chord along expanded obstacle contours
 */
