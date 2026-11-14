@@ -77,10 +77,13 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
                                   const ConstPrintingGroup &group,
                                   const ConstPrintingExtrusion &extrusion);
 
-/* Map every row to the first layer at or above its Z, preserving row order. */
-std::vector<std::vector<const CustomGCodeRow *>> rows_by_layer(
+// Rows indexed by plan group and layer; pointers borrow the supplied table.
+using CustomGCodePlanRows = std::vector<std::vector<std::vector<const CustomGCodeRow *>>>;
+
+/* Map each row once to the first plan layer at or above its Z, preserving row order. */
+CustomGCodePlanRows rows_by_plan(
     const CustomGCodeTable &table,
-    const ConstPrintingGroup &group);
+    const ConstPrintingPlan &plan);
 
 } // namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin
 

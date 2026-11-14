@@ -3,6 +3,7 @@
 #include <catch2/catch.hpp>
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <map>
 #include <set>
@@ -12,6 +13,7 @@
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -30,6 +32,9 @@ Two-copy checks reconstruct each instance independently; height-limit checks als
 require a shared final group in increasing Z and no upper layers in island stacks.
 Plate-wide groups may contain several copies. Their source coverage and parent
 order are checked independently of the stack order.
+Height-event scenes also publish model rows before slicing and verify one event
+across all copies. Relative-E deposition moves are checked against their emitted
+layer blocks, and upper-copy tool assignments are checked against the final plan.
 
     TEST_CASE: select clearance shape and expected scheduling
     `-- check_scene: build boxes, process and export with the production host
@@ -80,6 +85,143 @@ TEST_CASE("Parallel islands remain grouped without nozzle clearance",
     SECTION("nozzle too flat") { check_scene("flat", 2, 1., false, Expect::LayerByLayer); }
     SECTION("step above graph") { check_scene("high-step", 0, 3., false, Expect::LayerByLayer); }
     SECTION("nearby towers") { check_scene("close", 0, 1., true, Expect::LayerByLayer); }
+}
+
+// Export real copies through all consumers. Event tags belong to the target
+// layer's before events, after its Z comment but before any deposited material.
+TEST_CASE("Height events occur once across production copy bands",
+          "[plugins][printing-plan][gcode][print-sequence][custom-per-print-z][height-event-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool islands = GENERATE(false, true);
+    const bool tool_change = GENERATE(false, true);
+    bool prefix = false, tail = false, grids = false;
+    double barrier = 1.;
+    SECTION("Ordinary stack bands") {}
+    SECTION("Shared prefix") { prefix = true; grids = true; barrier = 0.3; }
+    SECTION("Above the height limit") { tail = true; }
+    SECTION("Different layer grids") { grids = true; }
+    CAPTURE(islands, tool_change, prefix, tail, grids);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{whole_objects_key, "ordering.plan_builder.by_object"},
+        {islands_key, islands ? "1" : "0"}, {step_key, "0.6"}, {limit_key, tail ? "0.7" : "0"},
+        {"complete_objects_one_first_layer", prefix ? "1" : "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "0"},
+        {"brim_width", "0"}, {"perimeters", "1"}, {"fill_density", "0%"},
+        {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}, {"start_gcode", ""},
+        {"end_gcode", ""}, {"binary_gcode", "0"}, {"use_relative_e_distances", "1"},
+        {"pause_print_gcode", "M117 pause"}, {"color_change_gcode", "M117 color"}});
+    if (tool_change) {
+        config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+        config.set_deserialize_strict("min_layer_height", "0.05,0.05");
+        config.set_deserialize_strict("max_layer_height", "0.3,0.3");
+        config.set_deserialize_strict("filament_diameter", "1.75,1.75");
+    }
+    Model model;
+    Print print;
+    const TriangleMesh mesh = make_cube(2., 2., 1.6);
+    Test::init_print(grids ? std::vector<TriangleMesh>{mesh, mesh} : std::vector<TriangleMesh>{mesh}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    if (grids) {
+        model.objects()[1].instances.front()->set_offset(Vec3d(100., 30., 0.));
+        model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
+        if (prefix)
+            model.objects()[1].config.set_deserialize_strict("first_layer_height", "0.4");
+    } else {
+        model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(100., 30., 0.));
+    }
+    model.custom_gcode_per_print_z.mode = tool_change ? CustomGCode::MultiAsSingle : CustomGCode::SingleExtruder;
+    if (tool_change)
+        model.custom_gcode_per_print_z.gcodes.push_back({scale_i(barrier), CustomGCode::ToolChange, 2, "", ""});
+    else {
+        model.custom_gcode_per_print_z.gcodes.push_back({scale_i(barrier), CustomGCode::PausePrint, 1, "", "pause"});
+        model.custom_gcode_per_print_z.gcodes.push_back({scale_i(barrier), CustomGCode::ColorChange, 1, "#FF0000", ""});
+    }
+    model.custom_gcode_per_print_z.gcodes.push_back({scale_i(3.), CustomGCode::Custom, 1, "", "M117 unreachable"});
+    Orchestrator::instance().consume_plugin_messages();
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print);
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    Test::GCode::remove_output_pair(output);
+    CHECK(text.find("M117 unreachable") == std::string::npos);
+    size_t above_warnings = 0;
+    for (const Orchestrator::PluginMessage &warning : Orchestrator::instance().consume_plugin_messages())
+        if (warning.level == Orchestrator::PluginMessageLevel::Warning &&
+            warning.message.find("Ignoring custom G-code marker above the last printing-plan layer") != std::string::npos)
+            ++above_warnings;
+    CHECK(above_warnings == 1);
+    REQUIRE(print.printing_plan() != nullptr);
+    std::vector<double> planned_z;
+    std::set<uint32_t> upper_copies;
+    for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            planned_z.push_back(unscaled(layer.print_z));
+            if (tool_change && layer.print_z >= scale_i(barrier))
+                for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                    for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                        CHECK(tool.extruder_id == 1);
+                        upper_copies.insert(extrusion.printing_catalog_id);
+                    }
+        }
+    if (tool_change)
+        CHECK(upper_copies.size() == 2);
+    const size_t target = size_t(std::find_if(planned_z.begin(), planned_z.end(), [barrier](double z) {
+        return z + 0.000001 >= barrier;
+    }) - planned_z.begin());
+    REQUIRE(target < planned_z.size());
+    std::vector<double> emitted_z;
+    size_t pause_count = 0, color_count = 0, deposits_below = 0, deposits_above = 0;
+    int active_tool = -1;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind(";Z:", 0) == 0)
+            emitted_z.push_back(std::stod(line.substr(3)));
+        if (line.rfind("T", 0) == 0 && line.size() > 1 && std::isdigit(static_cast<unsigned char>(line[1])))
+            active_tool = std::stoi(line.substr(1));
+        if (line.rfind(";PAUSE_PRINT", 0) == 0 || line.rfind(";COLOR_CHANGE", 0) == 0) {
+            const bool pause = line.rfind(";PAUSE_PRINT", 0) == 0;
+            if (pause) CHECK(color_count == 0);
+            else CHECK(pause_count == 1);
+            if (pause) ++pause_count; else ++color_count;
+            REQUIRE_FALSE(emitted_z.empty());
+            CHECK(emitted_z.size() - 1 == target);
+            CHECK(emitted_z.back() == Approx(planned_z[target]));
+            for (size_t idx = 0; idx + 1 < emitted_z.size(); ++idx)
+                CHECK(emitted_z[idx] < barrier);
+        }
+        // This scene uses relative E, linear G1 paths with space-separated fields,
+        // dot-decimal numbers and no extrusion in scripts. Positive E with XY
+        // therefore identifies deposition, excluding retraction and unretraction.
+        const size_t e = line.find(" E");
+        if (line.rfind("G1 ", 0) == 0 && e != std::string::npos &&
+            (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) &&
+            std::stod(line.substr(e + 2)) > 0.) {
+            REQUIRE_FALSE(emitted_z.empty());
+            if (emitted_z.back() + 0.000001 >= barrier) {
+                ++deposits_above;
+                if (tool_change) CHECK(active_tool == 1);
+                else { CHECK(pause_count == 1); CHECK(color_count == 1); }
+            } else {
+                ++deposits_below;
+                if (!tool_change) {
+                    CHECK(pause_count == 0);
+                    CHECK(color_count == 0);
+                }
+            }
+        }
+    }
+    REQUIRE(emitted_z.size() == planned_z.size());
+    for (size_t idx = 0; idx < planned_z.size(); ++idx)
+        CHECK(emitted_z[idx] == Approx(planned_z[idx]));
+    CHECK(deposits_below > 0);
+    CHECK(deposits_above > 0);
+    CHECK(pause_count == (tool_change ? 0 : 1));
+    CHECK(color_count == (tool_change ? 0 : 1));
 }
 
 // Each physical copy must retain complete source coverage, including the by-layer tail.

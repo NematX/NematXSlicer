@@ -40,9 +40,9 @@ The normal execution flow is:
     `-- use the stored mode, or infer SingleExtruder, MultiAsSingle, or
         MultiExtruder from the marker rows when the stored mode is undefined
 
-    rows_by_layer()
-    `-- assign each marker to the first PrintingLayerGroup whose print Z is
-        greater than or equal to the marker Z
+    rows_by_plan()
+    `-- assign each marker once to the first PrintingLayerGroup in plan order
+        whose print Z is greater than or equal to the marker Z
 
 `printing_plan_mode()` inspects the tools used by object extrusions, rather
 than support or auxiliary extrusions, to distinguish a true multi-extruder
@@ -58,6 +58,10 @@ consumer that maps them; this reader does not silently discard them.
 */
 
 namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin {
+// Return row pointers indexed by group and layer, assigning each row only at the
+// first qualifying plan location. Above-plan rows stay unmapped. The table must
+// outlive the result; allocation and plan API failures propagate without mutation.
+CustomGCodePlanRows rows_by_plan(const CustomGCodeTable &table, const ConstPrintingPlan &plan);
 namespace {
 
 /*
@@ -253,17 +257,24 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
     return false;
 }
 
-std::vector<std::vector<const CustomGCodeRow *>> rows_by_layer(
+CustomGCodePlanRows rows_by_plan(
     const CustomGCodeTable &table,
-    const ConstPrintingGroup &group)
+    const ConstPrintingPlan &plan)
 {
-    std::vector<std::vector<const CustomGCodeRow *>> result(group.layer_group_count());
+    CustomGCodePlanRows result(plan.group_count());
+    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx)
+        result[group_idx].resize(plan.group(group_idx).layer_group_count());
     for (const CustomGCodeRow &row : table.rows) {
         const coord_t row_print_z = scale_to_layer_coord(row.print_z_mm);
-        for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
-            if (group.layer_group(layer_idx).print_z() >= row_print_z) {
-                result[layer_idx].push_back(&row);
-                break;
+        bool mapped = false;
+        for (uint32_t group_idx = 0; !mapped && group_idx < plan.group_count(); ++group_idx) {
+            const ConstPrintingGroup group = plan.group(group_idx);
+            for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
+                if (group.layer_group(layer_idx).print_z() >= row_print_z) {
+                    result[group_idx][layer_idx].push_back(&row);
+                    mapped = true;
+                    break;
+                }
             }
         }
     }
