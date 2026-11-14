@@ -829,6 +829,8 @@ contributor with `orchestrator_find_plugin`. It checks `forbidden_tops` only whe
 `printed_tops` is active. Otherwise, disabling a contributor removes only its
 zones. With `printed_tops` inactive, disabling `forbidden_tops` removes top
 avoidance from Advanced. Legacy routing and its own top avoidance are unchanged.
+Platter blockers for outside-part travels apply independently of these contributor
+activation switches.
 
 The advanced planner uses the regional check described above, but an endpoint
 without an object instance does not veto the other endpoint. When neither has
@@ -836,42 +838,62 @@ an instance, the default region configuration's
 `avoid_crossing_perimeters` value governs eligibility (false if unavailable).
 The incoming layer-entry travel has no source extrusion and stays straight.
 
-For an eligible gap, individual forbidden zones containing either endpoint in
-their unexpanded filled area are ignored before union and expansion; other zones
-remain obstacles. The planner expands their union by the target tool's nozzle
-radius and subtracts it from the active attractor union. When the domain is
-non-empty, every eligible XY travel tries it through `build_boundary` and
-`route_on_boundary`. ZonePlanner never delegates its routes to Legacy. Initial
-placement keeps interior endpoints in place; the far-projection fallback may
-move the working points. Nearby endpoints attach to the domain, ring arcs guide
-the route, and `avoid_travel_island` enables
-inter-island bridges scored by bridge length and endpoint approaches weighted
-with `avoid_travel_island_weight`. Spacing and jump settings come from the target
-layer input, or the source layer when the target endpoint has no valid region
-island; spacing otherwise falls back to the target tool's nozzle diameter.
-Straight endpoint attachments and island jumps are allowed outside the domain.
-The worker caches obstacle geometry and domain rings per active zone set, tool,
-ignored zones and perimeter spacing. Z-only moves stay straight without a
-fallback count.
+Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
 
-Every domain path, including a direct segment, is validated against all remaining
-original forbidden material. A placement failure returns the chord; if it crosses
-no original forbidden area, it is accepted and counted as a domain route without
-a fallback. An absent or blocked domain path uses obstacle
-routing: follow the shorter outer-contour arc between the first entry and last
-exit of each crossed expanded component, then validate again against the original
-material. A segment that crosses only a hole, touches a vertex or runs along an
-edge is not blocked. If
-obstacle routing needs no detour and the straight chord passes validation, it is
-accepted without a fallback or domain-route count. When a required outer-contour
-entry or exit is missing, the component bound is exhausted, validation fails or
-the detour limit is exceeded, the result is a
-counted straight fallback. An endpoint in a hole or only in an expanded margin
-can cause a missing entry or exit. `avoid_crossing_perimeters_max_detour` limits
-extra length in millimetres or as a percentage of direct distance; zero is
-unlimited. All routes are heuristic, with no shortest-path guarantee; validation
-checks original forbidden material, not the nozzle margin. A fallback remains
-straight.
+1. **Classify and collect obstacles.** An endpoint with a region on a normal object
+   layer is in-part. Regionless endpoints and auxiliary layers (support, raft,
+   skirt, brim, tower) are outside-part. For every travel, ignore individual original
+   forbidden zones containing either endpoint. If either endpoint is outside, also
+   add `platter_blockers`: translated normal slices of the plan's objects at the
+   layer-group Z or below, from printing groups up to the current one. The synthetic
+   wipe tower is not a blocker. Ignore endpoint-containing components of these
+   object slices too, then union and expand all remaining forbidden material by the
+   tool's nozzle radius. This leaves the in-part endpoint's own component reachable
+   on a mixed travel. Subtract the expanded
+   obstacles from active attractors to form domain components.
+2. **Rank hypotheses.** An in-part endpoint offers its containing domain, otherwise
+   the nearest component within 1.5 perimeter spacings, plus the option without a
+   domain (`D∅`). Outside-part endpoints offer only `D∅`, even near a domain.
+   Contained points stay unchanged; other attachments use the nearest ring point.
+   At most four pairs are ranked stably, domain choices first on equal costs.
+   Same-component and attachment estimates cost `w * length`; bridges and other
+   in-part connectors cost outside-domain length plus `w * inside-domain length`,
+   measured across all components. An outside-part endpoint's leg counts its full
+   length without a domain penalty or inside weight. Here `w` is
+   `avoid_travel_island_weight` when island avoidance is active, otherwise zero.
+   For an in-part travel whose endpoint candidates share one component, admit
+   `D∅/D∅` only when its chord stays inside the components grown by 1.5 spacings
+   (allowing `SCALED_EPSILON` outside). Between different components, or without
+   an endpoint candidate, this material-proxy restriction does not apply.
+3. **Construct the candidate.** Within one component, join the attachments by a
+   chord that follows the component's rings only where it crosses them. Between
+   components, select bridge points with the legacy weighted jump search, route
+   within each component to those points and contour expanded
+   obstacles along the bridge. A mixed domain/`D∅` choice uses the domain ring
+   point nearest the free endpoint, then contours obstacles to that endpoint.
+   A `D∅/D∅` candidate contours obstacles on the original chord. Estimates and
+   construction share all selected bridge/entry/exit points. ZonePlanner never
+   delegates to Legacy.
+4. **Validate, then retry.** Require exact endpoints, no segment crossing original
+   forbidden material and the complete-path detour budget. Actual outside-domain
+   length must not exceed that of one obstacle-only reference detour by more than
+   `SCALED_EPSILON`. Compute that reference at most once; if unusable, skip only
+   this bound. Rejection tries the next hypothesis; exhaustion returns one counted
+   straight fallback. An accepted `D∅` route is not a fallback. `domain_routes`
+   counts accepted domain paths, `bridges` accepted inter-component bridges, and
+   `detours` accepted paths longer than the chord by more than `SCALED_EPSILON`.
+
+Spacing and island settings come from the target layer input, then the source
+when the target has no region, with nozzle diameter as the spacing fallback.
+The worker caches areas and component rings by active zones, tool, ignored zones
+and spacing. Travels using platter blockers additionally key group, Z and ignored
+platter components; the plan catalog and object slices remain unchanged during use.
+Obstacle contours use first entry/last exit arcs; holes, tangencies and collinear
+contacts do not count as material crossings. Missing contour entries/exits can
+reject a candidate. `avoid_crossing_perimeters_max_detour` limits extra length in
+millimetres or as a percentage of chord length; zero is unlimited. Routing is
+heuristic, not shortest-path search; validation checks original material, not the
+nozzle margin, and the final fallback remains straight.
 
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
@@ -881,10 +903,13 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- TravelZoneView: collect active contributors and cache dated role unions
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
     |-- CompatibilityPlanner::path: use perimeter routing
-    `-- ZonePlanner::path: filter endpoint zones and cache the domain
-        |-- build_boundary: index the domain rings
-        |-- route_on_boundary: attach endpoints and follow rings
-        `-- validate all segments: accept the domain path or try obstacle routing
+    `-- ZonePlanner::path: classify endpoints, cache geometry and rank hypotheses
+        |-- is_off_object_layer / platter_blockers: resolve outside-part geometry
+        |-- build_boundary / endpoint_candidates: index components and choose attachments
+        |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
+        |-- append_component_path / route_on_boundary: follow each chosen component
+        |-- detour_around_forbidden: contour bridges and free connectors
+        `-- validate all segments: accept, try the next hypothesis, or count one fallback
 ```
 
 ### Crossing wipes and lift

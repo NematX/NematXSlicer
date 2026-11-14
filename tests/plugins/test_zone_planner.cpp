@@ -14,8 +14,8 @@
 
 /*
 Zone planner tests supply small dated platter-space areas through a contributor.
-Local print and storage owners keep public views alive. Auxiliary travels isolate
-obstacle routing; a sliced cube supplies real regional provenance and shifted
+Local print and storage owners keep public views alive. Regionless travels on empty
+plan groups isolate obstacle routing; a sliced cube supplies real regional provenance and shifted
 instances for domain routing. Segment checks inspect filled material,
 not just route vertices. The fixture selects travel.advanced to keep its settings
 active while slicing, but invokes ZonePlanner directly without production wiring.
@@ -36,6 +36,9 @@ box-selected bridge must leave the mixed hypotheses available.
 Support obstacle checks slice an overhanging roof and two posts, retaining real support
 printing extrusions. Controlled endpoint chords test each shifted component;
 the support roles are read from the sliced plan, not synthesized.
+Normal-layer provenance distinguishes synthetic in-part domain scenes from outside
+travels. Regionless and real adhesion/support scenes check platter blockers, ignored
+endpoint parts, both mixed directions and no attachment to a nearby attractor.
 
     Owner: own print, geometry storage, cancellation and contributor inputs
     FixedZones::contribute: copy synthetic dated areas
@@ -108,12 +111,37 @@ struct Owner {
             return int(owner.cancel_at != 0 && ++owner.checks >= owner.cancel_at);
         };
     }
-    // Return contributor inputs borrowing this owner until its destruction.
+    // Refresh the plan view and return borrowed contributor inputs; unsliced scenes get an empty group with no printed instances.
     zones::ZoneContributorInput input()
-    { return {print_view, plan, context, Slic3r::scale_i(0.6), cache, chronology.travels, summary}; }
+    {
+        Slic3r::Printing::PrintingPlan &current = print.mutable_printing_plan();
+        plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&current));
+        if (current.groups.empty()) current.groups.resize(1);
+        return {print_view, plan, context, Slic3r::scale_i(0.6), cache, chronology.travels, summary};
+    }
     // Borrow applied print settings; auxiliary avoidance is passed separately to the planner.
     slic3r_api::Config settings() const
     { return print_view.config(); }
+    // Process the owned print and refresh the borrowed plan view because processing can replace the native plan.
+    void slice()
+    {
+        print.process();
+        plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&print.mutable_printing_plan()));
+    }
+    // Supply object 0 / last normal layer / island 0 provenance for classification and spacing, slicing once on demand.
+    // Coordinates stay unchanged; this does not find the island geometrically containing either point.
+    travel::PendingTravel in_part(travel::PendingTravel gap)
+    {
+        if (print.object(0).layers().empty()) {
+            print.mutable_printing_plan().groups.clear();
+            slice();
+        }
+        const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&print.object(0).layers().back()));
+        gap.source.region_island = gap.target.region_island = layer.island(0).get_or_create_full_region_island(0);
+        gap.source.printing_catalog_id = gap.target.printing_catalog_id =
+            print.mutable_printing_plan().find_or_add_object_instance(print.object(0), 0);
+        return gap;
+    }
 };
 
 work::ExPolygon rectangle(double x, double y, double width, double height)
@@ -211,7 +239,7 @@ TEST_CASE("Zone planner routes filled obstacles and preserves exact endpoints", 
         contributor.areas.push_back({zones::ZoneRole::Forbidden, {area}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(result.size() >= 2);
     CHECK(result.front().x == gap.source.position.x);
@@ -234,7 +262,7 @@ TEST_CASE("Zone planner caches tool margins and endpoint ignored sets independen
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {area}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     CHECK(planner.path(0, pending(5., 0., 10., 0.)).size() == 2);
     const std::vector<c_point> small = planner.path(1, pending(0., 0., 10., 0., 0));
     const std::vector<c_point> large = planner.path(2, pending(0., 0., 10., 0., 1));
@@ -259,7 +287,7 @@ TEST_CASE("Zone planner counts fallback when either endpoint lies in an obstacle
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {ring}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const bool target_inside = GENERATE(false, true);
     const std::vector<c_point> result = planner.path(0,
         target_inside ? pending(0., 0., 5., 0.) : pending(5., 0., 10., 0.));
@@ -275,7 +303,7 @@ TEST_CASE("Zone planner counts fallback for an endpoint inside only the nozzle m
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {rectangle(4., -2., 2., 4.)}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const bool target_inside = GENERATE(false, true);
     const std::vector<c_point> result = planner.path(0,
         target_inside ? pending(0., 0., 6.1, 0.) : pending(3.9, 0., 10., 0.));
@@ -290,7 +318,7 @@ TEST_CASE("Zone planner accepts real global adhesion provenance without an objec
     Owner owner;
     owner.config.set_deserialize_strict({{"skirts", "2"}, {"brim_width", brim ? "2" : "0"}});
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     owner.print.pipeline_progress().reset();
     Slic3r::Steps::StepExtrusionOrdering::clear(owner.print);
     Slic3r::Steps::StepExtrusionOrdering::prepare(owner.print);
@@ -317,7 +345,7 @@ TEST_CASE("Zone planner accepts real global adhesion provenance without an objec
     FixedZones contributor;
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     REQUIRE(compatibility.endpoint_enables_avoidance(object));
     CHECK_FALSE(compatibility.endpoint_enables_avoidance(auxiliary));
     CHECK(planner.eligible(auxiliary, object));
@@ -327,9 +355,70 @@ TEST_CASE("Zone planner accepts real global adhesion provenance without an objec
     invalid.printing_catalog_id = uint32_t(owner.plan.object_instance_count());
     CHECK(planner.eligible(invalid, object));
     zones::ZonePlanner disabled_defaults(compatibility, view,
-        owner.settings(), false, &owner.context, owner.print_view, owner.cache);
+        owner.settings(), false, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     CHECK_FALSE(disabled_defaults.eligible(auxiliary, auxiliary));
     CHECK(disabled_defaults.eligible(auxiliary, object));
+    REQUIRE(ac::is_off_object_layer(auxiliary.region_island.region(0).layer()));
+    const Slic3r::BoundingBox box = owner.print.object(0).layers().back().lslices().front().contour.bounding_box();
+    travel::PendingTravel gap;
+    gap.source = gap.target = auxiliary;
+    gap.source.position = {box.min.x() + shift.x - Slic3r::scale_i(2.), local.y() + shift.y, Slic3r::scale_i(0.6), true};
+    gap.target.position = {box.max.x() + shift.x + Slic3r::scale_i(2.), local.y() + shift.y, Slic3r::scale_i(0.6), true};
+    const work::ExPolygons blockers = ac::platter_blockers(owner.context.plugin_storage, owner.plan, 0, Slic3r::scale_i(0.6));
+    REQUIRE_FALSE(blockers.empty());
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() > 2);
+    CHECK(planner.domain_routes() == 0);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(route, blockers, owner.storage);
+}
+
+// Outside endpoints never attach to nearby domains; platter geometry is cached separately from in-part hypotheses on the same chord.
+TEST_CASE("Zone planner routes regionless travels around platter parts without domain attachments", "[plugins][zone-planner]")
+{
+    Owner owner;
+    owner.slice();
+    Slic3r::Printing::PrintingPlan &plan = owner.print.mutable_printing_plan();
+    plan.groups.resize(1);
+    plan.groups.front().printing_catalog_ids.clear();
+    for (size_t instance = 0; instance < 2; ++instance)
+        plan.groups.front().printing_catalog_ids.push_back(plan.find_or_add_object_instance(owner.print.object(0), instance));
+    const Slic3r::Layer &layer = owner.print.object(0).layers().back();
+    const Slic3r::BoundingBox box = layer.lslices().front().contour.bounding_box();
+    const c_point shift = owner.print_view.object(0).instance_shift(0);
+    const double x = Slic3r::unscaled(box.min.x() + shift.x), y = Slic3r::unscaled(box.min.y() + shift.y);
+    const travel::PendingTravel outside = pending(x - 2., y + 10., x + 22., y + 10.);
+    const travel::PendingTravel inside = owner.in_part(outside);
+    REQUIRE(owner.plan.group_count() == 1);
+    REQUIRE(owner.plan.group(0).object_instance_count() == 2);
+    REQUIRE(owner.plan.object_instance_count() == 2);
+    REQUIRE(owner.plan.object_instance(0).has_object());
+    const slic3r_api::Object object_view = owner.plan.object_instance(0).object();
+    REQUIRE(object_view.layer_count() > 0);
+    INFO("blocker z=" << layer.scaled_print_z() << " first=" << object_view.layer(0).print_z()
+        << " last=" << object_view.layer(object_view.layer_count() - 1).print_z());
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(x - 3., y - 3., 26., 26.)}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, layer.scaled_print_z());
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, layer.scaled_print_z());
+    const work::ExPolygons blockers = ac::platter_blockers(owner.context.plugin_storage, owner.plan, 0, layer.scaled_print_z());
+    REQUIRE_FALSE(blockers.empty());
+    const std::vector<c_point> route = planner.path(0, outside);
+    REQUIRE(route.size() > 2);
+    CHECK(planner.domain_routes() == 0);
+    check_clear(route, blockers, owner.storage);
+    CHECK(planner.path(1, inside).size() == 2);
+    CHECK(planner.domain_routes() == 1);
+    const std::vector<c_point> repeated = planner.path(2, outside);
+    REQUIRE(repeated.size() == route.size());
+    for (size_t i = 0; i < route.size(); ++i) {
+        CHECK(repeated[i].x == route[i].x);
+        CHECK(repeated[i].y == route[i].y);
+    }
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
 }
 
 TEST_CASE("Zone planner applies auxiliary eligibility detour budgets and cancellation", "[plugins][zone-planner]")
@@ -348,7 +437,7 @@ TEST_CASE("Zone planner applies auxiliary eligibility detour budgets and cancell
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
     const slic3r_api::Config defaults(print_get_default_region_config(owner.print_view.handle()));
     const bool auxiliary_avoidance = defaults.bool_or_default("avoid_crossing_perimeters", false);
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), auxiliary_avoidance, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), auxiliary_avoidance, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const travel::PendingTravel gap = pending(0., 0., 10., 0.);
     CHECK(planner.eligible(gap.source, gap.target) == enabled);
     CHECK(zones::ZonePlanner::eligible(compatibility, owner.settings(), auxiliary_avoidance,
@@ -382,7 +471,7 @@ TEST_CASE("Default top contributors retain other tops when an endpoint occupies 
     object->ensure_on_bed();
     owner.config.set_deserialize_strict({{"avoid_crossing_top", "1"}});
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
     Slic3r::Layer &layer = owner.print.object(0).layers()[2];
     const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
@@ -432,7 +521,7 @@ TEST_CASE("Default top contributors retain other tops when an endpoint occupies 
     REQUIRE(containing_source == size_t(use_tops));
     REQUIRE(other_tops.size() == size_t(use_tops));
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(planner.detours() == size_t(use_tops));
     CHECK(planner.domain_routes() == size_t(use_attractors));
@@ -453,7 +542,7 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
     // Keep a perimeter band wider than the crossing test's 1.5-nozzle-radius inset, independently of the perimeter generator.
     owner.config.set_deserialize_strict("external_perimeter_extrusion_width", "0.8");
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
     Slic3r::Layer &layer = owner.print.object(0).layers().back();
     const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
@@ -472,7 +561,7 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
     CHECK(view.query(0, gap).forbidden_indexes.empty());
     REQUIRE_FALSE(view.query(0, gap).attractors.empty());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> expected = compatibility.path(gap.source, gap.target, 0);
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(compatibility.avoidance_enabled(gap.source, gap.target));
@@ -493,7 +582,7 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
 TEST_CASE("Zone planner routes shifted domains but forbidden material wins", "[plugins][zone-planner]")
 {
     Owner owner;
-    owner.print.process();
+    owner.slice();
     owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
     Slic3r::Layer &layer = owner.print.object(0).layers().back();
     const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
@@ -533,7 +622,7 @@ TEST_CASE("Zone planner routes shifted domains but forbidden material wins", "[p
     if (forbidden) contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     REQUIRE(compatibility.avoidance_enabled(gap.source, gap.target));
     REQUIRE(planner.eligible(gap.source, gap.target));
     if (separate_attractors) {
@@ -580,11 +669,11 @@ TEST_CASE("Zone planner routes shifted domains but forbidden material wins", "[p
     Slic3r::DynamicPrintConfig first_settings = owner.config;
     first_settings.set_deserialize_strict({{"avoid_crossing_not_first_layer", "1"}});
     const slic3r_api::Config first_excluded(Slic3r::ApiHost::to_config_handle(&first_settings));
-    zones::ZonePlanner excluding(compatibility, view, first_excluded, true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner excluding(compatibility, view, first_excluded, true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     CHECK_FALSE(excluding.eligible(auxiliary, first_target));
     CHECK(excluding.eligible(first_target, auxiliary));
 }
-// Exercise domain containment and endpoint attachment without introducing object provenance.
+// Exercise synthetic domain containment and attachments using real normal-layer provenance.
 TEST_CASE("Zone planner retains interior points and attaches nearby free endpoints", "[plugins][zone-planner]")
 {
     Owner owner;
@@ -605,10 +694,11 @@ TEST_CASE("Zone planner retains interior points and attaches nearby free endpoin
         contributor.areas.push_back({zones::ZoneRole::Forbidden, {rectangle(4., 4., 2., 2.)}, 0, SIZE_MAX, {}});
         direct = false;
     }
+    gap = owner.in_part(gap);
     contributor.areas.push_back({zones::ZoneRole::Attractor, {domain}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() >= 2);
     CHECK(route.front().x == gap.source.position.x);
@@ -646,14 +736,14 @@ TEST_CASE("Zone planner retains interior points and attaches nearby free endpoin
 TEST_CASE("Zone planner accepts a safe domain route without a usable reference", "[plugins][zone-planner]")
 {
     Owner owner;
+    const travel::PendingTravel gap = owner.in_part(pending(3.9, 0., 10., 0.));
     const work::ExPolygon obstacle = rectangle(4., -2., 2., 4.);
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(-2., -5., 14., 10.)}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
-    const travel::PendingTravel gap = pending(3.9, 0., 10., 0.);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() > 2);
     CHECK(route.front().x == gap.source.position.x);
@@ -685,7 +775,7 @@ TEST_CASE("Zone planner ranks perimeter neighbours by weight and retries after t
     owner.config.set_deserialize_strict("avoid_travel_island", "1");
     owner.config.set_deserialize_strict("avoid_travel_island_weight", weight);
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&owner.print.object(0).layers().back()));
     travel::PendingTravel gap = pending(-0.1, 2., target_on_perimeter ? 0. : -0.1, 8.);
     gap.source.region_island = layer.island(0).get_or_create_full_region_island(0);
@@ -696,7 +786,7 @@ TEST_CASE("Zone planner ranks perimeter neighbours by weight and retries after t
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 10., 10.)}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() >= 2);
     CHECK(route.front().x == gap.source.position.x);
@@ -736,7 +826,7 @@ TEST_CASE("Zone planner contours a blocked bridge above a clear chord", "[plugin
     Owner owner;
     const work::ExPolygons domains{rectangle(-1., 0.5, 2., 2.), rectangle(9., 0.5, 2., 2.)};
     const work::ExPolygon obstacle = rectangle(4., 0.25, 2., 0.5);
-    const travel::PendingTravel gap = pending(0., 0., 10., 0.);
+    const travel::PendingTravel gap = owner.in_part(pending(0., 0., 10., 0.));
     const coord_t spacing = Slic3r::scale_i(0.4);
     ac::Boundary boundary;
     ac::build_boundary(owner.context.plugin_storage, work::ExPolygons(domains), 2 * spacing, boundary);
@@ -754,7 +844,7 @@ TEST_CASE("Zone planner contours a blocked bridge above a clear chord", "[plugin
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() > 2);
     CHECK(route.front().x == gap.source.position.x);
@@ -771,19 +861,20 @@ TEST_CASE("Zone planner contours a blocked bridge above a clear chord", "[plugin
 TEST_CASE("Zone planner caches domains separately for ignored forbidden sets", "[plugins][zone-planner]")
 {
     Owner owner;
+    owner.in_part(pending(0., 0., 10., 0.));
     FixedZones contributor;
     const work::ExPolygon obstacle = rectangle(4., -2., 2., 4.);
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(-2., -5., 14., 10.)}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
-    CHECK(planner.path(0, pending(5., 0., 10., 0.)).size() == 2);
-    const std::vector<c_point> route = planner.path(1, pending(0., 0., 10., 0.));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    CHECK(planner.path(0, owner.in_part(pending(5., 0., 10., 0.))).size() == 2);
+    const std::vector<c_point> route = planner.path(1, owner.in_part(pending(0., 0., 10., 0.)));
     REQUIRE(route.size() > 2);
     check_clear(route, {obstacle}, owner.storage);
-    CHECK(planner.path(2, pending(5., 0., 10., 0.)).size() == 2);
-    const std::vector<c_point> larger = planner.path(3, pending(0., 0., 10., 0., 1));
+    CHECK(planner.path(2, owner.in_part(pending(5., 0., 10., 0.))).size() == 2);
+    const std::vector<c_point> larger = planner.path(3, owner.in_part(pending(0., 0., 10., 0., 1)));
     REQUIRE(larger.size() > 2);
     check_clear(larger, {obstacle}, owner.storage);
     coord_t small_extent = 0, large_extent = 0;
@@ -804,19 +895,20 @@ TEST_CASE("Zone planner applies budgets eligibility and cancellation to domain p
     SECTION("Disabled avoidance") { enabled = false; owner.config.set_deserialize_strict("avoid_crossing_perimeters", "0"); }
     SECTION("Cancelled domain construction") { cancelled = true; }
     owner.print.apply(owner.model, owner.config);
+    const travel::PendingTravel gap = owner.in_part(pending(2., 5., 8., 5.));
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 10., 10.)}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {rectangle(4., 4., 2., 2.)}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), enabled, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), enabled, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     if (cancelled) {
         owner.checks = 0;
         owner.cancel_at = 3;
-        CHECK_THROWS_AS(planner.path(0, pending(2., 5., 8., 5.)), slic3r_api::PluginCancelled);
+        CHECK_THROWS_AS(planner.path(0, gap), slic3r_api::PluginCancelled);
         return;
     }
-    const std::vector<c_point> route = planner.path(0, pending(2., 5., 8., 5.));
+    const std::vector<c_point> route = planner.path(0, gap);
     CHECK((route.size() > 2) == (enabled && !reject));
     CHECK(planner.fallbacks() == size_t(reject));
     CHECK(planner.domain_routes() == size_t(enabled && !reject));
@@ -827,13 +919,13 @@ TEST_CASE("Zone planner rejects a blocked attachment and accepts the clear chord
 {
     Owner owner;
     const work::ExPolygon obstacle = rectangle(-0.1, 0.25, 0.2, 0.01);
-    const travel::PendingTravel gap = pending(0., 0., 10., 0.);
+    const travel::PendingTravel gap = owner.in_part(pending(0., 0., 10., 0.));
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(-1., 0.5, 2., 2.)}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() == 2);
     CHECK(route.front().x == gap.source.position.x);
@@ -861,12 +953,13 @@ TEST_CASE("Zone planner contours bridges starting and ending on expanded forbidd
         gap = pending(2., -1., 18., 1.);
         vertex = true;
     }
+    gap = owner.in_part(gap);
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, attractors, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(planner.bridges() == 1);
     CHECK(planner.domain_routes() == 1);
@@ -886,7 +979,7 @@ TEST_CASE("Zone planner contours bridges starting and ending on expanded forbidd
     FixedZones reference_contributor;
     reference_contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView reference_view({std::cref(reference_contributor)}, owner.input());
-    zones::ZonePlanner reference_planner(compatibility, reference_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner reference_planner(compatibility, reference_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     work::Polyline path, reference;
     for (const c_point &point : route) path.points.emplace_back(point);
     for (const c_point &point : reference_planner.path(0, gap)) reference.points.emplace_back(point);
@@ -906,7 +999,7 @@ TEST_CASE("Zone planner contours selected bridges between component ring routes"
     owner.config.set_deserialize_strict("avoid_travel_island", "1");
     owner.config.set_deserialize_strict("avoid_travel_island_weight", std::to_string(weight));
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&owner.print.object(0).layers().back()));
     travel::PendingTravel gap = pending(0.2, 1., 15.2, 9.);
     gap.source.region_island = gap.target.region_island = layer.island(0).get_or_create_full_region_island(0);
@@ -933,7 +1026,7 @@ TEST_CASE("Zone planner contours selected bridges between component ring routes"
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK(planner.fallbacks() == 0);
     CHECK(planner.domain_routes() == 1);
@@ -959,7 +1052,7 @@ TEST_CASE("Zone planner contours selected bridges between component ring routes"
     FixedZones only_obstacle;
     only_obstacle.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView reference_view({std::cref(only_obstacle)}, owner.input());
-    zones::ZonePlanner reference_planner(compatibility, reference_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner reference_planner(compatibility, reference_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     work::Polyline reference;
     for (const c_point &point : reference_planner.path(0, gap)) reference.points.emplace_back(point);
     REQUIRE(reference_planner.fallbacks() == 0);
@@ -974,12 +1067,12 @@ TEST_CASE("Zone planner connects a far free endpoint through the nearest compone
 {
     Owner owner;
     const bool reverse = GENERATE(false, true);
-    const travel::PendingTravel gap = reverse ? pending(20., 9., 2., 9.) : pending(2., 9., 20., 9.);
+    const travel::PendingTravel gap = owner.in_part(reverse ? pending(20., 9., 2., 9.) : pending(2., 9., 20., 9.));
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 5., 10.)}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     REQUIRE(route.size() >= 3);
     CHECK(route.front().x == gap.source.position.x);
@@ -997,6 +1090,8 @@ TEST_CASE("Zone planner connects a far free endpoint through the nearest compone
 TEST_CASE("Zone planner skips an unavailable bridge and tries a mixed hypothesis", "[plugins][zone-planner]")
 {
     Owner owner;
+    owner.config.set_deserialize_strict("avoid_travel_island_weight", "0");
+    owner.print.apply(owner.model, owner.config);
     work::ExPolygon outer = rectangle(0., 0., 20., 20.);
     work::Polygon bent_hole;
     for (const std::pair<double, double> &point : {std::pair<double, double>{2., 2.}, {18., 2.}, {18., 4.}, {4., 4.}, {4., 18.}, {2., 18.}})
@@ -1007,7 +1102,7 @@ TEST_CASE("Zone planner skips an unavailable bridge and tries a mixed hypothesis
     outer.holes = {bent_hole, near_hole};
     const work::ExPolygons domains = slic3r_api::PluginCommon::clipper::union_ex(owner.context.plugin_storage,
         {outer, rectangle(11., 11., 2., 2.)});
-    const travel::PendingTravel gap = pending(15., 12., 12., 12.);
+    const travel::PendingTravel gap = owner.in_part(pending(15., 12., 12., 12.));
     ac::Boundary boundary;
     ac::build_boundary(owner.context.plugin_storage, work::ExPolygons(domains), Slic3r::scale_i(0.8), boundary);
     size_t source_component = SIZE_MAX, target_component = SIZE_MAX, ring = 0;
@@ -1025,7 +1120,7 @@ TEST_CASE("Zone planner skips an unavailable bridge and tries a mixed hypothesis
     contributor.areas.push_back({zones::ZoneRole::Attractor, domains, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK(planner.bridges() == 0);
     CHECK(planner.domain_routes() == 1);
@@ -1047,18 +1142,20 @@ TEST_CASE("Zone planner constructs bridges and validates forbidden material", "[
     // Zero interior weight keeps the two-domain bridge competitive with the chord without a domain.
     owner.config.set_deserialize_strict("avoid_travel_island_weight", "0");
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     const slic3r_api::Layer layer(reinterpret_cast<const layer_handle *>(&owner.print.object(0).layers().back()));
     travel::PendingTravel gap = pending(2., 2., 18., 8.);
     gap.target.region_island = layer.island(0).get_or_create_full_region_island(0);
     gap.target.printing_catalog_id = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), 0);
+    gap.source.region_island = gap.target.region_island;
+    gap.source.printing_catalog_id = gap.target.printing_catalog_id;
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 5., 10.), rectangle(15., 0., 5., 10.)}, 0, SIZE_MAX, {}});
     const work::ExPolygon obstacle = rectangle(9., -1., 2., 12.);
     if (forbidden) contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK(planner.bridges() == 1);
     CHECK(planner.fallbacks() == 0);
@@ -1086,7 +1183,7 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
         {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"},
         {"nozzle_diameter", "0.4"}});
     owner.print.apply(owner.model, owner.config);
-    owner.print.process();
+    owner.slice();
     owner.plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&owner.print.mutable_printing_plan()));
     Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
     owner.print.pipeline_progress().reset();
@@ -1122,7 +1219,7 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
             zones::ZoneContributorInput real_input = owner.input();
             real_input.print_z = plan.groups[g].layers[l].print_z;
             zones::TravelZoneView real_view({std::cref(real_contributor)}, real_input);
-            zones::ZonePlanner real_planner(real_compatibility, real_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+            zones::ZonePlanner real_planner(real_compatibility, real_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, g, layer_view.print_z());
             for (size_t t = 0; t < chronology.travels.size(); ++t) {
                 const travel::PendingTravel &gap = chronology.travels[t];
                 if (!gap.source_extrusion.valid() ||
@@ -1205,6 +1302,8 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
     gap.target.position.x += minimum.x() + shift.x;
     gap.target.position.y += minimum.y() + shift.y;
     gap.source_extrusion = gap.target_extrusion = support;
+    gap.source.region_island = gap.target.region_island = support.region_island();
+    gap.source.printing_catalog_id = gap.target.printing_catalog_id = support.printing_catalog_id();
     if (target_object) {
         const slic3r_api::Layer view(reinterpret_cast<const layer_handle *>(&layer));
         gap.target.printing_catalog_id = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), 1);
@@ -1214,22 +1313,39 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
         REQUIRE(gap.target.region_island.valid());
         gap.target_extrusion = slic3r_api::PrintingExtrusion(nullptr);
     }
-    zones::TravelZoneView view({std::cref(contributor)}, input);
+    FixedZones domain_contributor;
+    if (target_object)
+        for (const zones::TravelZone &zone : exact)
+            if (zone.area.front().contains({gap.target.position.x, gap.target.position.y}))
+                domain_contributor.areas.push_back({zones::ZoneRole::Attractor,
+                    slic3r_api::PluginCommon::clipper::offset_ex(owner.context.plugin_storage, zone.area, -double(Slic3r::scale_i(0.4))),
+                    0, SIZE_MAX, {}});
+    const bool reverse = GENERATE(false, true);
+    if (reverse) {
+        std::swap(gap.source, gap.target);
+        std::swap(gap.source_extrusion, gap.target_extrusion);
+    }
+    zones::TravelZoneView view({std::cref(contributor), std::cref(domain_contributor)}, input);
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache);
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     REQUIRE(planner.eligible(gap.source, gap.target));
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(result.size() > 2);
     CHECK(planner.fallbacks() == 0);
+    CHECK(planner.domain_routes() == size_t(target_object));
     work::ExPolygons obstacles;
     for (const zones::TravelZone &zone : exact)
-        if (!zone.area.front().contains({gap.target.position.x, gap.target.position.y}))
+        if (!zone.area.front().contains({gap.target.position.x, gap.target.position.y}) &&
+            !zone.area.front().contains({gap.source.position.x, gap.source.position.y}))
             obstacles.push_back(zone.area.front());
     REQUIRE(obstacles.size() == (target_object ? 3 : 4));
     check_clear(result, obstacles, owner.storage);
     gap.source_extrusion = gap.target_extrusion = slic3r_api::PrintingExtrusion(nullptr);
     CHECK(view.query(1, gap).forbidden_indexes.empty());
-    CHECK(planner.path(1, gap).size() == 2);
+    const std::vector<c_point> platter_only = planner.path(1, gap);
+    REQUIRE(platter_only.size() > 2);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(platter_only, obstacles, owner.storage);
     // Removing a catalog entry must not create zones for its still-existing object instance.
     REQUIRE(plan.object_instances.size() == 2);
     plan.object_instances.pop_back();

@@ -4,7 +4,8 @@
 /*
 ZonePlanner supplies platter-space XY routes to travel providers. Construct one
 per worker with a compatibility planner, dated zone view, a copied Config view,
-the borrowed Print and worker LayerInputCache, and a live run context. These
+the borrowed Print, PrintingPlan and worker LayerInputCache, layer-group index/Z,
+and a live run context. These
 borrowed inputs must outlive the planner. Pass Print::config() for print settings and resolve the
 auxiliary avoidance flag from print_get_default_region_config(). The flag governs
 travels whose two endpoints have no valid object instance, such as skirt and brim.
@@ -17,19 +18,28 @@ with the planner's settings. Dependencies and context storage must outlive this 
 Attractors form a routing domain after expanded forbidden material is removed.
 The planner borrows the print and worker layer-input cache to resolve spacing and
 island-jump settings. It owns geometry cached by active set, tool, ignored zones
-and spacing. Each endpoint offers its containing component (or nearest within
-1.5 spacings) and an option without a domain. Outside endpoints attach at the
-nearest ring point; contained endpoints remain unchanged. Candidate pairs are
+and spacing. Outside-part and mixed travels also use slices of the plan's objects
+at the group Z or below, from groups up to the current one; the synthetic wipe
+tower is not a blocker. Their containing endpoint components
+are ignored before expansion; the cache additionally keys group, Z and ignored
+platter components. The plan catalog and object slices remain immutable during use.
+A normal object-layer endpoint offers its containing component (or nearest within
+1.5 spacings) and an option without a domain. An endpoint outside its chosen component
+attaches at the nearest ring point; contained endpoints remain unchanged. Regionless
+or auxiliary-layer endpoints (support, raft, skirt, brim, tower) are outside the part
+and offer only the option without a domain. Candidate pairs are
 ranked by estimated outside length plus weighted inside length, with stable ties.
 Inside estimates use weighted chord length wholly inside their component;
 endpoint attachments within 1.5 spacings are likewise priced as inside material;
 other connectors use clipped inside and outside portions across all components.
+An outside-part endpoint's connector counts its full length without a domain penalty
+or an inside weight in the estimate.
 Same-component paths use that component alone. Paths between distinct components
 reach selected bridge points within each one and contour forbidden obstacles on the bridge.
 Mixed choices use the nearest ring exit/entry to the free endpoint and contour
 obstacles on the remaining connector. Estimates and routes share selected points.
 The option without domains follows expanded obstacle contours.
-If both endpoints have the same domain candidate, that option requires its chord to stay
+For in-part travels whose endpoints have the same domain candidate, that option requires its chord to stay
 within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length allowance.
 Every route is checked against original forbidden material, exact endpoints and
 the complete-path detour budget. Its actual outside-domain length cannot exceed
@@ -41,6 +51,7 @@ outside-length bound. Rejection tries the next hypothesis, then counts one strai
 #define slic3r_plugins_advanced_zone_planner_hpp_
 
 #include <map>
+#include <optional>
 #include <tuple>
 
 #include "TravelZones.hpp"
@@ -54,11 +65,12 @@ namespace AdvancedTravel {
 class ZonePlanner
 {
 public:
-    // Copy the Config view and the auxiliary flag; borrow its configuration, the print, worker-local planners, input cache, zones and cancellation storage.
-    // The borrowed Print and worker LayerInputCache must outlive this planner, as must its other dependencies.
+    // Copy the Config view, the auxiliary flag and layer-group identity/Z; borrow its configuration, the print, plan, worker-local planners, cache, zones and run context.
+    // Borrowed dependencies outlive this planner; the plan catalog and object slices stay unchanged while cached platter blockers are used.
     ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
                 const Config &print_config, bool auxiliary_avoidance, const plugin_run_context *context,
-                const Print &print, AvoidCrossing::LayerInputCache &layer_inputs);
+                const Print &print, AvoidCrossing::LayerInputCache &layer_inputs,
+                const PrintingPlan &plan, uint32_t group_idx, coord_t print_z);
     // Evaluate eligibility without constructing zones; settings and planner are borrowed for this call.
     static bool eligible(const AvoidCrossing::CompatibilityPlanner &compatibility, const Config &print_config,
                          bool auxiliary_avoidance, const TravelConnection::TravelEndpoint &source,
@@ -95,7 +107,9 @@ private:
         std::vector<size_t> component_rings;
         std::unique_ptr<AvoidCrossing::Boundary> domain;
     };
-    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t>;
+    // Present only for travels using slices of the immutable plan's objects; retain group, Z and ignored component identities.
+    using PlatterKey = std::tuple<uint32_t, coord_t, std::vector<size_t>>;
+    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t, std::optional<PlatterKey>>;
     AvoidCrossing::CompatibilityPlanner &m_compatibility;
     TravelZoneView &m_zones;
     Config m_config;
@@ -103,6 +117,13 @@ private:
     const plugin_run_context *m_context;
     const Print &m_print;
     AvoidCrossing::LayerInputCache &m_layer_inputs;
+    // One immutable plan/group/Z geometry context per worker callback.
+    const PrintingPlan &m_plan;
+    uint32_t m_group_idx;
+    coord_t m_print_z;
+    // Original object-slice components are collected once and shared by the tool-specific expanded cache entries.
+    bool m_platter_ready = false;
+    polygon_work::ExPolygons m_platter_blockers;
     std::map<CacheKey, Obstacles> m_obstacles;
     size_t m_domain_routes = 0;
     size_t m_bridges = 0;

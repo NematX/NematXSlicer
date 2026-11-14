@@ -34,6 +34,11 @@ and, when a usable obstacle-only reference exists, actual outside length against
 leave the next choice available; only exhaustion counts a straight fallback.
 Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
 connectors follow expanded forbidden contours between their selected points.
+Endpoints without a region or on auxiliary layers offer no domain attachment.
+Travels touching such endpoints include slices of the plan's objects as forbidden
+components, not the synthetic wipe tower;
+containing components are excluded so mixed travels can reach their in-part endpoint.
+The planner borrows this layer group's plan, index and Z to cache those slices.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
@@ -61,6 +66,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
             `-- ZonePlanner::path: rank domain/obstacle hypotheses and accept the first validated route
+                |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
                 `-- detour_around_forbidden: connect the chord along expanded obstacle contours
 */
 
@@ -331,7 +337,8 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     if (orchestrator_find_plugin(m_orchestrator, k_support_obstacles_id) != nullptr)
         active.push_back(std::cref(support_obstacles));
     zones::TravelZoneView view(active, input);
-    zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs);
+    zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
+        plan, ctx->group_idx, layer_group.print_z());
     size_t t = 0;
     // apply calls this exactly once per PendingTravel, in chronology order.
     const TravelPathPlanner zone_route = [&zone_planner, &chronology, &t](

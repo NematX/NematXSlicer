@@ -12,8 +12,10 @@
 
 /*
 ZonePlanner supplies ranked XY routes on active attractors minus expanded forbidden
-material. Each endpoint chooses its containing component, or the nearest within
-1.5 perimeter spacings, and also offers an option without a domain. An attachment
+material. A normal object-layer endpoint chooses its containing component, or the
+nearest within 1.5 perimeter spacings, and also offers an option without a domain.
+Regionless endpoints and endpoints on auxiliary layers (support, raft, skirt, brim
+and tower) are outside the part and offer only the option without a domain. An attachment
 is the endpoint itself when contained, otherwise the nearest ring point. Stable
 ranking compares estimated outside length plus weighted inside length. The layer's
 island-travel weight applies only when island avoidance is active; otherwise it is zero.
@@ -22,6 +24,8 @@ length is weighted as wholly inside even when that chord spans a void. Other
 estimate connectors use their actual clipped inside and outside portions.
 Endpoint attachments within 1.5 spacings are also estimated as inside material;
 bridges and mixed entry/exit legs retain clipped pricing.
+Legs adjacent to an outside-part endpoint retain their geometric length without
+the inside weight or an outside-domain penalty in the estimate.
 Same-component paths use only that component: the chord between its attachments
 follows the component's rings only where it crosses them.
 Different-component paths join each component's route at bridge points selected
@@ -30,7 +34,7 @@ choice routes within its component to the ring point nearest the free endpoint, 
 contours obstacles to that endpoint. Selected connector points are retained with
 the hypothesis so estimates and constructed routes use the same points.
 The option without either domain follows the chord around expanded obstacles.
-When both endpoints have the same domain candidate, this option is admitted only if its
+For an in-part travel whose endpoints have the same domain candidate, this option is admitted only if its
 chord stays within the material proxy: components grown by 1.5 perimeter spacings,
 cached once with the components. Outside length up to SCALED_EPSILON is allowed.
 Each constructed hypothesis must retain exact endpoints, avoid original forbidden
@@ -44,6 +48,15 @@ accepted choices connecting distinct components count as bridges, and accepted
 paths longer than the chord by SCALED_EPSILON count as detours.
 Endpoint membership removes individual unexpanded zones before union and nozzle
 expansion, so overlapping margins do not erase unrelated obstacles. Cached areas
+also include platter blockers for travels touching outside-part endpoints: translated
+normal slices of the plan's objects at the layer-group Z or below, from printing
+groups up to this group. The synthetic wipe tower is not collected as a blocker.
+Platter components containing either endpoint are ignored individually, leaving
+an in-part endpoint's own component reachable on a mixed travel. The borrowed plan's
+catalog and object slices stay unchanged during this planner's lifetime. Platter
+slices are collected once; cache keys include their group, Z and ignored component
+indexes only for travels using them. The remaining geometry key retains active
+zones, tool, ignored zones and spacing. All cached areas
 belong to this worker. The Config view of print settings is copied, its configuration borrowed;
 the auxiliary avoidance flag is resolved from the default region configuration
 and governs travels whose two endpoints have no valid object instance (skirt and brim).
@@ -69,6 +82,8 @@ Cancellation propagates.
     |-- append_component_path: route within one component between selected points
     |   `-- route_on_boundary: follow crossed rings, else keep the chord; no placement or island jumps
     |-- eligible: resolve regional and auxiliary activation
+    |-- outside_part / is_off_object_layer: classify normal versus auxiliary provenance
+    |-- platter_blockers: collect translated slices for outside-part and mixed travels
     |-- contains: test filled material, including its border
     |-- endpoint_candidates: choose a component and the option without a domain
     |   `-- nearest_point: find a deterministic ring attachment
@@ -97,9 +112,11 @@ struct Hypothesis { Attachment source, target; work::Point exit, entry; double c
 // Epsilon-near points connect directly; no placement or nearby-ring search occurs. Update routing counts; cancellation propagates.
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
     const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts);
-// Inside estimates stand for a route within a component; outside estimates retain their geometric domain intersections.
-enum class EstimateKind { Inside, Outside };
+// Inside estimates stand for a route within a component; Outside retains geometric domain intersections; OutsidePart counts length without a domain penalty or weight.
+enum class EstimateKind { Inside, Outside, OutsidePart };
 struct EstimateSegment { work::Point from, to; EstimateKind kind; };
+// Classify regionless endpoints and endpoints on auxiliary layers as outside the part; normal object layers remain inside.
+bool outside_part(const travel::TravelEndpoint &endpoint);
 // Find the nearest point on any component ring, retaining ring/edge order on equal distances.
 work::Point nearest_point(const work::ExPolygon &component, const work::Point &point);
 // Return the containing component, else the nearest within 1.5 spacings, followed by the option without a domain.
@@ -109,7 +126,7 @@ std::vector<Attachment> endpoint_candidates(const work::ExPolygons &components, 
 // Sum segment lengths after clipping to the complement of the domain; an empty domain leaves the whole path outside.
 double outside_length(const work::Points &points, const work::ExPolygons &domain, const plugin_run_context *context);
 // Score inside estimates as weighted inside length; clip other connectors against all domains before weighting their inside portions.
-// Zero-length segments cost nothing; cancellation propagates per segment.
+// Outside-part legs count their full length without domain penalties; zero-length segments cost nothing. Cancellation propagates per segment.
 double estimate_cost(const std::vector<EstimateSegment> &segments, const work::ExPolygons &domain, double weight, const plugin_run_context *context);
 // Follow shorter outer-contour arcs along the chord through expanded components; return both endpoints, even on failure.
 // Set changed after inserting an arc and failed for a missing arc or exhausted component bound; do not validate original material or count routes. Cancellation propagates.
@@ -128,6 +145,12 @@ bool blocked(const work::Points &points, const work::ExPolygons &areas, const pl
 // Build both outer-contour arcs including the rounded hits, choosing the shorter; hole hits cannot produce a contour route.
 work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const Hit &exit,
                          const plugin_run_context *context);
+
+bool outside_part(const travel::TravelEndpoint &endpoint)
+{
+    return !endpoint.region_island.valid() || endpoint.region_island.region_count() == 0 ||
+        AvoidCrossing::is_off_object_layer(endpoint.region_island.region(0).layer());
+}
 
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
     const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts)
@@ -223,6 +246,7 @@ double estimate_cost(const std::vector<EstimateSegment> &segments, const work::E
         throw_if_cancelled(context);
         if (segment.from == segment.to) continue;
         const double length = segment.from.distance_to(segment.to);
+        if (segment.kind == EstimateKind::OutsidePart) { cost += length; continue; }
         const double outside = segment.kind == EstimateKind::Inside ? 0. :
             outside_length({segment.from, segment.to}, domain, context);
         cost += outside + weight * (length - outside);
@@ -347,9 +371,11 @@ work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const H
 
 ZonePlanner::ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
                          const Config &print_config, const bool auxiliary_avoidance, const plugin_run_context *context,
-                         const Print &print, AvoidCrossing::LayerInputCache &layer_inputs) :
+                         const Print &print, AvoidCrossing::LayerInputCache &layer_inputs,
+                         const PrintingPlan &plan, const uint32_t group_idx, const coord_t print_z) :
     m_compatibility(compatibility), m_zones(zones), m_config(print_config),
-    m_auxiliary_avoidance(auxiliary_avoidance), m_context(context), m_print(print), m_layer_inputs(layer_inputs)
+    m_auxiliary_avoidance(auxiliary_avoidance), m_context(context), m_print(print), m_layer_inputs(layer_inputs),
+    m_plan(plan), m_group_idx(group_idx), m_print_z(print_z)
 {}
 
 bool ZonePlanner::eligible(const travel::TravelEndpoint &source, const travel::TravelEndpoint &target) const
@@ -381,6 +407,8 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     const work::Point source(pending.source.position.x, pending.source.position.y);
     const work::Point target(pending.target.position.x, pending.target.position.y);
     if (source.coincides_with_epsilon(target)) return direct;
+    const bool source_outside = outside_part(pending.source), target_outside = outside_part(pending.target);
+    const bool use_platter = source_outside || target_outside;
     coord_t spacing = scale_i(m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4));
     double jump_weight = 0.;
     for (const travel::TravelEndpoint *endpoint : {&pending.target, &pending.source}) {
@@ -402,7 +430,22 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         const work::ExPolygons &area = m_zones.zone_area(index);
         if (contains(area, source) || contains(area, target)) ignored.push_back(index);
     }
-    const CacheKey key(active.id, pending.extruder_id, ignored, spacing);
+    std::vector<size_t> ignored_platter;
+    std::optional<PlatterKey> platter_key;
+    if (use_platter) {
+        if (!m_platter_ready) {
+            m_platter_blockers = AvoidCrossing::platter_blockers(m_context->plugin_storage, m_plan, m_group_idx, m_print_z);
+            throw_if_cancelled(m_context);
+            m_platter_ready = true;
+        }
+        for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+            throw_if_cancelled(m_context);
+            if (m_platter_blockers[component].contains(source) || m_platter_blockers[component].contains(target))
+                ignored_platter.push_back(component);
+        }
+        platter_key = PlatterKey(m_group_idx, m_print_z, ignored_platter);
+    }
+    const CacheKey key(active.id, pending.extruder_id, ignored, spacing, platter_key);
     std::map<CacheKey, Obstacles>::iterator cached = m_obstacles.find(key);
     if (cached == m_obstacles.end()) {
         Obstacles obstacles;
@@ -412,6 +455,12 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             const work::ExPolygons &area = m_zones.zone_area(index);
             obstacles.original.insert(obstacles.original.end(), area.begin(), area.end());
         }
+        if (use_platter)
+            for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+                throw_if_cancelled(m_context);
+                if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component))
+                    obstacles.original.push_back(m_platter_blockers[component]);
+            }
         if (!obstacles.original.empty()) {
             obstacles.original = clipper::union_ex(m_context->plugin_storage, obstacles.original);
             const coord_t radius = std::max<coord_t>(1, scale_i(m_config.vector_float_or_default(
@@ -440,15 +489,17 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         cached = m_obstacles.emplace(key, std::move(obstacles)).first;
     }
     const Obstacles &obstacles = cached->second;
-    const std::vector<Attachment> sources = endpoint_candidates(obstacles.components, source, spacing, m_context);
-    const std::vector<Attachment> targets = endpoint_candidates(obstacles.components, target, spacing, m_context);
+    const std::vector<Attachment> sources = source_outside ? std::vector<Attachment>{{SIZE_MAX, source}} :
+        endpoint_candidates(obstacles.components, source, spacing, m_context);
+    const std::vector<Attachment> targets = target_outside ? std::vector<Attachment>{{SIZE_MAX, target}} :
+        endpoint_candidates(obstacles.components, target, spacing, m_context);
     std::vector<Hypothesis> hypotheses;
     for (const Attachment &from : sources)
         for (const Attachment &to : targets) {
             throw_if_cancelled(m_context);
-            // Endpoint layer provenance is not classified here; matching component candidates stand for a travel within one part.
             // Within one component, the option without a domain may cut only within the grown material proxy.
             if (from.component == SIZE_MAX && to.component == SIZE_MAX &&
+                !source_outside && !target_outside &&
                 sources.front().component != SIZE_MAX && sources.front().component == targets.front().component &&
                 outside_length({source, target}, obstacles.material_proxy, m_context) > SCALED_EPSILON) continue;
             // Endpoint attachments within the selection tolerance cross perimeter material, so estimate them as inside legs.
@@ -471,13 +522,14 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             } else if (from.component != SIZE_MAX && to.component == SIZE_MAX) {
                 exit = nearest_point(obstacles.components[from.component], target);
                 estimate.push_back({from.point, exit, EstimateKind::Inside});
-                estimate.push_back({exit, target, EstimateKind::Outside});
+                estimate.push_back({exit, target, target_outside ? EstimateKind::OutsidePart : EstimateKind::Outside});
             } else if (from.component == SIZE_MAX && to.component != SIZE_MAX) {
                 entry = nearest_point(obstacles.components[to.component], source);
-                estimate.push_back({source, entry, EstimateKind::Outside});
+                estimate.push_back({source, entry, source_outside ? EstimateKind::OutsidePart : EstimateKind::Outside});
                 estimate.push_back({entry, to.point, EstimateKind::Inside});
             } else estimate.push_back({from.point, to.point,
-                from.component == SIZE_MAX ? EstimateKind::Outside : EstimateKind::Inside});
+                from.component != SIZE_MAX ? EstimateKind::Inside :
+                    use_platter ? EstimateKind::OutsidePart : EstimateKind::Outside});
             estimate.push_back({to.point, target, target_kind});
             hypotheses.push_back({from, to, exit, entry, estimate_cost(estimate, obstacles.components, jump_weight, m_context)});
         }
