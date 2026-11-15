@@ -802,6 +802,7 @@ public:
     void update_instance_printable_state_for_object(size_t obj_idx);
     void update_instance_printable_state_for_objects(const std::vector<size_t>& object_idxs);
 
+    // Borrow configuration and refresh preferred arrange spacing without imposing a minimum FFF gap.
     void set_config(const DynamicPrintConfig* config);
     const DynamicPrintConfig *config() const { return m_config; }
     void set_process(BackgroundSlicingProcess* process);
@@ -954,9 +955,12 @@ public:
 
     // the following methods add a snapshot to the undo/redo stack, unless the given string is empty
     // Persist selected model/tower translations with an optional undo snapshot.
+    // Commit moved instances and refresh clearance contours in every By object mode.
     void do_move(const std::string& snapshot_type);
     // Persist selected model or global-tower rotation with an optional snapshot.
+    // Commit rotated instances and refresh their By object clearance contours.
     void do_rotate(const std::string& snapshot_type);
+    // Commit scaled instances and refresh their By object clearance contours.
     void do_scale(const std::string& snapshot_type);
     void do_mirror(const std::string& snapshot_type);
     void do_reset_skew(const std::string& snapshot_type);
@@ -1080,6 +1084,7 @@ public:
     }
 
     // Update FFF clearance geometry only for the effective object mode; optionally rebuild contours.
+    // Refresh drag contours using the full print configuration and its capped height step.
     void update_sequential_clearance(bool force_contours_generation);
     void set_sequential_clearance_as_evaluating() {
         m_sequential_print_clearance.m_evaluating = true;
@@ -1132,6 +1137,7 @@ private:
     void _render_gcode();
     void _render_gcode_cog();
     void _render_selection();
+    // Render the non-blocking clearance overlay for all By object modes when editing permits it.
     void _render_sequential_clearance();
 #if ENABLE_RENDER_SELECTION_CENTER
     void _render_selection_center();
@@ -1179,6 +1185,7 @@ private:
     // Create 3D thick extrusion lines for a skirt and brim.
     // Adds a new Slic3r::GUI::3DScene::Volume to volumes, updates collision with the build_volume.
     // Borrow print adhesion and draw each object's already-projected brim once without extra shifts. Empty geometry is skipped; mesh and allocation failures propagate.
+    // Load adhesion preview geometry, using per-object skirts only in zero-step By object mode.
     void _load_skirt_brim_preview_toolpaths(const BuildVolume &build_volume);
     // Create 3D thick extrusion lines for object forming extrusions.
     // Adds a new Slic3r::GUI::3DScene::Volume to $self->volumes,

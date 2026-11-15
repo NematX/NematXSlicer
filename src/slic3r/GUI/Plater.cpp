@@ -26,6 +26,10 @@ It owns the editable scene and its UI configuration, schedules work through
 BackgroundSlicingProcess, and applies returned progress and preview results.
 The worker owns execution; the canvas and sidebar display its results rather
 than generating a second set of slicing geometry.
+Every FFF validation result synchronizes red clearance contours, including errors
+that clear a previous overlay. Changed or forced validation updates notifications;
+unchanged updates preserve dismissed notices. Clearance has its own notification
+type so support warnings retain their action link. Warnings do not invalidate slicing.
 
 An export action chooses how already-generated commands are delivered. Keep
 that action distinct from starting or invalidating slicing, so cancelling a
@@ -46,6 +50,11 @@ Representative direct calls (branches are not a timeline):
         |-- background_process.schedule_upload()
         |-- background_process.schedule_export()
         `-- this->restart_background_process()
+
+    Plater::priv::update_background_process()
+        |-- background_process.validate() -> collect errors, warnings and contours
+        |-- process_validation_feedback() -> synchronize notifications and contours
+        `-- canvas->set_sequential_print_clearance_contours() -> retain the red overlay
 */
 #include "Plater.hpp"
 #include "libslic3r/Exception.hpp"
@@ -2084,7 +2093,9 @@ struct Plater::priv
     void suppress_snapshots()   { m_prevent_snapshots++; }
     void allow_snapshots()      { m_prevent_snapshots--; }
 
-    void process_validation_warning(const std::vector<std::string>& warning) const;
+    // Synchronize FFF contours even for errors or an empty print; publish notices
+    // by independent type only when requested. Borrowed scene data remains unchanged.
+    void process_validation_feedback(const std::vector<std::string>& warnings, bool update_notifications) const;
 
     bool background_processing_enabled() const { return this->get_config_bool("background_processing"); }
     void update_print_volume_state();
@@ -2107,6 +2118,11 @@ struct Plater::priv
     };
     // returns bit mask of UpdateBackgroundProcessReturnState
     // Apply pending model/configuration data, validate it and refresh the current FFF export action on valid updates.
+    // Apply a local copy and return update-state bits. Every FFF result synchronizes
+    // red clearance contours; changed or forced validation also updates warnings.
+    // Valid data queries cached action information with ordinary-action fallback on
+    // query failure. Print retains configuration; cleanup failure marks data invalid.
+    // QUERY does not retain borrowed model data.
     unsigned int update_background_process(bool force_validation = false, bool postpone_error_messages = false);
     // Restart background processing thread based on a bitmask of UpdateBackgroundProcessReturnState.
     bool restart_background_process(unsigned int state);
@@ -3633,15 +3649,22 @@ void Plater::priv::update_print_volume_state()
     this->q->model().update_print_volume_state(this->bed.build_volume());
 }
 
-void Plater::priv::process_validation_warning(const std::vector<std::string>& warnings) const
+void Plater::priv::process_validation_feedback(const std::vector<std::string>& warnings, bool update_notifications) const
 {
-    if (warnings.empty())
-        notification_manager->close_notification_of_type(NotificationType::ValidateWarning);
+    bool has_generic_warning = false;
+    bool has_clearance_warning = false;
 
-    for (std::string text :  warnings) {
+    for (size_t idx = 0; update_notifications && idx < warnings.size(); ++idx) {
+        std::string text = warnings[idx];
+        const bool clearance = text == "_COPIES_TOO_CLOSE";
+        const NotificationType type = clearance ? NotificationType::SequentialClearanceWarning : NotificationType::ValidateWarning;
+        has_clearance_warning |= clearance;
+        has_generic_warning |= !clearance;
         std::string hypertext = "";
         std::function<bool(wxEvtHandler*)> action_fn = [](wxEvtHandler*){ return false; };
 
+        if (clearance)
+            text = _u8L("Some copies are closer than the extruder clearance; By object may print them together layer by layer.");
         if (text == "_SUPPORTS_OFF") {
             text = _u8L("An object has custom support enforcers which will not be used "
                         "because supports are disabled.")+"\n";
@@ -3661,15 +3684,29 @@ void Plater::priv::process_validation_warning(const std::vector<std::string>& wa
             text = _u8L("Bed temperatures for the used filaments differ significantly.");
 
         notification_manager->push_notification(
-            NotificationType::ValidateWarning,
+            type,
             NotificationManager::NotificationLevel::WarningNotificationLevel,
             _u8L("WARNING:") + "\n" + text, hypertext, action_fn
         );
     }
+    if (update_notifications && !has_generic_warning)
+        notification_manager->close_notification_of_type(NotificationType::ValidateWarning);
+    if (update_notifications && !has_clearance_warning)
+        notification_manager->close_notification_of_type(NotificationType::SequentialClearanceWarning);
+
+    if (printer_technology == ptFFF) {
+        GLCanvas3D* canvas = view3D->get_canvas3d();
+        canvas->reset_sequential_print_clearance();
+        if (!background_process.empty()) {
+            GLCanvas3D::ContoursList contours;
+            contours.contours = background_process.fff_print()->get_sequential_print_clearance_contours();
+            if (!contours.contours.empty())
+                canvas->set_sequential_print_clearance_contours(contours, true);
+        }
+    }
 }
 
 
-// Apply a local model/configuration copy with the validation/error-display flags and return update-state bits; Print retains its own configuration, cleanup failure marks data invalid, and valid FFF data queries cached action information with ordinary-action fallback on query failure. QUERY does not retain borrowed model data.
 unsigned int Plater::priv::update_background_process(bool force_validation, bool postpone_error_messages)
 {
     // bitmap of enum UpdateBackgroundProcessReturnState
@@ -3729,51 +3766,25 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         std::vector<std::string> warnings;
         std::pair<PrintBase::PrintValidationError, std::string> err = this->background_process.validate(&warnings);
         this->get_current_canvas3D()->show_print_warning(false);
+        process_validation_feedback(warnings, true);
         if (err.first == PrintBase::PrintValidationError::pveNone) {
 			notification_manager->set_all_slicing_errors_gray(true);
             notification_manager->close_notification_of_type(NotificationType::ValidateError);
             if (invalidated != Print::APPLY_STATUS_UNCHANGED && background_processing_enabled())
                 return_state |= UPDATE_BACKGROUND_PROCESS_RESTART;
-
-            // Pass a warning from validation and either show a notification,
-            // or hide the old one.
-            process_validation_warning(warnings);
-            if (printer_technology == ptFFF) {
-                GLCanvas3D* canvas = view3D->get_canvas3d();
-                canvas->reset_sequential_print_clearance();
-                canvas->set_as_dirty();
-                canvas->request_extra_frame();
-            }
         }
         else {
             // The print is not valid.
             // Show error as notification.
             notification_manager->push_validate_error_notification(err.second);
             return_state |= UPDATE_BACKGROUND_PROCESS_INVALID;
-            if (printer_technology == ptFFF) {
-                GLCanvas3D* canvas = view3D->get_canvas3d();
-                if (canvas->is_sequential_print_clearance_empty() || canvas->is_sequential_print_clearance_evaluating()) {
-                    GLCanvas3D::ContoursList contours;
-                    contours.contours = background_process.fff_print()->get_sequential_print_clearance_contours();
-                    canvas->set_sequential_print_clearance_contours(contours, true);
-                }
-            }
         }
     }
     else {
         if (invalidated == Print::APPLY_STATUS_UNCHANGED && !background_process.empty()) {
-            if (printer_technology == ptFFF) {
-                // Object manipulation with gizmos may end up in a null transformation.
-                // In this case, we need to trigger the completion of the sequential print clearance contours evaluation 
-                GLCanvas3D* canvas = view3D->get_canvas3d();
-                if (canvas->is_sequential_print_clearance_evaluating()) {
-                    GLCanvas3D::ContoursList contours;
-                    contours.contours = background_process.fff_print()->get_sequential_print_clearance_contours();
-                    canvas->set_sequential_print_clearance_contours(contours, true);
-                }
-            }
             std::vector<std::string> warnings;
             std::pair<PrintBase::PrintValidationError, std::string> err = background_process.validate(&warnings);
+            process_validation_feedback(warnings, false);
             if (err.first != PrintBase::PrintValidationError::pveNone)
                 return return_state;
         }
@@ -3786,7 +3797,7 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
 	//actualizate warnings
 	if (invalidated != Print::APPLY_STATUS_UNCHANGED || background_process.empty()) {
         if (background_process.empty())
-            process_validation_warning(std::vector<std::string>());
+            process_validation_feedback(std::vector<std::string>(), true);
 		actualize_slicing_warnings(*this->background_process.current_print());
         actualize_object_warnings(*this->background_process.current_print());
 		show_warning_dialog = false;

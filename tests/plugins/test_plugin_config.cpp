@@ -3490,16 +3490,18 @@ TEST_CASE("By object rejects steps with zero scaled slice height", "[plugins][pr
     }
 }
 
-// Validate close and separated copies above the printer clearance height, then
-// require an explicit stepped-tower error without changing zero-step validation.
-TEST_CASE("By object step validation checks placement and rejects wipe towers", "[plugins][print-sequence][validate][object-step]")
+// Close and tall copies retain their warning contours without blocking slicing;
+// a height step does not add a wipe-tower validation restriction.
+TEST_CASE("By object clearance warns without rejecting copies or stepped towers", "[plugins][print-sequence][validation][object-step]")
 {
     using namespace Slic3r;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double step = GENERATE(0., 0.5);
+    const bool islands = GENERATE(false, true);
     for (const double distance : {8., 30.}) {
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
-            {"complete_objects_step", "0.5"}, {"extruder_clearance_height", "1"},
+            {"complete_objects_step", std::to_string(step)}, {"complete_islands", islands ? "1" : "0"}, {"extruder_clearance_height", "1"},
             {"extruder_clearance_radius", "10"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
         Model model;
         Print print;
@@ -3508,14 +3510,25 @@ TEST_CASE("By object step validation checks placement and rejects wipe towers", 
         object.instances.front()->set_offset(Vec3d(40., 40., 0.));
         object.add_instance(*object.instances.front())->set_offset(Vec3d(40. + distance, 40., 0.));
         print.apply(model, config);
-        const auto result = print.validate();
-        CAPTURE(distance, result.second);
-        CHECK(result.first == (distance < 10. ? PrintBase::PrintValidationError::pveWrongPosition : PrintBase::PrintValidationError::pveNone));
-        if (distance > 10.) {
-            config.set_deserialize_strict("complete_objects_step", "0");
-            print.apply(model, config);
-            CHECK(print.validate().first == PrintBase::PrintValidationError::pveWrongPosition);
-        }
+        std::vector<std::string> warnings;
+        const auto result = print.validate(&warnings);
+        CAPTURE(step, islands, distance, result.second);
+        CHECK(result.first == PrintBase::PrintValidationError::pveNone);
+        CHECK(std::count(warnings.begin(), warnings.end(), "_COPIES_TOO_CLOSE") == (distance < 10. ? 1 : 0));
+        CHECK(print.get_sequential_print_clearance_contours().empty() == (distance >= 10.));
+        config.set_deserialize_strict("extruder_clearance_radius", "0");
+        config.set_deserialize_strict("extruder_clearance_height", "0");
+        print.apply(model, config);
+        warnings.clear();
+        CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveWrongSettings);
+        CHECK(print.get_sequential_print_clearance_contours().empty());
+        CHECK(warnings.empty());
+        config.set_deserialize_strict("extruder_clearance_height", "1");
+        print.apply(model, config);
+        warnings.clear();
+        CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveNone);
+        CHECK(print.get_sequential_print_clearance_contours().empty());
+        CHECK(warnings.empty());
     }
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(2);
@@ -3527,10 +3540,35 @@ TEST_CASE("By object step validation checks placement and rejects wipe towers", 
     Print print;
     Test::init_print({make_cube(3., 3., 1.)}, print, model, config);
     REQUIRE(print.has_wipe_tower());
-    CHECK(print.validate().second == "A wipe tower is not supported with a positive By object height step.");
+    CHECK(print.validate().first == PrintBase::PrintValidationError::pveNone);
     config.set_deserialize_strict("complete_objects_step", "0");
     print.apply(model, config);
     CHECK(print.validate().second.empty());
+}
+
+// Both messages must reach GUI feedback when supports are disabled and copies
+// need clearance grouping; the support action belongs only to its own notice.
+TEST_CASE("Clearance and disabled-support notices coexist in validation", "[plugins][validation][print-sequence]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0"}, {"extruder_clearance_radius", "10"},
+        {"extruder_clearance_height", "20"}, {"support_material", "0"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
+    Model model;
+    Print print;
+    Test::init_print({make_cube(3., 3., 2.)}, print, model, config);
+    ModelObject &object = model.objects().front();
+    object.instances.front()->set_offset(Vec3d(40., 40., 0.));
+    object.add_instance(*object.instances.front())->set_offset(Vec3d(48., 40., 0.));
+    object.add_volume(make_cube(1., 1., 1.))->set_type(ModelVolumeType::SUPPORT_ENFORCER);
+    print.apply(model, config);
+    std::vector<std::string> warnings;
+    CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveNone);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_SUPPORTS_OFF") == 1);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_COPIES_TOO_CLOSE") == 1);
 }
 
 // Change only the builder on a processed support-enabled print and require all

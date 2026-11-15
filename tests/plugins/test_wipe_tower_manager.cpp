@@ -8,7 +8,7 @@ Wipe manager tests lend a test-only service to the host. The service reports
 real changes between consecutive concrete tool visits and writes one local
 straight line per band. Constructed plans isolate insertion and ownership;
 the sliced-print test exercises the export-side ordering and downstream path.
-Its positive object-step variant checks validation rejection before processing.
+Its positive object-step variant checks validation acceptance only, not export.
 copy_gcode_export_objects, checking owned footprints after real tower generation.
 
 Operation notes:
@@ -19,7 +19,7 @@ Representative direct calls (branches are not a timeline):
     TEST_CASE
         |-- Test::init_print()
         |-- print.apply()
-        |-- print.validate() -> reject a tower with a positive object step
+        |-- print.validate() -> accept a tower with a positive object step, without exporting it
         |-- print.process()
         |-- Steps::StepExtrusionOrdering::run_step()
         |-- Steps::StepGenerateWipeTower::run_step()
@@ -928,7 +928,7 @@ TEST_CASE("Process settings distinguish synthetic wipes from missing real source
 }
 
 // Export two-tool models through shared groups and check tower maintenance;
-// stepped object printing is rejected before processing because it cannot use a tower.
+// the stepped variant checks validation only, without exercising tower export.
 TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code export", "[plugins][wipe-tower]")
 {
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
@@ -964,8 +964,8 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     print.apply(model, config);
     if (parallel) {
         const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
-        CHECK(validation.first == PrintBase::PrintValidationError::pveWrongSettings);
-        CHECK(validation.second == "A wipe tower is not supported with a positive By object height step.");
+        CHECK(validation.first == PrintBase::PrintValidationError::pveNone);
+        CHECK(validation.second.empty());
         return;
     }
     try {

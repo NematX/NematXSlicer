@@ -146,7 +146,7 @@ namespace Slic3r {
 namespace GUI {
 
 namespace {
-// Resolve the builder once without changing the borrowed config; show clearance for By object except a positive island height step.
+// Resolve the borrowed configuration's builder; all By object modes display non-blocking clearance contours.
 bool sequential_clearance_enabled(const PrintConfig &config);
 }
 
@@ -4528,7 +4528,7 @@ void GLCanvas3D::do_move(const std::string& snapshot_type)
     if (tower_moved)
         post_event(Vec3dEvent(EVT_GLCANVAS_WIPETOWER_MOVED, std::move(wipe_tower_origin)));
 
-    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
+    if (current_printer_technology() == ptFFF && sequential_clearance_enabled(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -4617,7 +4617,7 @@ void GLCanvas3D::do_rotate(const std::string& snapshot_type)
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_ROTATED));
 
-    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
+    if (current_printer_technology() == ptFFF && sequential_clearance_enabled(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -4694,7 +4694,7 @@ void GLCanvas3D::do_scale(const std::string& snapshot_type)
     if (!done.empty())
         post_event(SimpleEvent(EVT_GLCANVAS_INSTANCE_SCALED));
 
-    if (current_printer_technology() == ptFFF && print_complete_objects(fff_print()->config())) {
+    if (current_printer_technology() == ptFFF && sequential_clearance_enabled(fff_print()->config())) {
         update_sequential_clearance(true);
         m_sequential_print_clearance.m_evaluating = true;
     }
@@ -5042,8 +5042,12 @@ void GLCanvas3D::update_sequential_clearance(bool force_contours_generation)
     if (force_contours_generation || m_sequential_print_clearance_first_displacement) {
         m_sequential_print_clearance.m_evaluating = false;
         m_sequential_print_clearance.m_hulls_2d_cache.clear();
-        const double clearance_dist = min_object_distance(&fff_print()->default_region_config(), 0);
-        const coordf_t shrink_factor = scale_d(0.5 * clearance_dist - EPSILON);
+        const Print &print = *fff_print();
+        const ConfigOption *step_option = print.full_print_config().option("complete_objects_step");
+        const double step = step_option == nullptr ? 0. : step_option->get_float();
+        const double clearance_height = step > 0. ? std::min(step, config.extruder_clearance_height.value) : 0.;
+        const double clearance_dist = min_object_distance(&print.full_print_config(), clearance_height);
+        const coordf_t shrink_factor = scale_d(0.5 * clearance_dist - BuildVolume::BedEpsilon);
         const coordf_t mitter_limit = scale_d(0.1);
         m_sequential_print_clearance.m_hulls_2d_cache.reserve(m_model->objects().size());
         for (size_t i = 0; i < m_model->objects().size(); ++i) {
@@ -6876,7 +6880,7 @@ void GLCanvas3D::_render_selection()
 
 void GLCanvas3D::_render_sequential_clearance()
 {
-    if (current_printer_technology() != ptFFF || !print_complete_objects(fff_print()->config()))
+    if (current_printer_technology() != ptFFF || !sequential_clearance_enabled(fff_print()->config()))
         return;
 
     if (m_layers_editing.is_enabled())
@@ -8704,9 +8708,7 @@ ModelInstance *get_model_instance(const GLVolume &gl_volume, const ModelObject &
 namespace {
 bool sequential_clearance_enabled(const PrintConfig &config)
 {
-    const ConfigOption *step = config.option("complete_objects_step");
-    const ConfigOption *islands = config.option("complete_islands");
-    return print_by_object(config) && !(step != nullptr && step->get_float() > 0 && islands != nullptr && islands->get_bool());
+    return print_by_object(config);
 }
 }
 

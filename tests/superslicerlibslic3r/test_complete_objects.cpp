@@ -9,7 +9,7 @@
 #include <libslic3r/SVG.hpp>
 
 /*
-Checks whole-object collision clearance and arrangement with generated cube
+Checks whole-object clearance warnings and arrangement with generated cube
 instances. The standalone executable registers both ordering choices so native
 mode checks resolve the same active provider as the production pipeline.
     SCENARIO -> initialize_plan_builders() -> register and finalize the selector
@@ -71,6 +71,7 @@ SCENARIO("Complete objects separatly") {
         config.set_deserialize("brim_width", "0", subst);
 
         std::pair<PrintBase::PrintValidationError, std::string>  result;
+        std::vector<std::string> warnings;
 
         WHEN("2 mm appart") {
 
@@ -84,15 +85,17 @@ SCENARIO("Complete objects separatly") {
             //now with complete_objects
             THEN("complete objects") {
                 config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
-                result = init_print_with_dist(config, 22)->validate();
-                REQUIRE(result.first == PrintBase::PrintValidationError::pveWrongPosition);
+                result = init_print_with_dist(config, 22)->validate(&warnings);
+                REQUIRE(result.first == PrintBase::PrintValidationError::pveNone);
+                REQUIRE(warnings == std::vector<std::string>{"_COPIES_TOO_CLOSE"});
             }
         }
         WHEN("at the limit (~30 mm)") {
             config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
             THEN("(too near)") {
-                result = init_print_with_dist(config, 29.9)->validate();
-                REQUIRE(result.first == PrintBase::PrintValidationError::pveWrongPosition);
+                result = init_print_with_dist(config, 29.9)->validate(&warnings);
+                REQUIRE(result.first == PrintBase::PrintValidationError::pveNone);
+                REQUIRE(warnings == std::vector<std::string>{"_COPIES_TOO_CLOSE"});
             }
             THEN("(ok far)") {
                 result = init_print_with_dist(config, 30.1)->validate();
@@ -104,8 +107,9 @@ SCENARIO("Complete objects separatly") {
             config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
             config.set_deserialize("brim_width", "10", subst);
             THEN("(too near)") {
-                result = init_print_with_dist(config, 39.9)->validate();
-                REQUIRE(result.first == PrintBase::PrintValidationError::pveWrongPosition);
+                result = init_print_with_dist(config, 39.9)->validate(&warnings);
+                REQUIRE(result.first == PrintBase::PrintValidationError::pveNone);
+                REQUIRE(warnings == std::vector<std::string>{"_COPIES_TOO_CLOSE"});
             }
             THEN("(ok far)") {
                 result = init_print_with_dist(config, 40.1)->validate();
@@ -121,8 +125,9 @@ SCENARIO("Complete objects separatly") {
             config.set_deserialize("complete_objects_one_skirt", "0", subst);
             
             THEN("(too near)") {
-                result = init_print_with_dist(config, 40)->validate();
-                REQUIRE(result.first == PrintBase::PrintValidationError::pveWrongPosition);
+                result = init_print_with_dist(config, 40)->validate(&warnings);
+                REQUIRE(result.first == PrintBase::PrintValidationError::pveNone);
+                REQUIRE(warnings == std::vector<std::string>{"_COPIES_TOO_CLOSE"});
             }
             THEN("(ok far)") {
                 result = init_print_with_dist(config, 40.8)->validate();

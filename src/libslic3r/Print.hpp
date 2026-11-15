@@ -247,6 +247,7 @@ public:
     // After apply(), validate placement/settings and selected providers using retained group descriptions; return an owned status/message pair.
     // Append to borrowed warnings when supplied and refresh cached clearance contours without changing registrations.
     // Geometry, plugin-resolution, config-comparison and allocation failures may propagate; no ownership is retained.
+    // Return the first blocking error and append non-blocking clearance warnings when requested.
     std::pair<PrintValidationError, std::string> validate(std::vector<std::string>* warnings = nullptr) const override;
     Flow                brim_flow(extruder_index_t extruder_id, const PrintObjectConfig &brim_config) const;
     Flow                skirt_flow(extruder_index_t extruder_id, bool first_layer=false) const;

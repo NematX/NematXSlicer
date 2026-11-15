@@ -75,6 +75,8 @@ enum class NotificationType
 	ValidateError,
 	// Notification emitted by Print::validate
 	ValidateWarning,
+	// Advisory By object clearance, independent of validation warnings with action links.
+	SequentialClearanceWarning,
 	// Slicing error produced by BackgroundSlicingProcess::validate() or by the BackgroundSlicingProcess background
 	// thread thowing a SlicingError exception.
 	SlicingError,
