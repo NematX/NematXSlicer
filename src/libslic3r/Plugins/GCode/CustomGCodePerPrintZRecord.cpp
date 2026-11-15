@@ -44,6 +44,10 @@ The normal execution flow is:
     `-- assign each marker once to the first PrintingLayerGroup in plan order
         whose print Z is greater than or equal to the marker Z
 
+    color_event_targets()
+    `-- resolve compatible color tools at those locations before tool ordering
+        and reject conflicting targets without changing the plan
+
 `printing_plan_mode()` inspects the original region-island tools of object
 extrusions, rather than substituted plan tools or support and auxiliary tools, to distinguish a true multi-extruder
 plan from a multi-extruder printer operating as a single tool. This distinction
@@ -62,6 +66,12 @@ namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin {
 // first qualifying plan location. Above-plan rows stay unmapped. The table must
 // outlive the result; allocation and plan API failures propagate without mutation.
 CustomGCodePlanRows rows_by_plan(const CustomGCodeTable &table, const ConstPrintingPlan &plan);
+
+// Map rows once and return each layer's required first tool, including converted
+// single-printer ToolChanges. Incompatible modes have no targets. Conflicting
+// color tools, conversion, allocation and API failures propagate without plan mutation.
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count);
 
 // Classify the printer using known tools on the source region islands of object
 // extrusions present in the borrowed plan. Tool overrides leave those sources
@@ -266,6 +276,32 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
                 return true;
     }
     return false;
+}
+
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count)
+{
+    CustomGCodeColorTargets targets(plan.group_count());
+    const CustomGCodePlanRows mapped = rows_by_plan(table, plan);
+    const Slic3r::CustomGCode::Mode record_mode = effective_record_mode(table);
+    const bool compatible = (print_mode == Slic3r::CustomGCode::MultiExtruder) ==
+        (record_mode == Slic3r::CustomGCode::MultiExtruder);
+    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
+        targets[group_idx].resize(plan.group(group_idx).layer_group_count());
+        for (uint32_t layer_idx = 0; compatible && layer_idx < targets[group_idx].size(); ++layer_idx)
+            for (const CustomGCodeRow *row : mapped[group_idx][layer_idx]) {
+                const bool converted = row->type == Slic3r::CustomGCode::ToolChange &&
+                    print_mode == Slic3r::CustomGCode::SingleExtruder && record_mode == Slic3r::CustomGCode::MultiAsSingle;
+                if (row->type != Slic3r::CustomGCode::ColorChange && !converted)
+                    continue;
+                const extruder_index_t tool = print_mode == Slic3r::CustomGCode::SingleExtruder ?
+                    extruder_index_t(0) : custom_gcode_row_extruder_index(*row, extruder_count);
+                if (targets[group_idx][layer_idx] && *targets[group_idx][layer_idx] != tool)
+                    throw std::runtime_error("Several color changes require different tools on the same layer.");
+                targets[group_idx][layer_idx] = tool;
+            }
+    }
+    return targets;
 }
 
 CustomGCodePlanRows rows_by_plan(

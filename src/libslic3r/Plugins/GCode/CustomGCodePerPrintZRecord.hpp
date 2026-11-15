@@ -79,6 +79,12 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
 
 // Rows indexed by plan group and layer; pointers borrow the supplied table.
 using CustomGCodePlanRows = std::vector<std::vector<std::vector<const CustomGCodeRow *>>>;
+// Owned optional first-tool targets indexed by plan group, then layer; no value imposes no tool.
+using CustomGCodeColorTargets = std::vector<std::vector<std::optional<extruder_index_t>>>;
+
+// Resolve the required first color-event tool at each plan location, rejecting conflicts.
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count);
 
 /* Map each row once to the first plan layer at or above its Z, preserving row order. */
 CustomGCodePlanRows rows_by_plan(

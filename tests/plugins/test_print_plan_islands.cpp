@@ -37,6 +37,8 @@ across all copies. Relative-E deposition moves are checked against their emitted
 layer blocks, and upper-copy tool assignments are checked against the final plan.
 Source-tool scenes verify that substituted plan tools do not suppress later color
 scripts, including ToolChange conversion on a single-tool printer.
+Two-tool copy scenes compare the final plan and exported tool switches to ensure
+the ordering consumer carries its last tool across group boundaries.
 
     TEST_CASE: select clearance shape and expected scheduling
     `-- check_scene: build boxes, process and export with the production host
@@ -224,6 +226,110 @@ TEST_CASE("Height events occur once across production copy bands",
     CHECK(deposits_above > 0);
     CHECK(pause_count == (tool_change ? 0 : 1));
     CHECK(color_count == (tool_change ? 0 : 1));
+}
+
+// Odd-height copies with two tools per layer end on the higher tool. Every later
+// group can keep that tool first without adding an internal change. Verify the
+// complete production chain and the serialized switches, not only the builder.
+// The color variant uses single-layer copies: T1 is pinned first only in the
+// first copy, whose real end T0 must start the second copy without another switch.
+TEST_CASE("Production tool ordering continues across copy groups",
+          "[plugins][ordering][tool-groups][tool-ordering][print-sequence][gcode][group-tool-continuity]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const bool islands = GENERATE(false, true);
+    const double step = GENERATE(0., 0.4);
+    const bool color = GENERATE(false, true);
+    CAPTURE(by_object, islands, step, color);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", std::to_string(step)}, {"complete_islands", islands ? "1" : "0"},
+        {"complete_objects_one_first_layer", "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}, {"perimeters", "1"},
+        {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"nozzle_diameter", "0.4,0.4"}, {"filament_diameter", "1.75,1.75"},
+        {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"},
+        {"start_gcode", ""}, {"end_gcode", ""}, {"binary_gcode", "0"},
+        {"color_change_gcode", "M117 continuity-color"}});
+    Model model;
+    Print print;
+    const double height = color ? 0.2 : 0.6;
+    Test::init_print({make_cube(2., 2., height)}, print, model, config);
+    TriangleMesh second = make_cube(2., 2., height);
+    second.translate(Vec3f(2.f, 0.f, 0.f));
+    ModelVolume *volume = model.objects()[0].add_volume(second);
+    volume->config.set_key_value("extruder", new ConfigOptionInt(2));
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(100., 30., 0.));
+    if (color) {
+        model.custom_gcode_per_print_z.mode = CustomGCode::MultiExtruder;
+        model.custom_gcode_per_print_z.gcodes = {{scale_i(0.2), CustomGCode::ColorChange, 2, "#FF0000", ""}};
+    }
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print);
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    Test::GCode::remove_output_pair(output);
+    REQUIRE(print.printing_plan() != nullptr);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    if (by_object) REQUIRE(plan.groups.size() >= 2);
+    else REQUIRE(plan.groups.size() == 1);
+    extruder_index_t previous = EXTRUDER_ID_UNKNOWN;
+    size_t boundaries = 0, high_tool_boundaries = 0;
+    std::vector<int> expected_switches;
+    for (const Printing::PrintingGroup &group : plan.groups) {
+        REQUIRE_FALSE(group.layers.empty());
+        REQUIRE_FALSE(group.layers.front().tool_groups.empty());
+        const extruder_index_t first = group.layers.front().tool_groups.front().extruder_id;
+        if (previous != EXTRUDER_ID_UNKNOWN) {
+            CHECK(first == previous);
+            ++boundaries;
+            if (previous == 1) ++high_tool_boundaries;
+        }
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            REQUIRE(layer.tool_groups.size() == 2);
+            CHECK(layer.tool_groups[0].extruder_id != layer.tool_groups[1].extruder_id);
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups) {
+                if (expected_switches.empty() || expected_switches.back() != tool.extruder_id)
+                    expected_switches.push_back(tool.extruder_id);
+                previous = tool.extruder_id;
+            }
+        }
+    }
+    if (by_object) {
+        CHECK(boundaries > 0);
+        if (step == 0. && !color) CHECK(high_tool_boundaries > 0);
+        if (color) {
+            CHECK(plan.groups.size() == 2);
+            CHECK(expected_switches == (std::vector<int>{1, 0, 1}));
+        }
+    } else {
+        CHECK(expected_switches == (color ? std::vector<int>{1, 0} : std::vector<int>{0, 1, 0, 1}));
+    }
+    std::vector<int> emitted_switches;
+    std::istringstream lines(text);
+    std::string line;
+    size_t color_scripts = 0, color_tags = 0;
+    while (std::getline(lines, line)) {
+        if (line.size() > 1 && line[0] == 'T' && std::isdigit(static_cast<unsigned char>(line[1]))) {
+            const int tool = std::stoi(line.substr(1));
+            if (emitted_switches.empty() || emitted_switches.back() != tool)
+                emitted_switches.push_back(tool);
+        }
+        if (line == "M117 continuity-color") ++color_scripts;
+        if (line == ";COLOR_CHANGE,T1,#FF0000") {
+            ++color_tags;
+            REQUIRE_FALSE(emitted_switches.empty());
+            CHECK(emitted_switches.back() == 1);
+        }
+    }
+    CHECK(emitted_switches == expected_switches);
+    CHECK(color_scripts == (color ? 1 : 0));
+    CHECK(color_tags == (color ? 1 : 0));
 }
 
 // A tool substitution must not reclassify a single-source-tool model. Export both
