@@ -6,15 +6,22 @@
 #include <stdexcept>
 
 #include "FanTreeHelpers.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
 /*
 This layer editor applies the disabled-layer/full-speed-layer program to eligible
-fan requests and closes role fallbacks. It accepts TIME, or BASE as an identity
-time stage when optional cooling is absent. Protected pairs remain unchanged.
+fan requests and closes role fallbacks. In Api/plugin/cpp/FanPolicy.hpp, BASE is
+the initial reference table, TIME applies layer-duration limits, and CLOSED adds
+first-layer limits and final fallbacks. This editor accepts TIME, or BASE when
+optional cooling is absent. Protected requests are those whose mode forbids this
+policy from modifying them; their speed and mode pair remains unchanged.
+First-layer limits use cached source ranks: each copy merges its object and local
+auxiliary heights, and a shared pass takes the minimum rank of its actual sources.
 
+    setup_impl(): cache source ranks before parallel runs
     run_impl(): validate the preceding public context
     |-- close_first_layers(): compute CLOSED references and dynamic bounds
     `-- for_each_leaf(): apply the program once or fill a late absence
@@ -71,9 +78,17 @@ private:
     const char *progress_message_format_impl() const noexcept override { return "Applying first-layer fan program: %u / %u trees"; }
     // Count trees in the borrowed layer without editing them.
     void setup_run_impl(const plugin_run_context *run) const override;
-    // Transform modifiable requests and publish a complete CLOSED context.
+    // Cache owned source-layer ranks once before parallel fan runs.
+    void setup_impl(const plugin_run_context *run, uint32_t) const override {
+        m_indices.clear();
+        const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run);
+        if (ctx && ctx->print && ctx->plan)
+            m_indices = source_layer_indices(Print(ctx->print), ConstPrintingPlan(ctx->plan));
+    }
+    // Transform modifiable requests using cached source ranks and publish CLOSED context.
     void run_impl(const plugin_run_context *run) const override;
     PluginPropertyKey<FanPolicy::Context> m_context;
+    mutable SourceLayerIndices m_indices;
 };
 
 void initialize_settings(orchestrator_handle *orch)
@@ -133,6 +148,7 @@ void FirstLayerFan::run_impl(const plugin_run_context *run) const
     if (!ctx || !ctx->print || !ctx->layer_group) return;
     const Config config = Print(ctx->print).config();
     PrintingLayerGroup layer(ctx->layer_group);
+    const uint32_t source_index = m_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index;
     for (uint32_t idx = 0; idx < layer.tool_group_count(); ++idx) {
         throw_if_cancelled(run);
         PrintingToolGroup tool = layer.tool_group(idx);
@@ -143,14 +159,14 @@ void FirstLayerFan::run_impl(const plugin_run_context *run) const
         // With no cooling plugin, BASE is the numerical identity for TIME.
         time.phase = RAW_FAN_POLICY_PHASE_TIME;
         const FanPolicy::Settings settings = FanPolicy::read_first_layer_settings(config, tool.extruder_id());
-        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, settings, ctx->layer_group_idx);
+        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, settings, source_index);
         for (uint32_t extrusion = 0; extrusion < tool.extrusion_count(); ++extrusion) {
             FanTreeHelpers::for_each_leaf(tool.extrusion(extrusion).mutable_root(),
                 [&](MutableExtrusionEntity leaf, const ProcessParameterHelpers::EffectiveTreeState &state) {
                     if (!state.fan.can_modify(FAN_REQUEST_MODE_AUTOMATIC)) return;
                     const raw_extrusion_role role = state.attributes.extrusion_role();
                     const float percent = state.fan.is_set() ?
-                        FanPolicy::first_layer_percent(state.fan.percent, FanPolicy::fan_role(role), settings, ctx->layer_group_idx) :
+                        FanPolicy::first_layer_percent(state.fan.percent, FanPolicy::fan_role(role), settings, source_index) :
                         FanTreeHelpers::closed_reference(closed, role);
                     if (percent >= 0.f)
                         leaf.get_or_add(EPropertyFan::key) = FanPolicy::transform_request(state.fan, percent, FAN_REQUEST_MODE_AUTOMATIC);

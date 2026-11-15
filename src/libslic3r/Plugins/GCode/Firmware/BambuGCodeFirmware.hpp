@@ -4,6 +4,7 @@
 ///|/
 #ifndef slic3r_Plugins_GCode_Firmware_BambuGCodeFirmware_hpp_
 #define slic3r_Plugins_GCode_Firmware_BambuGCodeFirmware_hpp_
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -45,15 +46,26 @@ public:
 
     // Build the object rank table from the plan, call the base, then open the
     // spaghetti detector after the whole start sequence.
+    // Build ranks before the base can request labels. Borrowed plan filaments supply
+    // activated exhaust speeds for owned output and the completion cache; base failures
+    // propagate. Source ranks schedule second layers and final passes, closing recovery
+    // only when every copy that started recovery has finished.
     std::string begin_print(const Print &print, const ConstPrintingPlan &plan) override;
-    // Reset the group's zero-based layer counter before the inherited approach.
+    // Reset the group's pass cursor before the inherited approach.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Advance the group's layer counter and defer the platter fan until tool selection.
+    // Advance the pass cursor, load its source rank and arm coalesced copy actions.
+    // Do not use the previous layer's filament; the selected tool group resolves its
+    // fan and consumes pending actions. Preserve inherited text and failures.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
+    // Close recovery at a copy's last layer only when no started copy remains.
+    // Close the inherited layer first and preserve its output and failures.
+    std::string end_layer() override;
     // Select the group's tool, then emit a pending platter speed outside object labels.
     std::string begin_tool_group(const ConstPrintingToolGroup &group) override;
     // Close the spaghetti detector at the end of the last group, before end_gcode,
     // after stopping the platter fan unless it is known to be stopped.
+    // Earlier groups emit neither fan stop nor detector close. Preserve base output
+    // and failures after it closes any object block; update the fan cache on stopping.
     std::string end_group() override;
     // Set the exhaust fan's completion speed after end_gcode.
     std::string end_print() override;
@@ -107,8 +119,12 @@ protected:
 private:
     // Emit a changed pending platter speed after closing any current object block.
     std::string write_platter_fan();
-    // On the first tool group of a group's second layer: `M1003` and the framed scan,
+    // On the first tool group of a pass with new second-layer copies: one recovery/scan sequence,
     // outside object blocks, as requested by printer_custom_variables.
+    // Close an open block first so cancellation cannot skip commands. M1003 precedes
+    // the scan, which uses write_with_retraction() with the selected tool's length:
+    // an unretracted tool gets a pair, otherwise at most the complement. No requested
+    // action emits nothing; base failures propagate.
     std::string write_second_layer_commands();
     // Rank of an object in the bitmask, or -1 when the object carries no label
     // (synthetic, or more than 64 real objects in the plan).
@@ -132,15 +148,21 @@ private:
     std::vector<int> m_complete_print_exhaust_fan_speeds;
     extruder_index_t m_selected_filament = 0;
     int m_group_layer = -1;
+    uint32_t m_source_layer_index = 0;
     bool m_platter_fan_pending = false;
     // From printer_custom_variables (setup_firmware): `scan_first_layer` is 1/true;
     // `enable_power_loss_recovery` gives the `M1003` argument, -1 when it writes nothing.
     bool m_scan_first_layer = false;
     int m_power_loss_recovery = -1;
-    // Set by begin_layer() on a group's second layer; the first tool group of that layer
+    // Set by begin_layer() from the precomputed per-copy starts; the first tool group
     // consumes it in write_second_layer_commands(), whether or not a variable asks for
     // commands (then nothing is written).
-    bool m_second_layer_pending = false;
+    bool m_second_layers_pending = false;
+    // One pass's minimum merged object/auxiliary source rank, count of newly
+    // second-layer copies, and recovery-close decision over still-active copies.
+    struct CopyCommands { uint32_t source_index = 0; uint32_t second_layers = 0; bool close_recovery = false; };
+    // Per-print commands cached by plan group, then layer, and consumed during traversal.
+    std::vector<std::vector<CopyCommands>> m_copy_commands;
     // Speed written last (0..255), or -1 when unknown: initially, since even an
     // initial zero must be sent once, and after a script left it uncertain.
     int m_last_platter_fan_speed = -1;

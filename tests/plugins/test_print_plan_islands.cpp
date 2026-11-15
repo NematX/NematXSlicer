@@ -18,6 +18,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 /*
 These production export tests measure the order of a shared base and two towers.
@@ -421,6 +422,229 @@ TEST_CASE("Source tools preserve color scripts after a height tool change",
                         upper_copies.insert(extrusion.printing_catalog_id);
                     }
     CHECK(upper_copies.size() == 2);
+}
+
+// Reconstruct source Z ranks independently, then compare first-layer fan/lift,
+// layer scripts, the single bed switch and per-copy Bambu actions in real exports.
+// Tower catalog entries must not become copies or change source ranks; P2 follows
+// the same source rank as the part fan, and simultaneous second layers share a scan.
+TEST_CASE("First-layer consumers follow each copy's source sequence",
+          "[plugins][gcode][fans][temperature][lift][bambu][script][source-first-layer-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const bool bambu = GENERATE(false, true);
+    const bool raft = GENERATE(false, true);
+    const bool tower = GENERATE(false, true);
+    CAPTURE(by_object, bambu, raft, tower);
+    struct TravelActivation {
+        Orchestrator &host;
+        Plugin *plugin;
+        bool active;
+        // Enable the real travel provider, which the shared test runtime disables.
+        explicit TravelActivation(Orchestrator &value) : host(value),
+            plugin(value.get_plugin("layer_extrusion_edit.travel.default")), active(value.is_plugin_active(plugin)) {
+            host.set_plugin_active(plugin, true);
+        }
+        // Restore the exact activation state even after a fatal assertion.
+        ~TravelActivation() { host.set_plugin_active(plugin, active); }
+    } travel(Orchestrator::instance());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0.4"}, {"complete_islands", "0"}, {"complete_objects_one_first_layer", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "1"}, {"skirt_height", "1"},
+        {"skirt_per_object", "0"}, {"brim_width", "0"}, {"perimeters", "1"}, {"fill_density", "0%"},
+        {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}, {"start_gcode", ""}, {"end_gcode", ""},
+        {"layer_gcode", "M117 source-layer"}, {"use_relative_e_distances", "1"}, {"binary_gcode", "0"},
+        {"default_fan_speed", "100"}, {"perimeter_fan_speed", "100"}, {"external_perimeter_fan_speed", "100"},
+        {"disable_fan_first_layers", "1"}, {"full_fan_speed_layer", "0"},
+        {"retract_lift", "0.5"}, {"print_retract_lift", "0.5"}, {"retract_lift_first_layer", "1"}, {"retract_lift_above", "10"},
+        {"retract_before_travel", "0"}, {"retract_lift_before_travel", "0"}, {"retract_length", "1"},
+        {"travel_ramping_lift", "0"}, {"wipe", "0"}, {"retract_lift_top", "All surfaces"},
+        {"print_first_layer_bed_temperature", "60"}, {"print_bed_temperature", "50"},
+        {"printer_custom_variables", "scan_first_layer=1\nenable_power_loss_recovery=enable"},
+        {"raft_layers", raft ? "2" : "0"}});
+    config.set_deserialize_strict("platter_fan", "1");
+    config.set_deserialize_strict("platter_fan_speed", "70");
+    if (tower) {
+        config.set_num_extruders(2);
+        config.set_deserialize_strict({{"wipe_tower", "1"}, {"wipe_tower_x", "60"}, {"wipe_tower_y", "60"},
+            {"wipe_tower_width", "20"}, {"wipe_tower_brim_width", "0"}, {"wiping_volumes_matrix", "0,140,140,0"},
+            {"filament_minimal_purge_on_wipe_tower", "15,15"}, {"filament_diameter", "1.75,1.75"},
+            {"extrusion_multiplier", "1,1"}, {"default_fan_speed", "100,100"},
+            {"perimeter_fan_speed", "100,100"}, {"external_perimeter_fan_speed", "100,100"},
+            {"disable_fan_first_layers", "1,1"}, {"full_fan_speed_layer", "0,0"}, {"platter_fan_speed", "70,70"}});
+    }
+    Model model;
+    Print print;
+    TriangleMesh short_mesh = make_cube(2., 2., 1.);
+    TriangleMesh island = make_cube(2., 2., 1.);
+    island.translate(Vec3f(10.f, 0.f, 0.f));
+    short_mesh.merge(island);
+    TriangleMesh tall_mesh = short_mesh;
+    tall_mesh.scale(Vec3f(1.f, 1.f, 1.4f));
+    Test::init_print({short_mesh, tall_mesh}, print, model, config);
+    if (tower) {
+        for (size_t obj = 0; obj < model.objects().size(); ++obj) {
+            TriangleMesh second_material = make_cube(2., 2., obj == 0 ? 1. : 1.4);
+            second_material.translate(Vec3f(0.f, 10.f, 0.f));
+            model.objects()[obj].add_volume(second_material)->config.set_key_value("extruder", new ConfigOptionInt(2));
+        }
+    }
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(100., 30., 0.));
+    model.objects()[1].config.set_deserialize_strict("first_layer_height", "0.4");
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print, bambu ? "gcode.firmware.bambu" : "gcode.firmware.marlin2");
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    Test::GCode::remove_output_pair(output);
+    REQUIRE(print.printing_plan() != nullptr);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    std::map<const PrintObject *, std::vector<coord_t>> sequences;
+    const slic3r_api::SourceLayerIndices actual_indices = slic3r_api::source_layer_indices(
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::ConstPrintingPlan(reinterpret_cast<const printing_plan_handle *>(&plan)));
+    std::map<const LayerRegionIsland *, coord_t> source_z;
+    std::set<coord_t> plate;
+    for (const PrintObject &object : print.objects()) {
+        std::set<coord_t> zs;
+        for (const Layer *layer : [&object]() {
+            std::vector<const Layer *> layers;
+            for (const Layer &value : object.layers()) layers.push_back(&value);
+            for (const Layer &value : object.auxiliary_layers()) layers.push_back(&value);
+            return layers;
+        }()) {
+            zs.insert(layer->scaled_print_z());
+            for (const LayerSliceIsland &slice : layer->islands())
+                for (const LayerRegionIsland &region : slice.regions_islands()) source_z[&region] = layer->scaled_print_z();
+        }
+        sequences[&object] = std::vector<coord_t>(zs.begin(), zs.end());
+    }
+    REQUIRE(print.auxiliary_object() != nullptr);
+    REQUIRE_FALSE(print.auxiliary_object()->auxiliary_layers().empty());
+    for (const Printing::PrintingGroup &group : plan.groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers) plate.insert(layer.print_z);
+    std::vector<bool> first;
+    std::vector<double> zs;
+    std::vector<std::map<uint32_t, size_t>> copies;
+    size_t expected_scripts = 0;
+    size_t group_index = 0;
+    bool saw_tower = false;
+    for (const Printing::PrintingGroup &group : plan.groups) {
+        size_t layer_index = 0;
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            std::map<uint32_t, size_t> ranks;
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    if (extrusion.printing_catalog_id < plan.object_instances.size() &&
+                        plan.object_instances[extrusion.printing_catalog_id].object != nullptr) {
+                        const std::vector<coord_t> &sequence = sequences.at(plan.object_instances[extrusion.printing_catalog_id].object);
+                        REQUIRE(source_z.count(extrusion.region_island) == 1);
+                        const size_t rank = size_t(std::lower_bound(sequence.begin(), sequence.end(), source_z.at(extrusion.region_island)) - sequence.begin());
+                        ranks.emplace(extrusion.printing_catalog_id, rank);
+                    } else if (extrusion.printing_catalog_id < plan.object_instances.size()) {
+                        saw_tower = true;
+                    }
+            bool is_first = layer.print_z == *plate.begin();
+            if (!ranks.empty()) {
+                is_first = false;
+                for (const auto &[id, rank] : ranks) is_first |= rank == 0;
+            }
+            first.push_back(is_first);
+            zs.push_back(unscaled(layer.print_z));
+            copies.push_back(ranks);
+            const slic3r_api::SourceLayerIndex &actual = actual_indices[group_index][layer_index++];
+            CHECK(actual.copies.size() == ranks.size());
+            size_t expected_rank = size_t(std::distance(plate.begin(), plate.lower_bound(layer.print_z)));
+            if (!ranks.empty()) {
+                expected_rank = ranks.begin()->second;
+                for (const auto &[id, rank] : ranks) expected_rank = std::min(expected_rank, rank);
+            }
+            CHECK(actual.index == expected_rank);
+            for (const slic3r_api::CopyLayerIndex &copy : actual.copies) {
+                REQUIRE(ranks.count(copy.id) == 1);
+                CHECK(copy.index == ranks.at(copy.id));
+            }
+            if (!is_first) ++expected_scripts;
+        }
+        ++group_index;
+    }
+    if (tower) CHECK(saw_tower);
+    std::map<uint32_t, size_t> last;
+    for (size_t l = 0; l < copies.size(); ++l)
+        for (const auto &[id, rank] : copies[l]) last[id] = l;
+    std::set<uint32_t> started, active;
+    size_t expected_stops = 0, overlap_stops = 0;
+    std::vector<size_t> expected_starts(copies.size(), 0), expected_ends(copies.size(), 0);
+    for (size_t l = 0; l < copies.size(); ++l) {
+        for (const auto &[id, rank] : copies[l]) if (rank == 1 && started.insert(id).second) {
+            active.insert(id);
+            expected_starts[l] = 1;
+        }
+        bool ending = false;
+        for (const auto &[id, rank] : copies[l]) if (last[id] == l) { active.erase(id); ending = true; }
+        if (ending && active.empty()) { ++expected_stops; ++expected_ends[l]; }
+        if (ending && !active.empty()) ++overlap_stops;
+    }
+    CHECK(started.size() == 2);
+    CHECK(overlap_stops > 0);
+    size_t layer = size_t(-1), scripts = 0, bed_switches = 0, initial_bed = 0, starts = 0, stops = 0, scans = 0;
+    int fan = -1, platter_fan = -1;
+    std::vector<size_t> deposits(first.size(), 0);
+    std::vector<size_t> lift_peaks(first.size(), 0);
+    std::vector<size_t> actual_starts(first.size(), 0), actual_ends(first.size(), 0), actual_scans(first.size(), 0);
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.rfind(";Z:", 0) == 0) { ++layer; REQUIRE(layer < zs.size()); CHECK(std::stod(line.substr(3)) == Approx(zs[layer])); }
+        if (line == "M117 source-layer") { ++scripts; REQUIRE(layer < first.size()); CHECK_FALSE(first[layer]); }
+        if (line == "M140 S50") ++bed_switches;
+        if (line == "M190 S60") ++initial_bed;
+        if (line == "M1003 S1") { REQUIRE(layer < first.size()); ++starts; ++actual_starts[layer]; }
+        if (line == "M1003 S0") { REQUIRE(layer < first.size()); ++stops; ++actual_ends[layer]; }
+        if (line.rfind("M976 S1 P1", 0) == 0) { REQUIRE(layer < first.size()); ++scans; ++actual_scans[layer]; }
+        if (line.rfind("M106 P2 S", 0) == 0) platter_fan = std::stoi(line.substr(9));
+        if (line.rfind("M107", 0) == 0 && line.find("P2") == std::string::npos && line.find("P3") == std::string::npos) fan = 0;
+        if (line.rfind("M106", 0) == 0 && line.find("P2") == std::string::npos && line.find("P3") == std::string::npos) {
+            const size_t s = line.find('S');
+            if (s != std::string::npos) fan = std::stoi(line.substr(s + 1));
+        }
+        const size_t e = line.find(" E");
+        const size_t move_z = line.find(" Z");
+        if (layer < zs.size() && move_z != std::string::npos &&
+            (line.rfind("G0 ", 0) == 0 || line.rfind("G1 ", 0) == 0) &&
+            std::abs(std::stod(line.substr(move_z + 2)) - zs[layer] - 0.5) < 0.00001)
+            ++lift_peaks[layer];
+        if (line.rfind("G1 ", 0) == 0 && e != std::string::npos &&
+            (line.find(" X") != std::string::npos || line.find(" Y") != std::string::npos) && std::stod(line.substr(e + 2)) > 0.) {
+            REQUIRE(layer < first.size());
+            ++deposits[layer];
+            CHECK((fan == 0) == first[layer]);
+            if (bambu) CHECK((platter_fan == 0) == first[layer]);
+        }
+    }
+    CHECK(scripts == expected_scripts);
+    CHECK(bed_switches == 1);
+    CHECK(initial_bed == 1);
+    for (size_t count : deposits) CHECK(count > 0);
+    for (size_t l = 0; l < first.size(); ++l) {
+        INFO(text);
+        CAPTURE(l, zs[l], first[l]);
+        if (first[l] && !copies[l].empty()) CHECK(lift_peaks[l] > 0);
+        if (!first[l]) CHECK(lift_peaks[l] == 0);
+    }
+    if (bambu) {
+        const size_t expected_start_count = std::count(expected_starts.begin(), expected_starts.end(), size_t(1));
+        CHECK(starts == expected_start_count); CHECK(scans == expected_start_count); CHECK(stops == expected_stops);
+        if (tower && !raft) { CHECK(starts == 2); CHECK(scans == 2); }
+        CHECK(actual_starts == expected_starts);
+        CHECK(actual_scans == expected_starts);
+        CHECK(actual_ends == expected_ends);
+    }
 }
 
 // Each physical copy must retain complete source coverage, including the by-layer tail.

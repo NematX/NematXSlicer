@@ -4,6 +4,7 @@
 ///|/
 
 #include "SettingsGCodeScripts.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -43,12 +44,17 @@ The normal execution flow is:
     |   |-- place `between_objects_gcode` before the next object or after the
     |   |   previous object according to its setting
     |   |-- place `before_layer_gcode` at each layer boundary
-    |   |-- place `layer_gcode` before each layer except a new object's first
+    |   |-- place `layer_gcode` unless the pass has merged source rank zero
     |   |-- on tool changes, append end-filament and start-filament scripts
     |   |   with the corresponding source and destination extruder
     |   `-- retain the last layer and tool state for the next group
     |-- append final end-filament scripts for the tools that were used
     `-- append `end_gcode` after the plan
+
+Source ranks merge each copy's object and local auxiliary layers by Z, including
+raft and support. A shared pass uses the minimum rank of its actual sources.
+Thus a raft can precede the first object layer, which may receive layer_gcode.
+Global-only passes use their rank among distinct plan heights.
 
 Each event is stored in the fixed scope that owns its boundary. Start-filament
 scripts are inserted immediately before the semantic Unretract event when an
@@ -579,6 +585,15 @@ private:
     void inilialize_impl(storage_handle *) const override {
         initialize_settings_gcode_scripts_settings(m_orchestrator);
     }
+    // Cache source ranks before script insertion; the table retains no borrowed views.
+    void setup_impl(const plugin_run_context *run, uint32_t) const override {
+        m_source_indices.clear();
+        const run_ctx_extrusion_edition *ctx = plugin_ctx_as_extrusion_edition(run);
+        if (ctx && ctx->print && ctx->plan)
+            m_source_indices = source_layer_indices(Print(ctx->print), ConstPrintingPlan(ctx->plan));
+    }
+    mutable SourceLayerIndices m_source_indices;
+
     // Read print, plan and storage from the run context and append owned events
     // to fixed scopes. Incomplete contexts leave the plan unchanged; cancellation
     // or storage/plan failures propagate without rolling back earlier appends,
@@ -620,7 +635,6 @@ private:
             config.bool_or_default("single_extruder_multi_material", false);
         extruder_index_t current_tool = EXTRUDER_ID_UNKNOWN;
         int32_t layer_number = 0;
-        bool seen_layer = false;
         std::set<extruder_index_t> used_tools;
         std::optional<uint32_t> previous_object;
         std::optional<LayerContext> previous_layer;
@@ -681,12 +695,10 @@ private:
                 append_script_event(run_context->plugin_storage, before_layer_events, before_layer,
                                     GCODE_SCRIPT_TYPE_BEFORE_LAYER_GCODE, current_layer_arguments,
                                     before_layer_position);
-                const bool first_layer_of_sequential_object = current_object && layer_idx == 0;
-                if (seen_layer && !first_layer_of_sequential_object)
+                if (m_source_indices.at(group_idx).at(layer_idx).index > 0)
                     append_script_event(run_context->plugin_storage, layer_events, after_layer,
                                         GCODE_SCRIPT_TYPE_LAYER_GCODE, current_layer_arguments,
                                         ScopeEventPosition::Before);
-                seen_layer = true;
 
                 for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
                     if ((tool_idx & 63u) == 0)

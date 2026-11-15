@@ -10,6 +10,7 @@
 #include <cmath>
 #include <locale>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -43,8 +44,8 @@ Bambu commands written, and where they appear in the file:
     M106 P3 S<speed>                           optional exhaust fan, before M981
     M981 S1 P20000 ;open spaghetti detector    end of begin_print(), before the first layer
     ;LAYER_CHANGE ...
-    (layer_gcode of the group's second layer)
-    M1003 S<0|1>                               optional, first tool group of the group's second layer
+    (layer_gcode of a copy's second source layer)
+    M1003 S<0|1>                               optional, once per pass containing new second-layer copies
     G1 E-<retract_length>                      optional scan, framed by a retraction pair when the tool is not retracted
     M976 S1 P1 ; scan model before printing 2nd layer
     M400 P100
@@ -65,7 +66,7 @@ Bambu commands written, and where they appear in the file:
       ; stop printing object, unique label id: <id>
       M625
       G92 E0                                   absolute E only, right after M625
-    M1003 S0                                  end of every group, only if power loss recovery is enabled
+    M1003 S0                                  copy end, only when no started copy remains unfinished
     M106 P2 S0                                stop the platter fan if still running
     M981 S0 P20000 ; close spaghetti detector  end of the last group, before end_gcode
 
@@ -141,10 +142,12 @@ command is tied to the end of the last group.
 Optional variables: `printer_custom_variables` (one `name = value` per line, not a
 declared setting, so absent means nothing is written) may hold `scan_first_layer`
 (1 or true, any case: write the scan) and `enable_power_loss_recovery` (`enable`:
-`M1003 S1` and `M1003 S0` at the end of each group; `disable`: `M1003 S0` only; any
-other value, `printer_configuration` included: nothing). They are written at the
-start of the first tool group of the second layer of every group (index 1 of the
-group's layer counter), after layer_gcode and before the first move, outside object
+`M1003 S1` at a copy's second source layer and `M1003 S0` at a copy's end only when
+no copy that reached its second layer remains unfinished; `disable`: `M1003 S0`
+at the second layer only; any other value, `printer_configuration` included:
+nothing). Second-layer commands are coalesced once per layer group, at the
+start of its first tool group when one or more copies reach their second source layer,
+after layer_gcode and before the first move, outside object
 blocks, since a cancelled object would otherwise skip them. The scan is framed by the
 base session's write_with_retraction() with the tool's `retract_length`: a tool that
 is not retracted is retracted, scanned, then unretracted; one already retracted only
@@ -152,11 +155,11 @@ gets the complement, so the extrusion that follows never repays twice.
 
 Optional fan settings are created by the Bambu firmware provider. `platter_fan`
 enables P2 at the selected filament's `platter_fan_speed`; it stays zero while the
-group's zero-based layer index is below `disable_fan_first_layers` (zero if that
+cached source-layer index is below `disable_fan_first_layers` (zero if that
 optional fan-plugin setting is absent). Layer/tool changes defer the command until
 the selected tool group or the next object opening/geometry, outside cancellable
-blocks, and identical speeds are not repeated. Each sequential
-group restarts the layer counter. `support_air_filtration` enables P3 if a used
+blocks, and identical speeds are not repeated. Splitting a copy into groups does
+not restart its source-layer index. `support_air_filtration` enables P3 if a used
 filament has `activate_air_filtration`: only activated, used filaments enter the
 maximum of `during_print_exhaust_fan_speed` and `complete_print_exhaust_fan_speed`.
 Both fan channels convert percent to the integer part of 255 * percent / 100.
@@ -241,11 +244,6 @@ std::string format_pressure_advance(const double value)
 
 } // namespace
 
-// The rank table is built before the base call so that the base can already ask
-// for labels, even though it only writes them while traversing the plan. The
-// detector command goes last: everything of the start sequence precedes it.
-// The borrowed plan identifies used filaments; only their activated exhaust speeds
-// contribute to the owned output and completion cache. Base failures propagate.
 std::string BambuGCodeFirmwareSession::begin_print(const Print &print, const ConstPrintingPlan &plan)
 {
     m_object_ranks.assign(plan.object_instance_count(), -1);
@@ -259,6 +257,37 @@ std::string BambuGCodeFirmwareSession::begin_print(const Print &print, const Con
 
     m_group_count = plan.group_count();
     m_ended_group_count = 0;
+    const SourceLayerIndices indices = source_layer_indices(print, plan);
+    std::map<uint32_t, size_t> last;
+    size_t flat = 0;
+    for (const std::vector<SourceLayerIndex> &group : indices)
+        for (const SourceLayerIndex &layer : group) {
+            for (const CopyLayerIndex &copy : layer.copies) last[copy.id] = flat;
+            ++flat;
+        }
+    m_copy_commands.clear();
+    m_copy_commands.resize(indices.size());
+    std::set<uint32_t> started, active;
+    flat = 0;
+    for (size_t g = 0; g < indices.size(); ++g) {
+        m_copy_commands[g].resize(indices[g].size());
+        for (size_t l = 0; l < indices[g].size(); ++l, ++flat) {
+            CopyCommands &commands = m_copy_commands[g][l];
+            commands.source_index = indices[g][l].index;
+            for (const CopyLayerIndex &copy : indices[g][l].copies)
+                if (copy.index == 1 && started.insert(copy.id).second) {
+                    ++commands.second_layers;
+                    active.insert(copy.id);
+                }
+            bool ending = false;
+            for (const CopyLayerIndex &copy : indices[g][l].copies)
+                if (last.at(copy.id) == flat) {
+                    active.erase(copy.id);
+                    ending = true;
+                }
+            commands.close_recovery = ending && active.empty();
+        }
+    }
     std::string output = Marlin2GCodeFirmwareSession::begin_print(print, plan);
     int during_speed = -1;
     m_completion_exhaust_speed = -1;
@@ -290,31 +319,33 @@ std::string BambuGCodeFirmwareSession::begin_print(const Print &print, const Con
 std::string BambuGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
 {
     m_group_layer = -1;
-    m_second_layer_pending = false;
+    m_second_layers_pending = false;
     return Marlin2GCodeFirmwareSession::begin_group(group);
 }
 
-// Count this borrowed layer without using the previous layer's filament. The
-// selected tool group resolves the fan; inherited text and failures are preserved.
-// On the group's second layer it also arms m_second_layer_pending, which the layer's
-// first tool group consumes in write_second_layer_commands().
 std::string BambuGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
     ++m_group_layer;
     m_platter_fan_pending = true;
-    m_second_layer_pending = m_group_layer == 1;
+    const CopyCommands &commands = m_copy_commands.at(m_ended_group_count).at(size_t(m_group_layer));
+    m_source_layer_index = commands.source_index;
+    // Several second-layer copies in one pass share one recovery/scan sequence.
+    m_second_layers_pending = commands.second_layers > 0;
     return Marlin2GCodeFirmwareSession::begin_layer(layer);
 }
 
-// When power loss recovery is enabled it is switched off at the end of every group
-// (after the base closed any object block). Only the end of the last group precedes end_gcode, so the detector
-// is closed there after stopping the platter fan (when enabled and not known to be stopped) and updating its cache. Earlier
-// groups emit no fan stop or detector close; owned base text and failures are preserved.
+std::string BambuGCodeFirmwareSession::end_layer()
+{
+    std::string output = Marlin2GCodeFirmwareSession::end_layer();
+    if (m_power_loss_recovery == 1 &&
+        m_copy_commands.at(m_ended_group_count).at(size_t(m_group_layer)).close_recovery)
+        output += transition_object(uint32_t(-1)) + "M1003 S0\n";
+    return output;
+}
+
 std::string BambuGCodeFirmwareSession::end_group()
 {
     std::string output = Marlin2GCodeFirmwareSession::end_group();
-    if (m_power_loss_recovery == 1)
-        output += "M1003 S0\n";
     if (++m_ended_group_count == m_group_count) {
         if (m_platter_fan && m_last_platter_fan_speed != 0) {
             output += "M106 P2 S0\n";
@@ -373,7 +404,7 @@ void BambuGCodeFirmwareSession::setup_firmware(const Config &config)
                    [](const unsigned char c) { return char(std::tolower(c)); });
     m_scan_first_layer = scan_value == "1" || scan_value == "true";
     m_power_loss_recovery = -1;
-    m_second_layer_pending = false;
+    m_second_layers_pending = false;
     const auto recovery = variables.find("enable_power_loss_recovery");
     if (recovery != variables.end() && recovery->second == "enable")
         m_power_loss_recovery = 1;
@@ -465,7 +496,7 @@ void BambuGCodeFirmwareSession::synchronize_reader_private_state(const GCodeStat
 
 // The borrowed group may defer its actual TOOLCHANGE to tree events. Emit the
 // currently selected speed after base selection; later selection marks it pending
-// again. The first tool group of a group's second layer also writes the M1003/scan
+// again. The first tool group of each copy's second layer also writes the M1003/scan
 // commands (write_second_layer_commands(), before the fan). Owned output closes a
 // preceding object if needed; base failures propagate.
 std::string BambuGCodeFirmwareSession::begin_tool_group(const ConstPrintingToolGroup &group)
@@ -493,18 +524,11 @@ std::string BambuGCodeFirmwareSession::write_before_object_start()
     return write_platter_fan();
 }
 
-// Runs once per group, on the first tool group of its second layer, so after the
-// layer's own script and before its first move. The commands are written outside any
-// object block (a cancelled object would skip them otherwise): an open block is closed
-// first. `M1003` comes before the scan. The scan goes through write_with_retraction() with
-// the selected tool's retract_length: it is framed by a retraction pair only when the
-// tool is not already retracted (otherwise it gets at most the complement). Nothing is written
-// when printer_custom_variables ask for neither. Base failures propagate.
 std::string BambuGCodeFirmwareSession::write_second_layer_commands()
 {
-    if (!m_second_layer_pending)
+    if (!m_second_layers_pending)
         return {};
-    m_second_layer_pending = false;
+    m_second_layers_pending = false;
     if (m_power_loss_recovery < 0 && !m_scan_first_layer)
         return {};
     std::string output = transition_object(uint32_t(-1));
@@ -526,7 +550,7 @@ std::string BambuGCodeFirmwareSession::write_platter_fan()
 {
     if (!m_platter_fan || !m_platter_fan_pending)
         return {};
-    const int pct = m_group_layer < m_disable_fan_first_layers[m_selected_filament] ?
+    const int pct = m_source_layer_index < uint32_t(std::max(0, m_disable_fan_first_layers[m_selected_filament])) ?
         0 : m_platter_fan_speeds[m_selected_filament];
     const int speed = 255 * pct / 100;
     if (speed == m_last_platter_fan_speed) {

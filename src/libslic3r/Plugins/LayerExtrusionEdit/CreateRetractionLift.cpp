@@ -15,6 +15,7 @@ pass contract and the prerequisites on transition scopes.
 */
 
 #include "CreateRetractionLift.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -217,6 +218,7 @@ private:
     mutable bool m_setup_valid = false;
     mutable std::vector<std::vector<size_t>> m_flat_indices;
     mutable std::vector<LayerLiftSummary> m_layers;
+    mutable SourceLayerIndices m_source_indices;
 };
 
 /* Add scaled Z values and reject overflow before editing geometry. */
@@ -347,11 +349,13 @@ and writes the resulting vertical or ramped profile into target.travel.
 
 The source state and printable content are read-only. Only the target travel
 geometry is modified, and its final Z remains the original destination Z.
+source_layer_index is the minimum rank in the target copies' merged object/auxiliary
+source sequences; only rank zero enables the first-layer override.
 */
 void apply_transition_lift(
     const SourceLiftState &source,
     const ScopeEntity &target,
-    uint32_t layer_group_idx,
+    uint32_t source_layer_index,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx);
@@ -890,7 +894,7 @@ coord_t travel_start_z(
 void apply_transition_lift(
     const SourceLiftState &source,
     const ScopeEntity &target,
-    const uint32_t layer_group_idx,
+    const uint32_t source_layer_index,
     const Config &print_config,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx)
@@ -916,7 +920,7 @@ void apply_transition_lift(
     const extruder_index_t extruder_id = source.extruder_id == EXTRUDER_ID_UNKNOWN ?
         target.tool_group.extruder_id() : source.extruder_id;
     double lift_mm = source.requested_lift_mm;
-    const bool first_layer_override = layer_group_idx == 0 &&
+    const bool first_layer_override = source_layer_index == 0 &&
         print_config.vector_bool_or_default(
             "retract_lift_first_layer", extruder_id, false);
     const std::string top_policy = print_config.vector_string_or_default(
@@ -1066,12 +1070,15 @@ void CreateRetractionLift::setup_impl(
     m_setup_valid = false;
     m_flat_indices.clear();
     m_layers.clear();
+    m_source_indices.clear();
     const run_ctx_layer_extrusion_edition *ctx =
         plugin_ctx_as_layer_extrusion_edition(run_ctx);
     if (ctx == nullptr || ctx->plan == nullptr)
         return;
 
     PrintingPlan plan(ctx->plan);
+    if (ctx->print != nullptr)
+        m_source_indices = source_layer_indices(Print(ctx->print), plan);
     size_t flat_idx = 0;
     m_flat_indices.resize(plan.group_count());
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
@@ -1191,7 +1198,7 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
         m_scope_property,
         lift_state_definition(),
         [this, preceding, &print_config, &plan,
-         layer_group_idx = ctx->layer_group_idx, run_ctx]
+         source_index = m_source_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index, run_ctx]
         (ScopeEntity *previous, ScopeEntity *next) {
             throw_if_cancelled(run_ctx);
             // The terminal callback has a source but no target travel to edit.
@@ -1205,7 +1212,7 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
                 const SourceLiftState source = describe_source(
                     *previous, plan, print_config, m_scope_property, run_ctx);
                 apply_transition_lift(
-                    source, *next, layer_group_idx, print_config,
+                    source, *next, source_index, print_config,
                     m_scope_property, run_ctx);
                 return;
             }
@@ -1215,7 +1222,7 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
             // its final scope as the source for this inter-layer transition.
             if (preceding != nullptr) {
                 apply_transition_lift(
-                    *preceding, *next, layer_group_idx, print_config,
+                    *preceding, *next, source_index, print_config,
                     m_scope_property, run_ctx);
             }
         },
