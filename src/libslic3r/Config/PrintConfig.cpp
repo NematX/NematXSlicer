@@ -3885,7 +3885,7 @@ PrintStatisticsConfigDef::PrintStatisticsConfigDef()
 
     def = this->add("total_layer_count", coInt);
     def->label = L("Total layer count");
-    def->tooltip = L("Number of layers in the entire print.");
+    def->tooltip = L("Number of printing-plan layer passes containing object extrusions. Shared passes count once; repeated copy or island passes count separately. Auxiliary-only passes are excluded; all_layer_count includes them.");
 }
 
 ObjectsInfoConfigDef::ObjectsInfoConfigDef()

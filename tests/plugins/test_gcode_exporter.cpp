@@ -4155,9 +4155,8 @@ TEST_CASE("The exporter receives the plan facts without measured statistics",
     CHECK(seen.export_numeric.max_print_z == 0.);
 }
 
-// With complete objects and one shared skirt, the plan has a leading auxiliary layer: the layer count given to the
-// exporter is the number of ";LAYER_CHANGE" markers of the G-code (every layer group of the plan), which is not the
-// count of the object layers.
+// With complete objects and one shared skirt, the leading auxiliary-only pass contributes
+// to export metadata and layer-change markers, but not the object-layer statistic.
 TEST_CASE("The exporter layer count includes auxiliary layers",
           "[plugins][gcode][exporter][export-contract][statistics]")
 {
@@ -4178,8 +4177,9 @@ TEST_CASE("The exporter layer count includes auxiliary layers",
 
     export_through_probe(orchestrator, print, print.full_print_config(), reference, directory.path() / "layers.probe");
     const size_t object_layers = print.object(0).layer_count();
+    CHECK(print.print_statistics().total_layer_count == int(count_layer_change_markers(body)));
     CHECK(g_exporter_probe_state.export_numeric.layer_count == count_layer_change_markers(body));
-    CHECK(g_exporter_probe_state.export_numeric.layer_count > object_layers);
+    CHECK(print.print_statistics().total_layer_count > int(object_layers));
     CHECK(print.print_statistics().object_layer_count == int(object_layers));
     CHECK(g_exporter_probe_state.export_numeric.layer_count == uint32_t(print.print_statistics().total_layer_count));
 }
@@ -6162,4 +6162,103 @@ TEST_CASE("Bambu rejects an active PNG provider without image capability", "[plu
     CHECK_THROWS_WITH(Test::export_print_to(host, cube.print, cube.print.full_print_config(), cube.reference.string(), destination.string(), selection), expected);
     CHECK_FALSE(text_only.saw_private);
     CHECK(snapshot_directory(directory.path()) == before);
+}
+
+// Compare independently enumerated object-containing plan passes with script constants
+// and object statistics; Bambu metadata and progress include auxiliary-only passes.
+TEST_CASE("Exported layer counts follow object-containing plan passes",
+          "[plugins][gcode][script][bambu][print-statistics][layer-count-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int scene = GENERATE(0, 1, 2, 3, 4, 5);
+    CAPTURE(scene);
+    ScopedTestDirectory directory;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", scene == 0 ? "ordering.plan_builder.by_layer" : "ordering.plan_builder.by_object"},
+        {"complete_objects_step", scene >= 2 ? "0.4" : "0"}, {"complete_objects_sort", "object"},
+        {"complete_islands", scene == 3 ? "1" : "0"}, {"complete_objects_step_max_z", scene == 4 ? "0.8" : "0"},
+        {"complete_objects_one_first_layer", scene == 5 ? "1" : "0"}, {"complete_objects_one_skirt", "1"},
+        {"skirts", "1"}, {"skirt_height", "1"}, {"brim_width", "0"}, {"wipe_tower", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "1"}, {"fill_density", "0%"},
+        {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}, {"binary_gcode", "0"},
+        {"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"gcode_exporter_plugin", "gcode.exporter.simple"},
+        {"start_gcode", "M117 COUNTS O{total_layer_count} A{all_layer_count}"},
+        {"layer_gcode", "M73 L{layer_num + 1}\n; COUNT_LAYER_NUM {layer_num}"},
+        {"end_gcode", "M117 ENDCOUNTS O{total_layer_count} A{all_layer_count}"}});
+    TriangleMesh mesh = make_cube(2., 2., 1.2);
+    TriangleMesh island = mesh;
+    island.translate(Vec3f(30.f, 0.f, 0.f));
+    mesh.merge(island);
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(100., 30., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Orchestrator &host = Orchestrator::instance();
+    const boost::filesystem::path reference = directory.path() / "layers.gcode";
+    GCodeProcessorResult result;
+    host.export_gcode(print, reference.string(), &result);
+    REQUIRE(print.printing_plan() != nullptr);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    std::set<const LayerRegionIsland *> object_sources;
+    for (const PrintObject &object : print.objects())
+        for (const Layer &layer : object.layers())
+            for (const LayerSliceIsland &slice : layer.islands())
+                for (const LayerRegionIsland &region : slice.regions_islands()) object_sources.insert(&region);
+    int object_passes = 0, all_passes = 0;
+    bool shared_tail = false, shared_first = false;
+    for (const Printing::PrintingGroup &group : plan.groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            ++all_passes;
+            bool object_pass = false;
+            std::set<uint32_t> copies;
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    if (object_sources.count(extrusion.region_island) && extrusion.root && !extrusion.root->empty()) {
+                        object_pass = true;
+                        copies.insert(extrusion.printing_catalog_id);
+                    }
+            if (object_pass) ++object_passes;
+            if (copies.size() == 2) {
+                shared_first |= layer.print_z == print.object(0).layers().front().scaled_print_z();
+                shared_tail |= layer.print_z >= scale_i(0.8);
+            }
+        }
+    REQUIRE(print.object(0).layer_count() == 6);
+    if (scene == 0) CHECK(object_passes == 6);
+    if (scene == 1 || scene == 2) CHECK(object_passes == 12);
+    if (scene == 3) CHECK(object_passes == 24);
+    if (scene == 4) { CHECK(shared_tail); CHECK(object_passes == 9); }
+    if (scene == 5) { CHECK(shared_first); CHECK(object_passes == 11); }
+    CHECK(all_passes >= object_passes);
+    if (scene == 1) CHECK(all_passes > object_passes);
+    const PrintStatistics &statistics = print.print_statistics();
+    REQUIRE(statistics.statistics_available.load());
+    CHECK(statistics.object_layer_count == object_passes);
+    CHECK(statistics.total_layer_count == all_passes);
+    const std::string counts = " O" + std::to_string(object_passes) + " A" + std::to_string(all_passes);
+    const std::string raw = read_binary_file(reference);
+    CHECK(raw.find("M117 COUNTS" + counts + "\n") != std::string::npos);
+    CHECK(raw.find("M117 ENDCOUNTS" + counts + "\n") != std::string::npos);
+    const boost::filesystem::path destination = directory.path() / "layers.gcode.3mf";
+    const Orchestrator::GCodeExporterSelection selection = host.select_gcode_exporter(
+        print, print.full_print_config(), "gcode.exporter.bambu3mf");
+    REQUIRE(Test::export_print_to(host, print, print.full_print_config(), reference.string(), destination.string(), selection) == destination.string());
+    const BambuEntries entries = read_bambu_zip(read_binary_file(destination));
+    const std::string &gcode = entries.at("Metadata/plate_1.gcode");
+    CHECK(gcode.find("; objects layers count = " + std::to_string(object_passes) + "\n") != std::string::npos);
+    CHECK(gcode.find("; total layers count = " + std::to_string(all_passes) + "\n") != std::string::npos);
+    CHECK(gcode.find("; total layer number: " + std::to_string(all_passes) + "\n") != std::string::npos);
+    if (scene == 1) {
+        // The separate global skirt advances the same zero-based layer index as object work.
+        const size_t last_progress = gcode.rfind("\nM73 L");
+        const size_t last_layer_num = gcode.rfind("\n; COUNT_LAYER_NUM ");
+        REQUIRE(last_progress != std::string::npos);
+        REQUIRE(last_layer_num != std::string::npos);
+        CHECK(std::stoi(gcode.substr(last_progress + std::string("\nM73 L").size())) == all_passes);
+        CHECK(std::stoi(gcode.substr(last_layer_num + std::string("\n; COUNT_LAYER_NUM ").size())) + 1 == all_passes);
+    }
 }

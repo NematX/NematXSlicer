@@ -393,7 +393,7 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
                  print.config().filament_type.get_at(size_t(plan_facts.initial_tool)));
     m_parser.set("total_toolchanges", int(plan_facts.toolchanges));
     m_parser.set("all_layer_count", int(plan_facts.layer_count));
-    m_parser.set("total_layer_count", int(Printing::object_layer_count(print)));
+    m_parser.set("total_layer_count", int(plan_facts.object_layer_count));
     m_parser.set("max_layer_z", m_max_layer_z);
     m_parser.set("is_extruder_used", new ConfigOptionBools(used_tool_flags(
         plan_facts, std::max(size_t(255), print.config().nozzle_diameter.size()))));
