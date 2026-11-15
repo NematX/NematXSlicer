@@ -823,6 +823,9 @@ public:
 class OtherSlicingStatesConfigDef : public ConfigDef
 {
 public:
+    // Define the typed execution-state placeholders available to custom G-code.
+    // Register translated descriptions including group copy IDs and finished-copy
+    // counts; definitions own their storage and allocation may throw.
     OtherSlicingStatesConfigDef();
 };
 
@@ -861,6 +864,9 @@ public:
 class CustomGcodeSpecificConfigDef : public ConfigDef
 {
 public:
+    // Define arguments specific to individual custom G-code script types.
+    // Distinguish object-list indices from copy catalog arrays; definitions own
+    // their translated metadata and allocation may throw.
     CustomGcodeSpecificConfigDef();
 };
 extern const CustomGcodeSpecificConfigDef    custom_gcode_specific_config_def;

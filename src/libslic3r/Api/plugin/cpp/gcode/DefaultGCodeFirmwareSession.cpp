@@ -475,7 +475,10 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
     m_units_in_mm = true;
     m_e_relative_mode = config.bool_or_default("use_relative_e_distances", false);
     m_e_position_known = true;
-    m_seen_object_group = false;
+    m_group_instances.clear();
+    m_finished_before_group.clear();
+    m_current_instances.clear();
+    m_group_cursor = 0;
     m_seen_print_group = false;
     m_running_max_print_z = 0;
     m_group_entry_clearance.reset();
@@ -527,12 +530,36 @@ void DefaultGCodeFirmwareSession::set_reader_state_id(orchestrator_runtime_id re
 // retaining their plan IDs. The text holds G-code only: the file header, notes and
 // thumbnails belong to the exporter. Invalid metadata throws; no ownership of the
 // borrowed views is retained.
+// Cache sorted physical-copy sets and last-group appearances once. Their prefix
+// counts give the number of fully finished copies before each group, independently
+// of labels and of repeated appearances of a copy in separate groups.
 std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const ConstPrintingPlan &plan)
 {
     setup(print.config());
     m_object_labels.clear();
     m_current_printing_catalog_id = uint32_t(-1);
-    m_seen_object_group = false;
+    m_group_cursor = 0;
+    m_current_instances.clear();
+    m_group_instances.resize(plan.group_count());
+    std::vector<uint32_t> last_group(plan.object_instance_count(), UINT32_MAX);
+    for (uint32_t g = 0; g < plan.group_count(); ++g) {
+        const ConstPrintingGroup group = plan.group(g);
+        std::vector<int32_t> &copies = m_group_instances[g];
+        for (uint32_t i = 0; i < group.object_instance_count(); ++i) {
+            const uint32_t id = group.printing_catalog_id(i);
+            if (id < plan.object_instance_count() && plan.object_instance(id).has_object()) {
+                copies.push_back(int32_t(id));
+                last_group[id] = g;
+            }
+        }
+        std::sort(copies.begin(), copies.end());
+        copies.erase(std::unique(copies.begin(), copies.end()), copies.end());
+    }
+    m_finished_before_group.assign(plan.group_count() + 1, 0);
+    for (uint32_t last : last_group)
+        if (last != UINT32_MAX) ++m_finished_before_group[last + 1];
+    for (size_t g = 1; g < m_finished_before_group.size(); ++g)
+        m_finished_before_group[g] += m_finished_before_group[g - 1];
     m_seen_print_group = false;
     m_running_max_print_z = 0;
     m_group_entry_clearance.reset();
@@ -567,20 +594,16 @@ std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const C
         m_preamble->begin(print, plan);
 }
 
-// Track object counters independently from group-entry clearance and return fallback
-// travel only for later groups with geometry and no materialized entry travel.
-// Borrowed groups stay unchanged; an uninitialized session or encoding failure throws.
 std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
     m_group_entry_clearance.reset();
-    // Only single-entry groups advance the object counter. Auxiliary and
-    // multi-entry groups still participate in the independent clearance sequence.
-    if (group.object_instance_count() == 1) {
-        if (m_seen_object_group) ++m_current_object_idx;
-        m_seen_object_group = true;
+    if (m_group_cursor < m_group_instances.size()) {
+        m_current_instances = m_group_instances[m_group_cursor];
+        m_current_object_idx = m_finished_before_group[m_group_cursor];
     }
+    ++m_group_cursor;
     return move_to_group_start(group);
 }
 
@@ -757,8 +780,11 @@ std::string DefaultGCodeFirmwareSession::end_layer()
     return {};
 }
 
+// Clear the current copy set outside a group and return closing object-label text;
+// the finished-copy count retains its last group value and encoding failures propagate.
 std::string DefaultGCodeFirmwareSession::end_group()
 {
+    m_current_instances.clear();
     return transition_object(uint32_t(-1));
 }
 

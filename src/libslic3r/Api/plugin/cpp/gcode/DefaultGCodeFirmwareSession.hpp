@@ -76,7 +76,7 @@ public:
     // machine state. The borrowed Config view is not retained.
     void setup(const Config &config);
 
-    // Initialize export state and declare only real catalog instances for cancellation.
+    // Cache group copy sets/completion counts and declare real catalog instances for cancellation.
     std::string begin_print(const Print &print, const ConstPrintingPlan &plan) override;
     // Build the plugin-side Reader client used to interpret custom G-code.
     // Both handles remain host-owned and must outlive this firmware session.
@@ -86,9 +86,17 @@ public:
     // Reader. Provider wiring calls this before the session is published.
     void set_reader_state_id(orchestrator_runtime_id reader_state_id);
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
-    // Update object counters and provide clearance for later groups without materialized travel.
+    // Load the next group's cached copy set and finished-copy count, then return fallback
+    // travel only for later groups with geometry and no materialized entry travel.
+    // Borrowed groups stay unchanged; an uninitialized session or encoding failure throws.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Emit layer markers, track the maximum plan Z and refresh extrusion/script heights.
+    // Validate listed source heights and return owned layer markers using their maximum,
+    // or the Z gap without sources. Refresh extrusion/script heights and advance the
+    // layer count without retaining the view. An uninitialized session throws before
+    // changes; source-height rejection occurs after advancing the running maximum Z.
+    // A non-rising source-free Z can produce a non-positive gap for readers.
+    // Clear the extrusion-height marker so the first printable extrusion writes
+    // ;HEIGHT: again; script height uses the first source extrusion or the Z gap.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
     // Set script height to the first source extrusion for this tool when one exists.
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
@@ -97,6 +105,7 @@ public:
     std::string write_event(const ExtrusionEntity &event_root) override;
     std::string end_tool_group() override;
     std::string end_layer() override;
+    // Clear the current copy set and close the current object label.
     std::string end_group() override;
     std::string end_print() override;
 
@@ -430,8 +439,14 @@ private:
     std::vector<double> m_filament_used_mm;
     std::optional<extruder_index_t> m_usage_tool;
     double m_usage_start_mm = 0.0;
-    // Zero-based index of the sequential object being printed, like the legacy current_object_idx.
+    // Number of copies whose final group precedes the current group; independent of labels.
     int32_t m_current_object_idx = 0;
+    // Per-print caches indexed by plan group: real copy catalog IDs and the number
+    // finished before that group. The current IDs and cursor advance in begin_group().
+    std::vector<std::vector<int32_t>> m_group_instances;
+    std::vector<int32_t> m_finished_before_group;
+    std::vector<int32_t> m_current_instances;
+    size_t m_group_cursor = 0;
     // Current plan layer for scripts: begin_layer() count minus one (-1 before the first layer) and its height; m_layer_print_z already holds its print Z.
     int32_t m_layer_num = -1;
     coord_t m_layer_height = 0;
@@ -442,7 +457,6 @@ private:
     // Cleared when external G-code invalidates E. The next generated extrusion
     // establishes a fresh E origin instead of continuing a stale coordinate.
     bool m_e_position_known = true;
-    bool m_seen_object_group = false;
     bool m_seen_print_group = false;
     // Per-print clearance state in print coordinates before machine correction:
     // running maximum Z is scaled; entry clearance, tool-indexed retract lifts,

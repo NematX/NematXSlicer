@@ -13,6 +13,7 @@
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/GCodeExportObjects.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -683,6 +684,194 @@ TEST_CASE("Stepped copy group entries clear all preceding plan heights",
     }
     CHECK(flat == first.size());
     CHECK(checked == (by_object ? plan.groups.size() - 1 : 0));
+}
+
+// Reconstruct copy-set transitions and finished-copy counts from the exported plan;
+// scripts must use catalog IDs independently of label activation and object-list indices.
+TEST_CASE("Copy-set scripts and instance placeholders follow production groups",
+          "[plugins][gcode][firmware][script][group-script-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const int scene = GENERATE(0, 1, 2);
+    const bool labels = GENERATE(false, true);
+    const bool before_move = GENERATE(false, true);
+    const bool travel_provider = GENERATE(false, true);
+    CAPTURE(by_object, scene, labels, before_move, travel_provider);
+    struct TravelActivation {
+        Orchestrator &host;
+        Plugin *plugin;
+        bool previous;
+        // Select production travel generation and retain the caller's activation state.
+        TravelActivation(Orchestrator &value, bool enabled) : host(value),
+            plugin(value.get_plugin("layer_extrusion_edit.travel.default")), previous(value.is_plugin_active(plugin)) {
+            host.set_plugin_active(plugin, enabled);
+        }
+        // Restore activation on normal completion and failed assertions alike.
+        ~TravelActivation() { host.set_plugin_active(plugin, previous); }
+    } activation(Orchestrator::instance(), travel_provider);
+    const std::string context = " O{current_object_idx} C{current_instance_id} K{size(current_instances_id)}"
+        " A{if size(current_instances_id)>0}{current_instances_id[0]}{else}-1{endif}"
+        " B{if size(current_instances_id)>1}{current_instances_id[1]}{else}-1{endif}";
+    const std::string transition = "M117 GO P{previous_object_id} N{next_object_id}"
+        " U{size(previous_instances_id)} V{size(next_instances_id)}"
+        " X{if size(previous_instances_id)>0}{previous_instances_id[0]}{else}-1{endif}"
+        " Y{if size(previous_instances_id)>1}{previous_instances_id[1]}{else}-1{endif}"
+        " Z{if size(next_instances_id)>0}{next_instances_id[0]}{else}-1{endif}"
+        " W{if size(next_instances_id)>1}{next_instances_id[1]}{else}-1{endif}" + context;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0"}, {"complete_objects_sort", "object"}, {"complete_objects_one_first_layer", "0"},
+        {"complete_objects_one_skirt", "1"},
+        {"complete_islands", scene == 1 ? "1" : "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"skirts", scene == 2 ? "1" : "0"}, {"skirt_height", "1"}, {"skirt_per_object", "0"}, {"brim_width", "0"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"start_gcode", "M117 OUTSTART" + context + " P{size(previous_instances_id)} N{size(next_instances_id)}"},
+        {"end_gcode", "M117 OUTEND" + context + " P{size(previous_instances_id)} N{size(next_instances_id)}"},
+        {"before_layer_gcode", "M117 CTX" + context}, {"between_objects_gcode", transition},
+        {"between_objects_gcode_before_move", before_move ? "1" : "0"}, {"use_relative_e_distances", "1"},
+        {"binary_gcode", "0"}, {"gcode_label_objects", labels ? "both" : "disabled"}, {"wipe_tower", "0"}, {"wipe", "0"}});
+    if (scene == 2)
+        config.set_key_value("extruder_clearance", new ConfigOptionGraphs({GraphData(0, 2,
+            GraphData::GraphType::SQUARE, {{0, 100}, {100, 100}})}));
+    Model model;
+    Print print;
+    TriangleMesh mesh = make_cube(2., 2., 1.2);
+    if (scene == 1) {
+        TriangleMesh island = mesh;
+        island.translate(Vec3f(30.f, 0.f, 0.f));
+        mesh.merge(island);
+    }
+    Test::init_print(scene == 2 ? std::vector<TriangleMesh>{mesh, make_cube(2., 2., 0.4)} :
+        std::vector<TriangleMesh>{mesh}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    if (scene == 0) model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(100., 30., 0.));
+    if (scene == 2) model.objects()[1].instances.front()->set_offset(Vec3d(40., 30., 0.));
+    if (scene != 1) {
+        model.custom_gcode_per_print_z.mode = CustomGCode::SingleExtruder;
+        model.custom_gcode_per_print_z.gcodes.push_back({scale_i(0.6), CustomGCode::Custom, 1, "", "M117 band"});
+    }
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    boost::filesystem::remove(output);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    std::vector<std::vector<int32_t>> groups;
+    std::map<int32_t, size_t> last;
+    for (size_t g = 0; g < plan.groups.size(); ++g) {
+        std::set<int32_t> copies;
+        for (uint32_t id : plan.groups[g].printing_catalog_ids)
+            if (plan.object_instances[id].object) { copies.insert(int32_t(id)); last[int32_t(id)] = g; }
+        groups.emplace_back(copies.begin(), copies.end());
+    }
+    // Produce the same compact marker format without using the placeholder implementation.
+    const auto format_context = [](const std::vector<int32_t> &copies, int finished) {
+        return " O" + std::to_string(finished) + " C" + std::to_string(copies.size() == 1 ? copies.front() : -1) +
+            " K" + std::to_string(copies.size()) + " A" + std::to_string(copies.empty() ? -1 : copies[0]) +
+            " B" + std::to_string(copies.size() < 2 ? -1 : copies[1]);
+    };
+    std::vector<int> finished(groups.size(), 0);
+    for (size_t g = 0; g < groups.size(); ++g)
+        for (const auto &[id, final_group] : last) if (final_group < g) ++finished[g];
+    std::vector<std::string> expected_context, expected_go, actual_context, actual_go;
+    std::vector<std::pair<size_t, size_t>> transition_groups;
+    std::vector<std::vector<int32_t>> nonempty;
+    size_t previous = size_t(-1);
+    for (size_t g = 0; g < groups.size(); ++g) {
+        for (size_t l = 0; l < plan.groups[g].layers.size(); ++l)
+            expected_context.push_back("M117 CTX" + format_context(groups[g], finished[g]));
+        if (groups[g].empty()) continue;
+        nonempty.push_back(groups[g]);
+        if (previous != size_t(-1) && groups[g] != groups[previous]) {
+            transition_groups.emplace_back(previous, g);
+            const std::vector<int32_t> &a = groups[previous], &b = groups[g];
+            int p = -1, n = -1;
+            for (uint32_t obj = 0; obj < print.objects().size(); ++obj) {
+                if (a.size() == 1 && plan.object_instances[a[0]].object == &print.objects()[obj]) p = int(obj);
+                if (b.size() == 1 && plan.object_instances[b[0]].object == &print.objects()[obj]) n = int(obj);
+            }
+            expected_go.push_back("M117 GO P" + std::to_string(p) + " N" + std::to_string(n) +
+                " U" + std::to_string(a.size()) + " V" + std::to_string(b.size()) +
+                " X" + std::to_string(a[0]) + " Y" + std::to_string(a.size() < 2 ? -1 : a[1]) +
+                " Z" + std::to_string(b[0]) + " W" + std::to_string(b.size() < 2 ? -1 : b[1]) +
+                format_context(groups[before_move ? previous : g], finished[before_move ? previous : g]));
+        }
+        previous = g;
+    }
+    std::istringstream lines(text);
+    std::string line;
+    size_t line_number = 0, layer_index = size_t(-1);
+    std::vector<size_t> go_lines, travel_xy_lines, layer_groups;
+    std::vector<size_t> first_deposit(groups.size(), size_t(-1)), last_deposit(groups.size(), size_t(-1));
+    for (size_t g = 0; g < groups.size(); ++g)
+        for (size_t l = 0; l < plan.groups[g].layers.size(); ++l) layer_groups.push_back(g);
+    double x = 0., y = 0.;
+    while (std::getline(lines, line)) {
+        ++line_number;
+        if (line == ";LAYER_CHANGE") ++layer_index;
+        if (line.rfind("M117 CTX", 0) == 0) actual_context.push_back(line);
+        if (line.rfind("M117 GO", 0) == 0) { actual_go.push_back(line); go_lines.push_back(line_number); }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0) continue;
+        double nx = x, ny = y, e = 0.;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word[0] == 'X') nx = std::stod(word.substr(1));
+            if (word[0] == 'Y') ny = std::stod(word.substr(1));
+            if (word[0] == 'E') e = std::stod(word.substr(1));
+        }
+        if (std::hypot(nx - x, ny - y) > 0.001) {
+            if (e > 0. && layer_index < layer_groups.size()) {
+                const size_t g = layer_groups[layer_index];
+                if (first_deposit[g] == size_t(-1)) first_deposit[g] = line_number;
+                last_deposit[g] = line_number;
+            } else if (e <= 0.) travel_xy_lines.push_back(line_number);
+        }
+        x = nx; y = ny;
+    }
+    CHECK(actual_context == expected_context);
+    CHECK(actual_go == expected_go);
+    REQUIRE(go_lines.size() == transition_groups.size());
+    for (size_t i = 0; i < transition_groups.size(); ++i) {
+        const size_t source = transition_groups[i].first, target = transition_groups[i].second;
+        REQUIRE(last_deposit[source] != size_t(-1));
+        REQUIRE(first_deposit[target] != size_t(-1));
+        std::vector<size_t> approach;
+        for (size_t move : travel_xy_lines)
+            if (move > last_deposit[source] && move < first_deposit[target]) approach.push_back(move);
+        REQUIRE_FALSE(approach.empty());
+        CHECK(go_lines[i] > last_deposit[source]);
+        CHECK(go_lines[i] < first_deposit[target]);
+        if (before_move) CHECK(go_lines[i] < approach.front());
+        else CHECK(go_lines[i] > approach.back());
+    }
+    CHECK(text.find("M117 OUTSTART O0 C-1 K0 A-1 B-1 P0 N0") != std::string::npos);
+    CHECK(text.find("M117 OUTEND" + format_context({}, finished.back()) + " P0 N0") != std::string::npos);
+    if (!by_object) { CHECK(actual_go.empty()); for (int count : finished) CHECK(count == 0); }
+    else if (scene == 0) {
+        REQUIRE(nonempty.size() == 4);
+        CHECK(nonempty[0] == nonempty[2]); CHECK(nonempty[1] == nonempty[3]); CHECK(actual_go.size() == 3);
+    } else if (scene == 1) { CHECK(nonempty.size() > 1); CHECK(actual_go.empty()); }
+    else { REQUIRE(nonempty.size() == 2); CHECK(groups[0].empty()); CHECK(nonempty[0].size() == 2); CHECK(nonempty[1].size() == 1); CHECK(actual_go.size() == 1); }
+    const ApiHost::GCodeExportDescription metadata = ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&print));
+    for (const ApiHost::GCodeExportObject &object : metadata.objects) {
+        CHECK(object.id < plan.object_instances.size());
+        if (!object.real) continue;
+        REQUIRE(object.object_index < print.objects().size());
+        CHECK(plan.object_instances[object.id].object == &print.objects()[object.object_index]);
+        CHECK(plan.object_instances[object.id].object_instance_idx == object.instance_index);
+        CHECK(object.name == plan.object_instances[object.id].name);
+        CHECK(last.count(int32_t(object.id)) == 1);
+        if (labels) {
+            CHECK(text.find("M486 S" + std::to_string(object.id) + "\n") != std::string::npos);
+            CHECK(text.find("; printing object " + object.name) != std::string::npos);
+        }
+    }
 }
 
 // The absolute travel floor is limited by the printer ceiling without blocking slicing.

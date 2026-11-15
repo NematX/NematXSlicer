@@ -34,15 +34,23 @@ into ordered events in the PrintingPlan. It runs at STEP_EXTRUSION_EDIT after
 the plan hierarchy and tool-change scopes have been created. The final
 firmware stage later evaluates these events; this plugin only places them and
 stores their static placeholder values.
+Between-object events compare sorted physical-copy catalog ID sets. Empty groups
+do not replace the preceding object group, and equal sets do not emit an event.
+Single-copy groups also carry a Print object-list index; multi-copy groups use -1
+for that scalar. Previous/next copy arrays are frozen on the event. Before-move
+events follow the preceding object group. After-move events enter the target
+scope's before phase, after its incoming travel and before printable content.
+Groups without an incoming scope keep group-level placement, after the firmware
+group-start approach when one exists.
 
 The normal execution flow is:
 
     run_impl()
     |-- summarize the plan's layers, Z positions, tools, and objects
     |-- append `start_gcode` before the plan
-    |-- for each sequential printing group:
-    |   |-- place `between_objects_gcode` before the next object or after the
-    |   |   previous object according to its setting
+    |-- for each printing group:
+    |   |-- when its non-empty copy set changes, place `between_objects_gcode`
+    |   |   after incoming travel or after the preceding object group
     |   |-- place `before_layer_gcode` at each layer boundary
     |   |-- place `layer_gcode` unless the pass has merged source rank zero
     |   |-- on tool changes, append end-filament and start-filament scripts
@@ -123,10 +131,11 @@ struct PlanSummary
 // invalid-view failures.
 PlanSummary summarize_plan(const ConstPrintingPlan &plan,
                            const plugin_run_context *run_ctx);
-// Resolve a single real-object catalog group to its stable placeholder object index.
+// Map one physical copy to its Print object-list index; multi-copy sets have no
+// scalar index. Borrowed owners are unchanged; invalid views or cancellation throw.
 std::optional<uint32_t> group_object_index(const Print &print,
                                            const ConstPrintingPlan &plan,
-                                           const ConstPrintingGroup &group,
+                                           const std::vector<int32_t> &copies,
                                            const plugin_run_context *run_ctx);
 // Register the option definitions owned by this plugin; it runs once from
 // inilialize_impl().
@@ -134,6 +143,8 @@ void initialize_settings_gcode_scripts_settings(orchestrator_handle *orchestrato
 // Add one typed scalar to the temporary Config transported with a script.
 void set_int_argument(MutableConfig &config, const char *key, int32_t value);
 void set_float_argument(MutableConfig &config, const char *key, double value);
+// Store an owned integer array of catalog copy IDs in script arguments.
+void set_instance_arguments(MutableConfig &config, const char *key, const std::vector<int32_t> &copies);
 // Build an owned producer Config from the final global layer position, including actual height and preceding Z; storage must remain valid for the returned handle and Config failures propagate.
 StoredConfig layer_arguments(storage_handle *storage,
                              const LayerContext &layer,
@@ -148,7 +159,17 @@ void append_script_event(storage_handle *storage,
                          gcode_script_type script_type,
                          const Config &arguments,
                          ScopeEventPosition position,
-                         extruder_index_t processing_extruder_id = EXTRUDER_ID_UNKNOWN);
+                          extruder_index_t processing_extruder_id = EXTRUDER_ID_UNKNOWN);
+// Find the first marked scope in execution order without entering its content.
+MutableExtrusionEntity first_scope_in_entity(MutableExtrusionEntity entity,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &scope_key,
+    const plugin_run_context *run_ctx);
+// Append a frozen between-group script after incoming travel and before content.
+// Return false when the first scope has no incoming phase or the group has no scopes;
+// borrowed trees stay owned by the plan, and rejected edits/cancellation throw.
+bool append_between_after_travel(PrintingGroup group,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &scope_key,
+    const std::string &script, const Config &arguments, const plugin_run_context *run_ctx);
 // Search one tree for the first scope whose incoming boundary selects a tool.
 MutableExtrusionEntity first_toolchange_scope_in_entity(
     MutableExtrusionEntity entity,
@@ -214,16 +235,15 @@ PlanSummary summarize_plan(const ConstPrintingPlan &plan,
     return summary;
 }
 
-// Inspect a borrowed single-entry group and map only a real catalog owner to a Print object index; missing/synthetic owners return no index, cancellation throws and no ownership or plan state changes.
 std::optional<uint32_t> group_object_index(const Print &print,
                                            const ConstPrintingPlan &plan,
-                                           const ConstPrintingGroup &group,
+                                            const std::vector<int32_t> &copies,
                                            const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if (group.object_instance_count() != 1)
+    if (copies.size() != 1)
         return std::nullopt;
-    const uint32_t printing_catalog_id = group.printing_catalog_id(0);
+    const uint32_t printing_catalog_id = uint32_t(copies.front());
     if (printing_catalog_id == UINT32_MAX ||
         printing_catalog_id >= plan.object_instance_count())
         return std::nullopt;
@@ -238,6 +258,13 @@ std::optional<uint32_t> group_object_index(const Print &print,
             return object_idx;
     }
     return std::nullopt;
+}
+
+void set_instance_arguments(MutableConfig &config, const char *key, const std::vector<int32_t> &copies)
+{
+    MutableConfigOption option = config.get_or_add(key, SLIC3R_CONFIG_OPTION_INTS);
+    option.resize(uint32_t(copies.size()));
+    for (uint32_t i = 0; i < copies.size(); ++i) option.set_int(copies[i], i);
 }
 
 void set_int_argument(MutableConfig &config, const char *key, int32_t value)
@@ -637,6 +664,7 @@ private:
         int32_t layer_number = 0;
         std::set<extruder_index_t> used_tools;
         std::optional<uint32_t> previous_object;
+        std::vector<int32_t> previous_copies;
         std::optional<LayerContext> previous_layer;
         std::optional<PrintingScopeEvents> previous_object_events;
         std::optional<PrintingScopeEvents> previous_tool_events;
@@ -648,28 +676,39 @@ private:
                 throw_if_cancelled(run_context);
             PrintingGroup group = plan.group(group_idx);
             PrintingScopeEvents group_events = group.events();
+            std::vector<int32_t> current_copies;
+            for (uint32_t i = 0; i < group.object_instance_count(); ++i) {
+                const uint32_t id = group.printing_catalog_id(i);
+                if (id < read_only_plan.object_instance_count() && read_only_plan.object_instance(id).has_object())
+                    current_copies.push_back(int32_t(id));
+            }
+            std::sort(current_copies.begin(), current_copies.end());
+            current_copies.erase(std::unique(current_copies.begin(), current_copies.end()), current_copies.end());
             const std::optional<uint32_t> current_object =
-                group_object_index(print, read_only_plan, ConstPrintingGroup(group), run_context);
-            if (current_object && previous_object && !between_objects.empty()) {
+                group_object_index(print, read_only_plan, current_copies, run_context);
+            if (!current_copies.empty() && !previous_copies.empty() && current_copies != previous_copies && !between_objects.empty()) {
                 StoredConfig arguments(run_context->plugin_storage);
                 const LayerContext object_layer = previous_layer.value_or(LayerContext{});
                 set_int_argument(arguments, "layer_num", object_layer.number);
                 set_float_argument(arguments, "layer_z", unscaled(object_layer.print_z));
-                set_int_argument(arguments, "previous_object_id", int32_t(*previous_object));
-                set_int_argument(arguments, "next_object_id", int32_t(*current_object));
+                set_int_argument(arguments, "previous_object_id", previous_object ? int32_t(*previous_object) : -1);
+                set_int_argument(arguments, "next_object_id", current_object ? int32_t(*current_object) : -1);
+                set_instance_arguments(arguments, "previous_instances_id", previous_copies);
+                set_instance_arguments(arguments, "next_instances_id", current_copies);
                 if (between_before_move) {
                     assert(previous_object_events.has_value());
                     append_script_event(run_context->plugin_storage, *previous_object_events,
                                         between_objects, GCODE_SCRIPT_TYPE_BETWEEN_OBJECTS_GCODE,
                                         arguments, ScopeEventPosition::After);
-                } else {
+                } else if (!append_between_after_travel(group, m_scope_property, between_objects, arguments, run_context)) {
                     append_script_event(run_context->plugin_storage, group_events,
                                         between_objects, GCODE_SCRIPT_TYPE_BETWEEN_OBJECTS_GCODE,
                                         arguments, ScopeEventPosition::Before);
                 }
             }
-            if (current_object) {
+            if (!current_copies.empty()) {
                 previous_object = current_object;
+                previous_copies = current_copies;
                 previous_object_events = group_events;
             }
 
@@ -807,6 +846,49 @@ private:
 
     PluginPropertyKey<PrintingExtrusionScopeProperty> m_scope_property;
 };
+
+bool append_between_after_travel(PrintingGroup group,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &scope_key,
+    const std::string &script, const Config &arguments, const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    for (uint32_t l = 0; l < group.layer_group_count(); ++l) {
+        if ((l & 63u) == 0) throw_if_cancelled(run_ctx);
+        PrintingLayerGroup layer = group.layer_group(l);
+        for (uint32_t t = 0; t < layer.tool_group_count(); ++t) {
+            PrintingToolGroup tool = layer.tool_group(t);
+            for (uint32_t e = 0; e < tool.extrusion_count(); ++e) {
+                MutableExtrusionEntity root = first_scope_in_entity(tool.extrusion(e).mutable_root(), scope_key, run_ctx);
+                if (!root.valid()) continue;
+                const LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope scope(root, scope_key);
+                // The before phase follows travel and precedes content, even without retraction.
+                MutableExtrusionEntity before = scope.before();
+                if (!before.valid()) return false;
+                MutableExtrusionEntity event = before;
+                if (before.segment_count() != 0 || before.child_count() != 0 || before.property_count() != 0)
+                    event = before.emplace_ordered_leaf(OrderedLeafPosition::After,
+                        ExistingPropertyPlacement::MoveWithExistingContent);
+                if (!event.valid()) throw std::runtime_error("Unable to place between-object script after travel.");
+                event.script_gcode(script, GCODE_SCRIPT_TYPE_BETWEEN_OBJECTS_GCODE, arguments);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+MutableExtrusionEntity first_scope_in_entity(MutableExtrusionEntity entity,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &scope_key,
+    const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    if (LayerExtrusionEdit::ExtrusionScope::is_scope(entity.readonly(), scope_key)) return entity;
+    for (uint32_t i = 0; i < entity.child_count(); ++i) {
+        MutableExtrusionEntity found = first_scope_in_entity(entity.child_mutable(i), scope_key, run_ctx);
+        if (found.valid()) return found;
+    }
+    return MutableExtrusionEntity();
+}
 
 } // namespace
 
