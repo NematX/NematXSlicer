@@ -6,7 +6,9 @@
 #include "ObjectInstanceCatalog.hpp"
 
 #include <algorithm>
+#include <map>
 #include <regex>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -28,6 +30,15 @@ This STEP_ORDERING provider completes entries registered by a plan builder. It
 uses only plugin-facing views and services, so the same catalog rules are
 available to native and future non-native plan builders without importing the
 host Print, Model, or mesh slicer implementation.
+After filling missing metadata, it resolves collisions between physical-copy
+names. Every original name is reserved before colliding copies receive catalog-ID
+suffixes, so already unique names remain unchanged, including suffix-like names.
+The plan owns all names and outlines; IDs and source associations never change.
+
+    populate_object_instance_catalog()
+        |-- object_instance_name() -> apply label-style and firmware sanitization
+        |-- project_object_instance_outline() -> copy the placed footprint
+        `-- reserve names and disambiguate colliding physical copies
 */
 
 namespace slic3r_api { namespace Ordering { namespace ObjectInstanceCatalogPlugin {
@@ -221,6 +232,26 @@ void populate_object_instance_catalog(
                 plan.mutable_handle(), id, name.c_str(), outline.handle()))
             throw std::invalid_argument(
                 "The PrintingPlan rejected object-instance metadata.");
+    }
+    std::map<std::string, uint32_t> name_counts;
+    std::set<std::string> reserved_names;
+    for (uint32_t id = 0; id < count; ++id) {
+        const PrintingObjectInstance instance = plan.object_instance(id);
+        reserved_names.insert(instance.name());
+        if (instance.has_object()) ++name_counts[instance.name()];
+    }
+    // Reserve originals first so a generated suffix cannot steal an existing unique name.
+    for (uint32_t id = 0; id < count; ++id) {
+        const PrintingObjectInstance instance = plan.object_instance(id);
+        if (!instance.has_object() || name_counts[instance.name()] < 2) continue;
+        const std::string base = instance.name() + "_id_" + std::to_string(id);
+        std::string name = base;
+        uint32_t suffix = 0;
+        while (reserved_names.count(name) != 0) name = base + "_" + std::to_string(++suffix);
+        reserved_names.insert(name);
+        if (!printing_plan_set_object_instance_metadata(plan.mutable_handle(), id, name.c_str(),
+                instance.projected_outline().handle()))
+            throw std::invalid_argument("The PrintingPlan rejected a unique object-instance name.");
     }
 }
 

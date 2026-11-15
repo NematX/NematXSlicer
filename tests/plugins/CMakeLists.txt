@@ -140,6 +140,7 @@ test_support_tree_family.cpp
     test_nozzle_cleaning.cpp
     test_ordering_advanced_extrusion_tree.cpp
     test_ordering_engine.cpp
+    test_ordering_object_instance_catalog.cpp
     test_ordering_printing_extrusion_presort.cpp
     test_ordering_wipe_into_first.cpp
     test_ordering_xy_serpentine.cpp
