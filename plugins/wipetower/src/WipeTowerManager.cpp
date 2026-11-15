@@ -689,7 +689,8 @@ uint32_t choose_tower(const ConstPrintingPlan &plan, const c_wipe_tower_request 
 
 void check_separate_filament(const Config &print_config, const ConstPrintingPlan &plan)
 {
-    if (print_config.get("single_extruder_multi_material").get_bool())
+    if (plan.uses_single_extruder_multi_material(
+            print_config.get("single_extruder_multi_material").get_bool()))
         throw std::runtime_error("Separate filament sections of the wipe tower cannot be used with a single extruder "
                                  "multi-material printer: every filament goes through the same nozzle.");
     const ConfigOption ramming = print_config.get("filament_multitool_ramming");

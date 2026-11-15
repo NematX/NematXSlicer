@@ -1,11 +1,12 @@
-"""Fast package E2E gate: micro-boxes, real 3MF instances and seven host exports.
+"""Fast package E2E gate: micro-boxes, real 3MF instances and nine host exports.
 
 The common scene combines ranges, partial/full modifiers, independent objects,
 copies, a synthetic skirt, policy changes and two tools/standby. Separate small
 scenes compare the host with N=0/1 and SEMM and exercise sequential copies.
+Single-tool scenes retain smoothing with SEMM checked and one or two configured tools.
 Expected sequences are written explicitly; the C++ tests cover the large
 arithmetic matrix without slicing it. The first export also saves the default
-catalogue for all scenes; the six others then run in parallel, each with its own
+catalogue for all scenes; the eight others then run in parallel, each with its own
 datadir copy, before the tests read their cached results. All share one budget.
 A passed export drops its datadir; a passed run is removed, a failed one is kept.
 
@@ -301,10 +302,20 @@ def semm_smooth_result() -> Result:
     return export("semm-smooth", semm_options(), tool_scene())
 
 
+@functools.lru_cache(maxsize=2)
+def single_tool_semm_result(configured_tools: int) -> Result:
+    """Keep a real ramp when the checked SEMM setting has only one visited tool."""
+    options = two_extruder_options() if configured_tools == 2 else ()
+    options += ("single_extruder_multi_material = 1", "print_temperature_smooth_change = 3")
+    return export(f"single-tool-semm-{configured_tools}", options,
+                  [Object("single", config={"print_first_layer_temperature": "205"}, height=1.5)])
+
+
 def prefetch() -> None:
     """Run the first export, whose saved catalogue the others read, then the others in parallel."""
     immediate_result()
-    exports = (main_result, host_result, sequential_result, tools_base_result, semm_base_result, semm_smooth_result)
+    exports = (main_result, host_result, sequential_result, tools_base_result, semm_base_result, semm_smooth_result,
+               functools.partial(single_tool_semm_result, 1), functools.partial(single_tool_semm_result, 2))
     with ThreadPoolExecutor(max_workers=len(exports)) as pool:
         for future in [pool.submit(result) for result in exports]:
             future.result()
@@ -374,6 +385,15 @@ class SmoothTemperature(unittest.TestCase):
         self.assertEqual(semm_smooth.commands(), semm_base.commands(), "SEMM leaves all base decisions unchanged")
         self.expect(semm_smooth, "tools", [220, 240, 240, 240, 240, 240], positions=[0, 1, 6, 7, 8, 9])
         self.expect(semm_smooth, "tools", [240] * 4, tool=1, positions=[2, 3, 4, 5])
+
+
+    def test_06_single_used_tool_keeps_smoothing_with_semm_checked(self) -> None:
+        """Configured tool slots do not disable smoothing unless two tools are visited."""
+        for configured_tools in (1, 2):
+            with self.subTest(configured_tools=configured_tools):
+                result = single_tool_semm_result(configured_tools)
+                self.expect(result, "single", [205, 210, 215, 220, 220])
+                self.assertEqual({key[1] for key in result.setpoints}, {0})
 
 
 def main() -> int:

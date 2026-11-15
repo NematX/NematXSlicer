@@ -363,6 +363,17 @@ class WipeTowerParity(unittest.TestCase):
         log = (OUTPUT_ROOT / "separate-semm" / "host.log").read_text(encoding="utf-8")
         self.assertIn("Separate filament sections of the wipe tower cannot be used", log)
 
+    def test_separate_sections_allow_one_used_tool_with_semm_checked(self) -> None:
+        """An unused second configured tool does not turn a single-tool plan into SEMM."""
+        model = OUTPUT_ROOT / "single-tool.3mf"
+        write_boxes(model, [(0, 0, 0, 10, 10, 1, 1)])
+        options = self.extruders + (f"step_wipetower_plugin = {NEMATX_MANAGER}",
+                                   "wipe_tower_separate_filament = 1", "single_extruder_multi_material = 1")
+        gcode, log = run_export("single-tool-semm", options, model)
+        self.assertNotIn("Separate filament sections of the wipe tower cannot be used", log)
+        self.assertIn(";TYPE:Perimeter", gcode)
+        self.assertNotIn(";TYPE:Wipe tower", gcode)
+
     def check_dense_fill(self, sparse: str, dense: str) -> None:
         """Above the first layer, the only segments that change are the fill of the unused area, and the dense
         fill is much longer than the sparse grid (a tenth of the area by default). The first layer is always

@@ -19,7 +19,7 @@ Example with N = 2: the first layer asks for 230 and prints 230; the second asks
 
 ## Limitations
 
-- No smoothing with a single extruder multi-material printer: the wipe tower resets the shared heater there.
+- No smoothing when SEMM is enabled and the PrintingPlan visits multiple distinct logical tools: the wipe tower resets the shared heater there. With only one used tool, smoothing remains active even if SEMM is checked or other tools are configured. Height-marker tool visits count, including empty visits; a color replacement on the same tool does not add another logical tool.
 - When the host provider is explicitly selected in the layer temperature group, `print_temperature_smooth_change` is ignored without a message.
 - Supports, skirt, brim and the wipe tower have no region: they keep the current setpoint, as with the host provider.
 - Several instances at different temperatures on one layer switch the setpoint, without waiting, at each change of instance, as with the host provider.
@@ -62,6 +62,7 @@ The host executable and library paths come from the repository's existing
 | Synthetic paths | Common scene with a small skirt | A real regionless extrusion exists and adds no heater request or ramp step |
 | Two tools / standby | Small base scene + shared main scene | Pause on absent-tool layers, immediate standby, next ramp value on return; identical wait locations |
 | SEMM bypass | Base + smoothed SEMM scenes | Complete executable G-code equal, with both materials really used |
+| Single-tool SEMM setting | Two small exports, one or two configured tools | Only tool 0 prints and its exact five-layer ramp remains enabled |
 | Oracle failure visibility | Python unit tests | Missing temperatures/layers, ambiguous objects, malformed labels and partial exports fail |
 | Timeout / process cleanup | Python unit tests | Failed commands retain logs; an expired budget launches nothing; a timed-out child's descendant is stopped |
 
@@ -72,7 +73,7 @@ arranger and uses one host worker for these tiny scenes. It does not depend on
 parallel CTest execution, a Release host or cached G-code. Arithmetic variations
 stay in the cheap kernel instead of repeating slicer launches.
 
-There are seven exports and seven host launches: saving the catalogue shares the
+There are nine exports and nine host launches: saving the catalogue shares the
 first export, and independent assertions reuse the main scene within that run.
 The original gate used fifteen exports plus three catalogue-only launches.
 Native SuperSlicer metadata avoids profile conversion, and a 3MF project-version

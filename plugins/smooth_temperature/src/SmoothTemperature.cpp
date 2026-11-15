@@ -210,9 +210,10 @@ private:
             return;
         const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
         const Print print(ctx->print);
-        if (print.config().bool_or_default("single_extruder_multi_material", false))
-            return;
         PrintingPlan plan(ctx->plan);
+        if (ConstPrintingPlan(plan).uses_single_extruder_multi_material(
+                print.config().bool_or_default("single_extruder_multi_material", false)))
+            return;
         smooth_decisions(print, plan, m_decisions);
     }
 };
