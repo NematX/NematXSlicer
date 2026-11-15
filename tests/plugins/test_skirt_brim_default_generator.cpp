@@ -1669,8 +1669,8 @@ TEST_CASE("Default skirt generator owns its serialized option and activation rul
     CHECK(PrintConfig::defaults().option("complete_objects_one_skirt") != nullptr);
 
     /*
-    The object builder owns both whole-object and height-step printing, so one
-    selector condition enables the setting for both cases in the print scope.
+    The option applies only to zero-step By object printing; a positive height
+    step always uses a global skirt.
     */
     Orchestrator &orchestrator = Orchestrator::instance();
     size_t rule_count = 0;
@@ -1679,10 +1679,12 @@ TEST_CASE("Default skirt generator owns its serialized option and activation rul
             continue;
         ++rule_count;
         CHECK(rule.scope == RAW_PRESET_TYPE_FFF_PRINT);
-        REQUIRE(rule.clauses.size() == 1);
+        REQUIRE(rule.clauses.size() == 2);
         CHECK(rule.clauses.front().condition == RAW_GUI_RULE_CONDITION_STRING_EQUALS);
         CHECK(rule.clauses.front().condition_key == "print_plan_builder");
         CHECK(rule.clauses.front().condition_string_value == "ordering.plan_builder.by_object");
+        CHECK(rule.clauses[1].condition_key == "complete_objects_step");
+        CHECK(rule.clauses[1].condition_float_value == 0.);
     }
     CHECK(rule_count == 1);
 }

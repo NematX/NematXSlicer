@@ -3571,6 +3571,27 @@ TEST_CASE("Clearance and disabled-support notices coexist in validation", "[plug
     CHECK(std::count(warnings.begin(), warnings.end(), "_COPIES_TOO_CLOSE") == 1);
 }
 
+// The preferred arrange distance retains the radius but excludes a skirt that
+// becomes global with a positive step, at bed level and above it.
+TEST_CASE("By object preferred spacing excludes per-copy skirts with a step", "[plugins][skirt-brim][print-sequence][object-step]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0"}, {"complete_objects_one_skirt", "0"},
+        {"extruder_clearance_radius", "10"}, {"skirts", "1"}, {"skirt_height", "2"},
+        {"skirt_distance", "6"}, {"brim_width", "0"}});
+    CHECK(min_object_distance(&config, 0.) > 16.);
+    CHECK(min_object_distance(&config, 0.2) > 16.);
+    config.set_deserialize_strict("complete_objects_step", "0.5");
+    for (const bool one_skirt : {false, true}) {
+        config.set_deserialize_strict("complete_objects_one_skirt", one_skirt ? "1" : "0");
+        CHECK(min_object_distance(&config, 0.) == Approx(10.));
+        CHECK(min_object_distance(&config, 0.2) == Approx(10.));
+    }
+}
+
 // Change only the builder on a processed support-enabled print and require all
 // mode-dependent producers to run again while the source slices remain cached.
 TEST_CASE("Changing the print sequence replays adhesion support and plan construction", "[plugins][config][print-sequence][invalidation]")

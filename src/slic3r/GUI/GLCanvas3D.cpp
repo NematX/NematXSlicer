@@ -25,6 +25,9 @@ Canvas scene rebuilding and interaction. Tower proxies have object_id INT_MAX;
 volume_id 0 is global, while owner-object-index+1 and instance_id identify an
 instance tower. Move events use Z=owner+1, XY=relative offset (global: Z=0,
 XY=platter position). Tower geometry and placement come only from config.
+All By object modes use the same clearance predicate for manipulation updates
+and rendering. Filled red contours are advisory; slicing eligibility belongs to
+Print validation, not the overlay. Positive steps use global skirt previews.
 
 Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
 
@@ -7524,7 +7527,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     GLVolume *volume = m_volumes.new_toolpath_volume(color);
     GLModel::Geometry init_data;
     init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
-    const bool object_skirts = sequential_clearance_enabled(config);
+    const bool object_skirts = print_complete_objects(config);
     for (size_t i = 0; i < skirt_height; ++ i) {
         volume->_print_zs.push_back(scale_to_layer_coord(print_zs_mm[i]));
         volume->offsets.push_back(init_data.indices_count());

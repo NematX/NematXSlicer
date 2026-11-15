@@ -131,6 +131,8 @@ const char *const k_defined_config_keys[] = {
 // rules that decide when they stay editable. Both run once from
 // inilialize_impl().
 void initialize_default_skirt_generator_settings(orchestrator_handle *orchestrator);
+// Keep the shared-skirt switch editable only in zero-step By object mode; the
+// borrowed host copies the rule, and registration failures follow the host API.
 void add_default_skirt_generator_gui_rules(orchestrator_handle *orchestrator);
 
 struct SkirtOutput
@@ -1044,7 +1046,7 @@ void add_default_skirt_generator_gui_rules(orchestrator_handle *orchestrator)
 
     const GuiCondition sequential = slic3r_api::string_equals("print_plan_builder", "ordering.plan_builder.by_object");
     GuiRule::activate("complete_objects_one_skirt")
-        .when(sequential)
+        .when(slic3r_api::all_of({sequential, slic3r_api::float_equals("complete_objects_step", 0.)}))
         .scope(RAW_PRESET_TYPE_FFF_PRINT)
         .add_to(orchestrator);
 }

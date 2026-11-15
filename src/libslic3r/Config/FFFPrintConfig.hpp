@@ -819,6 +819,7 @@ bool print_by_object(const ConfigBase &config);
 // Return the preferred arrangement clearance, without imposing a placement requirement.
 double min_object_distance(const PrintConfig& config); //TODO: remove
 //static inline
+// Return preferred clearance at the given height, excluding per-copy skirts when a step makes them global.
 double min_object_distance(const ConfigBase* config, double height = 0); //TODO: remove
 
 // This object is mapped to Perl as Slic3r::Config::Full.

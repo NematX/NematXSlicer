@@ -655,6 +655,28 @@ TEST_CASE("Core tower rules distinguish global and instance controls", "[plugins
     }
 }
 
+// A height step forces the skirt global regardless of the island-unit setting.
+TEST_CASE("One skirt option is editable only for zero-step By object printing", "[plugins][gui-rules][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &orchestrator = Orchestrator::instance();
+    for (const bool object_mode : {false, true})
+        for (const double step : {0., 0.5})
+            for (const bool islands : {false, true}) {
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                config.set_deserialize_strict({{"print_plan_builder", object_mode ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+                    {"complete_objects_step", std::to_string(step)}, {"complete_islands", islands ? "1" : "0"}});
+                bool found = false;
+                for (const Orchestrator::GuiRuleApplication &application :
+                        orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1, "skirt_brim.skirt.default"))
+                    if (application.target_key == "complete_objects_one_skirt") {
+                        found = true;
+                        CHECK(application.enabled == (object_mode && step == 0.));
+                    }
+                REQUIRE(found);
+            }
+}
+
 TEST_CASE("GUI rules preserve clauses, scope and owner", "[plugins][gui-rules][abi]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();

@@ -49,6 +49,8 @@ print_complete_objects() and print_by_object() read optional mode settings for
 native consumers using the effective active provider; an absent height step means zero.
 complete_objects_sort() maps a provider's serialized order name to the native
 enum, because provider enums assign integer values in their declaration order.
+min_object_distance() supplies preferred arrangement spacing, not a validation
+limit. Positive object steps use global skirts, so they add no per-copy skirt term.
 
 Built-in FFF option definitions and preset key lists. Tower options invalidate
 tower generation, and export merges their current envelopes with the cached
@@ -393,7 +395,9 @@ double min_object_distance(const ConfigBase *config, double ref_height /* = 0*/)
             // plugin leaves the option absent, which reads as the default.
             const ConfigOption *one_skirt_option = config->option("complete_objects_one_skirt");
             const bool one_skirt = one_skirt_option != nullptr && one_skirt_option->get_bool();
-            if (skirts > 0 && config->option("skirt_height")->get_int() >= 1 && !one_skirt) {
+            const ConfigOption *step_option = config->option("complete_objects_step");
+            const bool with_step = step_option != nullptr && step_option->get_float() > 0.;
+            if (skirts > 0 && config->option("skirt_height")->get_int() >= 1 && !one_skirt && !with_step) {
                 float overlap_ratio = 1;
                 //can't know the extruder, so we settle on the worst: 100%
                 //if (config->option<ConfigOptionPercents>("filament_max_overlap")) overlap_ratio = config->get_computed_value("filament_max_overlap");
