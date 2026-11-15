@@ -343,7 +343,7 @@ private:
     std::string write_lines(const PreparedMove &move);
     // Emit planar segments with flow-derived E, a fixed filament delta, or semantic retraction.
     std::string write_leaf_geometry(const ExtrusionEntity &leaf, const RequestedState &state);
-    // Reach a path or deposit start point at travel speed, preserving the requested print speed.
+    // Reach a path start at travel speed, bounding the first approach in the machine Z frame.
     std::string approach_leaf_point(c_point point, coord_t z_offset);
     // Emit a stationary volume, forcing swallowed support steps or dwelling for sub-step deposits.
     std::string write_deposit(const ExtrusionEntity &leaf, const RequestedState &state);
@@ -428,6 +428,9 @@ private:
     // establishes a fresh E origin instead of continuing a stale coordinate.
     bool m_e_position_known = true;
     bool m_seen_object_group = false;
+    double m_lift_min = 0.0;
+    double m_max_print_height = 0.0;
+    bool m_first_approach = true;
     bool m_use_firmware_retraction = false;
     // SEMM means single-extruder multi-material: tool IDs select filaments,
     // while heater, fan, pressure advance and extrusion state share hardware.

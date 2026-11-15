@@ -43,6 +43,9 @@ Validation checks print-level active settings against their selected plugin
 group providers; object/region overrides are not inspected by that guard.
 By object clearance checks fill warning contours without rejecting close or tall
 copies. The warnings vector carries close-copy notices to GUI notifications.
+It also warns when lift_min exceeds the printer ceiling; motion generation clamps
+that floor without making the print invalid. Its warning token has an independent
+GUI notification so other warnings and their action links remain visible.
 Zero scaled height lead remains invalid, with or without a height step.
 Adhesion winding normalization reads stored contours before ordering. It preserves
 entries, properties and ordering permissions, and reports fragmented event phases
@@ -1157,6 +1160,8 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     std::set<extruder_index_t> extruders = this->extruders();
 
     if (warnings) {
+        if (m_config.max_print_height.value > 0.0 && m_config.lift_min.value > m_config.max_print_height.value)
+            warnings->emplace_back("_LIFT_MIN_CLAMPED");
         for (auto it_a = extruders.begin(); it_a != extruders.end() ;++it_a)
             for (auto it_b = std::next(it_a); it_b != extruders.end() ;++it_b)
                 if (std::abs(m_config.bed_temperature.get_at(*it_a) - m_config.bed_temperature.get_at(*it_b)) > 15

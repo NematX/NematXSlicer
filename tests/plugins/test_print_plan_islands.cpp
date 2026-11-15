@@ -424,6 +424,141 @@ TEST_CASE("Source tools preserve color scripts after a height tool change",
     CHECK(upper_copies.size() == 2);
 }
 
+// Export distant copies with two islands each and inspect island entries, including
+// entries on a new source layer. Auxiliary brims use their travel-distance threshold.
+TEST_CASE("Object entry travels honor an absolute minimum height",
+          "[plugins][gcode][lift][travel][lift-min-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const int scenario = GENERATE(0, 1, 2, 3, 4, 5, 6, 7);
+    const double floor = scenario == 0 ? 0.0 : scenario == 1 ? 0.1 : 5.0;
+    CAPTURE(by_object, floor, scenario);
+    struct TravelActivation {
+        Orchestrator &host;
+        Plugin *plugin;
+        bool active;
+        // Enable production travel geometry and remember the previous activation.
+        explicit TravelActivation(Orchestrator &value) : host(value),
+            plugin(value.get_plugin("layer_extrusion_edit.travel.default")), active(value.is_plugin_active(plugin)) {
+            host.set_plugin_active(plugin, true);
+        }
+        // Restore activation even if export or an assertion fails.
+        ~TravelActivation() { host.set_plugin_active(plugin, active); }
+    } travel(Orchestrator::instance());
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0.4"}, {"complete_islands", "0"}, {"complete_objects_one_first_layer", "0"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"perimeters", "1"}, {"fill_density", "0%"}, {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"},
+        {"start_gcode", "G90\nG1 X0 Y0 Z0.1\nM117 lift-start"}, {"end_gcode", ""},
+        {"use_relative_e_distances", "1"}, {"binary_gcode", "0"}, {"lift_min", std::to_string(floor)},
+        {"retract_lift", "0.5"}, {"print_retract_lift", "0.5"}, {"retract_lift_above", "0"},
+        {"retract_lift_before_travel", "0"}, {"retract_before_travel", "0"}, {"retract_length", "1"},
+        {"travel_ramping_lift", "0"}, {"wipe", "0"}, {"retract_lift_top", "All surfaces"}});
+    if (scenario == 3)
+        config.set_deserialize_strict("start_gcode", "M117 lift-start");
+    if (scenario == 4)
+        config.set_deserialize_strict({{"retract_lift_above", "10"}, {"retract_lift_before_travel", "1000"},
+            {"travel_ramping_lift", "1"}, {"travel_slope", "10"}});
+    if (scenario == 5)
+        config.set_deserialize_strict("retract_length", "0");
+    if (scenario == 6)
+        config.set_deserialize_strict({{"brim_width", "2"}, {"brim_per_object", "0"}});
+    if (scenario == 7)
+        config.set_deserialize_strict({{"lift_min", "50"}, {"max_print_height", "5"}});
+    Model model;
+    Print print;
+    TriangleMesh mesh = make_cube(2., 2., 1.);
+    TriangleMesh island = make_cube(2., 2., 1.);
+    island.translate(Vec3f(10.f, 0.f, 0.f));
+    mesh.merge(island);
+    TriangleMesh tall = mesh;
+    tall.scale(Vec3f(1.f, 1.f, 1.4f));
+    Test::init_print({mesh, tall}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(30., 30., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(100., 30., 0.));
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    boost::filesystem::remove(output);
+    bool started = false, first_xy = true;
+    double x = 0.0, y = 0.0, z = 0.1;
+    size_t crossings = 0, deposits = 0, layer_entries = 0, island_travels = 0, brim_crossings = 0;
+    bool brim = false, layer_entry = true;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line == "M117 lift-start") { started = true; continue; }
+        if (line == ";LAYER_CHANGE") layer_entry = true;
+        if (line.rfind(";TYPE:", 0) == 0) brim = line.find("Skirt") != std::string::npos;
+        if (!started || (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)) continue;
+        double next_x = x, next_y = y, next_z = z, e = 0.0;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word.size() < 2) continue;
+            if (word[0] == 'X') next_x = std::stod(word.substr(1));
+            if (word[0] == 'Y') next_y = std::stod(word.substr(1));
+            if (word[0] == 'Z') next_z = std::stod(word.substr(1));
+            if (word[0] == 'E') e = std::stod(word.substr(1));
+        }
+        const bool xy = std::abs(next_x - x) > 0.001 || std::abs(next_y - y) > 0.001;
+        INFO(line << " from " << x << "," << y << "," << z << " brim=" << brim);
+        if (xy && first_xy) {
+            CHECK(std::min(z, next_z) + 0.001 >= floor);
+            if (floor == 0.0) CHECK(next_z < 1.0);
+            first_xy = false;
+        } else if (std::abs(next_x - x) > 20.0) {
+            ++crossings;
+            if (brim) ++brim_crossings;
+            CHECK(e <= 0.0);
+            CHECK(std::min(z, next_z) + 0.001 >= floor);
+            if (floor == 0.0) CHECK(std::max(z, next_z) < 2.0);
+        } else if (xy && e <= 0.0 && std::hypot(next_x - x, next_y - y) >= 4.0) {
+            ++island_travels;
+            CHECK(std::min(z, next_z) + 0.001 >= floor);
+        } else if (xy && e <= 0.0) {
+            if (layer_entry && !brim) {
+                ++layer_entries;
+                CHECK(std::min(z, next_z) + 0.001 >= floor);
+            } else CHECK(std::max(z, next_z) < 2.0);
+        }
+        if (xy && e > 0.0) { ++deposits; layer_entry = false; CHECK(next_z < 2.0); }
+        if (scenario == 7) CHECK(next_z <= 5.001);
+        x = next_x; y = next_y; z = next_z;
+    }
+    CHECK_FALSE(first_xy);
+    CHECK(crossings > 0);
+    CHECK(deposits > 0);
+    CHECK(layer_entries > 0);
+    CHECK(island_travels > 0);
+    if (scenario == 6) CHECK(brim_crossings > 0);
+}
+
+// The absolute travel floor is limited by the printer ceiling without blocking slicing.
+TEST_CASE("Validation warns when the minimum travel height exceeds the printer ceiling",
+          "[plugins][validation][lift][lift-min-validation]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double floor = GENERATE(0.0, 10.0, 12.0);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"lift_min", std::to_string(floor)}, {"max_print_height", "10"}});
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 1.)}, print, model, config);
+    std::vector<std::string> warnings;
+    CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveNone);
+    const std::string message = "_LIFT_MIN_CLAMPED";
+    CHECK(std::count(warnings.begin(), warnings.end(), message) == (floor > 10.0 ? 1 : 0));
+    CHECK(print.validate(nullptr).first == PrintBase::PrintValidationError::pveNone);
+}
+
 // Reconstruct source Z ranks independently, then compare first-layer fan/lift,
 // layer scripts, the single bed switch and per-copy Bambu actions in real exports.
 // Tower catalog entries must not become copies or change source ranks; P2 follows

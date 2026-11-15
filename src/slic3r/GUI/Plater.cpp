@@ -28,8 +28,9 @@ The worker owns execution; the canvas and sidebar display its results rather
 than generating a second set of slicing geometry.
 Every FFF validation result synchronizes red clearance contours, including errors
 that clear a previous overlay. Changed or forced validation updates notifications;
-unchanged updates preserve dismissed notices. Clearance has its own notification
-type so support warnings retain their action link. Warnings do not invalidate slicing.
+unchanged updates preserve dismissed notices. Clearance and clamped travel height
+have independent notification types so all three notices coexist and support
+warnings retain their action link. Warnings do not invalidate slicing.
 
 An export action chooses how already-generated commands are delivered. Keep
 that action distinct from starting or invalidating slicing, so cancelling a
@@ -2095,6 +2096,7 @@ struct Plater::priv
 
     // Synchronize FFF contours even for errors or an empty print; publish notices
     // by independent type only when requested. Borrowed scene data remains unchanged.
+    // Clearance and clamped travel height coexist with generic warnings and support action links.
     void process_validation_feedback(const std::vector<std::string>& warnings, bool update_notifications) const;
 
     bool background_processing_enabled() const { return this->get_config_bool("background_processing"); }
@@ -3653,18 +3655,24 @@ void Plater::priv::process_validation_feedback(const std::vector<std::string>& w
 {
     bool has_generic_warning = false;
     bool has_clearance_warning = false;
+    bool has_lift_min_warning = false;
 
     for (size_t idx = 0; update_notifications && idx < warnings.size(); ++idx) {
         std::string text = warnings[idx];
         const bool clearance = text == "_COPIES_TOO_CLOSE";
-        const NotificationType type = clearance ? NotificationType::SequentialClearanceWarning : NotificationType::ValidateWarning;
+        const bool lift_min = text == "_LIFT_MIN_CLAMPED";
+        const NotificationType type = clearance ? NotificationType::SequentialClearanceWarning :
+            lift_min ? NotificationType::LiftMinClampedWarning : NotificationType::ValidateWarning;
         has_clearance_warning |= clearance;
-        has_generic_warning |= !clearance;
+        has_lift_min_warning |= lift_min;
+        has_generic_warning |= !clearance && !lift_min;
         std::string hypertext = "";
         std::function<bool(wxEvtHandler*)> action_fn = [](wxEvtHandler*){ return false; };
 
         if (clearance)
             text = _u8L("Some copies are closer than the extruder clearance; By object may print them together layer by layer.");
+        if (lift_min)
+            text = _u8L("Min height for travel exceeds Max print height and will be clamped to it.");
         if (text == "_SUPPORTS_OFF") {
             text = _u8L("An object has custom support enforcers which will not be used "
                         "because supports are disabled.")+"\n";
@@ -3693,6 +3701,8 @@ void Plater::priv::process_validation_feedback(const std::vector<std::string>& w
         notification_manager->close_notification_of_type(NotificationType::ValidateWarning);
     if (update_notifications && !has_clearance_warning)
         notification_manager->close_notification_of_type(NotificationType::SequentialClearanceWarning);
+    if (update_notifications && !has_lift_min_warning)
+        notification_manager->close_notification_of_type(NotificationType::LiftMinClampedWarning);
 
     if (printer_technology == ptFFF) {
         GLCanvas3D* canvas = view3D->get_canvas3d();

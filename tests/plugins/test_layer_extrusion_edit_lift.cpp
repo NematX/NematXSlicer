@@ -54,7 +54,9 @@ void prepare_lift_print(Print &print,
                          const char *wipe_length = "100%",
                          const char *before_wipe = "20%",
                          bool returning = false,
-                         bool inside_end = false);
+                          bool inside_end = false,
+                          const char *minimum_z = "0",
+                          const char *ceiling = "200");
 
 /* Collect geometric leaves while resolving inherited process attributes. */
 void collect_lift_leaves(
@@ -73,10 +75,13 @@ void prepare_lift_print(
     const char *wipe_length,
     const char *before_wipe,
     const bool returning,
-    const bool inside_end)
+    const bool inside_end,
+    const char *minimum_z,
+    const char *ceiling)
 {
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
+        {"lift_min", minimum_z}, {"max_print_height", ceiling},
         {"retract_before_travel", "0"},
         {"retract_layer_change", "0"},
         {"retract_length", "2"},
@@ -326,6 +331,70 @@ TEST_CASE("CreateRetractionLift creates a symmetric ramped travel",
     CHECK(ascending.z_offset(ascending.point_count() - 1) == scale_i(1.0));
     CHECK(descending.z_offset(0) == scale_i(1.0));
     CHECK(descending.z_offset(descending.point_count() - 1) == 0);
+}
+
+// Absolute bounds apply to both endpoints of a descending path, including the climb.
+TEST_CASE("Descending lift stays below the printer ceiling",
+          "[plugins][lift][travel][lift-min-ceiling]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "0.5", "0", "0", "0", false, "100%", "20%", false, false, "5", "10");
+    PrintingGroup &group = print.mutable_printing_plan().groups.front();
+    PrintingExtrusion target = std::move(group.layers.front().tool_groups.front().extrusions.back());
+    group.layers.front().tool_groups.front().extrusions.pop_back();
+    group.layers.front().print_z = scale_i(9.0);
+    group.layers.emplace_back();
+    PrintingLayerGroup &layer = group.layers.back();
+    layer.print_z = scale_i(0.2);
+    layer.tool_groups.emplace_back();
+    layer.tool_groups.back().extruder_id = 0;
+    layer.tool_groups.back().extrusions.push_back(std::move(target));
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, LIFT_PLUGIN});
+    OrderedExtrusionScope scope(find_scope(entity_view(*layer.tool_groups.front().extrusions.front().root)), scope_property_key());
+    std::vector<LiftLeaf> leaves;
+    collect_lift_leaves(scope.travel().readonly(), std::nullopt, leaves);
+    REQUIRE_FALSE(leaves.empty());
+    bool horizontal = false;
+    for (const LiftLeaf &leaf : leaves)
+        for (const c_extrusion_segment &segment : leaf.entity.segments()) {
+            const double a = unscaled(layer.print_z + segment.z_offset_a);
+            const double b = unscaled(layer.print_z + segment.z_offset_b);
+            CHECK(a <= 10.0); CHECK(b <= 10.0);
+            if (segment.point_a.x != segment.point_b.x || segment.point_a.y != segment.point_b.y) {
+                horizontal = true;
+                CHECK(a >= 5.0); CHECK(b >= 5.0);
+            }
+        }
+    CHECK(horizontal);
+}
+
+// Source-free auxiliary paths use distance, not a shared missing island identity.
+TEST_CASE("Auxiliary lift floor starts at ten nozzle diameters",
+          "[plugins][lift][travel][lift-min-auxiliary]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double distance = GENERATE(1.0, 4.0, 10.0);
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "0.5", "0", "0", "0", false, "100%", "20%", false, false, "5", "10");
+    PrintingLayerGroup &layer = print.mutable_printing_plan().groups.front().layers.front();
+    PrintingToolGroup &tool = layer.tool_groups.front();
+    tool.extrusions.back().root = CanonicalExtrusion::acquire(*make_print_path(10.0 + distance, 20.0 + distance));
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, LIFT_PLUGIN});
+    OrderedExtrusionScope scope(find_scope(entity_view(*tool.extrusions.back().root)), scope_property_key());
+    std::vector<LiftLeaf> leaves;
+    collect_lift_leaves(scope.travel().readonly(), std::nullopt, leaves);
+    size_t horizontal = 0;
+    for (const LiftLeaf &leaf : leaves)
+        for (const c_extrusion_segment &segment : leaf.entity.segments())
+            if (segment.point_a.x != segment.point_b.x || segment.point_a.y != segment.point_b.y) {
+                ++horizontal;
+                CHECK(unscaled(layer.print_z + segment.z_offset_a) == Approx(distance >= 4.0 ? 5.0 : 0.7));
+                CHECK(unscaled(layer.print_z + segment.z_offset_b) == Approx(distance >= 4.0 ? 5.0 : 0.7));
+            }
+    CHECK(horizontal > 0);
 }
 
 TEST_CASE("CreateRetractionLift carries source lift across an empty layer",

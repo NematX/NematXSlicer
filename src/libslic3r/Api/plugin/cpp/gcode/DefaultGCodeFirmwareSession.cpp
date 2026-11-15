@@ -43,6 +43,9 @@ only the Marlin output required to represent the requested state.
 Stationary DEPOSIT leaves carry one point and a volume before the tool multiplier.
 They use the same approach travel and marker order as paths, then emit an E-only
 move at the filament speed of a line with their inherited flow and print speed.
+The first generated approach uses lift_min, capped at max_print_height and
+transformed by the gantry and tool Z corrections, as an absolute Z floor reached
+vertically before XY movement, and descends only at the first path's start.
 Inside a block opened with a retraction depth, the first deposit is preceded by the
 block's explicit unretraction, like the first geometric leaf.
 For scripts, a source extrusion is a plan extrusion linked to a sliced regional
@@ -441,6 +444,11 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
     m_e_relative_mode = config.bool_or_default("use_relative_e_distances", false);
     m_e_position_known = true;
     m_seen_object_group = false;
+    m_lift_min = config.float_or_default("lift_min", 0.0);
+    const double max_print_height = config.float_or_default("max_print_height", 0.0);
+    if (max_print_height > 0.0) m_lift_min = std::min(m_lift_min, max_print_height);
+    m_max_print_height = max_print_height;
+    m_first_approach = true;
     m_current_object_idx = 0;
     m_layer_num = -1;
     m_layer_height = 0;
@@ -1452,18 +1460,44 @@ std::string DefaultGCodeFirmwareSession::write_leaf_geometry(const ExtrusionEnti
 // Convert a scaled point and Z offset to machine coordinates and return approach
 // commands only when the quantized position differs; owned gantry state advances,
 // the inherited speed is restored, and encoding failures propagate to the caller.
+// The first approach raises vertically to lift_min before moving XY, then descends
+// at the destination. An unknown start position uses a Z-only absolute-mm move.
+// Both the floor and ceiling are transformed from print Z to machine Z using the
+// same gantry and tool corrections as the requested path position.
 std::string DefaultGCodeFirmwareSession::approach_leaf_point(c_point point, coord_t z_offset)
 {
     const c_vec3d position = machine_position(point, z_offset);
     const c_vec3d quantized = m_formatter->quantize(position);
-    if (m_gantry.position() && !coordinates_differ(*m_gantry.position(), quantized))
+    const bool first = m_first_approach;
+    m_first_approach = false;
+    if ((!first || m_lift_min <= 0.0) && m_gantry.position() && !coordinates_differ(*m_gantry.position(), quantized))
         return {};
     const std::optional<double> print_speed = m_gantry.requested_speed();
     m_gantry.request_speed(m_gantry.travel_speed());
     PreparedMove travel;
     travel.kind = PreparedMove::Kind::Travel;
+    std::string output = transition_wipe_marker(false);
+    if (first && m_lift_min > 0.0) {
+        const double frame_offset = m_gantry.z_offset() - current_extruder().z_offset();
+        double floor = std::max({m_lift_min + frame_offset, position.z, m_gantry.position() ? m_gantry.position()->z : position.z});
+        if (m_max_print_height > 0.0) floor = std::min(floor, m_max_print_height + frame_offset);
+        if (m_gantry.position()) {
+            travel.destination = *m_gantry.position();
+            travel.destination->z = floor;
+            output += write_lines(travel);
+        } else {
+            // No XY is known yet, so establish only Z before the first approach.
+            if (!m_units_in_mm) { output += "G21\n"; m_units_in_mm = true; }
+            if (m_xyz_relative_mode) { output += "G90\n"; m_xyz_relative_mode = false; }
+            output += "G1 Z" + format_number(floor, m_formatter->m_gcode_precision_xyz) +
+                " F" + format_number(m_gantry.travel_speed() * 60.0) + "\n";
+        }
+        travel.destination = position;
+        travel.destination->z = floor;
+        output += write_lines(travel);
+    }
     travel.destination = position;
-    const std::string output = transition_wipe_marker(false) + write_lines(travel);
+    output += write_lines(travel);
     m_gantry.request_speed(print_speed);
     return output;
 }

@@ -3546,9 +3546,9 @@ TEST_CASE("By object clearance warns without rejecting copies or stepped towers"
     CHECK(print.validate().second.empty());
 }
 
-// Both messages must reach GUI feedback when supports are disabled and copies
-// need clearance grouping; the support action belongs only to its own notice.
-TEST_CASE("Clearance and disabled-support notices coexist in validation", "[plugins][validation][print-sequence]")
+// Independent warning tokens preserve clearance, clamped travel height and disabled
+// support notices together; the support action belongs only to its own notice.
+TEST_CASE("Clearance, travel height and disabled-support notices coexist in validation", "[plugins][validation][print-sequence][lift]")
 {
     using namespace Slic3r;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -3556,6 +3556,7 @@ TEST_CASE("Clearance and disabled-support notices coexist in validation", "[plug
     config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
         {"complete_objects_step", "0"}, {"extruder_clearance_radius", "10"},
         {"extruder_clearance_height", "20"}, {"support_material", "0"},
+        {"lift_min", "12"}, {"max_print_height", "10"},
         {"skirts", "0"}, {"brim_width", "0"}, {"wipe_tower", "0"}});
     Model model;
     Print print;
@@ -3569,6 +3570,14 @@ TEST_CASE("Clearance and disabled-support notices coexist in validation", "[plug
     CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveNone);
     CHECK(std::count(warnings.begin(), warnings.end(), "_SUPPORTS_OFF") == 1);
     CHECK(std::count(warnings.begin(), warnings.end(), "_COPIES_TOO_CLOSE") == 1);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_LIFT_MIN_CLAMPED") == 1);
+    config.set_deserialize_strict("lift_min", "10");
+    print.apply(model, config);
+    warnings.clear();
+    CHECK(print.validate(&warnings).first == PrintBase::PrintValidationError::pveNone);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_SUPPORTS_OFF") == 1);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_COPIES_TOO_CLOSE") == 1);
+    CHECK(std::count(warnings.begin(), warnings.end(), "_LIFT_MIN_CLAMPED") == 0);
 }
 
 // The preferred arrange distance retains the radius but excludes a skirt that

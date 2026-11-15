@@ -3420,6 +3420,63 @@ TEST_CASE("Default firmware shares native retraction protocol state in SEMM",
         reinterpret_cast<const extrusion_entity_handle *>(retract.get()))) == "G10\n");
 }
 
+// Compare the first approach in the machine frame, including tool and printer Z corrections.
+TEST_CASE("First approach transforms and clamps the absolute travel floor",
+          "[plugins][gcode][firmware][lift][lift-min-frame]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool known = GENERATE(false, true);
+    const double z_offset = GENERATE(-1.0, 1.0);
+    const double tool_offset = GENERATE(-0.5, 0.5);
+    const double minimum = GENERATE(5.0, 12.0);
+    CAPTURE(known, z_offset, tool_offset, minimum);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"lift_min", std::to_string(minimum)}, {"max_print_height", "10"},
+        {"z_offset", std::to_string(z_offset)}});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    struct ToolOffset : slic3r_api::GCodeGeneration::Tool {
+        // Set only the protected correction for this test; no production setting exposes it.
+        static void set(slic3r_api::GCodeGeneration::Tool &tool, double value) {
+            tool.*(&ToolOffset::m_z_offset) = value;
+        }
+    };
+    ToolOffset::set(firmware.machine_extruder(0), tool_offset);
+    std::unique_ptr<ExtrusionEntity> select = special_command_entity(ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    const double correction = z_offset - tool_offset;
+    if (known)
+        const_cast<slic3r_api::GCodeGeneration::Gantry &>(firmware.machine_gantry()).set_position({0.0, 0.0, correction});
+    std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+        Point(scale_i(20.), 0), Point(scale_i(21.), 0)}), 20.f, 500.f);
+    const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+        reinterpret_cast<const extrusion_entity_handle *>(path.get())));
+    const double expected = std::min(minimum, 10.0) + correction;
+    double z = correction, x = 0.0;
+    bool approached = false;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0) continue;
+        double next_z = z, next_x = x;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word[0] == 'Z') next_z = std::stod(word.substr(1));
+            if (word[0] == 'X') next_x = std::stod(word.substr(1));
+        }
+        CHECK(next_z <= 10.0 + correction + 0.001);
+        if (!approached && next_x != x) {
+            CHECK(z == Approx(expected));
+            CHECK(next_z == Approx(expected));
+            approached = true;
+        }
+        z = next_z; x = next_x;
+    }
+    CHECK(approached);
+}
+
 // Coordinate resets never repay the physical retraction or consume its pending restart extras.
 TEST_CASE("Tool selection resets absolute E without changing retraction accounting",
           "[plugins][gcode][firmware][retraction][toolchange-reset]")
