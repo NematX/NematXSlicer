@@ -1430,9 +1430,10 @@ IDs return `422 invalid_arrange` or `422 invalid_orient`.
 
 - `POST .../arrange` accepts optional `distance`, `distance_from_bed`,
   `rotations`, `alignment`, `geometry`, and `strategy`. The distance defaults to
-  `duplicate_distance` plus the sequential-printing nozzle clearance, or 6 mm
-  when `duplicate_distance` is zero. `distance` must be finite and at least the
-  clearance when sequential printing is enabled; otherwise its minimum is 0.
+  `duplicate_distance` plus the preferred object spacing, or 6 mm
+  when `duplicate_distance` is zero. In By object, the preferred spacing includes
+  nozzle clearance; it is not a mandatory minimum. An explicit `distance` may be
+  smaller and must be finite and non-negative.
   `distance_from_bed` must be finite and non-negative. Both distances must also
   fit safely in the engine's scaled-coordinate representation; a finite value
   outside that representable range returns `422 invalid_arrange`.

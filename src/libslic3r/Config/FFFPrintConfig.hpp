@@ -816,6 +816,7 @@ CompleteObjectSort complete_objects_sort(const ConfigBase &config);
 bool print_by_object(const ConfigBase &config);
 
 //static inline
+// Return the preferred arrangement clearance, without imposing a placement requirement.
 double min_object_distance(const PrintConfig& config); //TODO: remove
 //static inline
 double min_object_distance(const ConfigBase* config, double height = 0); //TODO: remove

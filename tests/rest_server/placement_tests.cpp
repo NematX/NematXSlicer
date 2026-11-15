@@ -3,6 +3,7 @@
  *
  * Small models exercise arrangement selection, bed reporting, GUI distance
  * defaults, and per-instance automatic orientation without HTTP transport.
+ * Explicit By object gaps below the preferred clearance remain valid requests.
  */
 #include <catch2/catch.hpp>
 
@@ -103,15 +104,37 @@ TEST_CASE("Arrange defaults follow the GUI distance rules", "[placement]")
     config.set_deserialize_strict({{"duplicate_distance", "6"}, {"print_plan_builder", "ordering.plan_builder.by_layer"},
         {"complete_objects_step", "0"}});
     CHECK(default_arrange_distance(config) == Approx(6.));
-    CHECK(minimum_arrange_distance(config) == Approx(0.));
 
     config.set_deserialize_strict("duplicate_distance", "0");
     CHECK(default_arrange_distance(config) == Approx(6.));
 
     config.set_deserialize_strict({{"duplicate_distance", "6"}, {"print_plan_builder", "ordering.plan_builder.by_object"}});
-    const double clearance = minimum_arrange_distance(config);
-    CHECK(clearance >= 0.);
+    const double clearance = min_object_distance(&config, 0.);
+    CHECK(clearance > 0.);
     CHECK(default_arrange_distance(config) == Approx(6. + clearance));
+}
+
+// Explicit distances smaller than the preferred radius are valid for both object
+// modes; the engine still enforces the requested non-negative gap.
+TEST_CASE("By object arrangement permits a gap below the preferred clearance", "[placement]")
+{
+    ensure_engine_initialized();
+    for (const double step : {0., 0.5}) {
+        DynamicPrintConfig config = default_placement_config();
+        config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+            {"complete_objects_step", std::to_string(step)}, {"extruder_clearance_radius", "20"},
+            {"duplicate_distance", "6"}, {"skirts", "0"}, {"brim_width", "0"}});
+        CHECK(default_arrange_distance(config) >= 26.);
+        Model scene = make_two_overlapping_instances();
+        ArrangeRequest request;
+        request.distance = 2.;
+        const ArrangeOutcome outcome = arrange_instances(scene, config, {}, request);
+        REQUIRE(outcome.instances.size() == 2);
+        const ModelObject &object = scene.objects().front();
+        CHECK(xy_gap(*object.instances[0], *object.instances[1]) == Approx(2.).margin(0.02));
+        request.distance = -1.;
+        CHECK_THROWS_AS(arrange_instances(scene, config, {}, request), SceneEditError);
+    }
 }
 
 TEST_CASE("Arrange separates instances and keeps unselected ones fixed", "[placement]")

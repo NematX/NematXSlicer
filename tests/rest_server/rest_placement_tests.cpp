@@ -147,8 +147,14 @@ TEST_CASE("REST arrange validates parameters and targets", "[rest_placement]")
         {"extruder_clearance_radius", "50"}, {"skirts", "0"}, {"brim_width", "0"}});
     REQUIRE(session->commit_mutation(session->begin_mutation().value(), std::move(sequential), false,
         SessionRegistry::Clock::now()));
-    require_error(post_json(fixture, route + "/arrange", {{"ids", {object_id}}, {"distance", 1.}}),
-        http::status::unprocessable_entity, "invalid_arrange");
+    const HttpResponseMessage response = post_json(fixture, route + "/arrange",
+        {{"ids", {object_id}}, {"distance", 1.}});
+    REQUIRE(response.result() == http::status::ok);
+    const nlohmann::json result = nlohmann::json::parse(response.body());
+    REQUIRE(result.at("instances").size() == 1);
+    CHECK(result.at("instances").at(0).at("id") ==
+        before.at("objects").at(0).at("instances").at(0).at("id"));
+    CHECK(result.at("instances").at(0).at("bed").is_number_integer());
 }
 
 TEST_CASE("REST arrange moves instances onto the bed and reports their beds", "[rest_placement]")

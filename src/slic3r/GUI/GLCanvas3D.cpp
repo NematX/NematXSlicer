@@ -1877,8 +1877,8 @@ void GLCanvas3D::set_config(const DynamicPrintConfig* config)
         m_arrange_settings_db.set_active_slot(slot);
 
         double objdst = min_object_distance(config, 0);
-        double min_obj_dst = slot == ArrangeSettingsDb_AppCfg::slotFFFSeqPrint ? objdst : 0.;
-        m_arrange_settings_db.set_distance_from_obj_range(slot, min_obj_dst, std::max(100., min_obj_dst*2));
+        // Clearance is the default spacing, not a lower bound on explicit FFF gaps.
+        m_arrange_settings_db.set_distance_from_obj_range(slot, 0., std::max(100., objdst * 2));
         
         if (std::abs(m_arrange_settings_db.get_defaults(slot).d_obj - objdst) > EPSILON) {
             m_arrange_settings_db.get_defaults(slot).d_obj = objdst;

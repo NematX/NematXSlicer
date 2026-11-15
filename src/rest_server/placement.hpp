@@ -58,9 +58,8 @@ struct OrientOutcome {
     bool changed = false;
 };
 
-// Return the GUI's distance default and the sequential-printing safety clearance.
+// Return the GUI's preferred distance default without imposing it on explicit requests.
 double default_arrange_distance(const DynamicPrintConfig &config);
-double minimum_arrange_distance(const DynamicPrintConfig &config);
 // Return the largest millimeter distance that remains safe in scaled engine coordinates.
 double maximum_arrange_distance_mm() noexcept;
 
