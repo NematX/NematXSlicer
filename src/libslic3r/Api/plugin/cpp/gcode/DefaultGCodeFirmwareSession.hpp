@@ -86,9 +86,9 @@ public:
     // Reader. Provider wiring calls this before the session is published.
     void set_reader_state_id(orchestrator_runtime_id reader_state_id);
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
-    // Advance the sequential object index for later real groups and return any group-start travel.
+    // Update object counters and provide clearance for later groups without materialized travel.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Emit layer markers, forget cached ;HEIGHT: for the next printable extrusion, and set script height from the first source or Z gap.
+    // Emit layer markers, track the maximum plan Z and refresh extrusion/script heights.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
     // Set script height to the first source extrusion for this tool when one exists.
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
@@ -331,6 +331,14 @@ private:
 
     // Select a tool, transfer SEMM runtime, settle filament usage and reset absolute E after emitted selections.
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
+    // Find the first geometric leaf of a borrowed group. The first non-empty group
+    // establishes the sequence; later groups without explicit Travel geometry rise
+    // vertically to bounded running-height clearance, then move XY at that height.
+    // The ordinary first-path approach descends at the destination. Missing machine
+    // position/tool emits nothing; encoding failures propagate and no tree is retained.
+    // Arrival XY uses the first geometry's tool frame, not the outgoing tool's frame.
+    // Retain clearance for a start-point correction after selection even when explicit
+    // travel suppresses this fallback movement.
     std::string move_to_group_start(const ConstPrintingGroup &group);
     // Visit an extrusion tree while tracking its object for opt-in tool-change reopening.
     std::string write_extrusion_tree(const ExtrusionEntity &root,
@@ -343,7 +351,14 @@ private:
     std::string write_lines(const PreparedMove &move);
     // Emit planar segments with flow-derived E, a fixed filament delta, or semantic retraction.
     std::string write_leaf_geometry(const ExtrusionEntity &leaf, const RequestedState &state);
-    // Reach a path start at travel speed, bounding the first approach in the machine Z frame.
+    // Convert a scaled point and Z offset to machine coordinates and return approach
+    // commands only when the quantized position differs; owned gantry state advances,
+    // inherited speed is restored, and encoding failures propagate. The first approach
+    // raises vertically to lift_min before moving XY, then descends at the destination.
+    // An unknown start position uses a Z-only absolute-mm move. Floor and ceiling use
+    // the requested path's gantry and tool corrections from print Z to machine Z.
+    // Consume pending group-entry clearance for XY corrections after tool selection,
+    // including explicit travel starts; matching XY leaves that travel responsible for lift.
     std::string approach_leaf_point(c_point point, coord_t z_offset);
     // Emit a stationary volume, forcing swallowed support steps or dwelling for sub-step deposits.
     std::string write_deposit(const ExtrusionEntity &leaf, const RequestedState &state);
@@ -428,6 +443,15 @@ private:
     // establishes a fresh E origin instead of continuing a stale coordinate.
     bool m_e_position_known = true;
     bool m_seen_object_group = false;
+    bool m_seen_print_group = false;
+    // Per-print clearance state in print coordinates before machine correction:
+    // running maximum Z is scaled; entry clearance, tool-indexed retract lifts,
+    // the absolute lift floor and printer ceiling are millimeters. The optional
+    // entry clearance lasts until the next group; the first-approach flag lasts
+    // until the first geometry approach. begin_print() resets these values.
+    coord_t m_running_max_print_z = 0;
+    std::optional<double> m_group_entry_clearance;
+    std::vector<double> m_retract_lifts;
     double m_lift_min = 0.0;
     double m_max_print_height = 0.0;
     bool m_first_approach = true;

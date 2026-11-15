@@ -541,6 +541,150 @@ TEST_CASE("Object entry travels honor an absolute minimum height",
     if (scenario == 6) CHECK(brim_crossings > 0);
 }
 
+// Inspect the entire approach between deposits across every production group boundary,
+// including firmware-only approaches, global auxiliary groups and tower source heights.
+TEST_CASE("Stepped copy group entries clear all preceding plan heights",
+          "[plugins][lift][travel][firmware][wipe-tower][group-clearance-export]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool by_object = GENERATE(false, true);
+    const bool provider = GENERATE(false, true);
+    const bool tower = GENERATE(false, true);
+    const int scenario = GENERATE(0, 1, 2);
+    const double floor = scenario == 0 ? 0.3 : 3.0;
+    const double ceiling = scenario == 2 ? 1.6 : 200.0;
+    CAPTURE(by_object, provider, tower, scenario);
+    struct TravelActivation {
+        Orchestrator &host;
+        Plugin *plugin;
+        bool previous;
+        // Select whether production travel geometry is available; preserve global activation.
+        TravelActivation(Orchestrator &value, bool enabled) : host(value),
+            plugin(value.get_plugin("layer_extrusion_edit.travel.default")), previous(value.is_plugin_active(plugin)) {
+            host.set_plugin_active(plugin, enabled);
+        }
+        // Restore the previous provider state even when export fails.
+        ~TravelActivation() { host.set_plugin_active(plugin, previous); }
+    } activation(Orchestrator::instance(), provider);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0.4"}, {"complete_objects_one_first_layer", "0"}, {"complete_islands", "0"},
+        {"complete_objects_step_max_z", "0.8"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "1"}, {"skirt_height", "1"},
+        {"skirt_per_object", "0"}, {"brim_width", "0"}, {"perimeters", "1"}, {"fill_density", "0%"},
+        {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}, {"start_gcode", "G90\nG1 X0 Y0 Z0.1"}, {"end_gcode", ""},
+        {"use_relative_e_distances", "1"}, {"binary_gcode", "0"}, {"lift_min", std::to_string(floor)},
+        {"max_print_height", std::to_string(ceiling)}, {"retract_lift", "0.5"}, {"print_retract_lift", "0.5"},
+        {"retract_length", "0"}, {"retract_lift_above", "100"}, {"retract_lift_below", "0.1"},
+        {"retract_lift_before_travel", "1000"}, {"retract_lift_top", "Only on top"}, {"retract_lift_first_layer", "0"},
+        {"wipe", "0"}, {"travel_ramping_lift", "1"}, {"travel_slope", "10"}});
+    if (tower) {
+        config.set_num_extruders(2);
+        config.set_deserialize_strict({{"wipe_tower", "1"}, {"wipe_tower_x", "60"}, {"wipe_tower_y", "80"},
+            {"wipe_tower_width", "20"}, {"wipe_tower_brim_width", "0"}, {"wiping_volumes_matrix", "0,140,140,0"},
+            {"filament_minimal_purge_on_wipe_tower", "15,15"}, {"filament_diameter", "1.75,1.75"},
+            {"extrusion_multiplier", "1,1"}, {"retract_lift", "0.5,0.5"}, {"retract_length", "0,0"}});
+    }
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 1.), make_cube(2., 2., 1.4), make_cube(2., 2., 1.2)}, print, model, config);
+    for (size_t i = 0; i < model.objects().size(); ++i) {
+        model.objects()[i].instances.front()->set_offset(Vec3d(30. + 50. * i, 30., 0.));
+        if (tower) {
+            TriangleMesh material = make_cube(2., 2., i == 1 ? 1.4 : i == 2 ? 1.2 : 1.);
+            material.translate(Vec3f(0.f, 10.f, 0.f));
+            model.objects()[i].add_volume(material)->config.set_key_value("extruder", new ConfigOptionInt(2));
+        }
+    }
+    print.apply(model, config);
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
+    const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+    Orchestrator::instance().export_gcode(print, output.string(), nullptr);
+    const std::string text = Test::GCode::read_text_file(output);
+    boost::filesystem::remove(output);
+    const Printing::PrintingPlan &plan = *print.printing_plan();
+    if (by_object) REQUIRE(plan.groups.size() > 2);
+    else REQUIRE(plan.groups.size() == 1);
+    bool saw_tower = false, later_shared = false;
+    for (size_t g = 0; g < plan.groups.size(); ++g) {
+        size_t physical_copies = 0;
+        for (const uint32_t id : plan.groups[g].printing_catalog_ids)
+            if (plan.object_instances[id].object != nullptr) ++physical_copies;
+        if (g > 0 && physical_copies > 1) later_shared = true;
+        for (const Printing::PrintingLayerGroup &entry : plan.groups[g].layers)
+            for (const Printing::PrintingToolGroup &tool : entry.tool_groups)
+                for (const Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    saw_tower |= extrusion.sregion_island_role == ExtrusionRole::WipeTower;
+    }
+    if (by_object) CHECK(later_shared);
+    CHECK(saw_tower == tower);
+    struct Move { double from_z, z; bool xy, deposit; };
+    std::vector<Move> moves;
+    std::vector<size_t> first, last;
+    size_t layer = size_t(-1);
+    double x = 0., y = 0., z = 0.;
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line == ";LAYER_CHANGE") {
+            ++layer; first.push_back(size_t(-1)); last.push_back(size_t(-1));
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0) continue;
+        double nx = x, ny = y, nz = z, e = 0.;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word[0] == 'X') nx = std::stod(word.substr(1));
+            if (word[0] == 'Y') ny = std::stod(word.substr(1));
+            if (word[0] == 'Z') nz = std::stod(word.substr(1));
+            if (word[0] == 'E') e = std::stod(word.substr(1));
+        }
+        const bool xy = std::hypot(nx - x, ny - y) > 0.001;
+        if (xy && e > 0. && layer != size_t(-1)) {
+            if (first[layer] == size_t(-1)) first[layer] = moves.size();
+            last[layer] = moves.size();
+        }
+        moves.push_back({z, nz, xy, xy && e > 0.});
+        x = nx; y = ny; z = nz;
+    }
+    size_t flat = 0, previous_last = size_t(-1), checked = 0;
+    double maximum = 0.;
+    for (size_t g = 0; g < plan.groups.size(); ++g) {
+        bool entered = false;
+        for (const Printing::PrintingLayerGroup &entry : plan.groups[g].layers) {
+            REQUIRE(flat < first.size());
+            if (first[flat] != size_t(-1)) {
+                if (!entered && previous_last != size_t(-1)) {
+                    const double clearance = std::min(ceiling, std::max(maximum + 0.5, floor));
+                    size_t xy_moves = 0;
+                    for (size_t i = previous_last + 1; i < first[flat]; ++i) {
+                        INFO("group " << g << " move " << i << " clearance " << clearance);
+                        CHECK(moves[i].z <= ceiling + 0.001);
+                        if (xy_moves == 0 && !moves[i].xy)
+                            CHECK(moves[i].z + 0.001 >= moves[i].from_z);
+                        if (moves[i].xy) {
+                            ++xy_moves;
+                            CHECK_FALSE(moves[i].deposit);
+                            CHECK(std::min(moves[i].from_z, moves[i].z) + 0.001 >= clearance);
+                        }
+                    }
+                    CHECK(xy_moves == 1);
+                    ++checked;
+                }
+                entered = true;
+                previous_last = last[flat];
+            }
+            maximum = std::max(maximum, unscaled(entry.print_z));
+            ++flat;
+        }
+    }
+    CHECK(flat == first.size());
+    CHECK(checked == (by_object ? plan.groups.size() - 1 : 0));
+}
+
 // The absolute travel floor is limited by the printer ceiling without blocking slicing.
 TEST_CASE("Validation warns when the minimum travel height exceeds the printer ceiling",
           "[plugins][validation][lift][lift-min-validation]")

@@ -134,8 +134,11 @@ between `M625` and `M624` when the first point of the object's tree differs from
 current position. Without a travel plugin (as in the plugin tests) the tree starts with
 the first printed point, so the approach is written there and a cancelled object does
 not skip it. With the default travel plugin the tree starts with the travel, whose first
-point is the current position, so begin_group() writes nothing (write_lines() has no
-move to make) and the whole approach is inside the block, as in layer printing.
+role is Travel, so the base session explicitly leaves the approach to that tree
+and writes no group-start move. The approach then stays inside the object block,
+as in layer printing. After tool selection the base session also checks whether
+the machine's XY correction requires an approach before deposition; equal print
+positions alone do not suppress that correction.
 An empty plan (no group) writes `M981 S1` but no `M981 S0`, because the closing
 command is tied to the end of the last group.
 

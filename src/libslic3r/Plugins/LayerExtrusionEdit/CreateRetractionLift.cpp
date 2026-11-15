@@ -60,6 +60,9 @@ enables the absolute lift_min floor. When either endpoint has no source island,
 the floor applies only to travels at least ten nozzle diameters long. Ordinary
 lift is relative to the path; the floor and printer ceiling constrain the final
 absolute heights, with vertical moves at the ends preserving the print heights.
+Setup also records the maximum plan-layer Z preceding every layer, including
+auxiliary and tower layers. The first travel from a different group uses that
+maximum plus tool lift as a floor, bypassing ordinary lift filters and ramping.
 
     setup_run_impl: raise each scope's outgoing wipe and publish its final Z
         prepare_scope_wipe_lift: measure all wipe leaves before computing the ramp
@@ -149,6 +152,7 @@ struct SourceEndpoint
 /* Scalar source facts needed after the owning layer is no longer accessible. */
 struct SourceLiftState
 {
+    uint32_t group_idx = uint32_t(-1);
     bool valid = false;
     bool outgoing_transition = false;
     bool outgoing_toolchange = false;
@@ -195,6 +199,7 @@ private:
 
     Assign one summary slot per PrintingLayerGroup and, only with lift_min enabled,
     cache each referenced source layer's region-to-parent-island map once.
+    Record the preceding maximum plan-layer Z for group-entry clearance.
     Source layers are borrowed and no extrusion tree is inspected or modified.
     */
     void setup_impl(const plugin_run_context *run_ctx,
@@ -233,6 +238,7 @@ private:
     mutable std::vector<LayerLiftSummary> m_layers;
     mutable SourceLayerIndices m_source_indices;
     mutable IslandParents m_island_parents;
+    mutable std::vector<double> m_previous_max_z;
 };
 
 /* Add scaled Z values and reject overflow before editing geometry. */
@@ -380,6 +386,9 @@ Leaving a source island enables lift_min independently of retraction filters.
 Without islands, travel must span at least ten nozzle diameters. Final absolute
 heights combine the floor and ordinary lift and are capped at max_print_height,
 including vertical entry and exit segments; printing endpoint heights are retained.
+When previous_max_z is supplied, the travel enters a new group: use its maximum
+plus the outgoing tool's lift as a floor regardless of retraction, role, Z-window
+or length filters. The climb is vertical, and the printer ceiling still applies.
 */
 void apply_transition_lift(
     const SourceLiftState &source,
@@ -388,7 +397,8 @@ void apply_transition_lift(
     const Config &print_config,
     const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const plugin_run_context *run_ctx);
+    const plugin_run_context *run_ctx,
+    std::optional<double> previous_max_z = std::nullopt);
 
 coord_t checked_add_z(const coord_t value, const coord_t offset)
 {
@@ -952,7 +962,8 @@ void apply_transition_lift(
     const Config &print_config,
     const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const plugin_run_context *run_ctx)
+    const plugin_run_context *run_ctx,
+    const std::optional<double> previous_max_z)
 {
     throw_if_cancelled(run_ctx);
     const ExtrusionScope::OrderedExtrusionScope target_scope(target.entity, key);
@@ -967,7 +978,7 @@ void apply_transition_lift(
 
     MutableExtrusionEntity travel = target_scope.travel();
     const double configured_minimum = print_config.float_or_default("lift_min", 0.0);
-    if ((!source.retracted && configured_minimum <= 0.0) || !travel.valid() ||
+    if ((!source.retracted && configured_minimum <= 0.0 && !previous_max_z) || !travel.valid() ||
         (travel.segment_count() == 0 && travel.child_count() == 0))
         return;
 
@@ -1013,7 +1024,14 @@ void apply_transition_lift(
     const bool leaves_island = configured_minimum > 0.0 && (source.island && target_island ?
         source.island != target_island || source.printing_catalog_id != target.printing_extrusion.printing_catalog_id() :
         unscaled(travel_length) >= 10.0 * print_config.vector_float_or_default("nozzle_diameter", extruder_id, 0.4));
-    const double minimum_z = leaves_island ? configured_minimum : 0.0;
+    double minimum_z = leaves_island ? configured_minimum : 0.0;
+    if (previous_max_z) {
+        // TODO v2: track printed zones per Z and the highest Z crossed by the
+        // travel, expanded by the extruder size, instead of a plate-wide maximum.
+        minimum_z = std::max(configured_minimum, *previous_max_z +
+            print_config.vector_float_or_default("retract_lift", extruder_id, 0.0));
+        lift_mm = 0.0;
+    }
     const double max_print_height = print_config.float_or_default(
         "max_print_height", 0.0);
     if (max_print_height > 0.0)
@@ -1024,7 +1042,7 @@ void apply_transition_lift(
 
     const coord_t inherited_start_lift = std::max<coord_t>(
         0, source.lifted_end_z - initial_travel_z);
-    const bool ramping = print_config.vector_bool_or_default(
+    const bool ramping = !previous_max_z && print_config.vector_bool_or_default(
         "travel_ramping_lift", extruder_id, false);
     const double slope = print_config.vector_float_or_default(
         "travel_slope", extruder_id, 0.0);
@@ -1168,6 +1186,7 @@ void CreateRetractionLift::setup_impl(
     m_layers.clear();
     m_source_indices.clear();
     m_island_parents.clear();
+    m_previous_max_z.clear();
     const run_ctx_layer_extrusion_edition *ctx =
         plugin_ctx_as_layer_extrusion_edition(run_ctx);
     if (ctx == nullptr || ctx->plan == nullptr)
@@ -1177,6 +1196,7 @@ void CreateRetractionLift::setup_impl(
     if (ctx->print != nullptr)
         m_source_indices = source_layer_indices(Print(ctx->print), plan);
     size_t flat_idx = 0;
+    double running_max_z = 0.0;
     const bool index_islands = ctx->print != nullptr && Print(ctx->print).config().float_or_default("lift_min", 0.0) > 0.0;
     std::set<const layer_handle *> indexed_layers;
     m_flat_indices.resize(plan.group_count());
@@ -1188,6 +1208,8 @@ void CreateRetractionLift::setup_impl(
              layer_idx < group.layer_group_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
             m_flat_indices[group_idx][layer_idx] = flat_idx++;
+            m_previous_max_z.push_back(running_max_z);
+            running_max_z = std::max(running_max_z, unscaled(group.layer_group(layer_idx).print_z()));
             if (index_islands) {
                 const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
                 for (uint32_t t = 0; t < layer.tool_group_count(); ++t) {
@@ -1283,6 +1305,7 @@ void CreateRetractionLift::setup_run_impl(
     throw_if_cancelled(run_ctx);
     traversal.process(layer);
     throw_if_cancelled(run_ctx);
+    summary.last.group_idx = ctx->group_idx;
     m_layers[flat_layer_index(ctx->group_idx, ctx->layer_group_idx)] = summary;
     progress().add_max(1);
 }
@@ -1314,7 +1337,8 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
         m_scope_property,
         lift_state_definition(),
         [this, preceding, &print_config, &plan,
-         source_index = m_source_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index, run_ctx]
+         source_index = m_source_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index,
+         group_idx = ctx->group_idx, previous_max_z = m_previous_max_z.at(flat_idx), run_ctx]
         (ScopeEntity *previous, ScopeEntity *next) {
             throw_if_cancelled(run_ctx);
             // The terminal callback has a source but no target travel to edit.
@@ -1339,7 +1363,8 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
             if (preceding != nullptr) {
                 apply_transition_lift(
                     *preceding, *next, source_index, print_config, m_island_parents,
-                    m_scope_property, run_ctx);
+                    m_scope_property, run_ctx, preceding->group_idx != group_idx ?
+                        std::optional<double>(previous_max_z) : std::nullopt);
             }
         },
         MatchingEntityDescendants::Skip);

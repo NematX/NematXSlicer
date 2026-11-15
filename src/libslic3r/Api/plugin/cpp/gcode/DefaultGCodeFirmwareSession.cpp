@@ -46,6 +46,15 @@ move at the filament speed of a line with their inherited flow and print speed.
 The first generated approach uses lift_min, capped at max_print_height and
 transformed by the gantry and tool Z corrections, as an absolute Z floor reached
 vertically before XY movement, and descends only at the first path's start.
+Later non-empty groups without materialized entry travel receive a vertical
+clearance move before XY. Its floor is the maximum preceding plan-layer Z plus
+tool lift, or lift_min if greater, capped at max_print_height. All plan layers
+contribute, including global auxiliaries and towers. Explicit entry travels
+remain owned by the travel/lift providers and receive no group-start fallback.
+Fallback arrival uses the first geometry's tool XY offset. The session also
+retains group clearance until that geometry is approached after tool selection;
+any remaining XY correction, including an explicit travel's start correction,
+is performed at clearance height before a separate vertical descent.
 Inside a block opened with a retraction depth, the first deposit is preceded by the
 block's explicit unretraction, like the first geometric leaf.
 For scripts, a source extrusion is a plan extrusion linked to a sliced regional
@@ -115,6 +124,26 @@ DefaultGCodeFirmwareSession::DefaultGCodeFirmwareSession(
         m_script_config.emplace(storage);
 }
 namespace {
+
+// Return the first geometric role in execution order, resolving inherited attributes.
+// Borrowed trees are unchanged; command-only entries have no geometric role.
+std::optional<raw_extrusion_role> first_motion_role(const ExtrusionEntity &entity, raw_extrusion_role inherited);
+
+std::optional<raw_extrusion_role> first_motion_role(const ExtrusionEntity &entity, raw_extrusion_role inherited)
+{
+    if (const EPropertyAttributes *attributes = entity.get(EPropertyAttributes::key))
+        inherited = attributes->extrusion_role();
+    if (entity.segment_count() > 0)
+        return inherited;
+    const EPropertySpecialCommand *command = entity.get(EPropertySpecialCommand::key);
+    if (entity.point_count() == 1 && command && command->code == C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT)
+        return inherited;
+    for (uint32_t i = 0; i < entity.child_count(); ++i) {
+        const std::optional<raw_extrusion_role> role = first_motion_role(entity.child(i), inherited);
+        if (role) return role;
+    }
+    return std::nullopt;
+}
 
 uint32_t option_size_or_zero(const Config &config, const char *key)
 {
@@ -422,6 +451,9 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
         m_extruders.back().setup(config);
     }
     m_native_retraction_active.assign(extruder_count, 0);
+    m_retract_lifts.resize(extruder_count);
+    for (uint32_t i = 0; i < extruder_count; ++i)
+        m_retract_lifts[i] = config.vector_float_or_default("retract_lift", i, 0.0);
 
     m_gantry.setup(config);
     m_printer.setup(config);
@@ -444,6 +476,9 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
     m_e_relative_mode = config.bool_or_default("use_relative_e_distances", false);
     m_e_position_known = true;
     m_seen_object_group = false;
+    m_seen_print_group = false;
+    m_running_max_print_z = 0;
+    m_group_entry_clearance.reset();
     m_lift_min = config.float_or_default("lift_min", 0.0);
     const double max_print_height = config.float_or_default("max_print_height", 0.0);
     if (max_print_height > 0.0) m_lift_min = std::min(m_lift_min, max_print_height);
@@ -498,6 +533,9 @@ std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const C
     m_object_labels.clear();
     m_current_printing_catalog_id = uint32_t(-1);
     m_seen_object_group = false;
+    m_seen_print_group = false;
+    m_running_max_print_z = 0;
+    m_group_entry_clearance.reset();
     m_object_labels.reserve(plan.object_instance_count());
     std::vector<ObjectLabel> real_labels;
     for (uint32_t id = 0; id < plan.object_instance_count(); ++id) {
@@ -529,36 +567,29 @@ std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const C
         m_preamble->begin(print, plan);
 }
 
-// Inspect a borrowed plan group, increment the sequential object index for later real objects, and return any required start travel; an uninitialized session throws and the group remains unowned.
+// Track object counters independently from group-entry clearance and return fallback
+// travel only for later groups with geometry and no materialized entry travel.
+// Borrowed groups stay unchanged; an uninitialized session or encoding failure throws.
 std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
-    // Ordering represents a sequential object as a group with exactly one
-    // source instance. Auxiliary groups carry none, while layer-wise plans may
-    // carry several. Skipping both keeps ordinary first-path travel unchanged.
-    if (group.object_instance_count() != 1)
-        return {};
-    if (!m_seen_object_group) {
+    m_group_entry_clearance.reset();
+    // Only single-entry groups advance the object counter. Auxiliary and
+    // multi-entry groups still participate in the independent clearance sequence.
+    if (group.object_instance_count() == 1) {
+        if (m_seen_object_group) ++m_current_object_idx;
         m_seen_object_group = true;
-        return {};
     }
-    ++m_current_object_idx;
     return move_to_group_start(group);
 }
 
-// Borrow a valid layer group, validate its listed source heights and calculate
-// the Z gap once. Return owned layer markers using the listed maximum or that
-// gap, forget the cached extrusion marker so the first printable extrusion
-// writes ;HEIGHT: again, set script height from the first source extrusion or
-// the same gap, and advance state without retaining the view. An uninitialized
-// session or non-positive source height throws before state changes; a
-// non-rising source-free Z may still produce a non-positive gap for readers.
 std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
     const coord_t z_gap = layer.print_z() - m_layer_print_z;
+    m_running_max_print_z = std::max(m_running_max_print_z, layer.print_z());
     coord_t max_source_height = 0;
     if (layer.layer_count() > 0) {
         for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
@@ -1049,11 +1080,6 @@ std::string DefaultGCodeFirmwareSession::select_extruder(extruder_index_t tool_i
 
 std::string DefaultGCodeFirmwareSession::move_to_group_start(const ConstPrintingGroup &group)
 {
-    // The caller has already established that this is a transition between
-    // real object groups. A missing tool or position still makes the first
-    // regular path responsible for establishing the machine position.
-    if (!m_current_extruder_idx || !m_gantry.position())
-        return {};
     for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
         const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
         for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
@@ -1062,18 +1088,33 @@ std::string DefaultGCodeFirmwareSession::move_to_group_start(const ConstPrinting
                 const ExtrusionEntity root = tool_group.extrusion(extrusion_idx).root();
                 if (root.empty())
                     continue;
+                const std::optional<raw_extrusion_role> first_role = first_motion_role(root, RAW_EXTRUSION_ROLE_NONE);
+                if (!first_role) continue;
+                const bool previous_group = m_seen_print_group;
+                m_seen_print_group = true;
+                if (!previous_group || !m_current_extruder_idx || !m_gantry.position())
+                    return {};
+                double height = std::max(unscaled(m_running_max_print_z) + m_retract_lifts.at(*m_current_extruder_idx), m_lift_min);
+                if (m_max_print_height > 0.0) height = std::min(height, m_max_print_height);
+                m_group_entry_clearance = height;
+                if (RAW_EXTRUSION_ROLE_IS_TRAVEL(*first_role)) return {};
+                height += m_gantry.z_offset() - current_extruder().z_offset();
+                const DefaultExtruder &arrival_tool = extruder(tool_group.extruder_id());
                 const c_point first_point = root.front();
                 const c_vec3d destination = {
-                    unscaled(first_point.x) - current_extruder().xy_offset().x,
-                    unscaled(first_point.y) - current_extruder().xy_offset().y,
-                    m_gantry.position()->z
+                    unscaled(first_point.x) - arrival_tool.xy_offset().x,
+                    unscaled(first_point.y) - arrival_tool.xy_offset().y,
+                    height
                 };
                 const std::optional<double> inherited_speed = m_gantry.requested_speed();
                 m_gantry.request_speed(m_gantry.travel_speed());
                 PreparedMove move;
                 move.kind = PreparedMove::Kind::Travel;
+                move.destination = *m_gantry.position();
+                move.destination->z = height;
+                std::string output = transition_wipe_marker(false) + write_lines(move);
                 move.destination = destination;
-                const std::string output = transition_wipe_marker(false) + write_lines(move);
+                output += write_lines(move);
                 m_gantry.request_speed(inherited_speed);
                 return output;
             }
@@ -1457,29 +1498,28 @@ std::string DefaultGCodeFirmwareSession::write_leaf_geometry(const ExtrusionEnti
     return output;
 }
 
-// Convert a scaled point and Z offset to machine coordinates and return approach
-// commands only when the quantized position differs; owned gantry state advances,
-// the inherited speed is restored, and encoding failures propagate to the caller.
-// The first approach raises vertically to lift_min before moving XY, then descends
-// at the destination. An unknown start position uses a Z-only absolute-mm move.
-// Both the floor and ceiling are transformed from print Z to machine Z using the
-// same gantry and tool corrections as the requested path position.
 std::string DefaultGCodeFirmwareSession::approach_leaf_point(c_point point, coord_t z_offset)
 {
     const c_vec3d position = machine_position(point, z_offset);
     const c_vec3d quantized = m_formatter->quantize(position);
     const bool first = m_first_approach;
     m_first_approach = false;
-    if ((!first || m_lift_min <= 0.0) && m_gantry.position() && !coordinates_differ(*m_gantry.position(), quantized))
+    const std::optional<double> group_clearance = m_group_entry_clearance;
+    m_group_entry_clearance.reset();
+    const bool group_xy_correction = group_clearance && (!m_gantry.position() ||
+        m_gantry.position()->x != quantized.x || m_gantry.position()->y != quantized.y);
+    const bool protected_approach = (first && m_lift_min > 0.0) || group_xy_correction;
+    if (!protected_approach && m_gantry.position() && !coordinates_differ(*m_gantry.position(), quantized))
         return {};
     const std::optional<double> print_speed = m_gantry.requested_speed();
     m_gantry.request_speed(m_gantry.travel_speed());
     PreparedMove travel;
     travel.kind = PreparedMove::Kind::Travel;
     std::string output = transition_wipe_marker(false);
-    if (first && m_lift_min > 0.0) {
+    if (protected_approach) {
         const double frame_offset = m_gantry.z_offset() - current_extruder().z_offset();
-        double floor = std::max({m_lift_min + frame_offset, position.z, m_gantry.position() ? m_gantry.position()->z : position.z});
+        const double minimum = group_xy_correction ? *group_clearance : m_lift_min;
+        double floor = std::max({minimum + frame_offset, position.z, m_gantry.position() ? m_gantry.position()->z : position.z});
         if (m_max_print_height > 0.0) floor = std::min(floor, m_max_print_height + frame_offset);
         if (m_gantry.position()) {
             travel.destination = *m_gantry.position();
