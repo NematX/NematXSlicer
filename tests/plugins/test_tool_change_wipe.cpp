@@ -1307,6 +1307,7 @@ TEST_CASE("SEMM unload and load travel along the band work line", "[plugins][wip
     Print print;
     Model model;
     configure_print(print, model);
+    append_layer(print, Test::GCode::printing_plan_view(print).append_group(), 0.2, {0, 1}, false);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.single_extruder_multi_material.value = true;
     config.cooling_tube_retraction.value = 91.5;

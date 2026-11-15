@@ -19,6 +19,8 @@ Shared plan construction and output helpers live in gcode_test_helpers so this f
 Seam export probes materialize an exact entry, consume rotation permission and
 verify the writer's first extrusion and marker. Fixed closed sequences and their
 canonical copies keep their entry even when a child remains rotatable.
+SEMM startup probes count concrete plan tools, not configured tool slots, while
+retaining the rejection of inactive-tool heater events in multi-filament plans.
 
 Representative direct calls (branches are not a timeline):
 
@@ -3289,6 +3291,46 @@ TEST_CASE("Default firmware distributes geometric EXTRUSION over planar segments
     CHECK(count_occurrences(output, "G1 E") == 0);
     if (arc)
         CHECK(output.find("G3 X3 R1 E") != std::string::npos);
+}
+
+// Export initialization resolves SEMM from visits, including a later tool without extrusion.
+TEST_CASE("Default firmware resolves effective SEMM before startup heater events",
+          "[plugins][gcode][firmware][semm]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool configured = GENERATE(false, true);
+    const uint16_t configured_tools = GENERATE(1, 2);
+    const bool later_tool = GENERATE(false, true);
+    const bool second_visit = configured_tools > 1 && later_tool;
+    Print print;
+    configure_standard_firmware(print, configured_tools);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.single_extruder_multi_material.value = configured;
+    config.start_gcode_manual.value = true;
+    append_speed_validation_tool_group(print, scale_i(0.2), 0);
+    if (second_visit)
+        append_speed_validation_tool_group(print, scale_i(0.4), 1);
+
+    ScriptStateFirmwareProbe firmware;
+    firmware.begin_print(
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::ConstPrintingPlan(
+            reinterpret_cast<const printing_plan_handle *>(print.printing_plan())));
+    std::unique_ptr<ExtrusionNop> heating(new ExtrusionNop());
+    heating->add_property(ExtrusionPropertyHeater(
+        C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 180, false));
+    const slic3r_api::ExtrusionEntity event(
+        reinterpret_cast<const extrusion_entity_handle *>(heating.get()));
+    // Startup heating precedes initial selection; true multi-filament SEMM must
+    // still refuse a heater addressed to a logical tool that is not yet active.
+    if (configured && second_visit)
+        CHECK_THROWS_WITH(firmware.write_event(event),
+                          "A SEMM heater event cannot address a non-active tool.");
+    else {
+        CHECK_NOTHROW(firmware.write_event(event));
+        CHECK(firmware.machine_extruder(0).heater().requested_temperature() == 180);
+    }
+    CHECK(config.single_extruder_multi_material.value == configured);
 }
 
 // Logical filament selection transfers all live physical state but retains destination settings.

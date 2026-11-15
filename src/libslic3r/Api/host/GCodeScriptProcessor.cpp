@@ -26,6 +26,7 @@
 
 #include "ApiHostUtils.hpp"
 #include "Orchestrator.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/GCodeReader.hpp"
@@ -378,7 +379,9 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
     const bool has_wipe_tower = plan_has_wipe_tower(print.printing_plan());
     m_parser.set("has_wipe_tower", has_wipe_tower);
     m_parser.set("has_single_extruder_multi_material_priming", has_wipe_tower &&
-        print.config().single_extruder_multi_material.value &&
+        slic3r_api::ConstPrintingPlan(
+            reinterpret_cast<const printing_plan_handle *>(print.printing_plan()))
+            .uses_single_extruder_multi_material(print.config().single_extruder_multi_material.value) &&
         print.config().single_extruder_multi_material_priming.value);
 
     // Set export constants after the final plan is available; dimensions come from the sliced Print and remain fixed for every script.

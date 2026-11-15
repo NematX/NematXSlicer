@@ -300,7 +300,8 @@ StartupHeating startup_heating(const Config &config, PrintingPlan &plan)
         heating.chamber = value;
 
     heating.initial_tool_temperature = filament_target(config, heating.initial_tool, true);
-    const bool semm = config.bool_or_default("single_extruder_multi_material", false);
+    const bool semm = ConstPrintingPlan(plan).uses_single_extruder_multi_material(
+        config.bool_or_default("single_extruder_multi_material", false));
     if (!semm) {
         for (const extruder_index_t tool : heating.used_tools) {
             if (tool == heating.initial_tool)
@@ -630,7 +631,8 @@ void LayerTemperature::setup_impl(const plugin_run_context *run_ctx, const uint3
     PrintingPlan plan(ctx->plan);
     const Config config = print.config();
     const StartupHeating startup = startup_heating(config, plan);
-    const bool semm = config.bool_or_default("single_extruder_multi_material", false);
+    const bool semm = ConstPrintingPlan(plan).uses_single_extruder_multi_material(
+        config.bool_or_default("single_extruder_multi_material", false));
     const bool ooze_prevention = config.bool_or_default("ooze_prevention", false) && !semm;
     std::map<extruder_index_t, TrackedHeater> tools;
     TrackedHeater bed;

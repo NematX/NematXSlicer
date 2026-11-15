@@ -638,7 +638,8 @@ void ToolChangeUnretract::run_impl(const plugin_run_context *run_ctx) const
     const Config print_config = Print(ctx->print).config();
     // Firmware retraction cannot restore a partial amount, and the SEMM swap has no tool-change
     // unretraction at this boundary.
-    if (print_config.bool_or_default("single_extruder_multi_material", false) ||
+    if (ConstPrintingPlan(ctx->plan).uses_single_extruder_multi_material(
+            print_config.bool_or_default("single_extruder_multi_material", false)) ||
         print_config.bool_or_default("use_firmware_retraction", false))
         return;
 

@@ -10,13 +10,17 @@
 #include <vector>
 
 #include "gcode_test_helpers.hpp"
+#include "perimeter_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/Layer.hpp"
+#include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZRecord.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/KlipperGCodeFirmware.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/Marlin1GCodeFirmware.hpp"
@@ -25,6 +29,8 @@
 #include "libslic3r/Plugins/GCode/Firmware/RepRapGCodeFirmware.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/SprinterGCodeFirmware.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 
@@ -36,6 +42,8 @@ These tests exercise the boundary between the host-owned PrintRecord and the
 ordered PrintingPlan. The fixtures deliberately build the record independently
 from Model so malformed producer data and plugin-side validation can be tested
 without involving GUI persistence.
+SEMM checks use the ordering plugin's real height-marker visits, including
+empty visits for a color change on a tool that prints no object extrusion.
 */
 
 namespace {
@@ -382,4 +390,115 @@ TEST_CASE("Custom G-code per print Z plugin owns its script settings",
     // The scripts stay always editable: the plugin owns no activation rule.
     for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
         CHECK(rule.owner != "gcode.custom_gcode_per_print_z");
+}
+
+// A height marker can add a second logical tool without adding object extrusion.
+TEST_CASE("SEMM counts tools introduced only by a height color marker",
+          "[plugins][gcode][custom-per-print-z][semm]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int32_t marker_tool = GENERATE(1, 2);
+    Print print;
+    configure_standard_firmware(print, 2);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.single_extruder_multi_material.value = true;
+    PrintingPlan &native_plan = print.mutable_printing_plan();
+    native_plan.groups.emplace_back();
+    for (const double z : {0.2, 0.4}) {
+        PrintingLayerGroup &layer = native_plan.groups.back().layers.emplace_back();
+        layer.print_z = scale_i(z);
+        layer.tool_groups.emplace_back();
+        layer.tool_groups.back().extruder_id = 0;
+    }
+    const slic3r_api::ConstPrintingPlan plan(
+        reinterpret_cast<const printing_plan_handle *>(&native_plan));
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(true));
+    publish_record(print, CustomGCode::MultiAsSingle, {
+        {scale_to_layer_coord(0.4), CustomGCode::ColorChange, marker_tool, "#112233", ""}
+    });
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Plugin *plugin = orchestrator.get_plugin("ordering.custom_gcode_event_tools");
+    REQUIRE(plugin != nullptr);
+    run_ctx_extrusion_ordering payload = {};
+    payload.print = reinterpret_cast<const print_handle *>(&print);
+    payload.plan = reinterpret_cast<printing_plan_handle *>(&native_plan);
+    plugin_host_context host_context =
+        orchestrator.prepare_plugin_host_context(STEP_ORDERING, plugin, &print);
+    plugin_run_context run_context =
+        orchestrator.prepare_plugin_run_context(STEP_ORDERING, plugin, &host_context);
+    run_context.data = &payload;
+    plugin->setup(run_context, 1);
+    plugin->setup_run(run_context);
+    plugin->run(run_context);
+
+    const PrintingLayerGroup &changed_layer = native_plan.groups.back().layers.back();
+    REQUIRE(changed_layer.tool_groups.size() == (marker_tool == 2 ? 2 : 1));
+    CHECK(changed_layer.tool_groups.front().extruder_id == marker_tool - 1);
+    CHECK(changed_layer.tool_groups.front().extrusions.empty());
+    CHECK(plan.uses_single_extruder_multi_material(true) == (marker_tool == 2));
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(false));
+}
+
+// Object tool selection at a height must reach the same plan-based SEMM decision.
+TEST_CASE("SEMM counts a second tool selected only by a height tool change",
+          "[plugins][gcode][custom-per-print-z][semm]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::Test::PerimeterPluginTests::PreparedPerimeterPrint prepared;
+    Slic3r::Test::PerimeterPluginTests::prepare_cube_print(
+        prepared, Slic3r::Test::PerimeterPluginTests::perimeter_config({}));
+    Print &print = prepared.print;
+    configure_standard_firmware(print, 2);
+    const_cast<PrintConfig &>(print.config()).single_extruder_multi_material.value = true;
+    PrintingPlan &native_plan = print.mutable_printing_plan();
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const uint32_t catalog_id = printing_plan_view(print).find_or_add_object_instance(print_view.object(0), 0);
+    PluginStorage storage;
+    slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
+        reinterpret_cast<const print_handle *>(&print),
+        reinterpret_cast<printing_plan_handle *>(&native_plan),
+        reinterpret_cast<storage_handle *>(&storage));
+    native_plan.groups.emplace_back();
+    native_plan.groups.back().printing_catalog_ids.push_back(catalog_id);
+    PrintObject &object = print.object(0);
+    LayerRegionIsland source({&object.layer(0).region(0)}, 0);
+    for (const double z : {0.2, 0.4}) {
+        PrintingLayerGroup &layer = native_plan.groups.back().layers.emplace_back();
+        layer.print_z = scale_i(z);
+        layer.tool_groups.emplace_back();
+        layer.tool_groups.back().extruder_id = 0;
+        append_empty_extrusion(layer.tool_groups.back(), ExtrusionRole::Perimeter, catalog_id, &source);
+    }
+    publish_record(print, CustomGCode::MultiAsSingle, {
+        {scale_to_layer_coord(0.4), CustomGCode::ToolChange, 2, "#112233", ""}
+    });
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Plugin *plugin = orchestrator.get_plugin("ordering.custom_gcode_tool_overrides");
+    REQUIRE(plugin != nullptr);
+    run_ctx_extrusion_ordering payload = {};
+    payload.print = reinterpret_cast<const print_handle *>(&print);
+    payload.plan = reinterpret_cast<printing_plan_handle *>(&native_plan);
+    plugin_host_context host_context =
+        orchestrator.prepare_plugin_host_context(STEP_ORDERING, plugin, &print);
+    plugin_run_context run_context =
+        orchestrator.prepare_plugin_run_context(STEP_ORDERING, plugin, &host_context);
+    run_context.data = &payload;
+    plugin->setup(run_context, 1);
+    plugin->setup_run(run_context);
+    plugin->run(run_context);
+    const slic3r_api::ConstPrintingPlan plan(
+        reinterpret_cast<const printing_plan_handle *>(print.printing_plan()));
+    CHECK(plan.uses_single_extruder_multi_material(true));
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(false));
+    bool earlier_object_tool = false;
+    bool later_object_tool = false;
+    for (const PrintingGroup &group : print.printing_plan()->groups)
+        for (const PrintingLayerGroup &layer : group.layers)
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                if (!tool.extrusions.empty()) {
+                    earlier_object_tool = earlier_object_tool || tool.extruder_id == 0;
+                    later_object_tool = later_object_tool || tool.extruder_id == 1;
+                }
+    CHECK(earlier_object_tool);
+    CHECK(later_object_tool);
 }

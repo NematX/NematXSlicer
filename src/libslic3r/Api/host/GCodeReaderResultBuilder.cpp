@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "libslic3r/Api/plugin/c/slic3r_extrusions.h"
+#include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/Layer.hpp"
@@ -284,7 +285,9 @@ void GCodeReaderResultBuilder::initialize_result(
     }
 
     const PrintConfig &config = print->config();
-    m_single_extruder_multi_material = config.single_extruder_multi_material.value;
+    m_single_extruder_multi_material = slic3r_api::ConstPrintingPlan(
+        reinterpret_cast<const printing_plan_handle *>(plan))
+        .uses_single_extruder_multi_material(config.single_extruder_multi_material.value);
     const size_t tool_count = std::max<size_t>(config.nozzle_diameter.size(), 1);
     m_result.extruders_count = tool_count;
     m_result.max_print_height = static_cast<float>(config.max_print_height.value);

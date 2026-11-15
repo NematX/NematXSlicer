@@ -3076,14 +3076,23 @@ TEST_CASE("Host G-code reader shares loading debt only for SEMM prints",
 {
     ensure_plugin_test_runtime_initialized();
     const bool semm = GENERATE(false, true);
+    const bool second_plan_tool = GENERATE(false, true);
     const char *reader_id = GENERATE("gcode.reader.default", "gcode.reader.marlin2");
-    CAPTURE(semm, reader_id);
+    CAPTURE(semm, second_plan_tool, reader_id);
     Print print;
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.single_extruder_multi_material.value = semm;
     config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
     config.filament_diameter.set(std::vector<double>{1.75, 1.75});
-    print.mutable_printing_plan();
+    Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    for (const extruder_index_t tool : {extruder_index_t(0), extruder_index_t(1)}) {
+        if (tool == 1 && !second_plan_tool)
+            continue;
+        plan.groups.back().layers.back().tool_groups.emplace_back();
+        plan.groups.back().layers.back().tool_groups.back().extruder_id = tool;
+    }
     GCodeReaderService service(Orchestrator::instance(), &print);
     const std::string load = "M82\nT0\nG92 E0\nG1 E-92 F120\nT1\nG92 E0\n"
                              ";TYPE:Wipe tower\nG1 X10 E90 F600\n";
@@ -3094,7 +3103,7 @@ TEST_CASE("Host G-code reader shares loading debt only for SEMM prints",
     for (const std::pair<std::string, double> &boundary : boundaries) {
         CAPTURE(boundary.second);
         const GCodeProcessorResult result = service.read_for_viewer(reader_id, load + boundary.first);
-        const double consumed = semm ? std::max(boundary.second - 92.0, 0.0) : boundary.second;
+        const double consumed = semm && second_plan_tool ? std::max(boundary.second - 92.0, 0.0) : boundary.second;
         CHECK(result.print_statistics.volumes_per_extruder.count(0) == 0);
         if (consumed == 0.0) {
             CHECK(result.print_statistics.volumes_per_extruder.empty());
@@ -3129,6 +3138,12 @@ TEST_CASE("Host G-code reader SEMM debt follows active tool E validity",
     config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
     config.filament_diameter.set(std::vector<double>{1.75, 1.75});
     Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    for (const extruder_index_t tool : {extruder_index_t(0), extruder_index_t(1)}) {
+        plan.groups.back().layers.back().tool_groups.emplace_back();
+        plan.groups.back().layers.back().tool_groups.back().extruder_id = tool;
+    }
     std::vector<raw_gcode_reader_event_item> initial_items;
     raw_gcode_reader_state initial = initial_state(initial_items);
     initial_items.push_back({RAW_GCODE_READER_ITEM_E, 1, 0.0});

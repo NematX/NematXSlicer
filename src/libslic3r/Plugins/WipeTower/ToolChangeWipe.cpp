@@ -193,7 +193,7 @@ private:
 // Add the SEMM priming visits and the empty outgoing visits needed at layer starts.
 void edit_plan(const Slic3r::PrintConfig &config, PrintingPlan plan, const plugin_run_context *run);
 // Return true when the change away from tool needs an outgoing part (ramming and/or unload).
-bool needs_outgoing(const Slic3r::PrintConfig &config, extruder_index_t tool);
+bool needs_outgoing(const Slic3r::PrintConfig &config, extruder_index_t tool, bool semm);
 // Return the volume of the consecutive eligible leaves at the start of one incoming visit.
 double consecutive_wiped_volume(const ConstPrintingLayerGroup &layer, uint32_t visit_index, extruder_index_t incoming);
 // Add the volume of the consecutive eligible leaves of a borrowed tree in print order.
@@ -207,7 +207,7 @@ double purge_volume(const Slic3r::PrintConfig &config, extruder_index_t from, ex
 // Return the factor applied to the purge speed of the incoming filament on the tower.
 double purge_speed_factor(const Slic3r::PrintConfig &config, extruder_index_t tool, double print_z);
 // Return the ramming profile of a tool leaving the nozzle; empty when it is not rammed.
-std::vector<RammingStep> ramming_steps(const Slic3r::PrintConfig &config, extruder_index_t tool);
+std::vector<RammingStep> ramming_steps(const Slic3r::PrintConfig &config, extruder_index_t tool, bool semm);
 // Sum the volume of a ramming profile.
 double ramming_volume(const std::vector<RammingStep> &steps);
 // Return true when the band prints at the Z of the first layer of the plan.
@@ -309,7 +309,8 @@ void ToolChangeWipe::run_impl(const plugin_run_context *run) const
 void edit_plan(const Slic3r::PrintConfig &config, PrintingPlan plan, const plugin_run_context *run)
 {
     const size_t tool_count = config.nozzle_diameter.size();
-    const bool semm = config.single_extruder_multi_material.value;
+    const bool semm = ConstPrintingPlan(plan).uses_single_extruder_multi_material(
+        config.single_extruder_multi_material.value);
     if (semm && config.single_extruder_multi_material_priming.value) {
         std::vector<bool> used(tool_count, false);
         extruder_index_t first = EXTRUDER_ID_UNKNOWN;
@@ -353,7 +354,7 @@ void edit_plan(const Slic3r::PrintConfig &config, PrintingPlan plan, const plugi
                 const extruder_index_t tool = layer.tool_group(t).extruder_id();
                 if (tool < 0 || size_t(tool) >= tool_count)
                     continue;
-                if (first_visit && previous != EXTRUDER_ID_UNKNOWN && previous != tool && needs_outgoing(config, previous))
+                if (first_visit && previous != EXTRUDER_ID_UNKNOWN && previous != tool && needs_outgoing(config, previous, semm))
                     insertions.push_back({g, l, previous});
                 first_visit = false;
                 previous = tool;
@@ -370,9 +371,9 @@ void edit_plan(const Slic3r::PrintConfig &config, PrintingPlan plan, const plugi
 
 // SEMM unloads every filament; a multi-nozzle printer rams only the tools with filament_multitool_ramming. Reads
 // borrowed configuration only.
-bool needs_outgoing(const Slic3r::PrintConfig &config, const extruder_index_t tool)
+bool needs_outgoing(const Slic3r::PrintConfig &config, const extruder_index_t tool, const bool semm)
 {
-    return config.single_extruder_multi_material.value || config.filament_multitool_ramming.get_at(size_t(tool));
+    return semm || config.filament_multitool_ramming.get_at(size_t(tool));
 }
 
 // Volume of the consecutive eligible leaves at the start of the incoming visit, in print order: the
@@ -467,6 +468,7 @@ bool measure_eligible_leaves(const Slic3r::ExtrusionEntity &entity, const Slic3r
 void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan &plan,
                       const run_ctx_wipe_tower_wipe &ctx, const plugin_run_context *run)
 {
+    const bool semm = plan.uses_single_extruder_multi_material(config.single_extruder_multi_material.value);
     const size_t tool_count = config.nozzle_diameter.size();
     extruder_index_t previous = EXTRUDER_ID_UNKNOWN;
     c_wipe_tower_anchor previous_end = {};
@@ -494,10 +496,10 @@ void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan
                         volume = std::max(volume - consecutive_wiped_volume(layer, t, tool),
                                           config.filament_minimal_purge_on_wipe_tower.get_at(size_t(tool)));
                     c_wipe_tower_request request{++id, {g, l, t, 0}, {}, 1, 0, volume, 0};
-                    if (previous_adjacent && needs_outgoing(config, previous)) {
+                    if (previous_adjacent && needs_outgoing(config, previous, semm)) {
                         request.outgoing = previous_end;
                         request.has_outgoing = 1;
-                        request.purge_volume += ramming_volume(ramming_steps(config, previous));
+                        request.purge_volume += ramming_volume(ramming_steps(config, previous, semm));
                     }
                     if (!ctx.report_request(ctx.report_context, &request))
                         return;
@@ -509,10 +511,10 @@ void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan
         }
     // No reported change means nothing was purged, so no tower grows and no final unload is
     // reported; the end G-code unloads the filament, like the legacy tower.
-    if (config.single_extruder_multi_material.value && id > 0) {
+    if (semm && id > 0) {
         // The final unload is floating: it may be printed above a tower that stopped lower.
         const c_wipe_tower_request request{++id, {}, previous_end, 0, 1,
-            ramming_volume(ramming_steps(config, previous)), 1};
+            ramming_volume(ramming_steps(config, previous, semm)), 1};
         if (!ctx.report_request(ctx.report_context, &request))
             return;
     }
@@ -568,10 +570,10 @@ double purge_speed_factor(const Slic3r::PrintConfig &config, const extruder_inde
 // speed in mm3/s held for 0.25 s; the two leading percentages and the part after '|' are ignored, the ramming lines
 // use the band flow. Multi-nozzle with filament_multitool_ramming: one step of the configured volume at the configured
 // flow. Otherwise, or when nothing positive is configured, the profile is empty. Malformed numbers end the profile.
-std::vector<RammingStep> ramming_steps(const Slic3r::PrintConfig &config, const extruder_index_t tool)
+std::vector<RammingStep> ramming_steps(const Slic3r::PrintConfig &config, const extruder_index_t tool, const bool semm)
 {
     std::vector<RammingStep> steps;
-    if (config.single_extruder_multi_material.value) {
+    if (semm) {
         const std::string &text = config.filament_ramming_parameters.get_at(size_t(tool));
         std::istringstream stream(text.substr(0, text.find('|')));
         double width_percent = 0., step_percent = 0., speed = 0.;
@@ -658,7 +660,7 @@ void generate(const Slic3r::PrintConfig &config, const ConstPrintingPlan &plan,
             throw std::invalid_argument("Tool-change wipe band is too shallow for its rounded flow.");
     }
     PurgePath path = purge_path(band, lines);
-    const bool semm = config.single_extruder_multi_material.value;
+    const bool semm = plan.uses_single_extruder_multi_material(config.single_extruder_multi_material.value);
     const double cap = semm ? xy_speed_cap(config) : 0.;
     storage_handle *storage = run->plugin_storage;
     c_vec2d last = band.entry;
@@ -672,7 +674,7 @@ void generate(const Slic3r::PrintConfig &config, const ConstPrintingPlan &plan,
         if (config.filament_pressure_advance.is_enabled(int32_t(outgoing)))
             MutableExtrusionEntity(band.outgoing_root).get_or_add(EPropertySpeed::key).pressure_advance(0.f);
         bool rammed = false;
-        for (const RammingStep &step : ramming_steps(config, outgoing)) {
+        for (const RammingStep &step : ramming_steps(config, outgoing, semm)) {
             throw_if_cancelled(run);
             const std::vector<c_vec2d> points = take_path(path, step.volume / flow.mm3_per_mm(), false);
             if (points.size() < 2)

@@ -61,9 +61,14 @@ Typical step flow:
     for (uint32_t idx = 0; idx < plan.group_count(); ++idx)
         my_plugin_order_extrusion_trees(plan.group(idx));
 
-The views expose only plan editing primitives. Algorithms such as by-layer or
+The views expose plan access and editing primitives. Algorithms such as by-layer or
 by-object construction belong in STEP_ORDERING plugins, where they can be
 replaced independently.
+
+ConstPrintingPlan::uses_single_extruder_multi_material() resolves the configured
+SEMM mode against concrete tool visits. Call it after ordering, so tools selected
+by height markers are included even when their visits contain no extrusion.
+A color replacement on the same tool does not introduce another logical tool.
 
 Property guide: [Using Plugin Properties](/doc/plugins/properties.md)
 
@@ -259,6 +264,30 @@ public:
     uint32_t group_count() const { return printing_plan_count_group(handle()); }
     ConstPrintingGroup group(uint32_t idx) const {
         return ConstPrintingGroup(printing_plan_get_group(handle(), idx));
+    }
+
+    // Enable shared-nozzle operation only for an enabled setting and two distinct
+    // concrete tool visits anywhere in the borrowed plan. Scripts are not parsed.
+    bool uses_single_extruder_multi_material(bool configured) const {
+        if (!configured || !valid())
+            return false;
+        extruder_index_t first = EXTRUDER_ID_UNKNOWN;
+        for (uint32_t group_idx = 0; group_idx < group_count(); ++group_idx) {
+            const ConstPrintingGroup current_group = group(group_idx);
+            for (uint32_t layer_idx = 0; layer_idx < current_group.layer_group_count(); ++layer_idx) {
+                const ConstPrintingLayerGroup layer = current_group.layer_group(layer_idx);
+                for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
+                    const extruder_index_t tool = layer.tool_group(tool_idx).extruder_id();
+                    if (tool == EXTRUDER_ID_UNKNOWN)
+                        continue;
+                    if (first == EXTRUDER_ID_UNKNOWN)
+                        first = tool;
+                    else if (tool != first)
+                        return true;
+                }
+            }
+        }
+        return false;
     }
 
 private:

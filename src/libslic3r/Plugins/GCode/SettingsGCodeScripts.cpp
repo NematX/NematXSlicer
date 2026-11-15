@@ -617,7 +617,8 @@ private:
         const std::string between_objects = config.string_or_default("between_objects_gcode", std::string());
         const bool between_before_move = config.bool_or_default("between_objects_gcode_before_move", false);
         const bool single_extruder_multi_material =
-            config.bool_or_default("single_extruder_multi_material", false);
+            read_only_plan.uses_single_extruder_multi_material(
+                config.bool_or_default("single_extruder_multi_material", false));
         extruder_index_t current_tool = EXTRUDER_ID_UNKNOWN;
         int32_t layer_number = 0;
         bool seen_layer = false;

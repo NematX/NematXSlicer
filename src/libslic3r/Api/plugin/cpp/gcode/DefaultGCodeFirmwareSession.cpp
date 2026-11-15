@@ -52,6 +52,8 @@ it again when an individual source extrusion begins.
 In single-extruder multi-material (SEMM), logical tool IDs select filaments on
 one physical extruder. Tool selection copies runtime state while preserving
 each filament's configured conversions, speeds and device offsets.
+At begin_print(), this sharing requires both the configured SEMM setting and
+multiple distinct logical tools in the plan, including height-marker visits.
 
 Cancellation labels cover only catalog entries backed by source objects.
 Synthetic entries, including wipe towers, close any active label and emit no
@@ -487,6 +489,8 @@ void DefaultGCodeFirmwareSession::set_reader_state_id(orchestrator_runtime_id re
 std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const ConstPrintingPlan &plan)
 {
     setup(print.config());
+    m_single_extruder_multi_material = plan.uses_single_extruder_multi_material(
+        m_single_extruder_multi_material);
     m_object_labels.clear();
     m_current_printing_catalog_id = uint32_t(-1);
     m_seen_object_group = false;

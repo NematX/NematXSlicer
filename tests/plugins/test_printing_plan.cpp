@@ -58,6 +58,8 @@ only a successful complete chain freezes the resulting plan. Reversal probes
 verify the full authorized unit, including fixed descendants and command phases.
 Native-reader probes preserve warmed child-pointer views and stable identities
 through ordering, and compare extents using inherited widths across siblings.
+SEMM probes distinguish repeated visits from distinct tools, including empty
+visits introduced for height-marker events.
 */
 namespace {
 using namespace Slic3r;
@@ -2564,4 +2566,30 @@ TEST_CASE("DataTree extruder index boundaries validate before narrowing",
     CHECK(layer_island_get_or_create_region_island(
               const_cast<layer_island_handle *>(island.handle()),
               nullptr, 0, extruder_index_t(-2)) == nullptr);
+}
+
+// SEMM follows actual tool identities, not the number of visits or their extrusion counts.
+TEST_CASE("PrintingPlan enables SEMM only for distinct concrete tools",
+          "[printing][plan][semm]")
+{
+    PrintingPlan native_plan;
+    const slic3r_api::ConstPrintingPlan plan(
+        reinterpret_cast<const printing_plan_handle *>(&native_plan));
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(true));
+    native_plan.groups.emplace_back();
+    native_plan.groups.back().layers.emplace_back();
+    native_plan.groups.back().layers.back().tool_groups.emplace_back();
+    native_plan.groups.back().layers.back().tool_groups.back().extruder_id = EXTRUDER_ID_UNKNOWN;
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(true));
+    native_plan.groups.back().layers.back().tool_groups.back().extruder_id = 1;
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(true));
+    native_plan.groups.emplace_back();
+    native_plan.groups.back().layers.emplace_back();
+    native_plan.groups.back().layers.back().tool_groups.emplace_back();
+    native_plan.groups.back().layers.back().tool_groups.back().extruder_id = 1;
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(true));
+    native_plan.groups.back().layers.back().tool_groups.emplace_back();
+    native_plan.groups.back().layers.back().tool_groups.back().extruder_id = 0;
+    CHECK(plan.uses_single_extruder_multi_material(true));
+    CHECK_FALSE(plan.uses_single_extruder_multi_material(false));
 }

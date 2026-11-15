@@ -73,10 +73,12 @@ public:
     ~DefaultGCodeFirmwareSession() override;
 
     // Copy every setting needed during the export and reset all transient
-    // machine state. The borrowed Config view is not retained.
+    // machine state. Without a plan, SEMM follows the setting; begin_print()
+    // resolves it against the tools actually visited. The Config is not retained.
     void setup(const Config &config);
 
-    // Initialize export state and declare only real catalog instances for cancellation.
+    // Initialize export state, resolve SEMM from concrete plan tools, and declare
+    // only real catalog instances for cancellation.
     std::string begin_print(const Print &print, const ConstPrintingPlan &plan) override;
     // Build the plugin-side Reader client used to interpret custom G-code.
     // Both handles remain host-owned and must outlive this firmware session.
