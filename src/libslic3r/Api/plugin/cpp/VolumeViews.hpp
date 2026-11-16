@@ -382,7 +382,12 @@ public:
     bool is_modifier() const { return type() == RAW_VOLUME_TYPE_PARAMETER_MODIFIER; }
     bool is_support_enforcer() const { return type() == RAW_VOLUME_TYPE_SUPPORT_ENFORCER; }
     bool is_support_blocker() const { return type() == RAW_VOLUME_TYPE_SUPPORT_BLOCKER; }
+    // Support-demand modifiers: they add or remove object surfaces that ask for support.
     bool is_support_modifier() const { return is_support_blocker() || is_support_enforcer(); }
+    bool is_support_column() const { return type() == RAW_VOLUME_TYPE_SUPPORT_COLUMN; }
+    bool is_no_support_zone() const { return type() == RAW_VOLUME_TYPE_NO_SUPPORT_ZONE; }
+    // Support-geometry modifiers: they add to or remove from the support itself, not from its demand.
+    bool is_support_geometry_modifier() const { return is_support_column() || is_no_support_zone(); }
     bool is_seam_position() const
     {
         const raw_volume_type value = type();

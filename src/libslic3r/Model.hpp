@@ -359,6 +359,10 @@ enum class ModelVolumeType : int {
     SEAM_POSITION_INSIDE, //TODO
     BRIM_PATCH,
     BRIM_NEGATIVE,
+    // Non-printing mesh that asks for sparse support inside it, even where no surface asks for support.
+    SUPPORT_COLUMN,
+    // Non-printing mesh that forbids support inside it, whatever created that support.
+    NO_SUPPORT_ZONE,
 };
 
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
@@ -879,7 +883,14 @@ public:
 	bool                is_modifier()           const { return m_type == ModelVolumeType::PARAMETER_MODIFIER; }
 	bool                is_support_enforcer()   const { return m_type == ModelVolumeType::SUPPORT_ENFORCER; }
 	bool                is_support_blocker()    const { return m_type == ModelVolumeType::SUPPORT_BLOCKER; }
+    // Support-demand modifiers: they add or remove object surfaces that ask for support.
     bool                is_support_modifier()   const { return m_type == ModelVolumeType::SUPPORT_BLOCKER || m_type == ModelVolumeType::SUPPORT_ENFORCER; }
+    bool                is_support_column()     const { return m_type == ModelVolumeType::SUPPORT_COLUMN; }
+    bool                is_no_support_zone()    const { return m_type == ModelVolumeType::NO_SUPPORT_ZONE; }
+    // Support-geometry modifiers: they add to or remove from the support itself, not from its demand.
+    bool                is_support_geometry_modifier() const { return is_support_column() || is_no_support_zone(); }
+    // Any of the four support helper volumes; all of them only affect the support steps.
+    bool                is_support_volume()     const { return is_support_modifier() || is_support_geometry_modifier(); }
     bool                is_seam_position()      const { return m_type == ModelVolumeType::SEAM_POSITION_CENTER || m_type == ModelVolumeType::SEAM_POSITION_CENTER_Z || m_type == ModelVolumeType::SEAM_POSITION_INSIDE_CENTER || m_type == ModelVolumeType::SEAM_POSITION_INSIDE; }
     bool                is_brim_patch()         const { return m_type == ModelVolumeType::BRIM_PATCH; }
     bool                is_brim_negative()      const { return m_type == ModelVolumeType::BRIM_NEGATIVE; }

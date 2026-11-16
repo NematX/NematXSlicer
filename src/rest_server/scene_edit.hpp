@@ -45,7 +45,7 @@ inline std::string part_type_name(ModelVolumeType type)
 {
     static const char *names[] = {"part", "negative_volume", "modifier", "support_blocker", "support_enforcer",
         "seam_position_center", "seam_position_center_z", "seam_position_inside_center", "seam_position_inside",
-        "brim_patch", "brim_negative"};
+        "brim_patch", "brim_negative", "support_column", "no_support_zone"};
     const int index = int(type);
     return index >= 0 && index < int(sizeof(names) / sizeof(names[0])) ? names[index] : "invalid";
 }

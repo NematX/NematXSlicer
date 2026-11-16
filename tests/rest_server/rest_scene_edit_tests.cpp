@@ -2,6 +2,7 @@
 #include <catch2/catch.hpp>
 
 #include "rest_models_test_helpers.hpp"
+#include "scene_edit.hpp"
 #include "libslic3r/EmbossShape.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Print.hpp"
@@ -218,6 +219,12 @@ TEST_CASE("REST set_part_type changes types atomically and keeps unchanged types
     const std::uint64_t revision = session->snapshot().revision;
     REQUIRE(post_json(fixture, route + "/set_part_type/" + part_id, {{"type", "support_enforcer"}}).result() == http::status::ok);
     CHECK(session->snapshot().revision == revision);
+    // Demand and geometry support volumes convert into each other like the other helper types.
+    for (const char *type : {"support_column", "no_support_zone", "support_blocker"}) {
+        CAPTURE(type);
+        REQUIRE(post_json(fixture, route + "/set_part_type/" + part_id, {{"type", type}}).result() == http::status::ok);
+        CHECK(listed(fixture, route)["objects"][0]["parts"][1]["type"] == type);
+    }
 }
 
 TEST_CASE("REST rename validates names and invalidates G-code only for objects", "[rest_scene_edit]")
@@ -337,7 +344,9 @@ TEST_CASE("REST add_shape creates default and sized shapes", "[rest_scene_edit]"
         {"brim_patch", "square", {100, 100, 0.1}, "Brim-Square"},
         {"brim_patch", "circle", {10, 10, 0.1}, "Brim-Circle"},
         {"seam_position_center", "small_sphere", {20, 20, 20}, "Seam-Sphere"},
-        {"seam_position_center_z", "small_cylinder", {20, 20, 100}, "Seam-Cylinder"}
+        {"seam_position_center_z", "small_cylinder", {20, 20, 100}, "Seam-Cylinder"},
+        {"support_column", "cylinder", {50, 50, 100}, "Column-Cylinder"},
+        {"no_support_zone", "box", {100, 100, 100}, "NoSupport-Box"}
     };
     for (const ShapeCase &shape : cases) {
         CAPTURE(shape.shape);
@@ -350,12 +359,19 @@ TEST_CASE("REST add_shape creates default and sized shapes", "[rest_scene_edit]"
         const Slic3r::ModelVolume *volume = Slic3r::Rest::find_transform_volume(*data.scene, entity).second;
         CHECK(volume->mesh().bounding_box().size().isApprox(shape.size, 1e-3));
         CHECK(volume->name == shape.name);
+        CHECK(Slic3r::Rest::part_type_name(volume->type()) == shape.type);
         if (std::string(shape.shape) == "slab") {
             const Slic3r::ModelObject *object = volume->get_object();
             const auto bounds = world_bounds(*object->instances.front(), *volume);
             CHECK(bounds.first.z() == Approx(object->instance_bounding_box(0).min.z()).margin(1e-3));
         }
     }
+
+    // Support columns and no-support zones are created only as boxes and cylinders.
+    for (const char *type : {"support_column", "no_support_zone"})
+        for (const char *shape : {"sphere", "slab"})
+            require_error(post_json(fixture, route + "/add_shape/" + object_id, {{"type", type}, {"shape", shape}}),
+                http::status::unprocessable_entity, "invalid_shape");
 
     const Slic3r::Vec3d requested_position(50, 60, 70);
     const HttpResponseMessage sized = post_json(fixture, route + "/add_shape/" + object_id,

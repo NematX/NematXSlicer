@@ -188,7 +188,7 @@ wxBitmapBundle* SettingsFactory::get_category_bitmap(const Slic3r::OptionCategor
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 13> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
     {L("Add part"),              "add_part" },           // ~ModelVolumeType::MODEL_PART
     {L("Add negative volume"),   "add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
@@ -201,7 +201,11 @@ static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD
     {L("Enforce seam position"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_INSIDE
     {L("Add brim patch"),        "add_brim_patch"},      // ~ModelVolumeType::BRIM_PATCH
     {L("Add brim negative"),     "add_brim_negative"},   // ~ModelVolumeType::BRIM_NEGATIVE
+    {L("Add support column"),    "support_enforcer"},    // ~ModelVolumeType::SUPPORT_COLUMN
+    {L("Add no support zone"),   "support_blocker"},     // ~ModelVolumeType::NO_SUPPORT_ZONE
 }};
+static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::NO_SUPPORT_ZONE) + 1,
+              "ADD_VOLUME_MENU_ITEMS has one entry per volume type, in enum order");
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
 static const constexpr std::array<std::pair<const char *, const char *>, 3> TEXT_VOLUME_ICONS {{

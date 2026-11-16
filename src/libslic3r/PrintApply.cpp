@@ -58,9 +58,10 @@ Representative direct calls (branches are not a timeline):
 
 namespace Slic3r {
 
-// Add or remove support modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
-// in the exact order and with the same IDs.
-// It is expected, that the model_object_dst already contains the non-support volumes of model_object_new in the correct order.
+// Add or remove the support, seam and brim helper ModelVolumes of model_object_dst to match the ModelVolumes of
+// model_object_new in the exact order and with the same IDs.
+// It is expected, that the model_object_dst already contains the printable parts and parameter modifiers of
+// model_object_new in the correct order.
 // Friend to ModelVolume to allow copying.
 // static is not accepted by gcc if declared as a friend of ModelObject.
 /* static */ void model_volume_list_update_supports_seams(ModelObject &model_object_dst, const ModelObject &model_object_new)
@@ -83,19 +84,19 @@ namespace Slic3r {
             assert(! it->second); // not consumed yet
             it->second = true;
             ModelVolume *model_volume_dst = const_cast<ModelVolume*>(it->first);
-            // For support modifiers, the type may have been switched from blocker to enforcer and vice versa.
-            assert((model_volume_dst->is_support_modifier() && model_volume_src->is_support_modifier()) || model_volume_dst->type() == model_volume_src->type());
+            // A support volume may have been converted to another support kind, for example from blocker to column.
+            assert((model_volume_dst->is_support_volume() && model_volume_src->is_support_volume()) || model_volume_dst->type() == model_volume_src->type());
             model_object_dst.volumes.emplace_back(model_volume_dst);
-            if (model_volume_dst->is_support_modifier() || model_volume_dst->is_seam_position() ||
+            if (model_volume_dst->is_support_volume() || model_volume_dst->is_seam_position() ||
                 model_volume_dst->is_brim()) {
-                // For support modifiers, the type may have been switched from blocker to enforcer and vice versa.
+                // Copy the kind too: the engine ID stays the same when a support volume changes kind.
                 model_volume_dst->set_type(model_volume_src->type());
                 model_volume_dst->set_transformation(model_volume_src->get_transformation());
             }
             assert(model_volume_dst->get_matrix().isApprox(model_volume_src->get_matrix()));
         } else {
             // The volume was not found in the old list. Create a new copy.
-            assert(model_volume_src->is_support_modifier() || model_volume_src->is_seam_position() ||
+            assert(model_volume_src->is_support_volume() || model_volume_src->is_seam_position() ||
                    model_volume_src->is_brim());
             model_object_dst.volumes.emplace_back(new ModelVolume(*model_volume_src));
             model_object_dst.volumes.back()->set_model_object(&model_object_dst);
@@ -1328,8 +1329,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         bool solid_or_modifier_differ   = model_volume_list_changed(model_object, model_object_new, solid_or_modifier_types) ||
                                           model_mmu_segmentation_data_changed(model_object, model_object_new) ||
                                           (model_object_new.is_mm_painted() && num_extruders_changed);
+        // Demand modifiers and support-geometry volumes share the support invalidation.
         bool supports_differ            = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_BLOCKER) ||
-                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_ENFORCER);
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_ENFORCER) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_COLUMN) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::NO_SUPPORT_ZONE);
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
         bool model_origin_translation_differ = model_object.origin_translation != model_object_new.origin_translation;
         auto print_objects_range        = print_object_status_db.get_range(model_object);
