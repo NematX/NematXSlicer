@@ -275,6 +275,7 @@ const ColorRGBA GLVolume::SUPPORT_BLOCKER_COLOR    = {1.0f, 0.2f, 0.2f, 0.5f}; /
 const ColorRGBA GLVolume::SUPPORT_ENFORCER_COLOR   = {0.2f, 0.2f, 1.0f, 0.5f}; // blue
 const ColorRGBA GLVolume::SUPPORT_COLUMN_COLOR     = {0.2f, 0.75f, 0.3f, 0.5f}; // green
 const ColorRGBA GLVolume::NO_SUPPORT_ZONE_COLOR    = {1.0f, 0.65f, 0.1f, 0.5f}; // amber
+const ColorRGBA GLVolume::SUPPORT_INTERFACE_COLUMN_COLOR = {0.1f, 0.65f, 0.8f, 0.5f}; // teal
 const ColorRGBA GLVolume::SEAM_POSITION_COLOR      = { 0.8f, 0.9f, 0.2f, 0.5f }; // yellow - brown
 const ColorRGBA GLVolume::BRIM_PATCH_COLOR         = { 0.2f, 1.0f, 5.0f, 0.5f }; //cyan
 const ColorRGBA GLVolume::BRIM_NEGATIVE_COLOR      = { 0.7f, 0.2f, 1.0f, 0.5f }; //blue-purple
@@ -327,7 +328,7 @@ void GLVolume::set_render_color(bool force_transparent)
             const ColorRGBA rc = outside ? SELECTED_OUTSIDE_COLOR : SELECTED_COLOR;
             if (color == NEGATIVE_VOLUME_COLOR || color == PARAMETER_MODIFIER_COLOR ||
                 color == SUPPORT_BLOCKER_COLOR || color == SUPPORT_ENFORCER_COLOR ||
-                color == SUPPORT_COLUMN_COLOR || color == NO_SUPPORT_ZONE_COLOR ||
+                color == SUPPORT_COLUMN_COLOR || color == NO_SUPPORT_ZONE_COLOR || color == SUPPORT_INTERFACE_COLUMN_COLOR ||
                 color == SEAM_POSITION_COLOR || color == BRIM_PATCH_COLOR || color == BRIM_NEGATIVE_COLOR)
                 set_render_color(ColorRGBA(rc.r() * color.r(), rc.g() * color.g(), rc.b() * color.b(), rc.a() * color.a()));
             else
@@ -363,6 +364,8 @@ ColorRGBA color_from_model_volume(const ModelVolume& model_volume)
         color = GLVolume::SUPPORT_COLUMN_COLOR;
     else if (model_volume.is_no_support_zone())
         color = GLVolume::NO_SUPPORT_ZONE_COLOR;
+    else if (model_volume.is_support_interface_column())
+        color = GLVolume::SUPPORT_INTERFACE_COLUMN_COLOR;
     else if (model_volume.is_seam_position())
         color = GLVolume::SEAM_POSITION_COLOR;
     else if (model_volume.is_brim_patch())

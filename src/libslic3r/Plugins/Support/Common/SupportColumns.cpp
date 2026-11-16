@@ -24,13 +24,15 @@
       than the minimum support height joins its neighbor.
    3. Areas: every column is sliced once at the middle Z of every carrying slab. A section loses the object clearance (the object
       layers within the slab's Z gaps, with their no-support zones, grown by the XY gap, as the grid family trims its slabs) and
-      the areas of the contacts and interfaces that overlap the slab in Z, then joins the slab's polygons by a union.
+      the areas of the contacts and interfaces that overlap the slab in Z. A sparse section then joins the slab's polygons by a
+      union; an interface section becomes a new top interface slab with the slab's print Z and height, so that publication gives
+      the dense role the area both kinds cover.
    Sparse slabs do not overlap each other in Z, so a column area is printed by one slab only. The geometry lives in out's storage.
 
        add_support_columns()
        |-- column_spans(): Z spans of the columns
        |-- uncovered() / gap_pieces(): new base slabs where no sparse slab covers a span
-       |-- slice_support_volumes(): column sections at the middle of every carrying slab
+       |-- slice_support_volumes(): sparse and interface column sections at the middle of every carrying slab
        `-- column_clearance(): object, zones, contacts and interfaces removed before the union */
 
 namespace slic3r_api::Support::Common {
@@ -78,7 +80,7 @@ std::vector<Interval> column_spans(const Object &object, double z_step)
     const c_matrix4d centered = object.transform_centered();
     for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx) {
         const Volume volume = object.volume(volume_idx);
-        if (!volume.is_support_column())
+        if (!volume.is_support_column() && !volume.is_support_interface_column())
             continue;
         const TriangleMesh mesh = volume.mesh();
         if (mesh.empty())
@@ -177,7 +179,7 @@ bool has_support_columns(const Object &object)
     if (!object.config().get("support_material").get_bool())
         return false;
     for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx)
-        if (object.volume(volume_idx).is_support_column())
+        if (object.volume(volume_idx).is_support_column() || object.volume(volume_idx).is_support_interface_column())
             return true;
     return false;
 }
@@ -227,21 +229,39 @@ void add_support_columns(const plugin_run_context *context, const Print &print, 
     slice_zs.reserve(carriers.size());
     for (const GeneratorLayer *slab : carriers)
         slice_zs.push_back(float(unscaled(slab->print_z - slab->height / 2)));
-    const std::vector<StoredExPolygonCollection> sections =
+    const std::vector<StoredExPolygonCollection> sparse =
         slice_support_volumes(print, object, RAW_VOLUME_TYPE_SUPPORT_COLUMN, slice_zs, out.storage, context);
+    const std::vector<StoredExPolygonCollection> dense =
+        slice_support_volumes(print, object, RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN, slice_zs, out.storage, context);
     const ClipperContext clipper(out.storage);
-    for (size_t idx = 0; idx < carriers.size() && idx < sections.size(); ++idx) {
-        if (sections[idx].empty())
+    // The interface slabs of the dense columns are listed after every clearance is taken, so a column never trims another.
+    GeneratorLayers dense_slabs;
+    for (size_t idx = 0; idx < carriers.size(); ++idx) {
+        const bool has_sparse = idx < sparse.size() && !sparse[idx].empty();
+        const bool has_dense = idx < dense.size() && !dense[idx].empty();
+        if (!has_sparse && !has_dense)
             continue;
         throw_if_cancelled(context);
         GeneratorLayer &slab = *carriers[idx];
-        ClipperOperand column = clipper(sections[idx]);
-        if (std::optional<ClipperOperand> clearance = column_clearance(clipper, layers, params, out, slab))
-            column = clipper_diff(column, *clearance);
-        ClipperOperand both = clipper(slab.polygons);
-        both += column;
-        slab.polygons = clipper_union(both).to_polygon_collection();
-        slab.polygons.ensure_valid(params.resolution);
+        const std::optional<ClipperOperand> clearance = column_clearance(clipper, layers, params, out, slab);
+        if (has_sparse) {
+            ClipperOperand column = clipper(sparse[idx]);
+            if (clearance)
+                column = clipper_diff(column, *clearance);
+            ClipperOperand both = clipper(slab.polygons);
+            both += column;
+            slab.polygons = clipper_union(both).to_polygon_collection();
+            slab.polygons.ensure_valid(params.resolution);
+        }
+        if (has_dense) {
+            // The same print Z and height as the carrier: publication then removes its area from the carrier's sparse support.
+            GeneratorLayer &dense_slab = add_layer(out, LayerType::TopInterface, slab.print_z, slab.bottom_print_z(), slab.height);
+            ClipperOperand column = clipper(dense[idx]);
+            dense_slab.polygons = (clearance ? clipper_diff(column, *clearance) : clipper_union(column)).to_polygon_collection();
+            dense_slab.polygons.ensure_valid(params.resolution);
+            dense_slabs.push_back(&dense_slab);
+        }
     }
+    out.interfaces.insert(out.interfaces.end(), dense_slabs.begin(), dense_slabs.end());
 }
 } // namespace slic3r_api::Support::Common

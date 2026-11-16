@@ -227,6 +227,7 @@ class AbiPackagingTests(unittest.TestCase):
                 "is_support_modifier",
                 "is_support_column",
                 "is_no_support_zone",
+                "is_support_interface_column",
                 "is_support_geometry_modifier",
                 "is_seam_position",
                 "is_brim",

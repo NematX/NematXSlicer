@@ -77,11 +77,13 @@ Clipper 2.1 adds `clipper_variable_offset_inner()` without changing the 2.0
 operand layout. Volume 2.0 retains `c_mesh_slicing_params.extra_offset`; moving
 FFF compensation to post-slicing does not remove the mesh API's offset field.
 
-Volume 2.1 appends two support-geometry volume types without changing any
+Volume 2.1 appends three support-geometry volume types without changing any
 existing value: `RAW_VOLUME_TYPE_SUPPORT_COLUMN` (11), a mesh that asks for
-sparse support inside it, and `RAW_VOLUME_TYPE_NO_SUPPORT_ZONE` (12), a mesh
-that forbids support inside it. Projects write `SupportColumn` and `NoSupportZone`. The C++
-and Python volume views add `is_support_column()`, `is_no_support_zone()` and
+sparse support inside it, `RAW_VOLUME_TYPE_NO_SUPPORT_ZONE` (12), a mesh
+that forbids support inside it, and `RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN` (13),
+a mesh that asks for dense interface support inside it. Projects write `SupportColumn`,
+`NoSupportZone` and `SupportInterfaceColumn`. The C++ and Python volume views add
+`is_support_column()`, `is_no_support_zone()`, `is_support_interface_column()` and
 `is_support_geometry_modifier()`; `is_support_modifier()` still means only the
 support-demand enforcer and blocker. Volume 2.0 packages remain compatible, but
 a package that switches over volume types must accept values it does not know.

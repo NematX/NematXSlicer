@@ -81,6 +81,7 @@ public:
     static const ColorRGBA SUPPORT_ENFORCER_COLOR;
     static const ColorRGBA SUPPORT_COLUMN_COLOR;
     static const ColorRGBA NO_SUPPORT_ZONE_COLOR;
+    static const ColorRGBA SUPPORT_INTERFACE_COLUMN_COLOR;
     static const ColorRGBA SEAM_POSITION_COLOR;
     static const ColorRGBA BRIM_PATCH_COLOR;
     static const ColorRGBA BRIM_NEGATIVE_COLOR;

@@ -109,6 +109,7 @@ from slic3r_api_generated import (
     RAW_VOLUME_TYPE_SUPPORT_BLOCKER,
     RAW_VOLUME_TYPE_SUPPORT_COLUMN,
     RAW_VOLUME_TYPE_SUPPORT_ENFORCER,
+    RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN,
     CLIPPER_FILL_EVENODD,
     CLIPPER_FILL_NONZERO,
     CLIPPER_FILL_POSITIVE,
@@ -1492,9 +1493,13 @@ class Volume(DataTreeView):
         """Return whether this volume forbids support inside it."""
         return self.type() == RAW_VOLUME_TYPE_NO_SUPPORT_ZONE
 
+    def is_support_interface_column(self) -> bool:
+        """Return whether this volume asks for dense interface support inside it."""
+        return self.type() == RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN
+
     def is_support_geometry_modifier(self) -> bool:
         """Return whether this volume adds to or removes from the support itself, not from its demand."""
-        return self.is_support_column() or self.is_no_support_zone()
+        return self.is_support_column() or self.is_no_support_zone() or self.is_support_interface_column()
 
     def is_seam_position(self) -> bool:
         """

@@ -386,8 +386,9 @@ public:
     bool is_support_modifier() const { return is_support_blocker() || is_support_enforcer(); }
     bool is_support_column() const { return type() == RAW_VOLUME_TYPE_SUPPORT_COLUMN; }
     bool is_no_support_zone() const { return type() == RAW_VOLUME_TYPE_NO_SUPPORT_ZONE; }
+    bool is_support_interface_column() const { return type() == RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN; }
     // Support-geometry modifiers: they add to or remove from the support itself, not from its demand.
-    bool is_support_geometry_modifier() const { return is_support_column() || is_no_support_zone(); }
+    bool is_support_geometry_modifier() const { return is_support_column() || is_no_support_zone() || is_support_interface_column(); }
     bool is_seam_position() const
     {
         const raw_volume_type value = type();

@@ -16157,3 +16157,9 @@ msgstr "Colonne de support"
 
 msgid "No support zone"
 msgstr "Zone sans support"
+
+msgid "Add support interface column"
+msgstr "Ajouter une colonne d'interface"
+
+msgid "Support interface column"
+msgstr "Colonne d'interface"

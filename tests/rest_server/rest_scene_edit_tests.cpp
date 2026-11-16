@@ -220,7 +220,7 @@ TEST_CASE("REST set_part_type changes types atomically and keeps unchanged types
     REQUIRE(post_json(fixture, route + "/set_part_type/" + part_id, {{"type", "support_enforcer"}}).result() == http::status::ok);
     CHECK(session->snapshot().revision == revision);
     // Demand and geometry support volumes convert into each other like the other helper types.
-    for (const char *type : {"support_column", "no_support_zone", "support_blocker"}) {
+    for (const char *type : {"support_column", "no_support_zone", "support_interface_column", "support_blocker"}) {
         CAPTURE(type);
         REQUIRE(post_json(fixture, route + "/set_part_type/" + part_id, {{"type", type}}).result() == http::status::ok);
         CHECK(listed(fixture, route)["objects"][0]["parts"][1]["type"] == type);
@@ -346,7 +346,8 @@ TEST_CASE("REST add_shape creates default and sized shapes", "[rest_scene_edit]"
         {"seam_position_center", "small_sphere", {20, 20, 20}, "Seam-Sphere"},
         {"seam_position_center_z", "small_cylinder", {20, 20, 100}, "Seam-Cylinder"},
         {"support_column", "cylinder", {50, 50, 100}, "Column-Cylinder"},
-        {"no_support_zone", "box", {100, 100, 100}, "NoSupport-Box"}
+        {"no_support_zone", "box", {100, 100, 100}, "NoSupport-Box"},
+        {"support_interface_column", "box", {100, 100, 100}, "InterfaceColumn-Box"}
     };
     for (const ShapeCase &shape : cases) {
         CAPTURE(shape.shape);
@@ -368,7 +369,7 @@ TEST_CASE("REST add_shape creates default and sized shapes", "[rest_scene_edit]"
     }
 
     // Support columns and no-support zones are created only as boxes and cylinders.
-    for (const char *type : {"support_column", "no_support_zone"})
+    for (const char *type : {"support_column", "no_support_zone", "support_interface_column"})
         for (const char *shape : {"sphere", "slab"})
             require_error(post_json(fixture, route + "/add_shape/" + object_id, {{"type", type}, {"shape", shape}}),
                 http::status::unprocessable_entity, "invalid_shape");

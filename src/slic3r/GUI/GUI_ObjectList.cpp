@@ -1787,6 +1787,7 @@ void ObjectList::load_generic_subobject(const std::string& type_name, const Mode
     if (type == ModelVolumeType::SUPPORT_BLOCKER) base_name = "Blocker";
     if (type == ModelVolumeType::SUPPORT_COLUMN) base_name = "Column";
     if (type == ModelVolumeType::NO_SUPPORT_ZONE) base_name = "NoSupport";
+    if (type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN) base_name = "InterfaceColumn";
     const wxString name = _L(base_name) + "-" + (boost::starts_with(type_name, "Small") ? _(type_name.substr(5)): _(type_name));
     new_volume->name = into_u8(name);
     // set a default extruder value, since user can't add it manually
@@ -2897,7 +2898,8 @@ wxDataViewItem ObjectList::add_settings_item(wxDataViewItem parent_item, const D
     if (!is_object_settings) {
         ModelVolumeType volume_type = m_objects_model->GetVolumeType(parent_item);
         if (volume_type == ModelVolumeType::NEGATIVE_VOLUME || volume_type == ModelVolumeType::SUPPORT_BLOCKER || volume_type == ModelVolumeType::SUPPORT_ENFORCER ||
-            volume_type == ModelVolumeType::SUPPORT_COLUMN || volume_type == ModelVolumeType::NO_SUPPORT_ZONE)
+            volume_type == ModelVolumeType::SUPPORT_COLUMN || volume_type == ModelVolumeType::NO_SUPPORT_ZONE ||
+            volume_type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN)
             return ret;
     }
 
@@ -4357,9 +4359,10 @@ void ObjectList::change_part_type()
         for (const ModelVolumeType  type_id : { ModelVolumeType::SUPPORT_BLOCKER, ModelVolumeType::SUPPORT_ENFORCER })
             types.emplace_back(type_id);
         if (printer_technology() != ptSLA) {
-            for (const wxString&        name    : { _L("Support column"),           _L("No support zone") })
+            for (const wxString&        name    : { _L("Support column"), _L("Support interface column"), _L("No support zone") })
                 names.Add(name);
-            for (const ModelVolumeType  type_id : { ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::NO_SUPPORT_ZONE })
+            for (const ModelVolumeType  type_id : { ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::SUPPORT_INTERFACE_COLUMN,
+                                                    ModelVolumeType::NO_SUPPORT_ZONE })
                 types.emplace_back(type_id);
         }
     }

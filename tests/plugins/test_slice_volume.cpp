@@ -94,6 +94,7 @@
 // The numeric values are part of the plugin ABI: plugins compare them without the C++ enum.
 static_assert(int(Slic3r::ModelVolumeType::SUPPORT_COLUMN) == 11 && RAW_VOLUME_TYPE_SUPPORT_COLUMN == 11);
 static_assert(int(Slic3r::ModelVolumeType::NO_SUPPORT_ZONE) == 12 && RAW_VOLUME_TYPE_NO_SUPPORT_ZONE == 12);
+static_assert(int(Slic3r::ModelVolumeType::SUPPORT_INTERFACE_COLUMN) == 13 && RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN == 13);
 
 // Projects store both support-geometry volumes as non-printing helpers, in their place among the volumes.
 TEST_CASE("Support columns and no-support zones keep their type, identity and transform in 3MF", "[volume][support-volumes]")
@@ -104,6 +105,8 @@ TEST_CASE("Support columns and no-support zones keep their type, identity and tr
     CHECK(ModelVolume::type_from_string("NoSupportZone") == ModelVolumeType::NO_SUPPORT_ZONE);
     CHECK(ModelVolume::type_to_string(ModelVolumeType::SUPPORT_COLUMN) == "SupportColumn");
     CHECK(ModelVolume::type_to_string(ModelVolumeType::NO_SUPPORT_ZONE) == "NoSupportZone");
+    CHECK(ModelVolume::type_from_string("SupportInterfaceColumn") == ModelVolumeType::SUPPORT_INTERFACE_COLUMN);
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) == "SupportInterfaceColumn");
 
     Model model;
     ModelObject *object = model.add_object("part", "part.stl", make_cube(4, 4, 1.5));
@@ -184,7 +187,7 @@ TEST_CASE("Support volume kind changes and moves synchronize the applied Print",
     const ObjectID helper_id = helper->id();
     for (const ModelVolumeType type : {ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::SUPPORT_BLOCKER,
              ModelVolumeType::NO_SUPPORT_ZONE, ModelVolumeType::SUPPORT_ENFORCER, ModelVolumeType::NO_SUPPORT_ZONE,
-             ModelVolumeType::SUPPORT_COLUMN}) {
+             ModelVolumeType::SUPPORT_INTERFACE_COLUMN, ModelVolumeType::SUPPORT_COLUMN}) {
         CAPTURE(int(type));
         helper->set_type(type);
         helper->set_offset(helper->get_offset() + Vec3d(0.25, 0.5, 0));

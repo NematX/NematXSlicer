@@ -60,9 +60,10 @@ void zone_print(Print &print, Model &model, const char *style, const std::vector
     SG::family(print);
 }
 
-// Slices a plain 10 x 10 x 5 mm cube, which asks for no support, with the given support columns, and runs the support family of
-// the style; support_material off keeps the columns but disables the support.
-void column_print(Print &print, Model &model, const char *style, const std::vector<TriangleMesh> &columns, bool support = true)
+// Slices a plain 10 x 10 x 5 mm cube, which asks for no support, with the given columns of the given type and the given sparse
+// support columns, and runs the support family of the style; support_material off keeps the columns but disables the support.
+void column_print(Print &print, Model &model, const char *style, const std::vector<TriangleMesh> &columns, bool support = true,
+                  ModelVolumeType type = ModelVolumeType::SUPPORT_COLUMN, const std::vector<TriangleMesh> &sparse_columns = {})
 {
     const bool filled = std::string(style) == "filled";
     DynamicPrintConfig config = SG::config(style, filled, filled ? 0 : 2);
@@ -70,6 +71,9 @@ void column_print(Print &print, Model &model, const char *style, const std::vect
     Test::init_print({make_cube(10., 10., 5.)}, print, model, config);
     for (ModelObject &model_object : model.objects())
         for (const TriangleMesh &column : columns)
+            model_object.add_volume(TriangleMesh(column), type, false);
+    for (ModelObject &model_object : model.objects())
+        for (const TriangleMesh &column : sparse_columns)
             model_object.add_volume(TriangleMesh(column), ModelVolumeType::SUPPORT_COLUMN, false);
     print.apply(model, config);
     print.validate();
@@ -276,6 +280,31 @@ TEST_CASE("A support column keeps clear of the object", "[plugins][support-volum
     }
     // The part outside the cube, 4 x 2 mm less the XY gap, is printed.
     CHECK(printed > 1.);
+}
+
+// A support interface column prints its section as top interface over its own height, and where it overlaps a sparse column the
+// area is printed once, by the interface: the sparse support keeps only the rest of its own section.
+TEST_CASE("A support interface column becomes interface support and wins over a sparse column", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "snug", "tree", "organic");
+    CAPTURE(style);
+    Print print;
+    Model model;
+    // Interface column x = 14 to 16; sparse column x = 15 to 17, sharing x = 15 to 16 with it.
+    column_print(print, model, style, {zone_box(14., 2., 1., 2., 2., 3.)}, true, ModelVolumeType::SUPPORT_INTERFACE_COLUMN,
+                 {zone_box(15., 2., 1., 2., 2., 3.)});
+    size_t carrying = 0;
+    for (const Layer *layer : auxiliary_layers(print.object(0))) {
+        const double middle = layer->unscaled_print_z() - 0.5 * layer->unscaled_height();
+        if (middle < 1.2 || middle > 3.8)
+            continue;
+        const SG::LayerSurfaceAreas areas = SG::layer_surface_areas(*layer);
+        CAPTURE(layer->unscaled_print_z(), areas.top_interface, areas.top_contact, areas.sparse);
+        CHECK(areas.top_interface + areas.top_contact == Approx(4.).margin(0.1));
+        CHECK(areas.sparse == Approx(2.).margin(0.1));
+        ++carrying;
+    }
+    CHECK(carrying >= 12);
 }
 
 // Without support_material the columns are kept in the project but print nothing.

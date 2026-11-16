@@ -188,7 +188,7 @@ wxBitmapBundle* SettingsFactory::get_category_bitmap(const Slic3r::OptionCategor
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 13> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 14> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
     {L("Add part"),              "add_part" },           // ~ModelVolumeType::MODEL_PART
     {L("Add negative volume"),   "add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
@@ -203,8 +203,9 @@ static const constexpr std::array<std::pair<const char *, const char *>, 13> ADD
     {L("Add brim negative"),     "add_brim_negative"},   // ~ModelVolumeType::BRIM_NEGATIVE
     {L("Add support column"),    "support_column"},      // ~ModelVolumeType::SUPPORT_COLUMN
     {L("Add no support zone"),   "no_support_zone"},     // ~ModelVolumeType::NO_SUPPORT_ZONE
+    {L("Add support interface column"), "support_interface_column"}, // ~ModelVolumeType::SUPPORT_INTERFACE_COLUMN
 }};
-static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::NO_SUPPORT_ZONE) + 1,
+static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) + 1,
               "ADD_VOLUME_MENU_ITEMS has one entry per volume type, in enum order");
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
@@ -607,7 +608,7 @@ void MenuFactory::append_submenu_add_generic(wxMenu* menu_parent, wxMenu* sub_me
 
     std::vector<std::string> items = { L("Box"), L("Cylinder"), L("Sphere"), L("Slab") };
     // A sphere is no useful support column: its sections shrink to nothing at both ends.
-    if (type == ModelVolumeType::SUPPORT_COLUMN) items = { L("Box"), L("Cylinder"), L("Slab") };
+    if (type == ModelVolumeType::SUPPORT_COLUMN || type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN) items = { L("Box"), L("Cylinder"), L("Slab") };
     if (type == ModelVolumeType::BRIM_PATCH) items = {"Square", "Circle" };
     if (type == ModelVolumeType::BRIM_NEGATIVE) items = {"Square", "Circle" };
     for (auto& item : items)
@@ -726,7 +727,8 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
             ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SUPPORT_BLOCKER)].second, nullptr,
             []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
         if (menu_type != mtObjectSLA)
-            for (const ModelVolumeType type : {ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::NO_SUPPORT_ZONE})
+            for (const ModelVolumeType type : {ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::SUPPORT_INTERFACE_COLUMN,
+                     ModelVolumeType::NO_SUPPORT_ZONE})
                 append_menu_item(menu, wxID_ANY, _(ADD_VOLUME_MENU_ITEMS[int(type)].first), "",
                     [type](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Box"), type); },
                     ADD_VOLUME_MENU_ITEMS[int(type)].second, nullptr,
@@ -773,15 +775,17 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
     }
     {
         // Support volumes: the demand enforcer and blocker change which object surfaces ask for support; below them, the
-        // support column and the no-support zone add support or forbid it themselves (FFF only).
+        // support columns (sparse or interface) and the no-support zone add support or forbid it themselves (FFF only).
         wxMenu* sub_menu_both = new wxMenu;
         const std::pair<ModelVolumeType, wxString> support_types[] = {
             {ModelVolumeType::SUPPORT_ENFORCER, _L("Support demand enforcer")},
             {ModelVolumeType::SUPPORT_BLOCKER, _L("Support demand blocker")},
             {ModelVolumeType::SUPPORT_COLUMN, _L("Support column")},
+            {ModelVolumeType::SUPPORT_INTERFACE_COLUMN, _L("Support interface column")},
             {ModelVolumeType::NO_SUPPORT_ZONE, _L("No support zone")}};
         for (const std::pair<ModelVolumeType, wxString> &support_type : support_types) {
-            const bool geometry = support_type.first == ModelVolumeType::SUPPORT_COLUMN || support_type.first == ModelVolumeType::NO_SUPPORT_ZONE;
+            const bool geometry = support_type.first == ModelVolumeType::SUPPORT_COLUMN ||
+                support_type.first == ModelVolumeType::SUPPORT_INTERFACE_COLUMN || support_type.first == ModelVolumeType::NO_SUPPORT_ZONE;
             if (geometry && menu_type == mtObjectSLA)
                 continue;
             if (support_type.first == ModelVolumeType::SUPPORT_COLUMN)

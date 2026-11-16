@@ -1333,7 +1333,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         bool supports_differ            = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_BLOCKER) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_ENFORCER) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_COLUMN) ||
-                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::NO_SUPPORT_ZONE);
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::NO_SUPPORT_ZONE) ||
+                                          model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SUPPORT_INTERFACE_COLUMN);
         bool layer_height_ranges_differ = ! layer_height_ranges_equal(model_object.layer_config_ranges, model_object_new.layer_config_ranges, model_object_new.layer_height_profile.empty());
         bool model_origin_translation_differ = model_object.origin_translation != model_object_new.origin_translation;
         auto print_objects_range        = print_object_status_db.get_range(model_object);

@@ -92,7 +92,9 @@ typedef enum raw_volume_type {
     /* Since 2.1: non-printing mesh that asks for sparse support inside it. */
     RAW_VOLUME_TYPE_SUPPORT_COLUMN              = 11,
     /* Since 2.1: non-printing mesh that forbids support inside it. */
-    RAW_VOLUME_TYPE_NO_SUPPORT_ZONE             = 12
+    RAW_VOLUME_TYPE_NO_SUPPORT_ZONE             = 12,
+    /* Since 2.1: non-printing mesh that asks for dense interface support inside it. */
+    RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN    = 13
 } raw_volume_type;
 
 /* ========================= FACET PAINTING ========================= */
