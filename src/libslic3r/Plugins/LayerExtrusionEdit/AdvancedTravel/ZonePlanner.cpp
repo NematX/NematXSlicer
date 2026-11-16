@@ -29,19 +29,22 @@ the inside weight or an outside-domain penalty in the estimate.
 Same-component paths use only that component: the chord between its attachments
 follows the component's rings only where it crosses them.
 Different-component paths join each component's route at bridge points selected
-on the combined boundary, then contour expanded obstacles along the bridge. A mixed
-choice routes within its component to the ring point nearest the free endpoint, then
-contours obstacles to that endpoint. Selected connector points are retained with
-the hypothesis so estimates and constructed routes use the same points.
-The option without either domain follows the chord around expanded obstacles.
+on the combined boundary, then detour around expanded forbidden rings along the
+bridge. A mixed choice routes within its component to the ring point nearest the free
+endpoint, then detours around rings to that endpoint. Selected connector points are
+retained with the hypothesis so estimates and constructed routes use the same points.
+The option without either domain follows the chord around expanded forbidden rings.
 For an in-part travel whose endpoints have the same domain candidate, this option is admitted only if its
 chord stays within the material proxy: components grown by 1.5 perimeter spacings,
 cached once with the components. Outside length up to SCALED_EPSILON is allowed.
 Each constructed hypothesis must retain exact endpoints, avoid original forbidden
-material and respect the total detour budget. Its length outside the domain cannot
-exceed that of the obstacle-only chord detour by more than SCALED_EPSILON, the
-complete-path allowance for integer clipping. The reference detour is computed
-at most once per active blocker set; an unusable reference skips only this outside-length bound.
+material and respect the total detour budget. When the obstacle-only reference
+avoids original material, a candidate's outside-domain length may exceed the
+reference's outside-domain length by at most SCALED_EPSILON; that reference length
+is tripled when either endpoint is strictly inside expanded forbidden material. If
+the reference crosses original material, the option without a domain is unavailable;
+domain hypotheses are tried without this outside-domain bound.
+The reference detour is computed at most once per active blocker set.
 Rejected hypotheses leave the next ranked choice available. After exhaustion with no
 geometrically valid hypothesis, disable the remaining original component first crossed
 along the chord, or, when the chord is clear, along the initial best-ranked estimate, and retry with rebuilt
@@ -70,19 +73,15 @@ the auxiliary avoidance flag is resolved from the default region configuration
 and governs travels whose two endpoints have no valid object instance (skirt and brim).
 The other inputs are borrowed too; all borrowed data must outlive the planner.
 
-Segment intersections split the filled area into open intervals. Midpoint tests
-exclude tangencies, collinear contacts and holes. For each blocked segment, the
-first component's first entry and last exit delimit the shorter contour arc.
-Scanning resumes strictly after the exit: the remaining line may meet another
-component. Progress retains the unrounded exit parameter on the original line;
-only output vertices are rounded. Inserted arcs are not classified as entries. The
-component bound and original-area validation reject unsafe obstacle candidates;
-the total detour budget can reject either kind of route. Exhaustion produces
-the counted straight fallback. A connector endpoint in a hole whose line crosses
-the surrounding material cannot connect through the outer contour. An endpoint
-inside the expanded margin can likewise lack a contour entry or exit. These
-failures reject that connector; other hypotheses can still provide a valid route.
-Cancellation propagates.
+Obstacle-only references and connectors use the public
+`clipper_detour_polyline_expolygons` operation in Shortest mode; its crossing,
+ring-following and rounding rules are defined in `slic3r_clipper.h`. ZonePlanner
+extends each chord before the call so a crossing at an endpoint is visible when
+the chord leaves a ring into its interior or arrives from its interior; tangencies
+and travel along a ring remain contacts, not crossings. Only leading or trailing
+result points near an endpoint are replaced by that exact endpoint. The
+original-area check and total detour budget still reject unsafe hypotheses, and
+exhaustion produces the counted straight fallback. Cancellation propagates.
 
     path: filter zones, cache domains and retry ranked hypotheses after bounded blocker removal
     |-- LayerInputCache::get: resolve spacing and island-jump settings
@@ -98,11 +97,9 @@ Cancellation propagates.
     |-- select_island_bridge: estimate weighted approaches between components
     |-- estimate_cost: weight inside ring estimates and clip the other connectors
     |   `-- outside_length: measure outside connectors against the complete domain
-    |-- detour_around_forbidden: connect the chord around expanded components
-    |   |-- crossing: find first entry and last exit, ignoring contacts
-    |   `-- contour_arc: walk each contour direction and choose the shorter
+    |-- detour: extend a chord and call the public Clipper ring-detour operation
     |-- blocked: validate candidate segments against filled material
-    |   `-- crossing: shared with detour_around_forbidden to classify material intervals
+    |   `-- crossing: return the first material-entry parameter
     `-- outside_length: clip each route against the cached domain for the reference bound
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
@@ -111,7 +108,6 @@ namespace clipper = PluginCommon::clipper;
 namespace travel = TravelConnection;
 
 namespace {
-struct Hit { double parameter; work::Point point; size_t edge; };
 // SIZE_MAX denotes the option without a domain; its attachment is the endpoint itself.
 struct Attachment { size_t component; work::Point point; };
 // Connector endpoints are shared by estimation and construction; estimate holds the endpoint/attachment/bridge polyline.
@@ -137,23 +133,21 @@ double outside_length(const work::Points &points, const work::ExPolygons &domain
 // Score inside estimates as weighted inside length; clip other connectors against all domains before weighting their inside portions.
 // Outside-part legs count their full length without domain penalties; zero-length segments cost nothing. Cancellation propagates per segment.
 double estimate_cost(const std::vector<EstimateSegment> &segments, const work::ExPolygons &domain, double weight, const plugin_run_context *context);
-// Follow shorter outer-contour arcs along the chord through expanded components; return both endpoints, even on failure.
-// Set changed after inserting an arc and failed for a missing arc or exhausted component bound; do not validate original material or count routes. Cancellation propagates.
-work::Points detour_around_forbidden(const work::Point &from, const work::Point &to,
-    const work::ExPolygons &expanded, const plugin_run_context *context, bool &changed, bool &failed);
 // Test filled areas without changing them; holes exclude their interior and borders follow the supplied flag.
 bool contains(const work::ExPolygons &areas, const work::Point &point, bool border = true);
 // Classify an unrounded point against one ring: -1 outside, 0 on an edge, 1 inside, with sub-unit floating-point tolerance.
 int ring_location(const work::Polygon &ring, const work::Vec2d &point);
-// Find the first interval whose exit is strictly after minimum_parameter, returning its entry and the last material exit; contacts do not count.
-// Stable ties follow insertion order (endpoint seeds, then rings/edges); coincident hits keep their retained point/parameter and acquire a known outer edge when missing.
-bool crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
-              Hit &entry, Hit &exit, const plugin_run_context *context, double minimum_parameter = 0.);
+// Extend a chord by one scaled epsilon at both ends, call Clipper's shortest ring detour, and restore exact endpoints.
+// The extension makes endpoint crossings visible without turning tangencies or ring-following into crossings; only leading or trailing points of the result's interior are replaced by the exact endpoint.
+// A reference endpoint inside or on expanded material can pair an exit with a later entry; original material still validates it. Cancellation and API errors propagate.
+work::Points detour(const work::Point &from, const work::Point &to, const work::ExPolygons &expanded,
+                    const plugin_run_context *context);
+// Find the first material interval and return its entry parameter; tangencies, contacts and holes do not count.
+// Stable ties follow insertion order after endpoint seeds, and cancellation propagates.
+std::optional<double> crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
+                               const plugin_run_context *context);
 // Return whether any nonzero path segment enters filled material; cancellation propagates per component.
 bool blocked(const work::Points &points, const work::ExPolygons &areas, const plugin_run_context *context);
-// Build both outer-contour arcs including the rounded hits, choosing the shorter; hole hits cannot produce a contour route.
-work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const Hit &exit,
-                         const plugin_run_context *context);
 
 bool outside_part(const travel::TravelEndpoint &endpoint)
 {
@@ -218,35 +212,6 @@ double outside_length(const work::Points &points, const work::ExPolygons &domain
     return length;
 }
 
-work::Points detour_around_forbidden(const work::Point &from, const work::Point &to,
-    const work::ExPolygons &expanded, const plugin_run_context *context, bool &changed, bool &failed)
-{
-    work::Points points{from};
-    changed = false;
-    failed = false;
-    double progress = 0.;
-    for (size_t iteration = 0; iteration <= expanded.size(); ++iteration) {
-        size_t first = SIZE_MAX;
-        Hit entry{}, exit{};
-        entry.parameter = std::numeric_limits<double>::max();
-        for (size_t component = 0; component < expanded.size(); ++component) {
-            throw_if_cancelled(context);
-            Hit a, b;
-            if (crossing(expanded[component], from, to, a, b, context, progress) &&
-                a.parameter < entry.parameter) { first = component; entry = a; exit = b; }
-        }
-        if (first == SIZE_MAX) break;
-        if (iteration == expanded.size()) { failed = true; break; }
-        const work::Points arc = contour_arc(expanded[first].contour, entry, exit, context);
-        if (arc.empty()) { failed = true; break; }
-        points.insert(points.end(), arc.begin(), arc.end());
-        progress = exit.parameter;
-        changed = true;
-    }
-    points.push_back(to);
-    return points;
-}
-
 double estimate_cost(const std::vector<EstimateSegment> &segments, const work::ExPolygons &domain, const double weight,
     const plugin_run_context *context)
 {
@@ -287,13 +252,46 @@ int ring_location(const work::Polygon &ring, const work::Vec2d &point)
     return inside ? 1 : -1;
 }
 
-bool crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
-              Hit &entry, Hit &exit, const plugin_run_context *context, const double minimum_parameter)
+work::Points detour(const work::Point &from, const work::Point &to, const work::ExPolygons &expanded,
+                    const plugin_run_context *context)
 {
-    if (from == to) return false;
+    if (expanded.empty() || from == to) return {from, to};
+    throw_if_cancelled(context);
+    const work::Vec2d delta = work::to_vec2d(to - from);
+    const work::Vec2d step = double(SCALED_EPSILON) * delta / delta.norm();
+    work::Point before(coord_t(std::round(double(from.x()) - step.x())),
+                       coord_t(std::round(double(from.y()) - step.y())));
+    work::Point after(coord_t(std::round(double(to.x()) + step.x())),
+                      coord_t(std::round(double(to.y()) + step.y())));
+    slic3r_api::StoredPolyline subject(context->plugin_storage);
+    subject.push_back({before.x(), before.y()});
+    subject.push_back({from.x(), from.y()});
+    subject.push_back({to.x(), to.y()});
+    subject.push_back({after.x(), after.y()});
+    slic3r_api::StoredExPolygonCollection rings = clipper::to_stored_expolygons(context->plugin_storage, expanded);
+    slic3r_api::ClipperOperand operand(context->plugin_storage, rings.readonly());
+    const slic3r_api::StoredPolyline result = slic3r_api::clipper_detour_polyline_expolygons(
+        context->plugin_storage, subject, operand, CLIPPER_DETOUR_SHORTEST);
+    throw_if_cancelled(context);
+    // A crossing on an added segment lies at most that segment plus two roundings from its endpoint:
+    // drop such leading and trailing interior points, the exact endpoints replace them.
+    const double endpoint_margin = double(SCALED_EPSILON + 2);
+    size_t first = 1, last = result.size() - 1;
+    while (first < last && work::to_vec2d(work::Point(result.at(first)) - from).norm() <= endpoint_margin) ++first;
+    while (first < last && work::to_vec2d(work::Point(result.at(last - 1)) - to).norm() <= endpoint_margin) --last;
+    work::Points points{from};
+    for (size_t index = first; index < last; ++index) points.emplace_back(result.at(index));
+    points.push_back(to);
+    return points;
+}
+
+std::optional<double> crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
+                               const plugin_run_context *context)
+{
+    if (from == to) return std::nullopt;
     const work::Vec2d delta = work::to_vec2d(to - from);
     const double squared = delta.squaredNorm();
-    std::vector<Hit> hits{{0., from, SIZE_MAX}, {1., to, SIZE_MAX}};
+    std::vector<double> hits{0., 1.};
     for (size_t ring = 0; ring <= area.holes.size(); ++ring) {
         throw_if_cancelled(context);
         const work::Points &points = ring == 0 ? area.contour.points : area.holes[ring - 1].points;
@@ -305,43 +303,32 @@ bool crossing(const work::ExPolygon &area, const work::Point &from, const work::
                 const double parameter = (relative.x() * edge_delta.y() - relative.y() * edge_delta.x()) / denominator;
                 const double edge_parameter = (relative.x() * delta.y() - relative.y() * delta.x()) / denominator;
                 if (parameter < 0. || parameter > 1. || edge_parameter < 0. || edge_parameter > 1.) continue;
-                const work::Vec2d point = work::to_vec2d(from) + parameter * delta;
-                hits.push_back({parameter, work::Point(coord_t(std::round(point.x())), coord_t(std::round(point.y()))),
-                                ring == 0 ? edge : SIZE_MAX});
+                hits.push_back(parameter);
             } else if (std::abs(relative.x() * delta.y() - relative.y() * delta.x()) <= 1e-7 * delta.norm()) {
                 // Split collinear overlap at its ends; the ring test excludes the edge itself.
                 for (const work::Point &vertex : {a, b}) {
                     const double parameter = work::to_vec2d(vertex - from).dot(delta) / squared;
-                    if (parameter >= 0. && parameter <= 1.) hits.push_back({parameter, vertex, ring == 0 ? edge : SIZE_MAX});
+                    if (parameter >= 0. && parameter <= 1.) hits.push_back(parameter);
                 }
             }
         }
     }
-    std::stable_sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) { return a.parameter < b.parameter; });
-    // Endpoint seeds have no edge; retain the geometric hit's edge without moving the seed's point.
+    std::stable_sort(hits.begin(), hits.end());
     size_t retained = 0;
-    for (size_t i = 0; i < hits.size(); ++i) {
-        const Hit hit = hits[i];
-        if (retained > 0 && std::abs(hits[retained - 1].parameter - hit.parameter) < 1e-12) {
-            if (hits[retained - 1].edge == SIZE_MAX) hits[retained - 1].edge = hit.edge;
-        } else hits[retained++] = hit;
+    for (const double hit : hits) {
+        if (retained == 0 || std::abs(hits[retained - 1] - hit) >= 1e-12)
+            hits[retained++] = hit;
     }
     hits.resize(retained);
-    bool found = false;
     for (size_t i = 1; i < hits.size(); ++i) {
-        if (hits[i].parameter <= minimum_parameter) continue;
-        const double middle = (hits[i - 1].parameter + hits[i].parameter) * 0.5;
+        const double middle = (hits[i - 1] + hits[i]) * 0.5;
         const work::Vec2d probe = work::to_vec2d(from) + middle * delta;
         bool material = ring_location(area.contour, probe) == 1;
         for (const work::Polygon &hole : area.holes)
             if (ring_location(hole, probe) != -1) material = false;
-        if (material) {
-            if (!found) entry = hits[i - 1];
-            exit = hits[i];
-            found = true;
-        }
+        if (material) return hits[i - 1];
     }
-    return found;
+    return std::nullopt;
 }
 
 bool blocked(const work::Points &points, const work::ExPolygons &areas, const plugin_run_context *context)
@@ -349,32 +336,9 @@ bool blocked(const work::Points &points, const work::ExPolygons &areas, const pl
     for (size_t i = 1; i < points.size(); ++i)
         for (const work::ExPolygon &area : areas) {
             throw_if_cancelled(context);
-            Hit entry, exit;
-            if (crossing(area, points[i - 1], points[i], entry, exit, context)) return true;
+            if (crossing(area, points[i - 1], points[i], context).has_value()) return true;
         }
     return false;
-}
-
-work::Points contour_arc(const work::Polygon &contour, const Hit &entry, const Hit &exit,
-                         const plugin_run_context *context)
-{
-    if (entry.edge == SIZE_MAX || exit.edge == SIZE_MAX) return {};
-    work::Points arcs[2];
-    double lengths[2] = {0., 0.};
-    for (size_t direction = 0; direction < 2; ++direction) {
-        arcs[direction].push_back(entry.point);
-        size_t edge = entry.edge;
-        for (size_t count = 0; edge != exit.edge && count < contour.size(); ++count) {
-            throw_if_cancelled(context);
-            const size_t vertex = direction == 0 ? (edge + 1) % contour.size() : edge;
-            arcs[direction].push_back(contour.points[vertex]);
-            edge = direction == 0 ? (edge + 1) % contour.size() : (edge + contour.size() - 1) % contour.size();
-        }
-        arcs[direction].push_back(exit.point);
-        for (size_t i = 1; i < arcs[direction].size(); ++i)
-            lengths[direction] += work::Line(arcs[direction][i - 1], arcs[direction][i]).length();
-    }
-    return lengths[0] <= lengths[1] ? arcs[0] : arcs[1];
 }
 } // namespace
 
@@ -577,10 +541,13 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     double reference_outside = 0.;
     const auto prepare_reference = [&]() {
         if (reference_ready) return;
-        bool changed = false;
-        reference = detour_around_forbidden(source, target, obstacles.expanded, m_context, changed, reference_failed);
-        reference_failed = reference_failed || blocked(reference, obstacles.original, m_context);
-        if (!reference_failed) reference_outside = outside_length(reference, obstacles.components, m_context);
+        reference = detour(source, target, obstacles.expanded, m_context);
+        reference_failed = blocked(reference, obstacles.original, m_context);
+        if (!reference_failed) {
+            reference_outside = outside_length(reference, obstacles.components, m_context);
+            if (contains(obstacles.expanded, source, false) || contains(obstacles.expanded, target, false))
+                reference_outside *= 3.;
+        }
         reference_ready = true;
     };
     const c_float_or_percent budget = m_config.float_or_percent_or_default(
@@ -604,10 +571,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             points.push_back(source);
             if (from.component != SIZE_MAX)
                 append_component_path(points, *obstacles.component_boundaries[from.component], from.point, hypothesis.exit, m_context, m_router_counts);
-            bool changed = false, failed = false;
-            const work::Points connector = detour_around_forbidden(hypothesis.exit, hypothesis.entry,
-                obstacles.expanded, m_context, changed, failed);
-            if (failed) continue;
+            const work::Points connector = detour(hypothesis.exit, hypothesis.entry, obstacles.expanded, m_context);
             points.insert(points.end(), connector.begin(), connector.end());
             if (to.component != SIZE_MAX)
                 append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry, to.point, m_context, m_router_counts);
@@ -648,12 +612,12 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         for (size_t component = 0; component < area.size(); ++component) {
             const std::pair<size_t, size_t> identity(index, component);
             for (size_t segment = 1; segment < selection.size(); ++segment) {
-            Hit entry, exit;
-            if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), identity) &&
-                crossing(area[component], selection[segment - 1], selection[segment], entry, exit, m_context) &&
-                double(segment - 1) + entry.parameter < first_parameter) {
-                first_parameter = double(segment - 1) + entry.parameter;
-                first_zone = identity;
+            if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), identity)) {
+                const std::optional<double> entry = crossing(area[component], selection[segment - 1], selection[segment], m_context);
+                if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
+                    first_parameter = double(segment - 1) + *entry;
+                    first_zone = identity;
+                }
             }
             }
         }
@@ -662,12 +626,12 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
             throw_if_cancelled(m_context);
             for (size_t segment = 1; segment < selection.size(); ++segment) {
-            Hit entry, exit;
-            if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component) &&
-                crossing(m_platter_blockers[component], selection[segment - 1], selection[segment], entry, exit, m_context) &&
-                double(segment - 1) + entry.parameter < first_parameter) {
-                first_parameter = double(segment - 1) + entry.parameter;
-                first_platter = component;
+            if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component)) {
+                const std::optional<double> entry = crossing(m_platter_blockers[component], selection[segment - 1], selection[segment], m_context);
+                if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
+                    first_parameter = double(segment - 1) + *entry;
+                    first_platter = component;
+                }
             }
             }
         }

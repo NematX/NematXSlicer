@@ -33,7 +33,7 @@ weighted inside length. Validation checks forbidden material, endpoints, the bud
 and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
 Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
-connectors follow expanded forbidden contours between their selected points.
+connectors follow expanded forbidden rings, including holes, between their selected points.
 Endpoints without a region or on auxiliary layers offer no domain attachment.
 Travels touching such endpoints include slices of the plan's objects as forbidden
 components, not the synthetic wipe tower. Endpoint-containing components are excluded
@@ -71,7 +71,7 @@ planner survives the callback. Cancellation and routing errors propagate.
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
             `-- ZonePlanner::path: rank hypotheses, retry with bounded blocker removal, accept a validated route
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
-                `-- detour_around_forbidden: connect the chord along expanded obstacle contours
+                `-- detour: extend a chord and call the public Clipper ring-detour operation
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {

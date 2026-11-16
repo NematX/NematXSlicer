@@ -22,8 +22,8 @@ active while slicing, but invokes ZonePlanner directly without production wiring
 Ranked candidate checks use real layer weights with neighbouring perimeter endpoints,
 nearest ring attachments, budget rejection followed by the option without a domain,
 and repeat queries to check deterministic ordering.
-An endpoint in the expanded nozzle margin checks that an unusable obstacle-only
-reference does not reject a safe domain route around the original material.
+A reference with endpoints in the expanded nozzle margin checks that its relaxed
+outside-length bound admits a safe domain route around the original material.
 Bridge cases retain the selected exit and entry points, contour a forbidden top,
 and check the component approaches and the reference outside-length bound.
 An obstacle splitting one attractor places bridge endpoints exactly on its expanded
@@ -924,6 +924,137 @@ TEST_CASE("Zone planner accepts a safe domain route without a usable reference",
     check_clear(route, {obstacle}, owner.storage);
 }
 
+// A clear original chord from the expanded margin must still admit the domain route under the relaxed reference bound.
+TEST_CASE("Zone planner multiplies the reference bound for a margin endpoint", "[plugins][zone-planner]")
+{
+    Owner owner;
+    const work::ExPolygon obstacle = rectangle(4., 4., 2., 2.);
+    const work::ExPolygons attractors{rectangle(0., 0., 4., 10.), rectangle(6., 0., 4., 10.)};
+    const travel::PendingTravel gap = owner.in_part(pending(3.9, 3.9, 6.1, 3.9));
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, attractors, 0, SIZE_MAX, {}});
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> route = planner.path(0, gap);
+    const work::ExPolygons expanded = slic3r_api::PluginCommon::clipper::offset_ex(
+        owner.context.plugin_storage, {obstacle}, double(Slic3r::scale_i(0.2)));
+    const work::Point source(gap.source.position.x, gap.source.position.y);
+    const work::Point target(gap.target.position.x, gap.target.position.y);
+    REQUIRE(expanded.size() == 1);
+    REQUIRE(expanded.front().contains(source, false));
+    REQUIRE(expanded.front().contains(target, false));
+    work::Polyline direct;
+    direct.points = {source, target};
+    double direct_clear = 0.;
+    for (const work::Polyline &part : slic3r_api::PluginCommon::clipper::diff_pl(
+             owner.context.plugin_storage, {direct}, {obstacle})) direct_clear += part.length();
+    const work::ExPolygons domains = slic3r_api::PluginCommon::clipper::diff_ex(
+        owner.context.plugin_storage, attractors, expanded);
+    work::Polyline planned;
+    for (const c_point &point : route) planned.points.emplace_back(point);
+    FixedZones reference_contributor;
+    reference_contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView reference_view({std::cref(reference_contributor)}, owner.input());
+    zones::ZonePlanner reference_planner(compatibility, reference_view, owner.settings(), true, &owner.context,
+        owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> reference_route = reference_planner.path(0, gap);
+    work::Polyline reference;
+    for (const c_point &point : reference_route) reference.points.emplace_back(point);
+    double planned_outside = 0., reference_outside = 0.;
+    for (const work::Polyline &part : slic3r_api::PluginCommon::clipper::diff_pl(
+             owner.context.plugin_storage, {planned}, domains)) planned_outside += part.length();
+    for (const work::Polyline &part : slic3r_api::PluginCommon::clipper::diff_pl(
+             owner.context.plugin_storage, {reference}, domains)) reference_outside += part.length();
+    REQUIRE(route.size() > 2);
+    CHECK(direct_clear == Approx(direct.length()).margin(2.));
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
+    CHECK(reference_planner.domain_routes() == 0);
+    CHECK(reference_planner.fallbacks() == 0);
+    INFO("reference outside=" << reference_outside << " planned outside=" << planned_outside);
+    CHECK(planned_outside > reference_outside + Slic3r::SCALED_EPSILON);
+    CHECK(planned_outside <= 3. * reference_outside + Slic3r::SCALED_EPSILON);
+    check_clear(route, {obstacle}, owner.storage);
+}
+
+// Keep a domain route when Clipper rounds an endpoint crossing onto the added chord extension.
+TEST_CASE("Zone planner retains a route when endpoint crossings merge with extensions", "[plugins][zone-planner]")
+{
+    Owner owner;
+    owner.config.set_deserialize_strict("nozzle_diameter", "0.399996,1.2");
+    owner.print.apply(owner.model, owner.config);
+    work::ExPolygon obstacle;
+    obstacle.contour.points = {{0, 333330}, {2750004, 4000002}, {-2750004, 4000002}};
+    const work::ExPolygon attractor = rectangle(-4., -1., 8., 6.);
+    travel::PendingTravel gap = pending(0., 0., 0., 0.);
+    gap.source.position = {-371, 665, 0, true};
+    gap.target.position = {371, 665, 0, true};
+    gap = owner.in_part(gap);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {attractor}, 0, SIZE_MAX, {}});
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, Slic3r::scale_i(0.6));
+    const work::ExPolygons expanded = slic3r_api::PluginCommon::clipper::offset_ex(
+        owner.context.plugin_storage, {obstacle}, double(Slic3r::scale_i(0.199998)));
+    REQUIRE(expanded.size() == 1);
+    const work::Point expanded_tip(0, 0);
+    REQUIRE(std::find(expanded.front().contour.points.begin(), expanded.front().contour.points.end(), expanded_tip) !=
+        expanded.front().contour.points.end());
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() > 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.front().y == gap.source.position.y);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(route.back().y == gap.target.position.y);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(route, {obstacle}, owner.storage);
+}
+
+// Preserve an interior detour vertex when it passes near the travel's source endpoint.
+TEST_CASE("Zone planner preserves an interior arc vertex near an endpoint", "[plugins][zone-planner]")
+{
+    Owner owner;
+    owner.config.set_deserialize_strict("nozzle_diameter", "0.4,1.2");
+    owner.print.apply(owner.model, owner.config);
+    work::ExPolygon obstacle;
+    obstacle.contour.points = {{-800000, -800000}, {800129, -800000}, {800129, 800000},
+        {200129, 800000}, {200129, -200000}, {-200000, -200000}, {-200000, 9800000}, {-800000, 9800000}};
+    travel::PendingTravel gap = pending(0., 0., 0., 0.);
+    gap.source.position = {1, 1000000, 0, true};
+    gap.target.position = {-500000, -2000000, 0, true};
+    gap = owner.in_part(gap);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, Slic3r::scale_i(0.6));
+    const work::ExPolygons expanded = slic3r_api::PluginCommon::clipper::offset_ex(
+        owner.context.plugin_storage, {obstacle}, double(Slic3r::scale_i(0.2)));
+    REQUIRE(expanded.size() == 1);
+    const work::Points &contour = expanded.front().contour.points;
+    const work::Point arc_start(129, 0), arc_vertex(129, 1000000);
+    REQUIRE(std::find(contour.begin(), contour.end(), arc_start) != contour.end());
+    REQUIRE(std::find(contour.begin(), contour.end(), arc_vertex) != contour.end());
+    const work::Point source(gap.source.position.x, gap.source.position.y);
+    CHECK(work::to_vec2d(source - arc_vertex).norm() <= double(Slic3r::SCALED_EPSILON + 2));
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() > 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.front().y == gap.source.position.y);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(route.back().y == gap.target.position.y);
+    CHECK(planner.disabled_blockers() == 0);
+    CHECK(planner.fallbacks() == 0);
+    check_clear(route, {obstacle}, owner.storage);
+}
+
 // Rank nearby perimeter attachments against the chord without a domain, and try the next hypothesis after budget rejection.
 TEST_CASE("Zone planner ranks perimeter neighbours by weight and retries after the budget", "[plugins][zone-planner]")
 {
@@ -1108,7 +1239,7 @@ TEST_CASE("Zone planner rejects a blocked attachment and accepts the clear chord
     check_clear(route, {obstacle}, owner.storage);
 }
 
-// Retain contour-edge identities when subtraction puts both bridge endpoints exactly on the expanded forbidden border.
+// Retain bridge endpoints when subtraction puts both points exactly on the expanded forbidden border.
 TEST_CASE("Zone planner contours bridges starting and ending on expanded forbidden material", "[plugins][zone-planner]")
 {
     Owner owner;
@@ -1256,6 +1387,31 @@ TEST_CASE("Zone planner connects a far free endpoint through the nearest compone
     CHECK(planner.fallbacks() == 0);
 }
 
+// Route a mixed travel when its selected in-part exit lies on the expanded forbidden border.
+TEST_CASE("Zone planner detours a mixed connector from expanded forbidden material", "[plugins][zone-planner]")
+{
+    Owner owner;
+    const work::ExPolygon obstacle = rectangle(8., -1., 4., 12.);
+    const work::ExPolygon attractor = rectangle(0., 0., 8., 10.);
+    const travel::PendingTravel gap = owner.in_part(pending(2., 5., 12.9, 5.));
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {attractor}, 0, SIZE_MAX, {}});
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> route = planner.path(0, gap);
+    const work::Point expanded_edge(Slic3r::scale_i(7.8), Slic3r::scale_i(5.));
+    REQUIRE(route.size() > 2);
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
+    CHECK(std::find_if(route.begin(), route.end(), [&expanded_edge](const c_point &point) {
+        return point.x == expanded_edge.x() && point.y == expanded_edge.y();
+    }) != route.end());
+    check_clear(route, {obstacle}, owner.storage);
+}
+
 // Skip a bridge whose box-based hole choice cannot seed its ring, then leave the source component at the first nearest ring point.
 TEST_CASE("Zone planner skips an unavailable bridge and tries a mixed hypothesis", "[plugins][zone-planner]")
 {
@@ -1331,6 +1487,28 @@ TEST_CASE("Zone planner constructs bridges and validates forbidden material", "[
     CHECK(planner.fallbacks() == 0);
     CHECK(planner.domain_routes() == 1);
     if (forbidden) check_clear(route, {obstacle}, owner.storage);
+}
+
+// Accept a mixed connector when the selected ring exit and entry collapse to one point.
+TEST_CASE("Zone planner accepts a mixed connector with coincident endpoints", "[plugins][zone-planner]")
+{
+    Owner owner;
+    travel::PendingTravel gap = pending(0., 5., 2., 5.);
+    const travel::PendingTravel provenance = owner.in_part(gap);
+    gap.target.region_island = provenance.target.region_island;
+    gap.target.printing_catalog_id = provenance.target.printing_catalog_id;
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(0., 0., 10., 10.)}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache,
+        owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() >= 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
 }
 
 // Slice real support, then test component isolation, instance shifts, Z selection and non-support travels remaining unaffected.

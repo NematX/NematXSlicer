@@ -35,16 +35,19 @@ other connectors use clipped inside and outside portions across all components.
 An outside-part endpoint's connector counts its full length without a domain penalty
 or an inside weight in the estimate.
 Same-component paths use that component alone. Paths between distinct components
-reach selected bridge points within each one and contour forbidden obstacles on the bridge.
-Mixed choices use the nearest ring exit/entry to the free endpoint and contour
-obstacles on the remaining connector. Estimates and routes share selected points.
-The option without domains follows expanded obstacle contours.
+reach selected bridge points within each one and detour around forbidden rings on the bridge.
+Mixed choices use the nearest ring exit/entry to the free endpoint and detour around
+rings on the remaining connector. Estimates and routes share selected points. The
+option without domains follows expanded obstacle rings, including holes.
 For in-part travels whose endpoints have the same domain candidate, that option requires its chord to stay
 within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length allowance.
 Every route is checked against original forbidden material, exact endpoints and
 the complete-path detour budget. Its actual outside-domain length cannot exceed
-the obstacle-only reference detour's outside length by more than SCALED_EPSILON.
-The reference is computed at most once per blocker set; an unavailable reference skips only the
+the obstacle-only reference detour's outside length by more than SCALED_EPSILON;
+when a source or target is strictly inside expanded forbidden material, that
+reference bound is multiplied by three.
+The reference is computed at most once per blocker set; when it crosses original material,
+the option without a domain is unavailable and domain hypotheses are tried without the
 outside-length bound. Exhausted hypotheses with no geometrically valid route disable
 the first original component crossed along the chord, or the initial best-ranked estimate
 when the chord is clear, rebuild geometry and retry. Budget and outside-length failures

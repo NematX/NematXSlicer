@@ -877,8 +877,11 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
 4. **Validate, then retry.** Require exact endpoints, no segment crossing original
    forbidden material and the complete-path detour budget. Actual outside-domain
    length must not exceed that of one obstacle-only reference detour by more than
-   `SCALED_EPSILON`. Compute that reference at most once per blocker set; if unusable, skip only
-   this bound. Rejection tries the next hypothesis. After exhaustion, only if no
+   `SCALED_EPSILON`; when the source or target is strictly inside expanded forbidden
+   material, triple the reference outside length. Compute that reference at most once
+   per blocker set; if it crosses original material, the option without a domain is
+   unavailable and domain hypotheses are tried without this bound. Rejection tries the
+   next hypothesis. After exhaustion, only if no
    hypothesis passed forbidden-material validation, disable the remaining original
    forbidden component first crossed along the straight chord
    or, if that chord is clear, along the initial best-ranked estimate polyline (including
@@ -901,9 +904,10 @@ when the target has no region, with nozzle diameter as the spacing fallback.
 The worker caches areas and component rings by active zones, tool, ignored zones
 and spacing. Travels using platter blockers additionally key group, Z and ignored
 platter components; the plan catalog and object slices remain unchanged during use.
-Obstacle contours use first entry/last exit arcs; holes, tangencies and collinear
-contacts do not count as material crossings. Missing contour entries/exits can
-reject a candidate. `avoid_crossing_perimeters_max_detour` limits extra length in
+Obstacle-only references and connectors use the public Clipper detour operation in
+Shortest mode. ZonePlanner extends each chord by `SCALED_EPSILON` so an endpoint
+contact can be seen as a crossing; holes are followed like other rings.
+`avoid_crossing_perimeters_max_detour` limits extra length in
 millimetres or as a percentage of chord length; zero is unlimited. Routing is
 heuristic, not shortest-path search; validation checks original material, not the
 nozzle margin, and the final fallback remains straight.
@@ -921,7 +925,7 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
         |-- build_boundary / endpoint_candidates: index components and choose attachments
         |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
         |-- append_component_path / route_on_boundary: follow each chosen component
-        |-- detour_around_forbidden: contour bridges and free connectors
+        |-- detour: extend chords and call the public Clipper ring-detour operation
         `-- validate all segments: accept, retry hypotheses or remove a crossed blocker within the component bound, then fall back
 ```
 
