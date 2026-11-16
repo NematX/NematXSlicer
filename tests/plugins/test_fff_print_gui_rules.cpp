@@ -277,11 +277,12 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     const char *const tree_family_keys[] = {
         "support_tree_angle", "support_tree_angle_slow", "support_tree_branch_diameter",
         "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
-        "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate",
-        "support_tree_max_overhang"
+        "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate"
     };
     for (const char *key : tree_family_keys)
         set(key, tree_family);
+    set("support_max_overhang", tree_family ||
+        (supp && style == SupportMaterialStyle::smsGridMerged));
 
     const char *const iface_keys[] = {
         "support_material_interface_spacing", "support_material_interface_extruder",
@@ -545,8 +546,7 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const Orchestrator &orchestrator = Orchestrator::instance();
 
-    const char *const tree_keys[] = { "support_tree_angle", "support_tree_branch_diameter", "support_tree_top_rate",
-                                      "support_tree_max_overhang" };
+    const char *const tree_keys[] = { "support_tree_angle", "support_tree_branch_diameter", "support_tree_top_rate" };
     const char *const interface_keys[] = { "support_material_interface_layer_height", "support_material_interface_angle",
                                            "support_material_bottom_interface_pattern",
                                            "support_material_interface_contact_loops" };
@@ -556,11 +556,12 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
 
     struct StyleCase { SupportMaterialStyle style; bool tree_settings; bool base_fill; bool synchronization; };
     const StyleCase cases[] = {
-        { SupportMaterialStyle::smsGrid,    false, true,  true  },
-        { SupportMaterialStyle::smsSnug,    false, true,  true  },
-        { SupportMaterialStyle::smsTree,    true,  true,  false },
-        { SupportMaterialStyle::smsOrganic, true,  false, false },
-        { SupportMaterialStyle::smsFilled,  false, true,  false },
+        { SupportMaterialStyle::smsGrid,       false, true,  true  },
+        { SupportMaterialStyle::smsSnug,       false, true,  true  },
+        { SupportMaterialStyle::smsTree,       true,  true,  false },
+        { SupportMaterialStyle::smsOrganic,    true,  false, false },
+        { SupportMaterialStyle::smsFilled,     false, true,  false },
+        { SupportMaterialStyle::smsGridMerged, false, true,  false },
     };
     for (const StyleCase &style_case : cases) {
         for (const bool support_on : { true, false }) {
@@ -579,6 +580,8 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
                 CHECK(enabled.at(key) == support_on);
             for (const char *key : base_fill_keys)
                 CHECK(enabled.at(key) == (support_on && style_case.base_fill));
+            CHECK(enabled.at("support_max_overhang") ==
+                  (support_on && (style_case.tree_settings || style_case.style == SupportMaterialStyle::smsGridMerged)));
             CHECK(enabled.at("support_material_layer_height") == support_on);
             CHECK(enabled.at("support_material_synchronize_layers") == (support_on && style_case.synchronization));
         }
@@ -596,6 +599,7 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
     const EnabledMap raft_enabled = rule_enabled(orchestrator, raft_config);
     for (const char *key : tree_keys)
         CHECK_FALSE(raft_enabled.at(key));
+    CHECK_FALSE(raft_enabled.at("support_max_overhang"));
     for (const char *key : interface_keys)
         CHECK(raft_enabled.at(key));
     for (const char *key : base_fill_keys)

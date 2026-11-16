@@ -52,7 +52,7 @@ void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) co
     const Config config = object.config();
     const Common::SupportStyle style = Common::support_style(config);
     const bool straight_columns = style == Common::SupportStyle::Grid || style == Common::SupportStyle::Snug ||
-                                  style == Common::SupportStyle::Filled;
+                                  style == Common::SupportStyle::Filled || style == Common::SupportStyle::GridMerged;
     if (!straight_columns || !config.get("support_material_buildplate_only").get_bool()) {
         progress().finish_run();
         return;

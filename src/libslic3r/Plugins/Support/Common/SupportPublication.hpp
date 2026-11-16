@@ -50,6 +50,7 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
 using GenerateSupport = void (*)(const plugin_run_context *, const Print &, const Object &, const SupportParams &, GeneratedSupport &);
 // Filters styles and demand, constructs one parameter object, generates and publishes slabs, then finishes valid runs' progress.
 void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
-                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate);
+                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate,
+                        SupportStyle third_style = SupportStyle::Unknown);
 } // namespace slic3r_api::Support::Common
 #endif

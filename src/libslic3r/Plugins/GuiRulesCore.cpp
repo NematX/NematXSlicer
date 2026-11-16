@@ -116,6 +116,11 @@ const GuiCondition has_tree_family = any_of({
                       int_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)) }),
              non_zero("support_material_enforce_layers") })
 });
+// The merged grid shares the overhang limit with the tree family but keeps its own layer placement.
+const GuiCondition has_grid_merged = all_of({
+    int_equals("support_material_style", int(SupportMaterialStyle::smsGridMerged)),
+    any_of({ true_("support_material"), non_zero("support_material_enforce_layers") })
+});
 
 // base AND NOT(organic supports): NOT(style == organic AND (support OR enforce > 0)).
 // The organic body is the branch sheath (the loop that walls an organic branch section), so the
@@ -383,9 +388,10 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
 
     add_rule({ "support_tree_angle", "support_tree_angle_slow", "support_tree_branch_diameter",
                "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
-               "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate",
-               "support_tree_max_overhang" },
+               "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate" },
              has_tree_family);
+    // The overhang limit drives tree branch angles and the tolerated border of merged grid layers.
+    add_rule({ "support_max_overhang" }, any_of({ has_tree_family, has_grid_merged }));
 
     add_rule({ "support_material_interface_spacing", "support_material_interface_extruder",
                "support_material_interface_speed",
@@ -403,7 +409,7 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     add_rule({ "support_material_layer_height" }, have_support);
 
     // Synchronization also retains object Z positions for non-soluble support, while contacts keep their separation gaps.
-    // Only the grid and snug family follows it: tree and organic supports choose their layer heights from the branch slopes.
+    // Only grid and snug expose it: the merged grid forces synchronization, while tree and organic use branch slopes.
     add_rule({ "support_material_synchronize_layers" }, all_of({ have_support, any_of({
         int_equals("support_material_style", int(SupportMaterialStyle::smsGrid)),
         int_equals("support_material_style", int(SupportMaterialStyle::smsSnug)) }) }));

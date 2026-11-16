@@ -118,7 +118,7 @@ void install_island_surfaces(const plugin_run_context *context, storage_handle *
 
 // Borrows a valid support payload, filters its style and demand, and publishes generated owned slabs before finishing progress; invalid payloads return unfinished, while cancellation and generation/publication failures propagate.
 void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
-                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate)
+                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate, SupportStyle third_style)
 {
     throw_if_cancelled(context);
     const run_ctx_generate_support *payload = plugin_ctx_as_generate_support(context);
@@ -127,7 +127,7 @@ void run_support_family(const plugin_run_context *context, orchestrator_handle *
     const Print print(payload->print);
     const Object object(payload->object);
     const SupportStyle style = support_style(object.config());
-    if (style == first_style || style == second_style) {
+    if (style == first_style || style == second_style || style == third_style) {
         if (object_has_support_demand(object)) {
             const SupportParams params(print, object);
             GeneratedSupport support(context->plugin_storage);

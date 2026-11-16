@@ -26,7 +26,7 @@
    - the minimum height to the model and the root search depth: the plugin measures them on the real layer tops, the native
      settings count nominal layers (min_dtt_to_model). They agree only on uniform layers above the first, the identity domain
      checked against the native count; the variable profile has hand-computed values.
-   - the branch angle: the plugin caps it by support_tree_max_overhang; the cases set it high enough for the cap to be inactive.
+   - the branch angle: the plugin caps it by support_max_overhang; the cases set it high enough for the cap to be inactive.
    - the foot near the bed: bp_gain[L] and foot_target[L] follow the real layer heights; the native settings count nominal layers
      (bp_radius_increase_per_layer, layer_start_bp_radius). The step budget agrees with the native one on nominal layers; the
      targets have hand-computed values on a profile of three bands. foot_step_gain() and merge_support_element_states() are
@@ -39,6 +39,13 @@ using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
 namespace ST = Slic3r::Test::SupportTree;
 namespace TF = Slic3r::TreeFamily;
+
+TEST_CASE("support_max_overhang reads its historical key", "[plugins][support-tree][settings]")
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"support_tree_max_overhang", "0.37"}});
+    CHECK(config.opt<ConfigOptionFloatOrPercent>("support_max_overhang")->value == Approx(0.37));
+}
 
 namespace {
 // One configuration to compare: the options to override, the layer height profile (empty: uniform layers) and whether the native
@@ -73,7 +80,7 @@ void check_case(const SettingsCase &item)
     INFO("case " << item.name);
     DynamicPrintConfig config = SG::config("tree", false, 3);
     // A large maximum overhang keeps its cap on the branch angle inactive, as the native settings have no such cap.
-    config.set_deserialize_strict({{"support_tree_max_overhang", "100"}});
+    config.set_deserialize_strict({{"support_max_overhang", "100"}});
     for (const std::pair<std::string, std::string> &option : item.overrides)
         config.set_deserialize_strict({{option.first, option.second}});
     Print print;

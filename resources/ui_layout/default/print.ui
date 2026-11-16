@@ -305,6 +305,7 @@ group:Raft
 group:Options for support material and raft
 	setting:support_material_style
 	setting:support_material_layer_height
+	setting:support_max_overhang
 	setting:raft_first_layer_density
 	setting:raft_first_layer_expansion
 	line:Z-offset
@@ -344,7 +345,6 @@ group:Organic supports
 		setting:label$Maximum:support_tree_angle
 		setting:label$Preferred:support_tree_angle_slow
 	end_line
-	setting:support_tree_max_overhang
 	line:Branch diameter
 		setting:label$_:support_tree_branch_diameter
 		setting:label$Angle:support_tree_branch_diameter_angle

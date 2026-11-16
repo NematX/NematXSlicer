@@ -211,7 +211,8 @@ std::pair<SupportGeneratorLayersPtr, SupportGeneratorLayersPtr> generate_interfa
         // For all intermediate layers, collect top contact surfaces, which are not further than support_material_interface_layers.
         BOOST_LOG_TRIVIAL(debug) << "PrintObjectSupportMaterial::generate_interface_layers() in parallel - start";
         const bool snug_supports   = config.support_material_style.value == smsSnug;
-        const bool smooth_supports = config.support_material_style.value != smsGrid;
+        const bool smooth_supports = config.support_material_style.value != smsGrid &&
+                                     config.support_material_style.value != smsGridMerged;
         SupportGeneratorLayersPtr &interface_layers       = base_and_interface_layers.first;
         SupportGeneratorLayersPtr &base_interface_layers  = base_and_interface_layers.second;
         interface_layers.assign(intermediate_layers.size(), nullptr);

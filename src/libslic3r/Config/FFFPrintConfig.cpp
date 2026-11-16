@@ -212,7 +212,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle, {
     { "snug",           smsSnug },
     { "tree",           smsTree },
     { "organic",        smsOrganic },
-    { "filled",         smsFilled }
+    { "filled",         smsFilled },
+    { "grid_merged",    smsGridMerged }
 })
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SeamPosition, {
         {"random",    spRandom},
@@ -996,7 +997,7 @@ void init_categories(PrintConfigDef &definition)
         "support_tree_branch_diameter_angle",
         "support_tree_branch_diameter_double_wall", 
         "support_tree_branch_distance",
-        "support_tree_max_overhang",
+        "support_max_overhang",
         "support_tree_tip_diameter",
         "support_tree_top_rate",
         // miscellaneous
@@ -6668,12 +6669,14 @@ void init_fff_params(PrintConfigDef &definition)
         "will create more stable supports, while snug support towers will save material and reduce "
         "object scarring."
         "\nOrganic: create tree support structure, but this algorithm force to synchronize the support layers with object layers."
-        "\nFilled: dense support made only of interface layers, printed at the height of every object layer. It needs the contact distance type 'none' (soluble) and no raft.");
+        "\nFilled: dense support made only of interface layers, printed at the height of every object layer. It needs the contact distance type 'none' (soluble) and no raft."
+        "\nGrid merged: soluble grid support whose sparse body follows the object layers and merges consecutive body layers up to the support layer height. Contacts and interfaces keep their own layers.");
     def->set_enum<SupportMaterialStyle>({
         { "grid", L("Grid") }, 
         { "snug", L("Snug") },
         { "organic", L("Organic") },
-        { "filled", L("Filled") }
+        { "filled", L("Filled") },
+        { "grid_merged", L("Grid merged (soluble)") }
     });
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsGrid));
@@ -6802,18 +6805,18 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionFloat(1.));
 
-    // Largest horizontal overhang of a branch outline between two support layers. A nearly vertical branch
-    // can use thick layers, while a strongly inclined one needs thin layers to stay under this overhang.
-    def = definition.add("support_tree_max_overhang", coFloatOrPercent, ptFFF);
-    def->label = L("Max branch overhang");
+    // Largest horizontal overhang of a support outline between two support layers. A nearly vertical
+    // support can use thick layers, while a strongly inclined one needs thin layers to stay under it.
+    def = definition.add("support_max_overhang", coFloatOrPercent, ptFFF);
+    def->label = L("Max layer overhang");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
-    // TRN PrintSettings: "Organic supports" > "Max branch overhang"
-    def->tooltip = L("Maximum horizontal overhang of a tree branch outline from one support layer to the next. "
-                     "A nearly vertical branch allows thick support layers, while a strongly inclined branch needs thin layers "
-                     "to stay under this overhang. It also limits the branch angle, so that the overhang can be printed "
-                     "at the minimum layer height. If expressed as percentage (for example 50%), it will be calculated "
-                     "over the support material extrusion width.");
+    def->aliases = { "support_tree_max_overhang" };
+    def->tooltip = L("Maximum horizontal overhang of a support layer outline from one support layer to the next. "
+                     "A nearly vertical support allows thick layers, while a strongly inclined support needs thin layers "
+                     "to stay under this overhang. For tree supports it also limits the branch angle, so that the overhang "
+                     "can be printed at the minimum layer height. If expressed as percentage (for example 50%), it will be "
+                     "calculated over the support material extrusion width.");
     def->sidetext = L("mm or %");
     def->ratio_over = "support_material_extrusion_width";
     def->min = 0;

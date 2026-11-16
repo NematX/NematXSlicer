@@ -14,7 +14,7 @@
    layers, the maximum move of the branch centres is tan(effective angle) times the height of the upper layer.
 
    The effective angle is the branch angle, capped so that the horizontal overhang of a branch per support layer does not
-   exceed support_tree_max_overhang at the minimum layer height of the support extruder:
+   exceed support_max_overhang at the minimum layer height of the support extruder:
        effective angle = min(support_tree_angle, atan(max_overhang / support_min_height)).
 
        const TreeSettings settings(object, print, params);
@@ -118,9 +118,9 @@ struct TreeSettings
     // Spacing of the tip points along the overhang lines, and the top rate that sets their density (percent).
     coord_t branch_distance = 0;
     double top_rate = 0;
-    // Effective branch angle (radians), after the cap of support_tree_max_overhang.
+    // Effective branch angle (radians), after the cap of support_max_overhang.
     double angle = 0;
-    // Largest horizontal overhang of a branch over one support slab (scaled), from support_tree_max_overhang.
+    // Largest horizontal overhang of a branch over one support slab (scaled), from support_max_overhang.
     coord_t max_overhang = 0;
     // Thinnest and thickest slabs of the branch middle, and the dense interface slab, on the machine Z step (scaled).
     coord_t min_slab_height = 0, max_slab_height = 0, dense_slab_height = 0;

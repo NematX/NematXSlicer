@@ -345,7 +345,7 @@ TEST_CASE("A diagonal branch with build plate only takes thinner slabs for a sma
     for (const double limit_mm : {0.2, 0.1}) {
         DynamicPrintConfig config = SG::config("organic", false, 0);
         config.set_deserialize_strict({{"support_material_buildplate_only", "1"},
-            {"support_tree_max_overhang", std::to_string(limit_mm)}});
+            {"support_max_overhang", std::to_string(limit_mm)}});
         Print print;
         Model model;
         Test::init_print({diagonal_roof()}, print, model, config);
@@ -1728,7 +1728,7 @@ TEST_CASE("Tree family declares its keys and ignores a raft without a warning", 
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     REQUIRE(Orchestrator::instance().is_plugin_active("support.family.tree"));
     const Plugin &provider = *Orchestrator::instance().get_plugin("support.family.tree");
-    for (const char *expected_key : {"support_tree_max_overhang", "support_tree_branch_diameter", "support_tree_top_rate",
+    for (const char *expected_key : {"support_max_overhang", "support_tree_branch_diameter", "support_tree_top_rate",
              "support_material_interface_layers", "support_material_buildplate_only"}) {
         CAPTURE(expected_key);
         CHECK(std::any_of(provider.get_used_config_keys().begin(), provider.get_used_config_keys().end(),
@@ -1921,7 +1921,7 @@ TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = SG::config("organic", false, 0);
-    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", "0.2"}});
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_max_overhang", "0.2"}});
     Print print;
     Model model;
     Test::init_print({diagonal_roof()}, print, model, config);
@@ -2225,7 +2225,7 @@ TEST_CASE("Circular stems join the tilted branch meshes without a gap or a step 
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const double limit_mm = 0.2;
     DynamicPrintConfig config = SG::config("organic", false, 0);
-    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", std::to_string(limit_mm)}});
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_max_overhang", std::to_string(limit_mm)}});
     Print print;
     Model model;
     Test::init_print({diagonal_roof()}, print, model, config);
@@ -2266,7 +2266,7 @@ TEST_CASE("Bent organic slabs keep the drawn overhang within the limit inside ea
     const double limit_mm = GENERATE(0.2, 0.1);
     CAPTURE(limit_mm);
     DynamicPrintConfig config = SG::config("organic", false, 0);
-    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", std::to_string(limit_mm)}});
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_max_overhang", std::to_string(limit_mm)}});
     Print print;
     Model model;
     Test::init_print({diagonal_roof()}, print, model, config);

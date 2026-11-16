@@ -2,7 +2,7 @@
 /* Heights of the branch slabs between two fixed Z extremes.
 
    A branch that leans sideways overhangs its own slab below: the horizontal outline overhang per unit of height is
-   the rate of the branch, and a slab of height h keeps rate * h within support_tree_max_overhang. The planner gives
+   the rate of the branch, and a slab of height h keeps rate * h within support_max_overhang. The planner gives
    every object layer the largest rate of the branches entering it, and cuts the span between two extremes into
    slabs bottom first:
 

@@ -95,6 +95,8 @@ struct Run {
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
     bool buildplate_only;
     c_float_or_percent layer_height, interface_layer_height;
+    // Maximum sparse body slab height and the horizontal overhang allowed between two body slabs.
+    coord_t base_step, max_overhang;
     double closing_radius, spacing;
 };
 struct Grid {
@@ -134,6 +136,13 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
 void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
 // Fill intermediate slabs from projected columns and remove portions inside contacts.
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
+// Merge consecutive sparse body slabs when the upper one covers the lower core within the overhang limit.
+void merge_sparse_layers(const Run &run, Common::GeneratedSupport &out);
+// Return whether the part of the lower footprint outside the upper slab is clear of the object, contacts and interfaces.
+bool border_is_clear(const Run &run, const Common::GeneratorLayer &border, const Common::GeneratorLayer &upper,
+                     const Common::GeneratedSupport &out);
+// Return whether two polygon collections enclose the same area.
+bool same_area(const ClipperContext &clipper, const Polys &lhs, const Polys &rhs);
 // Rasterize polygons into a zero-bordered grayscale image using AGG's winding fill.
 std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_point origin, const Polys &polys);
 // Chain raster boundary edges into scaled contours, optionally closing single-pixel holes.
@@ -145,6 +154,8 @@ Polys contours(const Grid &grid, coord_t offset, bool fill_holes);
 void generate_support(const plugin_run_context *context, const Print &print, const Object &object,
                       const Common::SupportParams &params, Common::GeneratedSupport &out)
 {
+    if (params.style == Common::SupportStyle::GridMerged && !params.soluble)
+        throw std::runtime_error("Grid merged support needs support_material_contact_distance_type 'none'.");
     const Run run(context, print, object, params, out.storage);
     const std::vector<Polys> covered = run.buildplate_only ? buildplate_covered(run) : std::vector<Polys>();
     top_contacts(run, covered, out);
@@ -169,6 +180,8 @@ void generate_support(const plugin_run_context *context, const Print &print, con
     Common::carve_interfaces(params, params.style == Common::SupportStyle::Snug, out);
     // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
+    if (params.style == Common::SupportStyle::GridMerged)
+        merge_sparse_layers(run, out);
 }
 
 namespace {
@@ -185,6 +198,10 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     buildplate_only = config.get("support_material_buildplate_only").get_bool();
     layer_height = config.get("support_material_layer_height").get_float_or_percent();
     interface_layer_height = config.get("support_material_interface_layer_height").get_float_or_percent();
+    base_step = Common::slab_step(layer_height, p.base_flow_mm.nozzle_diameter, p.max_support_height);
+    const c_float_or_percent overhang = config.get("support_max_overhang").get_float_or_percent();
+    const double overhang_mm = overhang.percent ? overhang.value * p.base_flow_mm.width / 100. : overhang.value;
+    max_overhang = scale_i(std::max(0., overhang_mm));
     closing_radius = config.get("support_material_closing_radius").get_float();
     spacing = p.base_spacing_gap;
     grown_outlines.resize(layers.size());
@@ -282,12 +299,13 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
         const Common::TopContactSlabs slabs = Common::add_top_contacts(run.layers, run.print_config, p, id, out);
         if (!slabs.contact) continue;
         Common::GeneratorLayer &contact = *slabs.contact;
+        const bool grid_style = p.style == Common::SupportStyle::Grid || p.style == Common::SupportStyle::GridMerged;
         std::optional<Grid> grid;
-        if (p.style == Common::SupportStyle::Grid)
+        if (grid_style)
             grid.emplace(run, contacts, margin);
         contact.contact_polygons.emplace(grid ? grid->extract(-3, true) : snug_contours(run, contacts));
         contact.contact_polygons->ensure_valid(p.resolution);
-        if (p.style == Common::SupportStyle::Grid && !p.soluble) {
+        if (grid_style && !p.soluble) {
             Polys dense = polygons(clipper_diff(clipper(overhangs), clipper_offset2(clipper(lower_polygons),
                 -(no_interface_offset * 0.5f), no_interface_offset * 1.1f, join_type, 0.)));
             if (!dense.empty()) {
@@ -366,17 +384,16 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
 void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
-    const coord_t base_step = Common::slab_step(run.layer_height, p.base_flow_mm.nozzle_diameter, p.max_support_height);
     const coord_t interface_step = Common::slab_step(run.interface_layer_height, p.interface_flow_mm.nozzle_diameter, p.max_support_height);
     Common::SlabSpacing spacing;
     spacing.first_z = scale_to_layer_coord(p.first_layer_height);
     spacing.min_height = p.min_height;
     spacing.machine_step = scale_to_layer_coord(p.z_step);
-    spacing.base_step = base_step;
+    spacing.base_step = run.base_step;
     spacing.interface_step = interface_step;
     Common::set_interface_counts(spacing, p);
     spacing.soluble = p.soluble;
-    spacing.synchronize = run.synchronize;
+    spacing.synchronize = run.synchronize || p.style == Common::SupportStyle::GridMerged;
     Common::place_intermediate_slabs(spacing, run.layers, out);
 }
 
@@ -411,6 +428,122 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
         support->polygons = polygons(clipper_diff(clipper(support->polygons), clipper(united)));
         support->polygons.ensure_valid(p.resolution);
     }
+}
+
+// Compares two polygon collections by symmetric difference, ignoring ring order and redundant vertices.
+bool same_area(const ClipperContext &clipper, const Polys &lhs, const Polys &rhs)
+{
+    return clipper_diff(clipper(lhs), clipper(rhs)).empty() && clipper_diff(clipper(rhs), clipper(lhs)).empty();
+}
+
+// Checks the tolerated border at the upper slab's Z: the object clearance and the already carved contacts and interfaces must keep
+// the border unchanged. The probe reuses trim_by_object(), so the border is tested with the same grown object slices and bridges.
+bool border_is_clear(const Run &run, const Common::GeneratorLayer &border, const Common::GeneratorLayer &upper,
+                     const Common::GeneratedSupport &out)
+{
+    if (border.polygons.empty())
+        return true;
+    Common::GeneratorLayer probe(run.storage);
+    probe.type = Common::LayerType::Base;
+    probe.print_z = upper.print_z;
+    probe.bottom_z = upper.bottom_z;
+    probe.height = upper.height;
+    probe.height_block = upper.height;
+    probe.polygons = border.polygons.readonly().clone(run.storage);
+    Common::GeneratorLayers probe_layers{&probe};
+    trim_by_object(run, probe_layers);
+    if (!same_area(run.clipper, border.polygons, probe.polygons))
+        return false;
+    for (const Common::GeneratorLayers *slabs : {&out.interfaces, &out.top, &out.bottom}) {
+        for (const Common::GeneratorLayer *slab : *slabs) {
+            if (slab->height <= 0 || slab->print_z <= upper.bottom_z || slab->bottom_print_z() >= upper.print_z)
+                continue;
+            if (!clipper_intersection(run.clipper(border.polygons), run.clipper(slab->polygons)).empty())
+                return false;
+        }
+    }
+    return true;
+}
+
+// Merges contiguous sparse body slabs bottom-up. A prism extends when its core, shrunk by the overhang limit, is covered by the next
+// slab and the tolerated border is clear. The part of the next slab outside the prism starts a new prism, so material is preserved.
+void merge_sparse_layers(const Run &run, Common::GeneratedSupport &out)
+{
+    const ClipperContext &clipper = run.clipper;
+    struct OpenPrism {
+        coord_t bottom_z, top_z;
+        Polys polygons;
+        OpenPrism(coord_t bottom, coord_t top, Polys &&polygons) : bottom_z(bottom), top_z(top), polygons(std::move(polygons)) {}
+    };
+    std::vector<OpenPrism> open;
+    Common::GeneratorLayers merged;
+    const auto close = [&out, &merged](OpenPrism &prism) {
+        if (prism.top_z <= prism.bottom_z || prism.polygons.empty())
+            return;
+        Common::GeneratorLayer &layer = Common::add_layer(out, Common::LayerType::Base, prism.top_z, prism.bottom_z,
+                                                           prism.top_z - prism.bottom_z);
+        layer.polygons = std::move(prism.polygons);
+        merged.push_back(&layer);
+    };
+    for (Common::GeneratorLayer *slab : out.base) {
+        throw_if_cancelled(run.context);
+        if (slab == nullptr || slab->polygons.empty())
+            continue;
+        if ((slab->type != Common::LayerType::Base && slab->type != Common::LayerType::Intermediate) ||
+            slab->bottom_print_z() == 0) {
+            merged.push_back(slab);
+            continue;
+        }
+        for (auto it = open.begin(); it != open.end();) {
+            if (it->top_z != slab->bottom_z) {
+                close(*it);
+                it = open.erase(it);
+            } else
+                ++it;
+        }
+        ClipperOperand covered = clipper();
+        for (auto it = open.begin(); it != open.end();) {
+            OpenPrism &prism = *it;
+            const ClipperOperand core = run.max_overhang > 0 ?
+                clipper_offset(clipper(prism.polygons), -double(run.max_overhang), join_type, 0.) : clipper(prism.polygons);
+            const bool fits = clipper_diff(core, clipper(slab->polygons)).empty();
+            const bool height_fits = prism.top_z - prism.bottom_z + slab->height <= run.base_step + EPSILON;
+            bool clear = false;
+            if (fits && height_fits) {
+                const ClipperOperand border = clipper_diff(clipper(prism.polygons), clipper(slab->polygons));
+                if (border.empty())
+                    clear = true;
+                else {
+                    Common::GeneratorLayer border_layer(run.storage);
+                    border_layer.type = Common::LayerType::Base;
+                    border_layer.print_z = slab->print_z;
+                    border_layer.bottom_z = slab->bottom_z;
+                    border_layer.height = slab->height;
+                    border_layer.height_block = slab->height;
+                    border_layer.polygons = border.to_polygon_collection();
+                    clear = border_is_clear(run, border_layer, *slab, out);
+                }
+            }
+            if (!fits || !height_fits || !clear) {
+                close(prism);
+                it = open.erase(it);
+                continue;
+            }
+            covered = clipper_union2(covered, clipper_intersection(clipper(prism.polygons), clipper(slab->polygons)));
+            prism.top_z = slab->print_z;
+            ++it;
+        }
+        Polys residual = clipper_diff(clipper(slab->polygons), covered).to_polygon_collection();
+        residual.ensure_valid(run.p.resolution);
+        if (!residual.empty())
+            open.emplace_back(slab->bottom_z, slab->print_z, std::move(residual));
+    }
+    for (OpenPrism &prism : open)
+        close(prism);
+    std::sort(merged.begin(), merged.end(), [](const Common::GeneratorLayer *lhs, const Common::GeneratorLayer *rhs) {
+        return lhs->print_z < rhs->print_z || (lhs->print_z == rhs->print_z && lhs->bottom_z < rhs->bottom_z);
+    });
+    out.base = std::move(merged);
 }
 
 // Searches print-Z-ordered layers/contacts, selects cached projections, subtracts enclosing contacts and trims against the object;

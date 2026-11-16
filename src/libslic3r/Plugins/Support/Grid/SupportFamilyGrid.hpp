@@ -1,8 +1,10 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
-/* This built-in support family handles grid and snug styles. It reads demand
-   from object islands, computes the support slabs and publishes them through
+/* This built-in support family handles grid, snug and merged-grid styles. It reads
+   demand from object islands, computes the support slabs and publishes them through
    the shared publication (Common/SupportPublication.hpp) as auxiliary slices,
    support properties and typed fill surfaces, all through the plugin API.
+   The merged style keeps soluble contacts on object layers and joins consecutive
+   sparse body slabs within the support layer height and the overhang limit.
    Extrusion generation belongs to a later support-toolpath step. */
 #ifndef plugins_support_grid_family_hpp_
 #define plugins_support_grid_family_hpp_

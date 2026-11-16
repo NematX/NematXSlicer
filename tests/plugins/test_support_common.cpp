@@ -1005,7 +1005,7 @@ TEST_CASE("Support enum helpers read every serialized value", "[plugins][support
         const Common::SupportStyle expected = native == smsGrid ? Common::SupportStyle::Grid :
             native == smsSnug ? Common::SupportStyle::Snug : native == smsTree ? Common::SupportStyle::Tree :
             native == smsOrganic ? Common::SupportStyle::Organic : native == smsFilled ? Common::SupportStyle::Filled :
-            Common::SupportStyle::Unknown;
+            native == smsGridMerged ? Common::SupportStyle::GridMerged : Common::SupportStyle::Unknown;
         CHECK(expected != Common::SupportStyle::Unknown);
         CHECK(Common::support_style(view) == expected);
     }
@@ -1090,7 +1090,10 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
     const Plugin *family = Orchestrator::instance().get_plugin("support.family.grid");
     REQUIRE(family != nullptr);
     declares(*family, geometry);
-    CHECK(family->get_used_config_keys().size() == geometry.size);
+    // The merged grid style also reads the shared overhang limit.
+    CHECK(family->get_used_config_keys().size() == geometry.size + 1);
+    CHECK(std::any_of(family->get_used_config_keys().begin(), family->get_used_config_keys().end(),
+                      [](const Plugin::UsedConfigKey &used) { return used.key == "support_max_overhang"; }));
     // The filled family reads raft_layers only to reject a raft; other families and common key lists do not declare it.
     const auto declares_raft = [](const Plugin &plugin) {
         return std::any_of(plugin.get_used_config_keys().begin(), plugin.get_used_config_keys().end(),

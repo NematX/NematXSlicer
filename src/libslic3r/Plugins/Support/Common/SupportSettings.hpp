@@ -32,7 +32,7 @@
 namespace slic3r_api::Support::Common {
 
 // Serialized support styles; tree and organic share a family, while filled projects dense layers straight down.
-enum class SupportStyle { Grid, Snug, Tree, Organic, Filled, Unknown };
+enum class SupportStyle { Grid, Snug, Tree, Organic, Filled, GridMerged, Unknown };
 // support_material_contact_distance_type: "filament", "plane" or "none" (soluble).
 enum class ContactDistanceType { Filament, Plane, None, Unknown };
 // support_material_pattern, the base pattern: "rectilinear", "rectilinear-grid" or "honeycomb".

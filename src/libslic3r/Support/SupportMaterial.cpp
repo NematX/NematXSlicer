@@ -598,6 +598,7 @@ public:
     {
         switch (m_style) {
         case smsGrid:
+        case smsGridMerged:
         {
             // Prepare the grid data, it will be reused when extracting support structures.
             if (m_support_angle != 0.) {
@@ -688,6 +689,7 @@ public:
     {
         switch (m_style) {
         case smsGrid:
+        case smsGridMerged:
         {
     #ifdef SUPPORT_USE_AGG_RASTERIZER
             Polygons support_polygons_simplified = contours_simplified(m_grid_size, m_pixel_size, m_bbox.min, m_grid2, offset_in_grid, fill_holes);
@@ -1639,7 +1641,8 @@ static inline void fill_contact_layer(
     assert_valid(*new_layer.contact_polygons);
 
     // 2) infill polygons, expand them by half the extrusion width + a tiny bit of extra.
-    bool reduce_interfaces = object_config.support_material_style.value == smsGrid && layer_id > 0 && !slicing_params.soluble_interface;
+    bool reduce_interfaces = (object_config.support_material_style.value == smsGrid ||
+                              object_config.support_material_style.value == smsGridMerged) && layer_id > 0 && !slicing_params.soluble_interface;
     if (reduce_interfaces) {
         // Reduce the amount of dense interfaces: Do not generate dense interfaces below overhangs with 60% overhang of the extrusions.
         Polygons dense_interface_polygons = diff(overhang_polygons, lower_layer_polygons_for_dense_interface());

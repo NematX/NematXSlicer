@@ -288,14 +288,14 @@ TEST_CASE("The minimum height to the model follows the real Z of thin layers", "
         CHECK(on_model == routed.trees.size());
     }
 }
-// A small support_tree_max_overhang caps the branch angle at atan(max overhang / minimum layer height), where the minimum
+// A small support_max_overhang caps the branch angle at atan(max overhang / minimum layer height), where the minimum
 // layer height is the thinnest of the configured minimums and of the sliced layers. With the branch angle at 80 degrees, an
 // overhang of 0.05 mm must set the angle to that cap.
 TEST_CASE("A small max branch overhang lowers the branch angle", "[plugins][support-tree-routing]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = SG::config("organic");
-    config.set_deserialize_strict({{"support_tree_max_overhang", "0.05"}, {"support_tree_angle", "80"}});
+    config.set_deserialize_strict({{"support_max_overhang", "0.05"}, {"support_tree_angle", "80"}});
     Print print;
     Model model;
     Test::init_print({SG::slab(true)}, print, model, config);
@@ -366,7 +366,7 @@ TEST_CASE("Tree routing accepts zero XY spacing and zero branch overhang", "[plu
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool zero_xy = GENERATE(true, false);
     DynamicPrintConfig config = SG::config("organic");
-    config.set_deserialize_strict({{zero_xy ? "support_material_xy_spacing" : "support_tree_max_overhang", "0"}});
+    config.set_deserialize_strict({{zero_xy ? "support_material_xy_spacing" : "support_max_overhang", "0"}});
     Print print;
     Model model;
     Test::init_print({SG::slab()}, print, model, config);
@@ -383,7 +383,7 @@ TEST_CASE("The branch angle cap follows the minimum layer height of the support 
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool thin_support = GENERATE(false, true);
     DynamicPrintConfig config = SG::config("organic");
-    config.set_deserialize_strict({{"min_layer_height", thin_support ? "0.05,0.2" : "0.2,0.05"}, {"support_tree_max_overhang", "0.05"},
+    config.set_deserialize_strict({{"min_layer_height", thin_support ? "0.05,0.2" : "0.2,0.05"}, {"support_max_overhang", "0.05"},
         {"support_tree_angle", "85"}, {"support_tree_angle_slow", "80"}});
     Print print;
     Model model;

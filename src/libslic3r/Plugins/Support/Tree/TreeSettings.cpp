@@ -111,7 +111,7 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     // and the upper bound falls to zero when the branch angle is below EPSILON, including zero.
     const double angle_slow_limit = std::clamp<double>(config.get("support_tree_angle_slow").get_float() * PI / 180., 0., std::max(0., angle_limit - EPSILON));
     const double support_width_mm = object.support_flow_mm(support_role, layer_height_mm).width;
-    const c_float_or_percent max_overhang_setting = config.get("support_tree_max_overhang").get_float_or_percent();
+    const c_float_or_percent max_overhang_setting = config.get("support_max_overhang").get_float_or_percent();
     const double max_overhang_mm = max_overhang_setting.percent ? max_overhang_setting.value * support_width_mm / 100. : max_overhang_setting.value;
     const double overhang_angle = std::atan2(max_overhang_mm, params.support_min_height);
     angle = std::min(angle_limit, overhang_angle);

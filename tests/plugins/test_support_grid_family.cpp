@@ -478,6 +478,59 @@ TEST_CASE("Grid family layer heights and contact gaps respect object Z", "[plugi
 }
 
 // Publish support above a 0.8-mm platform and check that every bridge bottom contact keeps the requested 0.23-mm gap and printable thickness.
+// A soluble merged body follows object layers, then joins consecutive body slabs up to the support layer height. Contacts and
+// interfaces keep their own slabs, and the first layer stays a single layer.
+TEST_CASE("Grid merged soluble body joins consecutive body layers", "[plugins][support-grid][support-merged]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    DynamicPrintConfig config = SG::config("grid_merged", true);
+    config.set_deserialize_strict({{"layer_height", "0.1"}, {"first_layer_height", "0.1"},
+        {"support_material_layer_height", "0.2"}, {"support_material_interface_layer_height", "0.1"},
+        {"support_material_synchronize_layers", "0"}, {"support_max_overhang", "0.5"}});
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, SG::slab(false), std::vector<coordf_t>{0., 0.1, 5., 0.1}, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.style == Common::SupportStyle::GridMerged);
+    REQUIRE(params.soluble);
+    const SG::Generated generated(print, object);
+    REQUIRE_FALSE(generated.support.base.empty());
+
+    bool merged_body = false;
+    bool first_layer = false;
+    for (const Common::GeneratorLayer *slab : generated.support.base) {
+        INFO("base slab z=" << unscaled(slab->print_z) << " bottom=" << unscaled(slab->bottom_print_z())
+             << " height=" << unscaled(slab->height));
+        CHECK(slab->height <= scale_to_layer_coord(0.2) + 1);
+        if (slab->height == scale_to_layer_coord(0.2))
+            merged_body = true;
+        if (slab->bottom_print_z() == 0)
+            first_layer = slab->height == scale_to_layer_coord(0.1);
+    }
+    CHECK(merged_body);
+    CHECK(first_layer);
+    // The real family dispatch must publish the merged slabs and select the sparse toolpath for the new style.
+    SG::family(print);
+    SG::toolpaths(print);
+}
+
+// The merged style promises soluble contacts; a non-soluble object with demand must fail instead of falling back to grid.
+TEST_CASE("Grid merged refuses non-soluble support", "[plugins][support-grid][support-merged]")
+{
+    DynamicPrintConfig config = SG::config("grid_merged", false);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, SG::slab(false), std::vector<coordf_t>{0., 0.1, 5., 0.1}, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    CHECK_THROWS_WITH(SG::Generated(print, object),
+                      "Grid merged support needs support_material_contact_distance_type 'none'.");
+}
+
 TEST_CASE("Synchronized grid bottom contacts retain separation above the object", "[plugins][support-grid]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
