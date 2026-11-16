@@ -44,7 +44,8 @@
    subtracting the upper layer finds exposed tops including their perimeter
    strips. Typed fill surfaces live in island work regions and supply bridge
    footprints. height_block is the downward Z span used for object collisions,
-   independently of printable height.
+   independently of printable height; the XY clearance of trim_by_object()
+   covers at least the printed height, so every slab keeps gap_xy.
 
    The object is read through the data-tree views and every polygon set is a
    StoredPolygonCollection in the run's storage. Clipper operations take
@@ -409,7 +410,10 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
     for (Common::GeneratorLayer *support : layers) {
         if (support->polygons.empty()) continue;
         ExPolys trimming(run.storage);
-        const coord_t lower = support->print_z - support->height_block - scale_to_layer_coord(p.gap_below);
+        // gap_xy applies to every support slab: a top contact, whose collision span is zero, still keeps it from the object
+        // layers beside its own printed height.
+        const coord_t span = std::max(support->height_block, support->height);
+        const coord_t lower = support->print_z - span - scale_to_layer_coord(p.gap_below);
         // Layer views remain in print-Z order; upper_bound matches the strict print_z > lower window start.
         const std::vector<Layer>::const_iterator first = std::upper_bound(run.layers.begin(), run.layers.end(), lower,
             [](coord_t z, const Layer &layer) { return z < layer.print_z(); });

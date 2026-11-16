@@ -2892,8 +2892,10 @@ void PrintObjectSupportMaterial::trim_auxiliary_layers_by_object(
                 SupportGeneratorLayer &support_layer = *nonempty_layers[idx_layer];
                 // BOOST_LOG_TRIVIAL(trace) << "Support generator - trim_auxiliary_layers_by_object - trimmming non-empty layer " << idx_layer << " of " << nonempty_layers.size();
                 assert(! support_layer.polygons.empty() && support_layer.scaled_print_z() > scale_to_layer_coord(m_slicing_params->raft_contact_top_z));
-                // Find the overlapping object layers including the extra above / below gap.
-                const coord_t z_threshold = support_layer.scaled_print_z() - support_layer.scaled_height_block() - gap_extra_below;
+                // Find the overlapping object layers including the extra above / below gap. gap_xy applies to every support layer:
+                // a top contact, whose collision span is zero, still keeps it from the object layers beside its printed height.
+                const coord_t z_threshold = support_layer.scaled_print_z() -
+                    std::max(support_layer.scaled_height_block(), support_layer.scaled_height()) - gap_extra_below;
                 idx_object_layer_overlapping = idx_higher_or_equal(
                     object.layers().begin(), object.layers().end(), idx_object_layer_overlapping,
                     [z_threshold](const Layer &layer){ return layer.scaled_print_z() > z_threshold; });

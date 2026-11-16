@@ -539,6 +539,39 @@ TEST_CASE("Grid family layer heights and contact gaps respect object Z", "[plugi
     if (sync) CHECK(synchronized_base);
 }
 
+// A soluble top contact is printed beside the top layer of the post; it must keep gap_xy from that layer like every other slab,
+// not only the smaller overhang margin used when the contact is detected.
+TEST_CASE("Grid top contacts keep the XY gap from the object layer beside them", "[plugins][support-grid]")
+{
+    const bool soluble = GENERATE(false, true);
+    DynamicPrintConfig config = SG::config("grid", soluble);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "0.5"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const SG::Generated generated(print, object);
+    const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.gap_xy == scale_i(0.5));
+    size_t checked = 0;
+    for (const slic3r_api::Support::Common::GeneratorLayer *contact : generated.support.top) {
+        const Polygons &polygons = SG::native(contact->polygons);
+        if (polygons.empty()) continue;
+        for (const Layer &layer : object.layers()) {
+            // Object layers overlapping the printed height of the contact.
+            if (layer.scaled_print_z() <= contact->print_z - contact->height || layer.scaled_bottom_z() >= contact->print_z) continue;
+            INFO("contact z=" << unscaled(contact->print_z) << " object z=" << layer.unscaled_print_z());
+            // Round joins measure the true distance; the production square joins keep at least as much.
+            const Polygons inside = intersection(polygons, offset(layer.lslices(), double(params.gap_xy - SCALED_EPSILON), ClipperLib::jtRound, scale_d(0.01)));
+            INFO("area inside the gap: " << unscaled(unscaled(area(inside))) << " mm2");
+            CHECK(inside.empty());
+            ++checked;
+        }
+    }
+    CHECK(checked > 0);
+}
+
 // Publish support above a 0.8-mm platform and check that every bridge bottom contact keeps the requested 0.23-mm gap and printable thickness.
 // A soluble merged body follows object layers, then joins consecutive body slabs up to the support layer height. Contacts and
 // interfaces keep their own slabs, and the first layer stays a single layer.
