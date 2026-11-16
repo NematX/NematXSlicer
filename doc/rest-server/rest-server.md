@@ -1430,9 +1430,10 @@ IDs return `422 invalid_arrange` or `422 invalid_orient`.
 
 - `POST .../arrange` accepts optional `distance`, `distance_from_bed`,
   `rotations`, `alignment`, `geometry`, and `strategy`. The distance defaults to
-  `duplicate_distance` plus the sequential-printing nozzle clearance, or 6 mm
-  when `duplicate_distance` is zero. `distance` must be finite and at least the
-  clearance when sequential printing is enabled; otherwise its minimum is 0.
+  `duplicate_distance` plus the preferred object spacing, or 6 mm
+  when `duplicate_distance` is zero. In By object, the preferred spacing includes
+  nozzle clearance; it is not a mandatory minimum. An explicit `distance` may be
+  smaller and must be finite and non-negative.
   `distance_from_bed` must be finite and non-negative. Both distances must also
   fit safely in the engine's scaled-coordinate representation; a finite value
   outside that representable range returns `422 invalid_arrange`.
@@ -1778,9 +1779,10 @@ the API is always accepted again on the same scene), `mode_tool_change`,
 `extruder_range`, `invalid_color`, `empty_message`, `empty_gcode`, or
 `duplicate_z` (two items fall at the same rounded `z`; `item` is the later
 one). `z` is bounded by the scene height and must stay below 10000 mm once rounded; a scene
-top of 10000 mm or more refuses every item. With sequential printing (`complete_objects`) a
-non-empty list is refused with no `details`; an empty list is always accepted. The
-stored list is sorted by `z`.
+top of 10000 mm or more refuses every item. By object accepts height G-codes too:
+their heights split the plate's work into bands, and each eligible event is emitted once
+at the first printing-plan layer at or above its height. An empty list is always
+accepted. The stored list is sorted by `z`.
 
 **Warnings.** Accepted values that need attention are reported by both routes in
 `warnings`, each `{"item": i, "reason": r}` or a bare `{"reason": r}`:
@@ -1791,9 +1793,8 @@ an empty value is accepted). This warning still uses the legacy writer's
 defaults, not `gcode_firmware_plugin`, so it can disagree with the selected
 firmware's actual fallback. It does not suppress an item or change the output.
 Other warnings are
-`above_objects` (the scene changed and now ends below the item),
-`sequential_print` (sequential printing was enabled after the list was set;
-the engine ignores it), and `mode_mismatch` (the list holds a color or tool change
+`above_objects` (the scene changed and now ends below the item), and
+`mode_mismatch` (the list holds a color or tool change
 and its stored mode and the current mode differ on whether the print is
 `multi_extruder`: this is exactly when the engine ignores the color and tool
 changes of the list).

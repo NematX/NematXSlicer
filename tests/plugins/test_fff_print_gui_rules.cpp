@@ -108,8 +108,9 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     const bool notch = P && (fl("seam_notch_all") != 0 || fl("seam_notch_inner") != 0 || fl("seam_notch_outer") != 0);
 
 
-    const bool seq = b("complete_objects") || fl("parallel_objects_step") > 0;
-    const bool parallel_ok = !b("complete_objects") && fl("parallel_objects_step") > 0;
+    const bool seq = config.opt_serialize("print_plan_builder") == "ordering.plan_builder.by_object";
+    const bool whole = seq && fl("complete_objects_step") == 0.;
+    const bool parallel_ok = seq && fl("complete_objects_step") != 0.;
     const bool own_tower = b("wipe_tower_per_object");
     const bool have_wipe = !spiral;
     const bool wipe_ready = have_wipe && (b("wipe_tower") || own_tower);
@@ -323,17 +324,18 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     set("first_layer_infill_extrusion_spacing", en("first_layer_infill_extrusion_width"));
 
     set("complete_objects_sort", seq);
-    set("parallel_objects_step", !b("complete_objects"));
-    set("parallel_objects_step_max_z", parallel_ok);
-    set("parallel_islands", parallel_ok);
+    set("complete_objects_step", seq);
+    set("complete_objects_step_max_z", seq);
+    set("complete_islands", seq);
+    set("complete_objects_one_first_layer", seq);
     set("standby_temperature_delta", b("ooze_prevention"));
     set("wipe_tower", have_wipe);
     set("wipe_tower_per_object", !spiral);
-    set("wipe_tower_object_x", wipe_ready && (b("complete_objects") || own_tower));
-    set("wipe_tower_object_y", wipe_ready && (b("complete_objects") || own_tower));
+    set("wipe_tower_object_x", wipe_ready && (whole || own_tower));
+    set("wipe_tower_object_y", wipe_ready && (whole || own_tower));
     set("wipe_tower_extruder_toolchange", wipe_ready && i("wipe_tower_extruder") != 0);
-    set("wipe_tower_x", have_wipe && b("wipe_tower") && !b("complete_objects"));
-    set("wipe_tower_y", have_wipe && b("wipe_tower") && !b("complete_objects"));
+    set("wipe_tower_x", have_wipe && b("wipe_tower") && !whole);
+    set("wipe_tower_y", have_wipe && b("wipe_tower") && !whole);
     const char *const wipe_keys[] = {
         "wipe_tower_width", "wipe_tower_rotation_angle",
         "wipe_tower_brim_width", "wipe_tower_cone_angle", "wipe_tower_extra_spacing",
@@ -376,7 +378,7 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
 EnabledMap rule_enabled(const Orchestrator &orchestrator, const DynamicPrintConfig &config)
 {
     EnabledMap out;
-    const char *const owners[] = { core_gui_rules_owner, infill_gui_rules_owner };
+    const char *const owners[] = { core_gui_rules_owner, infill_gui_rules_owner, "ordering.plan_builder.by_object" };
     for (const char *owner : owners) {
         for (const Orchestrator::GuiRuleApplication &application :
              orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1, owner))
@@ -410,7 +412,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     config.option<ConfigOptionFloat>("solid_infill_below_area")->value = coin(rng) ? 5.0 : 0.0;
     config.option<ConfigOptionFloatOrPercent>("small_perimeter_speed")->value = coin(rng) ? 10.0 : 0.0;
     config.option<ConfigOptionFloat>("max_volumetric_speed")->value = coin(rng) ? 5.0 : 0.0;
-    config.option<ConfigOptionFloat>("parallel_objects_step")->value = coin(rng) ? 1.0 : 0.0;
+    config.option<ConfigOptionFloat>("complete_objects_step")->value = coin(rng) ? 1.0 : 0.0;
     config.option<ConfigOptionInt>("wipe_tower_extruder")->value = small(rng);
     for (const char *key : { "first_layer_extrusion_width", "external_perimeter_extrusion_width",
                              "perimeter_extrusion_width", "infill_extrusion_width",
@@ -425,7 +427,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     for (const char *key : { "spiral_vase", "external_perimeters_first", "perimeter_loop",
                              "overhangs", "perimeter_reverse", "thin_walls", "only_one_perimeter_top",
                              "support_material", "support_material_auto", "ooze_prevention",
-                              "complete_objects", "wipe_tower", "wipe_tower_per_object", "parallel_islands", "avoid_crossing_perimeters",
+                               "wipe_tower", "wipe_tower_per_object", "complete_islands", "complete_objects_one_first_layer", "avoid_crossing_perimeters",
                              "avoid_crossing_curled_overhangs", "avoid_travel_island",
                              "milling_post_process", "infill_dense", "gap_fill_enabled",
                              "infill_filled_bottom", "infill_filled_solid", "infill_filled_top",
@@ -446,6 +448,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     set_enum("raft_contact_distance_type", coin(rng) ? int(zdNone) : int(zdFilament));
     set_enum("seam_position", coin(rng) ? int(spCost) : int(spAligned));
     config.set_deserialize_strict("top_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
+    config.set_deserialize_strict("print_plan_builder", coin(rng) ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
     config.set_deserialize_strict("bottom_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
     // solid_fill_pattern is a plugin-defined enum storing plugin ids.
     config.set_deserialize_strict("solid_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
@@ -632,10 +635,10 @@ TEST_CASE("Core tower rules distinguish global and instance controls", "[plugins
         const bool contour_tool = (state & 32) != 0;
         config.option<ConfigOptionBool>("wipe_tower")->value = enabled;
         config.option<ConfigOptionBool>("wipe_tower_per_object")->value = own;
-        config.option<ConfigOptionBool>("complete_objects")->value = sequential;
+        config.set_deserialize_strict("print_plan_builder", sequential ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
         config.option<ConfigOptionBool>("spiral_vase")->value = vase;
-        config.option<ConfigOptionBool>("parallel_islands")->value = false;
-        config.option<ConfigOptionFloat>("parallel_objects_step")->value = parallel ? 5. : 0.;
+        config.option<ConfigOptionBool>("complete_islands")->value = false;
+        config.option<ConfigOptionFloat>("complete_objects_step")->value = parallel ? 5. : 0.;
         config.option<ConfigOptionInt>("wipe_tower_extruder")->value = contour_tool ? 2 : 0;
         const EnabledMap actual = rule_enabled(orchestrator, config);
         const EnabledMap expected = reference_enabled(config);
@@ -644,12 +647,34 @@ TEST_CASE("Core tower rules distinguish global and instance controls", "[plugins
         CHECK(actual.at("wipe_tower_per_object") == !vase);
         const bool possible = !vase;
         CHECK(actual.at("wipe_tower") == possible);
-        CHECK(actual.at("wipe_tower_object_x") == (possible && (enabled || own) && (sequential || own)));
+        CHECK(actual.at("wipe_tower_object_x") == (possible && (enabled || own) && ((sequential && !parallel) || own)));
         CHECK(actual.at("wipe_tower_object_y") == actual.at("wipe_tower_object_x"));
-        CHECK(actual.at("wipe_tower_x") == (possible && enabled && !sequential));
+        CHECK(actual.at("wipe_tower_x") == (possible && enabled && (!sequential || parallel)));
         CHECK(actual.at("wipe_tower_y") == actual.at("wipe_tower_x"));
         CHECK(actual.at("wipe_tower_extruder_toolchange") == (possible && (enabled || own) && contour_tool));
     }
+}
+
+// A height step forces the skirt global regardless of the island-unit setting.
+TEST_CASE("One skirt option is editable only for zero-step By object printing", "[plugins][gui-rules][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &orchestrator = Orchestrator::instance();
+    for (const bool object_mode : {false, true})
+        for (const double step : {0., 0.5})
+            for (const bool islands : {false, true}) {
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                config.set_deserialize_strict({{"print_plan_builder", object_mode ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
+                    {"complete_objects_step", std::to_string(step)}, {"complete_islands", islands ? "1" : "0"}});
+                bool found = false;
+                for (const Orchestrator::GuiRuleApplication &application :
+                        orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1, "skirt_brim.skirt.default"))
+                    if (application.target_key == "complete_objects_one_skirt") {
+                        found = true;
+                        CHECK(application.enabled == (object_mode && step == 0.));
+                    }
+                REQUIRE(found);
+            }
 }
 
 TEST_CASE("GUI rules preserve clauses, scope and owner", "[plugins][gui-rules][abi]")

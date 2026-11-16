@@ -7,15 +7,57 @@
 #include <libslic3r/ModelArrange.hpp>
 #include <libslic3r/Print.hpp>
 #include <libslic3r/Point.hpp>
+#include <libslic3r/Plugins/Ordering/DefaultOrdering.hpp>
+#include <libslic3r/Plugins/PluginLoader.hpp>
 #include <cstdlib>
 #include <string>
 #include <fstream>
 #include <cstdio>
+#include <stdexcept>
+
+/*
+Supplies generated meshes and print preparation to standalone core tests.
+initialize_plan_builders() initializes setting definitions before plugins inspect
+their used keys, then finalizes the selector and typed configuration defaults.
+Models and returned meshes belong to callers; registered providers live in the
+process orchestrator.
+    initialize_plan_builders() -> prepare definitions, register and activate builders
+        initialize_plugins() -> validate used keys against the definitions
+        finalize_plugin_option_defs() -> publish the selector
+*/
 
 using namespace std::string_literals;
 using namespace std;
 
 namespace Slic3r { namespace Test {
+
+// Initialize definitions before the borrowed singleton's providers and cache their
+// defaults once. Missing builders or initialization failures throw; no model is changed.
+void initialize_plan_builders();
+
+void initialize_plan_builders()
+{
+    static const bool initialized = [] {
+        PrintConfigDef::instance_mutable().init_common_params();
+        init_fff_params(PrintConfigDef::instance_mutable());
+        Orchestrator &host = Orchestrator::instance();
+        orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+        slic3r_api::Ordering::DefaultOrderingPlugin::register_by_layer_plan_builder_plugin(handle);
+        slic3r_api::Ordering::DefaultOrderingPlugin::register_by_object_plan_builder_plugin(handle);
+        host.set_plugin_active("ordering.plan_builder.by_layer", true);
+        host.set_plugin_active("ordering.plan_builder.by_object", true);
+        register_exclusive_step_group_options(host);
+        host.initialize_plugins();
+        host.finalize_plugin_option_defs();
+        for (const char *id : {"ordering.plan_builder.by_layer", "ordering.plan_builder.by_object"})
+            if (host.get_plugin(id) == nullptr || !host.is_plugin_active(host.get_plugin(id)))
+                throw std::runtime_error("The standalone print tests require both plan builders.");
+        initialize_fff_print_config_cache();
+        PrintConfigDef::instance_mutable().finalize();
+        return true;
+    }();
+    (void) initialized;
+}
 
 // Mesh enumeration to name mapping
 const std::unordered_map<TestMesh, const std::string, TestMeshHash> mesh_names {

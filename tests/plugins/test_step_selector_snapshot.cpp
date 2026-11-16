@@ -351,6 +351,12 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
           "[plugins][step-pipeline][selector-snapshot]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ConfigOptionDef *builder = PrintConfigDef::instance().get("print_plan_builder");
+    REQUIRE(builder != nullptr);
+    REQUIRE(builder->default_value.get() != nullptr);
+    CHECK(builder->default_value->serialize() == "ordering.plan_builder.by_layer");
+    CHECK(builder->mode == (comSimpleAE | comPrusa));
+    CHECK(builder->invalidates_step == STEP_SKIRT_BRIM);
     Orchestrator &host = Orchestrator::instance();
     const slicing_step_t dynamic_step = host.register_step("slic3r.test.selector_snapshot", STEP_INFILL);
     REQUIRE(dynamic_step != STEP_NONE);
@@ -427,7 +433,7 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
     const std::pair<slicing_step_t, const char *> real_groups[] = {
         {SEAM_PLACER, "seam_placer_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
         {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {STEP_EXPORT, "gcode_exporter_plugin"},
-        {STEP_ORDERING, "ordering.extrusion_tree"},
+        {STEP_ORDERING, "ordering.extrusion_tree"}, {STEP_ORDERING, "ordering.plan_builder"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_sparse"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_contact"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_contact"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_interface"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface"}
@@ -497,6 +503,10 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         return;
     }
 const char *const k_expected[] = {
+    "def|print_plan_builder|label=Print sequence|tooltip=Chooses whether the print is built layer by layer or object by object.|type=9|container=1|preset=1|category=11|invalidates=800|mode=15|gui=0|plugin_ids=1|technology=1|default=ordering.plan_builder.by_layer|values=ordering.plan_builder.by_layer,ordering.plan_builder.by_object",
+    "group|1500|real|ordering.plan_builder|key=print_plan_builder|label=Print sequence|tooltip=Chooses whether the print is built layer by layer or object by object.|type=8|container=1|preset=1|category=11|invalidates=800|mode=15|gui=7|plugin_ids=1|technology=1|default=ordering.plan_builder.by_layer|values=ordering.plan_builder.by_layer,ordering.plan_builder.by_object|ui=page:Output options\\ngroup:Sequential printing\\nline:\\nsetting:print_plan_builder\\nend_line\\n",
+    "group|1500|runtime|ordering.plan_builder|key=print_plan_builder|label=Print sequence|tooltip=Chooses whether the print is built layer by layer or object by object.|type=8|container=1|preset=1|category=11|invalidates=800|mode=15|gui=7|plugin_ids=1|technology=1|default=ordering.plan_builder.by_layer|values=ordering.plan_builder.by_layer,ordering.plan_builder.by_object|ui=page:Output options\\ngroup:Sequential printing\\nline:\\nsetting:print_plan_builder\\nend_line\\n",
+    "ui|print_plan_builder|print.ui|ordering.plan_builder|priority=0|page:Output options\\ngroup:Sequential printing\\nline:\\nsetting:print_plan_builder\\nend_line\\n",
     "def|bridge_volume_compensation|label=Bridge volume model|tooltip=Selects the active plugin used to adjust bridge volume. The surface model estimates room from lower surfaces and infill density; the experimental model uses actual extrusion footprints.|type=9|container=1|preset=1|category=3|invalidates=1400|mode=22|gui=0|plugin_ids=1|technology=1|default=bridge.finalize_surface_volume|values=bridge.finalize_surface_volume,bridge.finalize_volume",
     "def|exclusive_group_1650_layer_extrusion_edit_travel_plugin|label=Travel generation|tooltip=Selects how discontinuities between ordered extrusion leaves become travels.|type=9|container=1|preset=1|category=2|invalidates=1650|mode=22|gui=0|plugin_ids=1|technology=1|default=layer_extrusion_edit.travel.avoid_crossing_perimeters|values=layer_extrusion_edit.travel.avoid_crossing_perimeters,layer_extrusion_edit.travel.default",
     "ui|exclusive_group_1650_layer_extrusion_edit_travel_plugin|print.ui|layer_extrusion_edit.travel|priority=0|page:Notes\\ngroup:Exclusive step plugins\\nline:\\nsetting:exclusive_group_1650_layer_extrusion_edit_travel_plugin\\nend_line\\n",
@@ -586,7 +596,7 @@ const char *const k_expected[] = {
     "select|ordering_active_3_group|ordering.extrusion_tree.advanced",
     "select|ordering_active_3_step|ordering.extrusion_tree.advanced",
     "select|ordering_runtime_group|ordering.extrusion_tree.default",
-    "select|ordering_runtime_step|ordering.plan_builder.default,ordering.object_instance_catalog,ordering.custom_gcode_tool_overrides,ordering.tool_groups.default,ordering.custom_gcode_event_tools,ordering.printing_extrusion.presort.default,ordering.extrusion_tree.default,ordering.wipe_into_first.default",
+    "select|ordering_runtime_step|ordering.plan_builder.by_layer,ordering.object_instance_catalog,ordering.custom_gcode_tool_overrides,ordering.tool_groups.default,ordering.custom_gcode_event_tools,ordering.printing_extrusion.presort.default,ordering.extrusion_tree.default,ordering.wipe_into_first.default",
     "select|probe_unknown_absent_group|test.snapshot.selector.low",
     "select|probe_unknown_absent_step|test.snapshot.selector.low",
     "select|probe_unknown_group|test.snapshot.selector.low",

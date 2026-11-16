@@ -383,7 +383,7 @@ TEST_CASE("The objects layer count and the total layer count are kept apart",
     CAPTURE(complete_objects);
     ScopedDirectory directory;
     DynamicPrintConfig config = statistics_config(1);
-    config.set_deserialize_strict({{"complete_objects", complete_objects ? "1" : "0"}, {"skirts", "1"},
+    config.set_deserialize_strict({{"print_plan_builder", complete_objects ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}, {"skirts", "1"},
                                    {"skirt_height", "1"}, {"skirt_distance", "6"}, {"complete_objects_one_skirt", "1"}, {"brim_width", "0"}});
     Print print;
     Model model;

@@ -33,7 +33,7 @@ The normal execution flow is:
 
     run_impl()
     |-- read the marker table and the effective printing-plan mode
-    |-- map marker rows to their target printing-plan layer groups
+    |-- map each marker once to its first qualifying layer across the entire plan
     |-- choose the first tool group's event scope, or the layer scope when no
     |   tool group exists
     |-- convert each marker:
@@ -340,6 +340,9 @@ private:
         initialize_custom_gcode_per_print_z_settings(m_orchestrator);
     }
 
+    // Append each mapped row to its target layer's first-tool before events, or
+    // layer before events when no tool exists. The plan owns cloned scripts;
+    // invalid records, missing color tools, cancellation and API failures propagate.
     void run_impl(const plugin_run_context *run_context) const override
     {
         throw_if_cancelled(run_context);
@@ -362,12 +365,13 @@ private:
         const Slic3r::CustomGCode::Mode record_mode = effective_record_mode(table);
         std::vector<bool> mapped_rows(table.rows.size(), false);
         std::optional<extruder_index_t> last_tool;
+        const CustomGCodePlanRows mapped = rows_by_plan(table, plan);
 
         for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
             if ((group_idx & 63u) == 0)
                 throw_if_cancelled(run_context);
             PrintingGroup group = plan.group(group_idx);
-            const std::vector<std::vector<const CustomGCodeRow *>> layer_rows = rows_by_layer(table, group);
+            const std::vector<std::vector<const CustomGCodeRow *>> &layer_rows = mapped[group_idx];
             for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
                 if ((layer_idx & 63u) == 0)
                     throw_if_cancelled(run_context);

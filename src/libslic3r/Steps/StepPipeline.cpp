@@ -376,7 +376,7 @@ StepSelectorTraits selector_traits_of(const Orchestrator &orchestrator, slicing_
 slicing_step_t selector_invalidation_step(const Orchestrator &orchestrator, slicing_step_t step, const StepSelectorTraits &traits);
 // Build UI layout text from the group's placement and line label, using Notes when no placement is declared.
 std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std::string &line_label);
-// Build a selector description; its raw option pointers refer to its own strings and need refreshing after moves.
+// Build a selector with declared visibility or Advanced/Expert and SuperSlicer flags; raw pointers borrow its strings and need refreshing after moves.
 StepExclusiveGroup make_exclusive_group(slicing_step_t step, const std::string &group_id, const std::string &key,
                                        const std::string &label, const std::string &line_label, const std::string &tooltip,
                                        StepSelectorTraits traits, slicing_step_t invalidates_step);
@@ -542,7 +542,7 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
     def.category = group.traits.category;
     // Use the caller's resolved invalidation step so all selector descriptions follow the same rules.
     def.invalidates_step = invalidates_step;
-    def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
+    def.mode = group.traits.mode.value_or(RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI);
     group.option_def = def;
 
     group.ui_fragment = plugin_group_ui_fragment(group, line_label);

@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationOverBridgeDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// bridge and above-bridge calibration samples using whole-object printing.
 
 namespace Slic3r { 
 namespace GUI {
@@ -22,6 +24,7 @@ protected:
     void create_buttons(wxStdDialogButtonSizer* sizer) override;
     void create_geometry1(wxCommandEvent& event_args);
     void create_geometry2(wxCommandEvent& event_args);
+    // Create whole-object samples for bridge flow or the material above bridges.
     void create_geometry(bool over_bridge);
 
 };

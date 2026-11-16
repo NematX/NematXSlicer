@@ -15,13 +15,16 @@ pass contract and the prerequisites on transition scopes.
 */
 
 #include "CreateRetractionLift.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -49,6 +52,17 @@ all outgoing wipe leaves and publishes one scalar description of the layer's fin
 scope. After the host barrier, run() streams local scope pairs and shapes each
 target travel. Only the first scope of a layer may consume the preceding
 layer's scalar summary.
+When lift_min is enabled, setup caches region-to-parent-island identities once
+per referenced source layer. Both parallel passes only read this borrowed map;
+the source layers outlive the passes. With lift_min zero no identity is resolved.
+Each description keeps the copy and source island identities. Leaving an island
+enables the absolute lift_min floor. When either endpoint has no source island,
+the floor applies only to travels at least ten nozzle diameters long. Ordinary
+lift is relative to the path; the floor and printer ceiling constrain the final
+absolute heights, with vertical moves at the ends preserving the print heights.
+Setup also records the maximum plan-layer Z preceding every layer, including
+auxiliary and tower layers. The first travel from a different group uses that
+maximum plus tool lift as a floor, bypassing ordinary lift filters and ramping.
 
     setup_run_impl: raise each scope's outgoing wipe and publish its final Z
         prepare_scope_wipe_lift: measure all wipe leaves before computing the ramp
@@ -70,6 +84,7 @@ void register_create_retraction_lift_plugin(orchestrator_handle *orchestrator);
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
+using IslandParents = std::map<const layer_region_island_handle *, const layer_island_handle *>;
 namespace TP = TravelPhase;
 using TP::segment_planar_length;
 
@@ -137,6 +152,7 @@ struct SourceEndpoint
 /* Scalar source facts needed after the owning layer is no longer accessible. */
 struct SourceLiftState
 {
+    uint32_t group_idx = uint32_t(-1);
     bool valid = false;
     bool outgoing_transition = false;
     bool outgoing_toolchange = false;
@@ -144,6 +160,8 @@ struct SourceLiftState
     bool disable_lift = false;
     bool source_is_top = false;
     extruder_index_t extruder_id = EXTRUDER_ID_UNKNOWN;
+    uint32_t printing_catalog_id = uint32_t(-1);
+    const layer_island_handle *island = nullptr;
     double requested_lift_mm = 0.0;
     coord_t unlifted_end_z = 0;
     coord_t lifted_end_z = 0;
@@ -179,9 +197,10 @@ private:
     /*
     Prepare the shared indexing used by the two per-layer passes.
 
-    This method runs once and must stay inexpensive: it assigns one stable
-    summary slot to every PrintingLayerGroup, but does not inspect or modify
-    extrusion trees.
+    Assign one summary slot per PrintingLayerGroup and, only with lift_min enabled,
+    cache each referenced source layer's region-to-parent-island map once.
+    Record the preceding maximum plan-layer Z for group-entry clearance.
+    Source layers are borrowed and no extrusion tree is inspected or modified.
     */
     void setup_impl(const plugin_run_context *run_ctx,
                     uint32_t run_count) const override;
@@ -217,6 +236,9 @@ private:
     mutable bool m_setup_valid = false;
     mutable std::vector<std::vector<size_t>> m_flat_indices;
     mutable std::vector<LayerLiftSummary> m_layers;
+    mutable SourceLayerIndices m_source_indices;
+    mutable IslandParents m_island_parents;
+    mutable std::vector<double> m_previous_max_z;
 };
 
 /* Add scaled Z values and reject overflow before editing geometry. */
@@ -259,11 +281,21 @@ double source_lift(const ScopeEntity &source,
                    const Config &print_config,
                    const plugin_run_context *run_ctx);
 
-/* Describe one outgoing scope without retaining owner or entity handles. */
+// Return the borrowed parent island identity, or null without a source island.
+// Read only the setup cache for parent membership; a missing region maps to no island.
+// Skirt/brim source groups store auxiliary contours, not the object's physical islands.
+// Their printable leaf role identifies them even when the source bucket uses a perimeter role.
+const layer_island_handle *source_island(const ScopeEntity &scope,
+    const IslandParents &parents,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &key, const plugin_run_context *run_ctx);
+
+/* Describe one outgoing scope, retaining only scalar facts and a borrowed island
+   identity; sliced layers outlive both passes and the identity is never dereferenced. */
 SourceLiftState describe_source(
     const ScopeEntity &source,
     const PrintingPlan &plan,
     const Config &print_config,
+    const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx);
 
@@ -296,8 +328,9 @@ size_t split_travel_at(std::vector<TP::TravelLeaf> &leaves, distf_t distance,
 void apply_lift_profile(const std::vector<TP::TravelLeaf> &leaves, const LiftProfile &profile,
                         const plugin_run_context *run_ctx);
 
-/* Materialize a vertical or ramped lift on the ordered leaves of one reserved travel. */
-void lift_travel(std::vector<TP::TravelLeaf> leaves,
+/* Materialize a vertical or ramped lift and update the borrowed leaf list after splits.
+   Geometry edits or checked height arithmetic may throw; printable content is unchanged. */
+void lift_travel(std::vector<TP::TravelLeaf> &leaves,
                  coord_t lift,
                  coord_t inherited_start_lift,
                  bool ramping,
@@ -339,22 +372,33 @@ coord_t travel_start_z(
 Apply one source scope's lift policy to the following scope's travel.
 
 The function first verifies that the source and target describe the same
-transition. A lift is considered only when the source contains a semantic
-retraction and the target owns a materialized travel. It then applies the
+transition. Ordinary lift requires a semantic retraction; the lift_min floor
+does not. Both require a materialized target travel. Ordinary lift applies the
 source role, modifier, toolchange, layer-height, minimum-travel and printer-Z
 limits, combines the requested lift with any Z already left by a lifted wipe,
 and writes the resulting vertical or ramped profile into target.travel.
 
 The source state and printable content are read-only. Only the target travel
 geometry is modified, and its final Z remains the original destination Z.
+source_layer_index is the minimum rank in the target copies' merged object/auxiliary
+source sequences; only rank zero enables the first-layer override.
+Leaving a source island enables lift_min independently of retraction filters.
+Without islands, travel must span at least ten nozzle diameters. Final absolute
+heights combine the floor and ordinary lift and are capped at max_print_height,
+including vertical entry and exit segments; printing endpoint heights are retained.
+When previous_max_z is supplied, the travel enters a new group: use its maximum
+plus the outgoing tool's lift as a floor regardless of retraction, role, Z-window
+or length filters. The climb is vertical, and the printer ceiling still applies.
 */
 void apply_transition_lift(
     const SourceLiftState &source,
     const ScopeEntity &target,
-    uint32_t layer_group_idx,
+    uint32_t source_layer_index,
     const Config &print_config,
+    const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const plugin_run_context *run_ctx);
+    const plugin_run_context *run_ctx,
+    std::optional<double> previous_max_z = std::nullopt);
 
 coord_t checked_add_z(const coord_t value, const coord_t offset)
 {
@@ -537,10 +581,31 @@ double source_lift(const ScopeEntity &source,
         lookup.value.get_float("print_retract_lift") : printer_lift;
 }
 
+const layer_island_handle *source_island(const ScopeEntity &scope,
+    const IslandParents &parents,
+    const PluginPropertyKey<PrintingExtrusionScopeProperty> &key, const plugin_run_context *run_ctx)
+{
+    const EffectiveState state = traversal_state(scope.effective_properties);
+    const ExtrusionScope::OrderedExtrusionScope ordered(scope.entity, key);
+    MutableExtrusionEntity content = ordered.content();
+    SourceEndpoint endpoint;
+    const bool has_endpoint = find_last_printable_geometry(content, scope.layer_group.print_z(),
+        state, endpoint, content.handle() == scope.entity.handle(), run_ctx);
+    if (RAW_EXTRUSION_ROLE_IS_SKIRT(scope.printing_extrusion.role()) ||
+        (has_endpoint && RAW_EXTRUSION_ROLE_IS_SKIRT(endpoint.role)))
+        return nullptr;
+    const LayerRegionIsland region = scope.printing_extrusion.region_island();
+    if (!region.valid())
+        return nullptr;
+    const IslandParents::const_iterator parent = parents.find(region.handle());
+    return parent == parents.end() ? nullptr : parent->second;
+}
+
 SourceLiftState describe_source(
     const ScopeEntity &source,
     const PrintingPlan &plan,
     const Config &print_config,
+    const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
     const plugin_run_context *run_ctx)
 {
@@ -551,6 +616,9 @@ SourceLiftState describe_source(
     result.outgoing_transition = scope.has_outgoing_transition();
     result.outgoing_toolchange = scope.has_outgoing_toolchange();
     result.extruder_id = source.tool_group.extruder_id();
+    result.printing_catalog_id = source.printing_extrusion.printing_catalog_id();
+    if (print_config.float_or_default("lift_min", 0.0) > 0.0)
+        result.island = source_island(source, parents, key, run_ctx);
     if (!result.outgoing_transition)
         return result;
 
@@ -673,7 +741,7 @@ void apply_lift_profile(const std::vector<TP::TravelLeaf> &leaves,
 }
 
 void lift_travel(
-    std::vector<TP::TravelLeaf> leaves,
+    std::vector<TP::TravelLeaf> &leaves,
     const coord_t lift,
     const coord_t inherited_start_lift,
     const bool ramping,
@@ -890,10 +958,12 @@ coord_t travel_start_z(
 void apply_transition_lift(
     const SourceLiftState &source,
     const ScopeEntity &target,
-    const uint32_t layer_group_idx,
+    const uint32_t source_layer_index,
     const Config &print_config,
+    const IslandParents &parents,
     const PluginPropertyKey<PrintingExtrusionScopeProperty> &key,
-    const plugin_run_context *run_ctx)
+    const plugin_run_context *run_ctx,
+    const std::optional<double> previous_max_z)
 {
     throw_if_cancelled(run_ctx);
     const ExtrusionScope::OrderedExtrusionScope target_scope(target.entity, key);
@@ -907,7 +977,8 @@ void apply_transition_lift(
             "Adjacent scopes disagree about their lift tool change.");
 
     MutableExtrusionEntity travel = target_scope.travel();
-    if (!source.retracted || !travel.valid() ||
+    const double configured_minimum = print_config.float_or_default("lift_min", 0.0);
+    if ((!source.retracted && configured_minimum <= 0.0 && !previous_max_z) || !travel.valid() ||
         (travel.segment_count() == 0 && travel.child_count() == 0))
         return;
 
@@ -916,7 +987,7 @@ void apply_transition_lift(
     const extruder_index_t extruder_id = source.extruder_id == EXTRUDER_ID_UNKNOWN ?
         target.tool_group.extruder_id() : source.extruder_id;
     double lift_mm = source.requested_lift_mm;
-    const bool first_layer_override = layer_group_idx == 0 &&
+    const bool first_layer_override = source_layer_index == 0 &&
         print_config.vector_bool_or_default(
             "retract_lift_first_layer", extruder_id, false);
     const std::string top_policy = print_config.vector_string_or_default(
@@ -948,6 +1019,19 @@ void apply_transition_lift(
         travel_length += leaf.entity.local_length();
     if (unscaled(travel_length) <= minimum_travel)
         lift_mm = 0.0;
+    const layer_island_handle *target_island = configured_minimum > 0.0 ?
+        source_island(target, parents, key, run_ctx) : nullptr;
+    const bool leaves_island = configured_minimum > 0.0 && (source.island && target_island ?
+        source.island != target_island || source.printing_catalog_id != target.printing_extrusion.printing_catalog_id() :
+        unscaled(travel_length) >= 10.0 * print_config.vector_float_or_default("nozzle_diameter", extruder_id, 0.4));
+    double minimum_z = leaves_island ? configured_minimum : 0.0;
+    if (previous_max_z) {
+        // TODO v2: track printed zones per Z and the highest Z crossed by the
+        // travel, expanded by the extruder size, instead of a plate-wide maximum.
+        minimum_z = std::max(configured_minimum, *previous_max_z +
+            print_config.vector_float_or_default("retract_lift", extruder_id, 0.0));
+        lift_mm = 0.0;
+    }
     const double max_print_height = print_config.float_or_default(
         "max_print_height", 0.0);
     if (max_print_height > 0.0)
@@ -958,15 +1042,48 @@ void apply_transition_lift(
 
     const coord_t inherited_start_lift = std::max<coord_t>(
         0, source.lifted_end_z - initial_travel_z);
-    const bool ramping = print_config.vector_bool_or_default(
+    const bool ramping = !previous_max_z && print_config.vector_bool_or_default(
         "travel_ramping_lift", extruder_id, false);
     const double slope = print_config.vector_float_or_default(
         "travel_slope", extruder_id, 0.0);
     if (!std::isfinite(slope))
         throw std::runtime_error("Travel lift slope is not finite.");
     throw_if_cancelled(run_ctx);
-    lift_travel(std::move(leaves), scale_i(lift_mm), inherited_start_lift,
+    lift_travel(leaves, scale_i(lift_mm), inherited_start_lift,
                 ramping, slope, run_ctx);
+    // Bound absolute path heights, not one relative complement shared by unequal Z endpoints.
+    for (size_t i = 0; i < leaves.size(); ++i) {
+        TP::TravelLeaf &leaf = leaves[i];
+        std::vector<c_extrusion_segment> segments = leaf.entity.segments();
+        if (segments.empty()) continue;
+        const c_extrusion_segment original_first = segments.front(), original_last = segments.back();
+        const coord_t base = checked_add_z(target.layer_group.print_z(), leaf.z_offset);
+        for (c_extrusion_segment &segment : segments)
+            for (coord_t *offset : {&segment.z_offset_a, &segment.z_offset_b}) {
+                coord_t z = checked_add_z(base, *offset);
+                if (minimum_z > 0.0) z = std::max(z, scale_i(minimum_z));
+                if (max_print_height > 0.0) z = std::min(z, scale_i(max_print_height));
+                *offset = z - base;
+            }
+        if (i == 0 && segments.front().z_offset_a != original_first.z_offset_a) {
+            c_extrusion_segment climb{};
+            climb.point_a = climb.point_b = original_first.point_a;
+            climb.z_offset_a = max_print_height > 0.0 ?
+                std::min(original_first.z_offset_a, scale_i(max_print_height) - base) : original_first.z_offset_a;
+            climb.z_offset_b = segments.front().z_offset_a;
+            segments.insert(segments.begin(), climb);
+        }
+        if (i + 1 == leaves.size() && segments.back().z_offset_b != original_last.z_offset_b) {
+            c_extrusion_segment descent{};
+            descent.point_a = descent.point_b = original_last.point_b;
+            descent.z_offset_a = segments.back().z_offset_b;
+            descent.z_offset_b = max_print_height > 0.0 ?
+                std::min(original_last.z_offset_b, scale_i(max_print_height) - base) : original_last.z_offset_b;
+            segments.push_back(descent);
+        }
+        if (!leaf.entity.set_segments(segments))
+            throw std::runtime_error("Unable to bound travel heights.");
+    }
 }
 
 CreateRetractionLift &CreateRetractionLift::instance(
@@ -1020,6 +1137,8 @@ int32_t CreateRetractionLift::used_config_keys(
     raw_used_config_key *keys) const noexcept
 {
     static const raw_used_config_key used_keys[] = {
+        {"lift_min", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        {"nozzle_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"retract_lift", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"print_retract_lift", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"retract_lift_above", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -1061,18 +1180,25 @@ void CreateRetractionLift::setup_impl(
     const uint32_t run_count) const
 {
     throw_if_cancelled(run_ctx);
-    // Rebuild only the small group/layer-to-summary mapping. Geometry remains
-    // untouched here so expensive work can stay parallel in the later passes.
+    // Build shared read-only indexes before either parallel pass consumes them.
     m_setup_valid = false;
     m_flat_indices.clear();
     m_layers.clear();
+    m_source_indices.clear();
+    m_island_parents.clear();
+    m_previous_max_z.clear();
     const run_ctx_layer_extrusion_edition *ctx =
         plugin_ctx_as_layer_extrusion_edition(run_ctx);
     if (ctx == nullptr || ctx->plan == nullptr)
         return;
 
     PrintingPlan plan(ctx->plan);
+    if (ctx->print != nullptr)
+        m_source_indices = source_layer_indices(Print(ctx->print), plan);
     size_t flat_idx = 0;
+    double running_max_z = 0.0;
+    const bool index_islands = ctx->print != nullptr && Print(ctx->print).config().float_or_default("lift_min", 0.0) > 0.0;
+    std::set<const layer_handle *> indexed_layers;
     m_flat_indices.resize(plan.group_count());
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
         throw_if_cancelled(run_ctx);
@@ -1082,6 +1208,25 @@ void CreateRetractionLift::setup_impl(
              layer_idx < group.layer_group_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
             m_flat_indices[group_idx][layer_idx] = flat_idx++;
+            m_previous_max_z.push_back(running_max_z);
+            running_max_z = std::max(running_max_z, unscaled(group.layer_group(layer_idx).print_z()));
+            if (index_islands) {
+                const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
+                for (uint32_t t = 0; t < layer.tool_group_count(); ++t) {
+                    const ConstPrintingToolGroup tool = layer.tool_group(t);
+                    for (uint32_t e = 0; e < tool.extrusion_count(); ++e) {
+                        const LayerRegionIsland region = tool.extrusion(e).region_island();
+                        if (!region.valid() || region.region_count() == 0) continue;
+                        const Layer source = region.region(0).layer();
+                        if (!indexed_layers.insert(source.handle()).second) continue;
+                        for (uint32_t i = 0; i < source.island_count(); ++i) {
+                            const LayerIsland island = source.island(i);
+                            for (uint32_t r = 0; r < island.region_island_count(); ++r)
+                                m_island_parents.emplace(island.region_island(r).handle(), island.handle());
+                        }
+                    }
+                }
+            }
         }
     }
     if (flat_idx != run_count)
@@ -1154,12 +1299,13 @@ void CreateRetractionLift::setup_run_impl(
             // summary contains scalar state only; no scope handle escapes.
             if (previous != nullptr && next == nullptr)
                 summary.last = describe_source(
-                    *previous, plan, print_config, m_scope_property, run_ctx);
+                    *previous, plan, print_config, m_island_parents, m_scope_property, run_ctx);
         },
         MatchingEntityDescendants::Skip);
     throw_if_cancelled(run_ctx);
     traversal.process(layer);
     throw_if_cancelled(run_ctx);
+    summary.last.group_idx = ctx->group_idx;
     m_layers[flat_layer_index(ctx->group_idx, ctx->layer_group_idx)] = summary;
     progress().add_max(1);
 }
@@ -1191,7 +1337,8 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
         m_scope_property,
         lift_state_definition(),
         [this, preceding, &print_config, &plan,
-         layer_group_idx = ctx->layer_group_idx, run_ctx]
+         source_index = m_source_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index,
+         group_idx = ctx->group_idx, previous_max_z = m_previous_max_z.at(flat_idx), run_ctx]
         (ScopeEntity *previous, ScopeEntity *next) {
             throw_if_cancelled(run_ctx);
             // The terminal callback has a source but no target travel to edit.
@@ -1203,9 +1350,9 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
             // reserved travel phase which enters `next`.
             if (previous != nullptr) {
                 const SourceLiftState source = describe_source(
-                    *previous, plan, print_config, m_scope_property, run_ctx);
+                    *previous, plan, print_config, m_island_parents, m_scope_property, run_ctx);
                 apply_transition_lift(
-                    source, *next, layer_group_idx, print_config,
+                    source, *next, source_index, print_config, m_island_parents,
                     m_scope_property, run_ctx);
                 return;
             }
@@ -1215,8 +1362,9 @@ void CreateRetractionLift::run_impl(const plugin_run_context *run_ctx) const
             // its final scope as the source for this inter-layer transition.
             if (preceding != nullptr) {
                 apply_transition_lift(
-                    *preceding, *next, layer_group_idx, print_config,
-                    m_scope_property, run_ctx);
+                    *preceding, *next, source_index, print_config, m_island_parents,
+                    m_scope_property, run_ctx, preceding->group_idx != group_idx ?
+                        std::optional<double>(previous_max_z) : std::nullopt);
             }
         },
         MatchingEntityDescendants::Skip);

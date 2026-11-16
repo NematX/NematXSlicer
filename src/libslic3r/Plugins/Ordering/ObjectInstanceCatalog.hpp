@@ -23,7 +23,13 @@ Physical instances keep their source Object and local instance index. Synthetic
 entries, used by work that has no physical source instance, keep only a copied
 name and projected outline. The plan owns the copied metadata; source views are
 borrowed only for the duration of this call.
+Physical-copy names are unique after firmware sanitization. Only colliding names
+receive catalog-ID suffixes; existing unique names and all IDs remain unchanged.
 */
+// Complete copied catalog metadata and disambiguate colliding physical-copy names.
+// Borrow Print/plan/storage only during the call and preserve original unique names,
+// IDs and outlines. Null handles, invalid sources or rejected edits throw; the plan
+// owns copied metadata and no borrowed views escape.
 void populate_object_instance_catalog(
     const print_handle *print, printing_plan_handle *plan, storage_handle *storage);
 

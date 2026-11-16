@@ -147,15 +147,15 @@ public:
     ToolOrdering() = default;
 
     // For the use case when each object is printed separately
-    // (print.config.complete_objects is true).
+    // The effective By object builder has a zero height step.
     ToolOrdering(const PrintObject &object, extruder_index_t first_extruder, bool prime_multi_material = false);
 
     // For the use case when each object is printed separately but only for some layers
-    // (print.config.parallel_objects_step > 0).
+    // The supplied layer range describes one object batch.
     ToolOrdering(const PrintObject &object, const GCode::ObjectsLayerToPrint &layers, extruder_index_t first_extruder, bool prime_multi_material = false);
 
     // For the use case when all objects are printed at once.
-    // (print.config.complete_objects is false).
+    // Tools are ordered across a shared set of object layers.
     ToolOrdering(const Print &print, extruder_index_t first_extruder, bool prime_multi_material = false);
 
     void 				clear() { m_layer_tools.clear(); }

@@ -44,6 +44,7 @@ struct ConfigOptionDefSnapshot;
 
 static raw_config_option_type raw_option_type(ConfigOptionType type) noexcept;
 static raw_container_type raw_container(ConfigOptionContainerType type) noexcept;
+// Map public interpolation types to C values, returning NONE for internal types without throwing.
 static raw_graph_type raw_graph_interpolation(GraphData::GraphType type) noexcept;
 static const char *optional_string(const std::string &value) noexcept;
 static void rebuild_string_pointers(const std::vector<std::string> &strings,
@@ -137,7 +138,8 @@ static raw_graph_type raw_graph_interpolation(GraphData::GraphType type) noexcep
     case GraphData::GraphType::SQUARE: return RAW_GRAPH_TYPE_SQUARE;
     case GraphData::GraphType::LINEAR: return RAW_GRAPH_TYPE_LINEAR;
     case GraphData::GraphType::SPLINE: return RAW_GRAPH_TYPE_SPLINE;
-    case GraphData::GraphType::COUNT:  return RAW_GRAPH_TYPE_NONE;
+    case GraphData::GraphType::COUNT:
+    case GraphData::GraphType::SQUARE_INVERSE: return RAW_GRAPH_TYPE_NONE;
     }
     return RAW_GRAPH_TYPE_NONE;
 }

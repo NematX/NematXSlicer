@@ -31,7 +31,7 @@
 #define slic3r_config_def_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 6u
+#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 7u
 
 #include "slic3r_config_option.h"
 #include "slic3r_config_types.h"
@@ -659,6 +659,9 @@ has_value_when_absent enables the copied value_when_absent, including an empty
 string, and requires a nonnull pointer. Without it, missing values choose
 automatically when enabled, otherwise the default member. Stored values win.
 
+has_mode enables mode, the visibility flags of the generated selector. Without
+it, or when struct_size omits these fields, use Advanced/Expert and SuperSlicer.
+
 struct_size must include every field through value_when_absent. Short structures
 are rejected before later fields are read; extra bytes are ignored. No plugin or
 configuration ownership transfers to the caller.
@@ -685,6 +688,8 @@ typedef struct raw_exclusive_group_def {
     int32_t auto_value;
     int32_t has_value_when_absent;
     const char *value_when_absent;
+    int32_t has_mode;
+    raw_config_option_mode mode;
 } raw_exclusive_group_def;
 
 /* Return project-scoped defaults with the structure size set. No strings are allocated and application state is unchanged. */

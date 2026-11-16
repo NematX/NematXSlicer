@@ -19,6 +19,8 @@ Shared plan construction and output helpers live in gcode_test_helpers so this f
 Seam export probes materialize an exact entry, consume rotation permission and
 verify the writer's first extrusion and marker. Fixed closed sequences and their
 canonical copies keep their entry even when a child remains rotatable.
+Group-entry probes inspect both fallback and explicit travel across tool frames;
+XY corrections must retain clearance before a separate descent to printing Z.
 
 Representative direct calls (branches are not a timeline):
 
@@ -2107,8 +2109,8 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"first_layer_height", "0.2"},
                                    {"support_material", "0"},
-                                   {"complete_objects", "0"},
-                                   {"parallel_objects_step", "0"},
+                                   {"print_plan_builder", "ordering.plan_builder.by_layer"},
+                                   {"complete_objects_step", "0"},
                                    {"seam_visibility", "0"}});
     Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
                      print, model, config);
@@ -3418,6 +3420,209 @@ TEST_CASE("Default firmware shares native retraction protocol state in SEMM",
         reinterpret_cast<const extrusion_entity_handle *>(select.get())));
     CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
         reinterpret_cast<const extrusion_entity_handle *>(retract.get()))) == "G10\n");
+}
+
+// Global and multi-entry groups receive the same bounded fallback; explicit travel owns its approach.
+TEST_CASE("Group fallback clears global and multi-entry groups without duplicating travel",
+          "[plugins][gcode][firmware][lift][travel][group-clearance-fallback]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool multiple = GENERATE(false, true);
+    const bool materialized = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"retract_lift", "0.5"}, {"lift_min", "5"}, {"max_print_height", "10"}});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    std::unique_ptr<ExtrusionEntity> select = special_command_entity(ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    Printing::PrintingPlan plan;
+    plan.groups.resize(2);
+    plan.object_instances.resize(2);
+    for (Printing::PrintingGroup &group : plan.groups) {
+        group.layers.resize(1);
+        group.layers.front().tool_groups.resize(1);
+        group.layers.front().tool_groups.front().extruder_id = 0;
+    }
+    plan.groups[0].layers[0].print_z = scale_i(9.0);
+    plan.groups[1].layers[0].print_z = scale_i(0.2);
+    if (multiple) plan.groups[1].printing_catalog_ids = {0, 1};
+    append_path_extrusion(plan.groups[0].layers[0].tool_groups[0], make_firmware_path(
+        ArcPolyline(Points{Point(0, 0), Point(scale_i(1.), 0)}), 20.f, 500.f));
+    std::unique_ptr<ExtrusionPath> target = make_firmware_path(
+        ArcPolyline(Points{Point(scale_i(50.), 0), Point(scale_i(51.), 0)}), 20.f, 500.f);
+    if (materialized) target->get_or_add_property<ExtrusionAttributes>().set_role(ExtrusionRole::Travel);
+    append_path_extrusion(plan.groups[1].layers[0].tool_groups[0], std::move(target));
+    CHECK(firmware.begin_group(slic3r_api::ConstPrintingGroup(
+        reinterpret_cast<const printing_group_handle *>(&plan.groups[0]))).empty());
+    firmware.begin_layer(slic3r_api::ConstPrintingLayerGroup(
+        reinterpret_cast<const printing_layer_group_handle *>(&plan.groups[0].layers[0])));
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(
+        plan.groups[0].layers[0].tool_groups[0].extrusions[0].root.get())));
+    const std::string output = firmware.begin_group(slic3r_api::ConstPrintingGroup(
+        reinterpret_cast<const printing_group_handle *>(&plan.groups[1])));
+    if (materialized) {
+        CHECK(output.empty());
+        CHECK(firmware.machine_gantry().position()->z == Approx(9.0));
+    } else {
+        const size_t climb = output.find("Z9.5");
+        const size_t approach = output.find("X50");
+        REQUIRE(climb != std::string::npos);
+        REQUIRE(approach != std::string::npos);
+        CHECK(climb < approach);
+        CHECK(firmware.machine_gantry().position()->z == Approx(9.5));
+    }
+}
+
+// Inspect every non-extruding XY move after a group changes tools, including the
+// correction to an explicit travel's source point in the newly selected tool frame.
+TEST_CASE("Group entry protects XY tool-offset corrections before descending",
+          "[plugins][gcode][firmware][lift][travel][group-clearance-tool-offset]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool materialized = GENERATE(false, true);
+    const double offset = GENERATE(-20.0, 20.0);
+    CAPTURE(materialized, offset);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"}, {"filament_diameter", "1.75,1.75"},
+        {"extrusion_multiplier", "1,1"}, {"extruder_offset", "0x0," + std::to_string(offset) + "x5"},
+        {"retract_lift", "0.5,0.5"}, {"lift_min", "5"}, {"max_print_height", "10"},
+        {"use_relative_e_distances", "1"}});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    Printing::PrintingPlan plan;
+    plan.groups.resize(2);
+    for (size_t g = 0; g < plan.groups.size(); ++g) {
+        Printing::PrintingGroup &group = plan.groups[g];
+        group.layers.resize(1);
+        group.layers[0].print_z = scale_i(g == 0 ? 9.0 : 0.2);
+        group.layers[0].tool_groups.resize(1);
+        group.layers[0].tool_groups[0].extruder_id = extruder_index_t(g);
+    }
+    append_path_extrusion(plan.groups[0].layers[0].tool_groups[0], make_firmware_path(
+        ArcPolyline(Points{Point(0, 0), Point(scale_i(1.), 0)}), 20.f, 500.f));
+    if (materialized) {
+        ArcPolyline travel(Points{Point(scale_i(1.), 0), Point(scale_i(1.), 0),
+            Point(scale_i(50.), scale_i(30.)), Point(scale_i(50.), scale_i(30.))});
+        travel.set_z_offset(0, scale_i(8.8));
+        travel.set_z_offset(1, scale_i(9.3));
+        travel.set_z_offset(2, scale_i(9.3));
+        travel.set_z_offset(3, 0);
+        std::unique_ptr<ExtrusionPath> path = make_firmware_path(travel, 20.f, 500.f);
+        path->get_or_add_property<ExtrusionAttributes>().set_role(ExtrusionRole::Travel);
+        append_path_extrusion(plan.groups[1].layers[0].tool_groups[0], std::move(path));
+    }
+    append_path_extrusion(plan.groups[1].layers[0].tool_groups[0], make_firmware_path(
+        ArcPolyline(Points{Point(scale_i(50.), scale_i(30.)), Point(scale_i(51.), scale_i(30.))}), 20.f, 500.f));
+    firmware.begin_group(slic3r_api::ConstPrintingGroup(reinterpret_cast<const printing_group_handle *>(&plan.groups[0])));
+    firmware.begin_layer(slic3r_api::ConstPrintingLayerGroup(reinterpret_cast<const printing_layer_group_handle *>(&plan.groups[0].layers[0])));
+    firmware.begin_tool_group(slic3r_api::ConstPrintingToolGroup(
+        reinterpret_cast<const printing_tool_group_handle *>(&plan.groups[0].layers[0].tool_groups[0])));
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(
+        plan.groups[0].layers[0].tool_groups[0].extrusions[0].root.get())));
+    REQUIRE(firmware.machine_gantry().position().has_value());
+    double x = firmware.machine_gantry().position()->x, y = firmware.machine_gantry().position()->y;
+    double z = firmware.machine_gantry().position()->z;
+    CHECK(z == Approx(9.0));
+    std::string output = firmware.begin_group(slic3r_api::ConstPrintingGroup(
+        reinterpret_cast<const printing_group_handle *>(&plan.groups[1])));
+    if (materialized) CHECK(output.empty());
+    else {
+        CHECK(firmware.machine_gantry().position()->x == Approx(50.0 - offset));
+        CHECK(firmware.machine_gantry().position()->y == Approx(25.0));
+        CHECK(firmware.machine_gantry().position()->z == Approx(9.5));
+    }
+    output += firmware.begin_layer(slic3r_api::ConstPrintingLayerGroup(
+        reinterpret_cast<const printing_layer_group_handle *>(&plan.groups[1].layers[0])));
+    output += firmware.begin_tool_group(slic3r_api::ConstPrintingToolGroup(
+        reinterpret_cast<const printing_tool_group_handle *>(&plan.groups[1].layers[0].tool_groups[0])));
+    for (const Printing::PrintingExtrusion &extrusion : plan.groups[1].layers[0].tool_groups[0].extrusions)
+        output += firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(extrusion.root.get())));
+    size_t xy_moves = 0, deposits = 0;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0) continue;
+        double nx = x, ny = y, nz = z, e = 0.;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word[0] == 'X') nx = std::stod(word.substr(1));
+            if (word[0] == 'Y') ny = std::stod(word.substr(1));
+            if (word[0] == 'Z') nz = std::stod(word.substr(1));
+            if (word[0] == 'E') e = std::stod(word.substr(1));
+        }
+        INFO(line);
+        CHECK(nz <= 10.001);
+        if (std::hypot(nx - x, ny - y) > 0.001) {
+            if (e > 0.) { ++deposits; CHECK(nz == Approx(0.2)); }
+            else { ++xy_moves; CHECK(std::min(z, nz) + 0.001 >= 9.5); }
+        }
+        x = nx; y = ny; z = nz;
+    }
+    CHECK(xy_moves == (materialized ? 2 : 1));
+    CHECK(deposits > 0);
+    CHECK(x == Approx(51.0 - offset));
+    CHECK(y == Approx(25.0));
+    CHECK(z == Approx(0.2));
+}
+
+// Compare the first approach in the machine frame, including tool and printer Z corrections.
+TEST_CASE("First approach transforms and clamps the absolute travel floor",
+          "[plugins][gcode][firmware][lift][lift-min-frame]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool known = GENERATE(false, true);
+    const double z_offset = GENERATE(-1.0, 1.0);
+    const double tool_offset = GENERATE(-0.5, 0.5);
+    const double minimum = GENERATE(5.0, 12.0);
+    CAPTURE(known, z_offset, tool_offset, minimum);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"lift_min", std::to_string(minimum)}, {"max_print_height", "10"},
+        {"z_offset", std::to_string(z_offset)}});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    struct ToolOffset : slic3r_api::GCodeGeneration::Tool {
+        // Set only the protected correction for this test; no production setting exposes it.
+        static void set(slic3r_api::GCodeGeneration::Tool &tool, double value) {
+            tool.*(&ToolOffset::m_z_offset) = value;
+        }
+    };
+    ToolOffset::set(firmware.machine_extruder(0), tool_offset);
+    std::unique_ptr<ExtrusionEntity> select = special_command_entity(ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    const double correction = z_offset - tool_offset;
+    if (known)
+        const_cast<slic3r_api::GCodeGeneration::Gantry &>(firmware.machine_gantry()).set_position({0.0, 0.0, correction});
+    std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+        Point(scale_i(20.), 0), Point(scale_i(21.), 0)}), 20.f, 500.f);
+    const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+        reinterpret_cast<const extrusion_entity_handle *>(path.get())));
+    const double expected = std::min(minimum, 10.0) + correction;
+    double z = correction, x = 0.0;
+    bool approached = false;
+    std::istringstream lines(output);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0) continue;
+        double next_z = z, next_x = x;
+        std::istringstream words(line.substr(3));
+        std::string word;
+        while (words >> word) {
+            if (word[0] == ';') break;
+            if (word[0] == 'Z') next_z = std::stod(word.substr(1));
+            if (word[0] == 'X') next_x = std::stod(word.substr(1));
+        }
+        CHECK(next_z <= 10.0 + correction + 0.001);
+        if (!approached && next_x != x) {
+            CHECK(z == Approx(expected));
+            CHECK(next_z == Approx(expected));
+            approached = true;
+        }
+        z = next_z; x = next_x;
+    }
+    CHECK(approached);
 }
 
 // Coordinate resets never repay the physical retraction or consume its pending restart extras.

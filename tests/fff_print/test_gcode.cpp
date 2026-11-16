@@ -124,7 +124,7 @@ TEST_CASE("Extrusion, travels, temeperatures", "[GCode]") {
     DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         { "gcode_comments", 1 },
-        { "complete_objects", 1 },
+        { "print_plan_builder", "ordering.plan_builder.by_object" },
         { "extrusion_axis", 'A' },
         { "start_gcode", "" },  // prevent any default extra Z move
         { "layer_height", 0.4 },

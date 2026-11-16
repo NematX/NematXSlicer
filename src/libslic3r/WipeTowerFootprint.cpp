@@ -30,7 +30,7 @@ std::vector<WipeTowerFootprint> wipe_tower_footprints(const Print &print)
     if (print.has_global_wipe_tower())
         append_tower(towers, print.config(), print.default_object_config(), nullptr, nullptr, nullptr);
     for (const PrintObject &object : print.objects())
-        if ((print.config().complete_objects.value && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value)
+        if ((print_complete_objects(print.config()) && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value)
             for (const PrintInstance &instance : object.instances())
                 append_tower(towers, print.config(), object.config(), object.model_object(), instance.model_instance, &object);
     return towers;
@@ -46,12 +46,12 @@ std::vector<WipeTowerFootprint> wipe_tower_footprints(const Model &model, const 
     std::vector<WipeTowerFootprint> towers;
     if (print_config.nozzle_diameter.size() <= 1 || print_config.spiral_vase.value)
         return towers;
-    if (defaults.wipe_tower.value && !print_config.complete_objects.value)
+    if (defaults.wipe_tower.value && !print_complete_objects(print_config))
         append_tower(towers, print_config, defaults, nullptr, nullptr, nullptr);
     for (const ModelObject &object : model.objects()) {
         PrintObjectConfig effective = defaults;
         effective.apply(object.config.get(), true);
-        if ((print_config.complete_objects.value && effective.wipe_tower.value) || effective.wipe_tower_per_object.value)
+        if ((print_complete_objects(print_config) && effective.wipe_tower.value) || effective.wipe_tower_per_object.value)
             for (const ModelInstance *instance : object.instances)
                 if (object.printable && instance->is_printable())
                     append_tower(towers, print_config, effective, &object, instance, nullptr);

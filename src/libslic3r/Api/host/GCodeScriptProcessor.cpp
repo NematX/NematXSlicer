@@ -304,10 +304,13 @@ private:
                            const ConfigBase *producer_config);
     std::string process(const std::string &script, extruder_index_t current_extruder);
     void create_machine_options();
-    // Create read-only execution options; firmware fills them before each script, producer-frozen layer values win, and defaults remain when firmware does not fill them.
+    // Create owned execution options, with empty copy arrays and a -1 single-copy ID;
+    // firmware fills current group values while producer-frozen arguments retain precedence.
     void create_execution_options();
     void create_specific_options(const std::string &script_name);
     void merge_producer_config(const ConfigBase *producer_config);
+    // Fill names from valid object-list indices, use empty names for -1 multi-copy
+    // groups, and reject any other unknown index without changing the source names.
     void resolve_object_names();
     void validate_outputs(const DynamicConfig &outputs) const;
     void infer_position_from_gcode(const DynamicConfig &before,
@@ -390,7 +393,7 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
                  print.config().filament_type.get_at(size_t(plan_facts.initial_tool)));
     m_parser.set("total_toolchanges", int(plan_facts.toolchanges));
     m_parser.set("all_layer_count", int(plan_facts.layer_count));
-    m_parser.set("total_layer_count", int(Printing::object_layer_count(print)));
+    m_parser.set("total_layer_count", int(plan_facts.object_layer_count));
     m_parser.set("max_layer_z", m_max_layer_z);
     m_parser.set("is_extruder_used", new ConfigOptionBools(used_tool_flags(
         plan_facts, std::max(size_t(255), print.config().nozzle_diameter.size()))));
@@ -517,6 +520,10 @@ void GCodeScriptProcessor::Impl::resolve_object_names()
         ConfigOptionString *object_name = m_public_config.option<ConfigOptionString>(name_keys[idx]);
         if (object_id == nullptr || object_name == nullptr)
             continue;
+        if (object_id->value == -1) {
+            object_name->value.clear();
+            continue;
+        }
         if (object_id->value < 0 || static_cast<size_t>(object_id->value) >= m_object_names.size())
             throw std::invalid_argument(std::string("A G-code script references an unknown object in ") +
                                         id_keys[idx] + ".");
@@ -591,11 +598,16 @@ void GCodeScriptProcessor::Impl::create_machine_options()
             "e_position", new ConfigOptionFloats(m_extruder_count, 0.0));
 }
 
-// Create read-only execution options and register their keys for parser input; firmware fills them before each script, producer-frozen layer values win, and defaults remain when firmware does not fill them.
 void GCodeScriptProcessor::Impl::create_execution_options()
 {
     m_public_config.set_key_value("current_object_idx", new ConfigOptionInt(0));
     m_specific_keys.push_back("current_object_idx");
+    m_public_config.set_key_value("current_instance_id", new ConfigOptionInt(-1));
+    m_specific_keys.push_back("current_instance_id");
+    for (const char *key : {"previous_instances_id", "next_instances_id", "current_instances_id"}) {
+        m_public_config.set_key_value(key, new ConfigOptionInts());
+        m_specific_keys.push_back(key);
+    }
     m_public_config.set_key_value(
         "extruded_volume", new ConfigOptionFloats(m_extruder_count, 0.0));
     m_specific_keys.push_back("extruded_volume");

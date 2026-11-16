@@ -9,6 +9,8 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -16,6 +18,8 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Plugins/GCode/CustomGCodePerPrintZRecord.hpp"
 
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
@@ -42,6 +46,15 @@ ends" problem:
 
 The plugin does not split tool groups and does not move extrusions between
 tools. Those operations belong to other ordering or post-processing plugins.
+Groups retain their boundaries, but each group starts with the preceding group's
+resolved end tool as its preference. Empty groups do not erase that preference.
+When the color-event consumer is active, its mapped targets constrain each
+layer's first tool during candidate selection. Missing color visits are created
+before ordering, so the end tool is not changed later by color placement.
+
+    run_impl() -> visit groups in plan order and carry the last resolved tool
+        order_tool_groups_in_plugin() -> choose and apply layer tool orders
+        resolve_unassigned_tool_groups() -> assign concrete tools before carrying the end tool
 */
 
 const char *k_no_dependencies[] = { nullptr };
@@ -66,10 +79,12 @@ Order all tool groups inside one PrintingGroup.
 The function chooses one first/last extruder pair per layer, then applies those
 choices to the layer groups. It is intentionally local to this plugin so another
 tool-ordering plugin can replace the strategy without relying on host callbacks.
+color_targets has one entry per layer; supplied targets pin that layer's first tool.
 */
 void order_tool_groups_in_plugin(
     PrintingGroup &printing_group,
     extruder_index_t first_extruder,
+    const std::vector<std::optional<extruder_index_t>> &color_targets,
     const plugin_run_context *run_ctx);
 
 bool is_unassigned_extruder(extruder_index_t extruder_id);
@@ -105,9 +120,12 @@ Select one tool-order candidate per layer with a small dynamic program.
 The primary cost is the number of tool changes between consecutive layers.
 first_extruder is only a tie-break for the first printable layer; it should not
 force a worse global sequence.
+Color targets filter candidates before scoring, so the chosen ends remain valid
+after color-event placement. The caller creates any required missing tool visits.
 */
 std::vector<ToolOrderCandidate> select_tool_order_candidates(const PrintingGroup &printing_group,
-                                                             extruder_index_t first_extruder,
+                                                              extruder_index_t first_extruder,
+                                                              const std::vector<std::optional<extruder_index_t>> &color_targets,
                                                              const plugin_run_context *run_ctx);
 
 /*
@@ -140,10 +158,11 @@ bool is_unassigned_extruder(const extruder_index_t extruder_id)
 void order_tool_groups_in_plugin(
     PrintingGroup &printing_group,
     const extruder_index_t first_extruder,
+    const std::vector<std::optional<extruder_index_t>> &color_targets,
     const plugin_run_context *run_ctx)
 {
     const std::vector<ToolOrderCandidate> candidates =
-        select_tool_order_candidates(printing_group, first_extruder, run_ctx);
+        select_tool_order_candidates(printing_group, first_extruder, color_targets, run_ctx);
     assert(candidates.size() == printing_group.layer_group_count());
 
     /*
@@ -221,7 +240,8 @@ bool tool_order_score_less(const ToolOrderScore &lhs, const ToolOrderScore &rhs)
 }
 
 std::vector<ToolOrderCandidate> select_tool_order_candidates(const PrintingGroup &printing_group,
-                                                             const extruder_index_t first_extruder,
+                                                              const extruder_index_t first_extruder,
+                                                              const std::vector<std::optional<extruder_index_t>> &color_targets,
                                                              const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
@@ -245,6 +265,13 @@ std::vector<ToolOrderCandidate> select_tool_order_candidates(const PrintingGroup
         active_layers.push_back(layer_idx);
         active_candidates.push_back(
             tool_order_candidates_for_extruders(extruders, run_ctx));
+        if (color_targets[layer_idx]) {
+            const extruder_index_t pinned = *color_targets[layer_idx];
+            std::vector<ToolOrderCandidate> &candidates = active_candidates.back();
+            candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [pinned](const ToolOrderCandidate &candidate) {
+                return candidate.first_extruder != pinned;
+            }), candidates.end());
+        }
         active_extruders.push_back(std::move(extruders));
     }
 
@@ -438,6 +465,18 @@ private:
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 100; }
 
+    // Report the printer tool-count setting used to validate and interpret color rows.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override {
+        if (keys != nullptr)
+            keys[0] = raw_used_config_key{"nozzle_diameter", RAW_CO_VECTOR_FLOAT,
+                RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
+        return 1;
+    }
+
+    // Reorder each borrowed group with the preceding group's end-tool preference,
+    // pinning mapped color tools first, then resolve unknown tool visits. Empty
+    // groups preserve the preference. Invalid records, conflicting color tools,
+    // cancellation and API failures propagate; completed in-place moves remain.
     void run_impl(const plugin_run_context *run_ctx) const override
     {
         const run_ctx_extrusion_ordering *ctx = plugin_ctx_as_extrusion_ordering(run_ctx);
@@ -448,17 +487,40 @@ private:
 
         throw_if_cancelled(run_ctx);
         PrintingPlan plan(ctx->plan);
-        /*
-        Tool ordering works independently per PrintingGroup. Complete-object
-        plans therefore keep object batches separate, while by-layer plans sort
-        the single global group.
-        */
+        using namespace GCodeGeneration::CustomGCodePerPrintZPlugin;
+        CustomGCodeColorTargets color_targets(plan.group_count());
+        // Disabled height-event consumers must not make stale tables affect ordering.
+        if (ctx->print != nullptr && orchestrator_find_plugin(m_orchestrator, "ordering.custom_gcode_event_tools") != nullptr) {
+            const Print print(ctx->print);
+            const std::optional<CustomGCodeTable> table = read_custom_gcode_per_print_z(print);
+            if (table)
+                color_targets = color_event_targets(*table, plan, printing_plan_mode(print, plan),
+                    print.config().get("nozzle_diameter").size());
+        }
+        extruder_index_t previous_tool = EXTRUDER_ID_UNKNOWN;
         for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
             throw_if_cancelled(run_ctx);
             PrintingGroup group = plan.group(group_idx);
-            order_tool_groups_in_plugin(group, int32_t(-1), run_ctx);
+            std::vector<std::optional<extruder_index_t>> &targets = color_targets[group_idx];
+            targets.resize(group.layer_group_count());
+            for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
+                if (!targets[layer_idx])
+                    continue;
+                PrintingLayerGroup layer = group.layer_group(layer_idx);
+                bool found = false;
+                for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx)
+                    found |= layer.tool_group(tool_idx).extruder_id() == *targets[layer_idx];
+                if (!found && !layer.append_tool_group(*targets[layer_idx]).valid())
+                    throw std::runtime_error("Cannot create the tool visit required by a color change.");
+            }
+            order_tool_groups_in_plugin(group, previous_tool, targets, run_ctx);
             throw_if_cancelled(run_ctx);
             resolve_unassigned_tool_groups(group, run_ctx);
+            for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
+                const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
+                if (layer.tool_group_count() > 0)
+                    previous_tool = layer.tool_group(layer.tool_group_count() - 1).extruder_id();
+            }
         }
     }
 };

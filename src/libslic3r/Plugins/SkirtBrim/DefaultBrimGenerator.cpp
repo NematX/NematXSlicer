@@ -79,7 +79,7 @@ The generation and publication branches are:
     |-- initial_unbrimmable_area() from first-layer slices and negative patches
     `-- walk compatible object groups; skip groups without outer/interior/patch work
         |-- generate_per_object_brim() for each object, when brim_per_object is set
-        |   |-- complete_objects or parallel_objects_step > 0
+        |   |-- print_by_object(): the effective builder is By object
         |   |   |-- temporarily select one origin instance and a local occupied area
         |   |   |-- generate_brim_for_objects() into an object-owned temporary tree
         |   |   |-- make_brim_patch() into the same tree
@@ -161,8 +161,7 @@ const raw_used_config_key k_used_config_keys[] = {
     { "first_layer_height", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "layer_height", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "perimeter_direction", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "parallel_objects_step", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { "print_plan_builder", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "arc_fitting", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "resolution_internal", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "raft_first_layer_density", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
@@ -731,7 +730,7 @@ void generate_per_object_brim(storage_handle *storage,
     const PrintObjectConfig &brim_config = object.config();
     const Flow flow = brim_flow_for_object(print, object);
 
-    if (print.config().complete_objects || print.config().parallel_objects_step.value > 0) {
+    if (print_by_object(print.config())) {
         // PrintApply.cpp groups instances with identical transforms except for XY translation into one PrintObject.
         // Project the first real instance, then subtract its shift to obtain the shared local patch.
         const PrintInstance &first_instance = object.instances().front();

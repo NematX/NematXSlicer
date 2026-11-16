@@ -76,7 +76,7 @@ public:
     // machine state. The borrowed Config view is not retained.
     void setup(const Config &config);
 
-    // Initialize export state and declare only real catalog instances for cancellation.
+    // Cache group copy sets/completion counts and declare real catalog instances for cancellation.
     std::string begin_print(const Print &print, const ConstPrintingPlan &plan) override;
     // Build the plugin-side Reader client used to interpret custom G-code.
     // Both handles remain host-owned and must outlive this firmware session.
@@ -86,9 +86,17 @@ public:
     // Reader. Provider wiring calls this before the session is published.
     void set_reader_state_id(orchestrator_runtime_id reader_state_id);
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
-    // Advance the sequential object index for later real groups and return any group-start travel.
+    // Load the next group's cached copy set and finished-copy count, then return fallback
+    // travel only for later groups with geometry and no materialized entry travel.
+    // Borrowed groups stay unchanged; an uninitialized session or encoding failure throws.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Emit layer markers, forget cached ;HEIGHT: for the next printable extrusion, and set script height from the first source or Z gap.
+    // Validate listed source heights and return owned layer markers using their maximum,
+    // or the Z gap without sources. Refresh extrusion/script heights and advance the
+    // layer count without retaining the view. An uninitialized session throws before
+    // changes; source-height rejection occurs after advancing the running maximum Z.
+    // A non-rising source-free Z can produce a non-positive gap for readers.
+    // Clear the extrusion-height marker so the first printable extrusion writes
+    // ;HEIGHT: again; script height uses the first source extrusion or the Z gap.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
     // Set script height to the first source extrusion for this tool when one exists.
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
@@ -97,6 +105,7 @@ public:
     std::string write_event(const ExtrusionEntity &event_root) override;
     std::string end_tool_group() override;
     std::string end_layer() override;
+    // Clear the current copy set and close the current object label.
     std::string end_group() override;
     std::string end_print() override;
 
@@ -331,6 +340,14 @@ private:
 
     // Select a tool, transfer SEMM runtime, settle filament usage and reset absolute E after emitted selections.
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
+    // Find the first geometric leaf of a borrowed group. The first non-empty group
+    // establishes the sequence; later groups without explicit Travel geometry rise
+    // vertically to bounded running-height clearance, then move XY at that height.
+    // The ordinary first-path approach descends at the destination. Missing machine
+    // position/tool emits nothing; encoding failures propagate and no tree is retained.
+    // Arrival XY uses the first geometry's tool frame, not the outgoing tool's frame.
+    // Retain clearance for a start-point correction after selection even when explicit
+    // travel suppresses this fallback movement.
     std::string move_to_group_start(const ConstPrintingGroup &group);
     // Visit an extrusion tree while tracking its object for opt-in tool-change reopening.
     std::string write_extrusion_tree(const ExtrusionEntity &root,
@@ -343,7 +360,14 @@ private:
     std::string write_lines(const PreparedMove &move);
     // Emit planar segments with flow-derived E, a fixed filament delta, or semantic retraction.
     std::string write_leaf_geometry(const ExtrusionEntity &leaf, const RequestedState &state);
-    // Reach a path or deposit start point at travel speed, preserving the requested print speed.
+    // Convert a scaled point and Z offset to machine coordinates and return approach
+    // commands only when the quantized position differs; owned gantry state advances,
+    // inherited speed is restored, and encoding failures propagate. The first approach
+    // raises vertically to lift_min before moving XY, then descends at the destination.
+    // An unknown start position uses a Z-only absolute-mm move. Floor and ceiling use
+    // the requested path's gantry and tool corrections from print Z to machine Z.
+    // Consume pending group-entry clearance for XY corrections after tool selection,
+    // including explicit travel starts; matching XY leaves that travel responsible for lift.
     std::string approach_leaf_point(c_point point, coord_t z_offset);
     // Emit a stationary volume, forcing swallowed support steps or dwelling for sub-step deposits.
     std::string write_deposit(const ExtrusionEntity &leaf, const RequestedState &state);
@@ -415,8 +439,14 @@ private:
     std::vector<double> m_filament_used_mm;
     std::optional<extruder_index_t> m_usage_tool;
     double m_usage_start_mm = 0.0;
-    // Zero-based index of the sequential object being printed, like the legacy current_object_idx.
+    // Number of copies whose final group precedes the current group; independent of labels.
     int32_t m_current_object_idx = 0;
+    // Per-print caches indexed by plan group: real copy catalog IDs and the number
+    // finished before that group. The current IDs and cursor advance in begin_group().
+    std::vector<std::vector<int32_t>> m_group_instances;
+    std::vector<int32_t> m_finished_before_group;
+    std::vector<int32_t> m_current_instances;
+    size_t m_group_cursor = 0;
     // Current plan layer for scripts: begin_layer() count minus one (-1 before the first layer) and its height; m_layer_print_z already holds its print Z.
     int32_t m_layer_num = -1;
     coord_t m_layer_height = 0;
@@ -427,7 +457,18 @@ private:
     // Cleared when external G-code invalidates E. The next generated extrusion
     // establishes a fresh E origin instead of continuing a stale coordinate.
     bool m_e_position_known = true;
-    bool m_seen_object_group = false;
+    bool m_seen_print_group = false;
+    // Per-print clearance state in print coordinates before machine correction:
+    // running maximum Z is scaled; entry clearance, tool-indexed retract lifts,
+    // the absolute lift floor and printer ceiling are millimeters. The optional
+    // entry clearance lasts until the next group; the first-approach flag lasts
+    // until the first geometry approach. begin_print() resets these values.
+    coord_t m_running_max_print_z = 0;
+    std::optional<double> m_group_entry_clearance;
+    std::vector<double> m_retract_lifts;
+    double m_lift_min = 0.0;
+    double m_max_print_height = 0.0;
+    bool m_first_approach = true;
     bool m_use_firmware_retraction = false;
     // SEMM means single-extruder multi-material: tool IDs select filaments,
     // while heater, fan, pressure advance and extrusion state share hardware.

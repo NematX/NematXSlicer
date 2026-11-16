@@ -489,3 +489,18 @@ TEST_CASE("Plugin activation migration replaces the generic firmware with Marlin
     CHECK(config.plugin_packages.count("gcode.firmware.default") == 0);
     CHECK(config.activated.at("gcode.firmware.marlin2"));
 }
+
+// Move the enabled builder activation to its new id and remove the obsolete package association.
+TEST_CASE("Plugin activation migration renames the default plan builder to By layer",
+          "[plugins][repository][activation][migration][ordering]")
+{
+    Slic3r::PluginActivationConfig config;
+    config.activated["ordering.plan_builder.default"] = true;
+    config.plugin_packages["ordering.plan_builder.default"] = "obsolete.package";
+
+    REQUIRE(Slic3r::migrate_plugin_activation_id(
+        config, "ordering.plan_builder.default", {"ordering.plan_builder.by_layer"}));
+    CHECK(config.activated.count("ordering.plan_builder.default") == 0);
+    CHECK(config.plugin_packages.count("ordering.plan_builder.default") == 0);
+    CHECK(config.activated.at("ordering.plan_builder.by_layer"));
+}

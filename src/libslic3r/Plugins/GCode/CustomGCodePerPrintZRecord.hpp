@@ -69,7 +69,7 @@ extruder_index_t custom_gcode_row_extruder_index(const CustomGCodeRow &row,
 /* Resolve the old Undef mode with the same semantic rules as the Model helper. */
 Slic3r::CustomGCode::Mode effective_record_mode(const CustomGCodeTable &table);
 
-/* Infer the active print mode from the final object extrusions in the plan. */
+/* Infer the print mode from the original region-island tools of planned object extrusions. */
 Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrintingPlan &plan);
 
 /* Return true only for extrusion roots sourced from a normal object layer. */
@@ -77,10 +77,19 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
                                   const ConstPrintingGroup &group,
                                   const ConstPrintingExtrusion &extrusion);
 
-/* Map every row to the first layer at or above its Z, preserving row order. */
-std::vector<std::vector<const CustomGCodeRow *>> rows_by_layer(
+// Rows indexed by plan group and layer; pointers borrow the supplied table.
+using CustomGCodePlanRows = std::vector<std::vector<std::vector<const CustomGCodeRow *>>>;
+// Owned optional first-tool targets indexed by plan group, then layer; no value imposes no tool.
+using CustomGCodeColorTargets = std::vector<std::vector<std::optional<extruder_index_t>>>;
+
+// Resolve the required first color-event tool at each plan location, rejecting conflicts.
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count);
+
+/* Map each row once to the first plan layer at or above its Z, preserving row order. */
+CustomGCodePlanRows rows_by_plan(
     const CustomGCodeTable &table,
-    const ConstPrintingGroup &group);
+    const ConstPrintingPlan &plan);
 
 } // namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin
 

@@ -1235,7 +1235,7 @@ void append_owned_child(ExtrusionEntity &entity, ExtrusionEntityUPtr &&child)
 
 std::vector<const PrintInstance *> ordered_print_instances_for_object_plan(const Print &print)
 {
-    switch (print.config().complete_objects_sort.value) {
+    switch (complete_objects_sort(print.config())) {
     case cosZ:
         return print.sort_object_instances_by_max_z();
     case cosY:

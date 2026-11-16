@@ -1111,6 +1111,32 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         }
     }
 
+    // A stored selector wins over the obsolete switch. Rename the original entry
+    // because text loaders consume the mapped entries for their original keys.
+    // The obsolete switch marks a full legacy configuration. Partial files with
+    // only a height step do not select By object. Pair conversion cannot inspect
+    // another key, so it converts only the switch and cannot clear a height step.
+    const bool has_builder = has(dict, "print_plan_builder");
+    const bool has_step = has(dict, "parallel_objects_step");
+    double object_step = 0.;
+    if (has_step) {
+        try { object_step = boost::lexical_cast<double>(value()); }
+        catch (boost::bad_lexical_cast &) {}
+    }
+    if (has(dict, "complete_objects")) {
+        if (has_builder) {
+            erase();
+        } else if (value() == "1") {
+            set("print_plan_builder", "ordering.plan_builder.by_object");
+            if (has(dict, "parallel_objects_step"))
+                value() = "0";
+        } else if (object_step > 0.) {
+            set("print_plan_builder", "ordering.plan_builder.by_object");
+        } else {
+            erase();
+        }
+    }
+
     // it's not needed to check aliases, because they are taken care of in deserialize().
     // still need as some things check for def and emit a ConfigSubstitutionContext
     for (auto it = dict.begin(); it != dict.end(); ++it) {
@@ -2062,8 +2088,11 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "brim_speed",
 "brim_width_interior",
 "chamber_temperature",
+"complete_islands",
 "complete_objects_one_skirt",
 "complete_objects_sort",
+"complete_objects_step",
+"complete_objects_step_max_z",
 "curve_smoothing_angle_concave",
 "curve_smoothing_angle_convex",
 "curve_smoothing_cutoff_dist",
@@ -2232,9 +2261,6 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "overhangs_speed_enforce",
 "overhangs_type",
 "overhangs_width_speed",
-"parallel_islands",
-"parallel_objects_step",
-"parallel_objects_step_max_z",
 "perimeter_bonding",
 "perimeter_extrusion_change_odd_layers",
 "perimeter_extrusion_spacing",
@@ -3754,8 +3780,15 @@ OtherSlicingStatesConfigDef::OtherSlicingStatesConfigDef()
     def->tooltip = L("Zero-based index of currently used extruder.");
 
     def = this->add("current_object_idx", coInt);
-    def->label = L("Current object index");
-    def->tooltip = L("Specific for sequential printing. Zero-based index of currently printed object.");
+    def->label = L("Finished copy count");
+    def->tooltip = L("Number of physical copies entirely finished before the current printing group. This is zero in By layer printing.");
+
+    def = this->add("current_instances_id", coInts);
+    def->label = L("Current copy IDs");
+    def->tooltip = L("Array of printing catalog copy IDs in the current group, also used for object labels and cancellation. Empty outside object groups. Unlike previous_object_id and next_object_id, these identify copies, not object-list indices.");
+    def = this->add("current_instance_id", coInt);
+    def->label = L("Current copy ID");
+    def->tooltip = L("Printing catalog copy ID when the current group contains exactly one copy, or -1 for several copies or outside object groups. Unlike previous_object_id and next_object_id, this is a copy ID, not an object-list index.");
 
     def = this->add("has_single_extruder_multi_material_priming", coBool);
     def->label = L("Has single extruder MM priming");
@@ -3852,7 +3885,7 @@ PrintStatisticsConfigDef::PrintStatisticsConfigDef()
 
     def = this->add("total_layer_count", coInt);
     def->label = L("Total layer count");
-    def->tooltip = L("Number of layers in the entire print.");
+    def->tooltip = L("Number of printing-plan layer passes containing object extrusions. Shared passes count once; repeated copy or island passes count separately. Auxiliary-only passes are excluded; all_layer_count includes them.");
 }
 
 ObjectsInfoConfigDef::ObjectsInfoConfigDef()
@@ -3987,7 +4020,7 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z"}},
     {"color_change_gcode",      {"color_change_extruder", "next_color", "next_colour"}},
     {"pause_print_gcode",       {"color_change_extruder", "next_color", "next_colour"}},
-    {"between_objects_gcode",   {"layer_num", "layer_z", "previous_object_id", "previous_object_name", "next_object_id", "next_object_name"}},
+    {"between_objects_gcode",   {"layer_num", "layer_z", "previous_object_id", "previous_object_name", "next_object_id", "next_object_name", "previous_instances_id", "next_instances_id"}},
 };
 
 const std::map<t_custom_gcode_key, t_config_option_keys>& custom_gcode_specific_placeholders()
@@ -4079,22 +4112,27 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
                      "number of entries as the number of extruders as the printer.");
 
     def = this->add("previous_object_id", coInt);
-    def->label = L("Index of the object that finished printing.");
-    def->tooltip = L("0-based index, the index is the object's position in the right panel list in the platter tab, from top to bottom."
-        "\nIt's the same id used for 'label object' gcode.");
+    def->label = L("Previous group's object index");
+    def->tooltip = L("Zero-based object-list index for a previous group containing one copy, or -1 for a multi-copy group. This is not a copy ID; previous_instances_id contains the IDs used for labels and cancellation.");
 
     def = this->add("next_object_id", coInt);
-    def->label = L("Index of the object that will start printing.");
-    def->tooltip = L("0-based index, the index is the object's position in the right panel list in the platter tab, from top to bottom."
-        "\nIt's the same id used for 'label object' gcode.");
+    def->label = L("Next group's object index");
+    def->tooltip = L("Zero-based object-list index for a next group containing one copy, or -1 for a multi-copy group. This is not a copy ID; next_instances_id contains the IDs used for labels and cancellation.");
+
+    def = this->add("previous_instances_id", coInts);
+    def->label = L("Previous copy IDs");
+    def->tooltip = L("Array of printing catalog copy IDs in the previous object group, used for labels and cancellation. Unlike previous_object_id, an object-list index, this identifies every physical copy in that group.");
+    def = this->add("next_instances_id", coInts);
+    def->label = L("Next copy IDs");
+    def->tooltip = L("Array of printing catalog copy IDs in the next object group, used for labels and cancellation. Unlike next_object_id, an object-list index, this identifies every physical copy in that group.");
 
     def = this->add("previous_object_name", coString);
-    def->label = L("Name of the object that finished printing.");
-    def->tooltip = L("It's the same name used for 'label object' gcode.");
+    def->label = L("Previous group's object name");
+    def->tooltip = L("Name of previous_object_id, or an empty string for a multi-copy group.");
 
     def = this->add("next_object_name", coString);
-    def->label = L("Name of the object that will start printing.");
-    def->tooltip = L("It's the same name used for 'label object' gcode.");
+    def->label = L("Next group's object name");
+    def->tooltip = L("Name of next_object_id, or an empty string for a multi-copy group.");
 
 }
 

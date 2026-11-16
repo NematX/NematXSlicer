@@ -22,6 +22,13 @@
 #include "Plater.hpp"
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
+/*
+Provides the bed calibration dialog to the plater. Geometry creation prepares
+sample objects and a print configuration that completes each object in turn.
+The plater retains the resulting model and settings.
+    CalibrationBedDialog::create_geometry() -> prepare sample objects and settings
+        set_deserialize_strict() -> select By object; set_key_value() -> use a zero height step
+*/
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
 {
@@ -41,6 +48,8 @@ void CalibrationBedDialog::create_buttons(wxStdDialogButtonSizer* buttons){
 }
 
 void CalibrationBedDialog::create_geometry(wxCommandEvent& event_args) {
+    if (!require_plan_builder(true))
+        return;
     Plater* plat = this->main_frame->plater();
     Model& model = plat->model();
     if (!plat->new_project(L("First layer calibration")))
@@ -126,7 +135,8 @@ void CalibrationBedDialog::create_geometry(wxCommandEvent& event_args) {
 
     /// --- main config, please modify object config when possible ---
     DynamicPrintConfig new_print_config = *printConfig; //make a copy
-    new_print_config.set_key_value("complete_objects", new ConfigOptionBool(true));
+    new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+    new_print_config.set_key_value("complete_objects_step", new ConfigOptionFloat(0.));
 
     /// --- custom config ---
     for (size_t i = 0; i < 5; i++) {

@@ -24,6 +24,12 @@
 #include "Tab.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "wxExtensions.hpp"
+/*
+Provides retraction calibration samples to the plater. Geometry creation assigns
+the sample settings and configures each object to finish before moving on.
+    CalibrationRetractionDialog::create_geometry() -> prepare samples and settings
+        set_deserialize_strict() -> select By object; set_key_value() -> use a zero height step
+*/
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
 {
@@ -112,6 +118,18 @@ void CalibrationRetractionDialog::remove_slowdown(wxCommandEvent& event_args) {
 }
 
 void CalibrationRetractionDialog::create_geometry(wxCommandEvent& event_args) {
+    size_t nb_items = 1;
+    if (decr_temp->GetSelection() == 1) {
+        nb_items = 2;
+    } else if (decr_temp->GetSelection() == 2 || decr_temp->GetSelection() == 4) {
+        nb_items = 3;
+    } else if (decr_temp->GetSelection() == 3) {
+        nb_items = 4;
+    } else if (decr_temp->GetSelection() == 5) {
+        nb_items = 5;
+    }
+    if (nb_items > 1 && !require_plan_builder(true))
+        return;
     Plater* plat = this->main_frame->plater();
     Model& model = plat->model();
     if (!plat->new_project(L("Retraction calibration")))
@@ -129,16 +147,6 @@ void CalibrationRetractionDialog::create_geometry(wxCommandEvent& event_args) {
     long nb_retract = 1;
     if (!nb_steps->GetValue().ToLong(&nb_retract)) {
         nb_retract = 15;
-    }
-    size_t nb_items = 1;
-    if (decr_temp->GetSelection() == 1) {
-        nb_items = 2;
-    } else if (decr_temp->GetSelection() == 2 || decr_temp->GetSelection() == 4) {
-        nb_items = 3;
-    } else if (decr_temp->GetSelection() == 3) {
-        nb_items = 4;
-    } else if (decr_temp->GetSelection() == 5) {
-        nb_items = 5;
     }
     int temp_decr = (decr_temp->GetSelection() < 4) ? 10 : 5;
 
@@ -273,7 +281,8 @@ void CalibrationRetractionDialog::create_geometry(wxCommandEvent& event_args) {
     /// --- main config, please modify object config when possible ---
     if (nb_items > 1) {
         DynamicPrintConfig new_print_config = *print_config; //make a copy
-        new_print_config.set_key_value("complete_objects", new ConfigOptionBool(true));
+        new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+        new_print_config.set_key_value("complete_objects_step", new ConfigOptionFloat(0.));
         //if skirt, use only one
         if (print_config->option<ConfigOptionInt>("skirts")->get_int() > 0 && print_config->option<ConfigOptionInt>("skirt_height")->get_int() > 0) {
             new_print_config.set_key_value("complete_objects_one_skirt", new ConfigOptionBool(true));

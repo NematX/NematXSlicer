@@ -18,7 +18,7 @@ Facts about a finalized PrintingPlan
 
 The plan is the single source of truth for what is printed: layer count, which
 tools are used, the first tool and the planned tool transitions. This module
-reads a finalized plan (and the sliced Print for the object layer count) and
+reads a finalized plan and its borrowed source-layer associations and
 returns plain values, so the custom G-code variables and the print statistics
 are computed by the same code and cannot disagree. These plan facts are
 independent of the generated text: the measured values (volumes, weights, costs,
@@ -26,8 +26,6 @@ tower share, support flag) come from the Reader result and are not computed here
 */
 
 namespace Slic3r {
-
-class Print;
 
 namespace Printing {
 
@@ -42,6 +40,8 @@ struct PlanFacts
     int32_t toolchanges = 0;
     // Number of PrintingLayerGroup, auxiliary layers included.
     int32_t layer_count = 0;
+    // Layer groups containing object-source extrusions, counted once per pass.
+    int32_t object_layer_count = 0;
     // Highest layer print Z of the plan (scaled), 0 without layers. It is the layer's own print Z: the Z offset of the
     // printer is not added, as in the historical max_layer_z.
     coord_t max_print_z = 0;
@@ -51,9 +51,6 @@ struct PlanFacts
 
 // Read a possibly null finalized plan and return its layer and tool facts; a null plan gives default facts.
 PlanFacts summarize_plan(const PrintingPlan *plan);
-
-// Count the distinct object layer Z values of a sliced Print, auxiliary layers excluded.
-int32_t object_layer_count(const Print &print);
 
 } // namespace Printing
 } // namespace Slic3r

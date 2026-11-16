@@ -405,7 +405,8 @@ TEST_CASE("Tool-change wipe collects every real visit boundary", "[plugins][wipe
     configure_print(print, model, 3);
     const bool semm = GENERATE(false, true);
     const_cast<PrintConfig &>(print.config()).single_extruder_multi_material.value = semm;
-    const_cast<PrintConfig &>(print.config()).parallel_objects_step.value = 5.;
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("complete_objects_step", "5");
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     slic3r_api::PrintingPlan plan = Test::GCode::printing_plan_view(print);
     slic3r_api::PrintingGroup first = plan.append_group();
     append_layer(print, first, 0.2, {0, 0, 1});
@@ -2135,7 +2136,8 @@ TEST_CASE("Production two-nozzle wipe exports tool changes and tower offsets", "
         {"perimeter_extruder", "1"}, {"infill_extruder", "1"}, {"solid_infill_extruder", "1"},
         {"step_perimeter_plugin", "perimeter.generator.classic"}, {"step_surface_generation_plugin", "surface.initial_typed_surface_builder"},
         {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"layer_height", "0.3"}, {"fill_density", "10%"},
-        {"parallel_objects_step", parallel ? "5" : "0"}, {"gcode_comments", "1"},
+        {"complete_objects_step", parallel ? "5" : "0"}, {"gcode_comments", "1"},
+        {"print_plan_builder", parallel ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
         {"single_extruder_multi_material", semm ? "1" : "0"}});
     Print print;
     Model model;

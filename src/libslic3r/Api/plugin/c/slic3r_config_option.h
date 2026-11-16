@@ -6,7 +6,7 @@
 #define slic3r_config_option_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_OPTION_MAJOR 3u
-#define SLIC3R_PLUGIN_API_CONFIG_OPTION_MINOR 0u
+#define SLIC3R_PLUGIN_API_CONFIG_OPTION_MINOR 1u
 
 #include <stddef.h>
 #include <stdint.h>
@@ -14,6 +14,10 @@
 #include "slic3r_config_option_type.h"
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
+
+/* Typed configuration access for plugins uses borrowed option and graph handles.
+   Standalone graphs can instead be created from copied points, evaluated through
+   the same graph functions, and released with graph_data_free by their owner. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +47,15 @@ typedef enum raw_graph_type {
     RAW_GRAPH_TYPE_LINEAR,
     RAW_GRAPH_TYPE_SPLINE,
 } raw_graph_type;
+
+/* Copy unscaled points into a caller-owned host graph. Coordinates must be finite, with nondecreasing X
+   and a public interpolation type. Return null for invalid input or allocation failure;
+   no exception crosses the ABI. Release only this returned handle with graph_data_free. */
+SLIC3R_HOST_API graph_data_handle *graph_data_create(const c_vec2d *points, uint32_t count, raw_graph_type type);
+
+/* Release a graph returned by graph_data_create; null is harmless. Borrowed graphs
+   must not be passed here. No exception crosses the ABI. */
+SLIC3R_HOST_API void graph_data_free(graph_data_handle *me);
 
 /* Return the number of usable points in this borrowed graph; null returns 0. */
 SLIC3R_HOST_API uint32_t         graph_data_size(const graph_data_handle *me);

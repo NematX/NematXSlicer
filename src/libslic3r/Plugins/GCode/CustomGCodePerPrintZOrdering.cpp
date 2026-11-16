@@ -6,6 +6,8 @@
 #include "CustomGCodePerPrintZ.hpp"
 
 #include <cassert>
+#include <iterator>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -28,9 +30,9 @@ layer.
 The normal execution flow is:
 
     CustomGCodeToolOverrides (priority 50)
-    |-- read the marker rows for each PrintingGroup
-    |-- keep the first object tool as the initial selection
-    |-- update the selection after each MultiAsSingle ToolChange
+    |-- index ToolChange rows by their scaled Z
+    |-- keep each group's first object tool below all effective ToolChanges
+    |-- select the last MultiAsSingle ToolChange at or below each layer's Z
     |-- move only normal object extrusion roots to the selected tool group
     `-- remove empty tool groups that no longer contain work or events
 
@@ -62,25 +64,6 @@ namespace {
 const char *const k_no_dependencies[] = {nullptr};
 
 /*
-Check whether tool-oriented markers describe the same physical printer mode as
-the PrintingPlan. Multi-extruder markers must only act on a multi-extruder
-plan; all single-tool variants form the other compatible family.
-*/
-bool tool_and_color_modes_are_compatible(Slic3r::CustomGCode::Mode print_mode,
-                                         Slic3r::CustomGCode::Mode record_mode);
-
-/*
-Resolve the zero-based tool that must be active to execute one color event.
-This also converts a MultiAsSingle ToolChange into a color change on a
-single-nozzle printer. A missing result means the row has no executable color
-event in the current mode.
-*/
-std::optional<extruder_index_t> color_event_tool(const CustomGCodeRow &row,
-                                         Slic3r::CustomGCode::Mode print_mode,
-                                         Slic3r::CustomGCode::Mode record_mode,
-                                         uint32_t extruder_count);
-
-/*
 Find the first tool that prints a normal object extrusion in one group. This is
 the initial state of the ToolChange timeline; support and auxiliary extrusions
 must not choose the object tool.
@@ -102,9 +85,10 @@ void move_object_extrusions_to_tool(PrintingPlan &plan,
                                      extruder_index_t extruder_id);
 
 /*
-Replay the MultiAsSingle ToolChange timeline independently in every sequential
-printing group. Once a marker changes the selected tool, that tool remains in
-effect for the following layers until another marker replaces it.
+Assign each layer's object roots to the last MultiAsSingle ToolChange
+at or below its Z, regardless of group order. Below all changes, retain the group's
+first object tool. Borrowed table rows remain unchanged; conversion and plan API
+failures propagate. Other modes leave the plan unchanged.
 */
 void apply_tool_overrides(const CustomGCodeTable &table,
                            PrintingPlan &plan,
@@ -113,6 +97,7 @@ void apply_tool_overrides(const CustomGCodeTable &table,
 
 /*
 Prepare the first tool visit of each layer for color-change execution. All
+rows map once across the complete plan, with pointers borrowing the table. All
 targets are validated before mutation so conflicting markers cannot leave a
 partially reordered plan; a missing visit is created intentionally as an empty
 structural tool change.
@@ -121,31 +106,6 @@ void apply_color_event_tools(const CustomGCodeTable &table,
                               PrintingPlan &plan,
                              Slic3r::CustomGCode::Mode print_mode,
                              uint32_t extruder_count);
-
-bool tool_and_color_modes_are_compatible(Slic3r::CustomGCode::Mode print_mode,
-                                         Slic3r::CustomGCode::Mode record_mode)
-{
-    return (print_mode == Slic3r::CustomGCode::MultiExtruder) ==
-           (record_mode == Slic3r::CustomGCode::MultiExtruder);
-}
-
-std::optional<extruder_index_t> color_event_tool(const CustomGCodeRow &row,
-                                         Slic3r::CustomGCode::Mode print_mode,
-                                         Slic3r::CustomGCode::Mode record_mode,
-                                         uint32_t extruder_count)
-{
-    if (!tool_and_color_modes_are_compatible(print_mode, record_mode))
-        return std::nullopt;
-    if (row.type == Slic3r::CustomGCode::ColorChange)
-        return print_mode == Slic3r::CustomGCode::SingleExtruder ?
-            std::optional<extruder_index_t>(0) :
-            std::optional<extruder_index_t>(custom_gcode_row_extruder_index(row, extruder_count));
-    if (row.type == Slic3r::CustomGCode::ToolChange &&
-        print_mode == Slic3r::CustomGCode::SingleExtruder &&
-        record_mode == Slic3r::CustomGCode::MultiAsSingle)
-        return extruder_index_t(0);
-    return std::nullopt;
-}
 
 std::optional<extruder_index_t> first_object_tool(const ConstPrintingPlan &plan,
                                            const ConstPrintingGroup &group)
@@ -223,14 +183,18 @@ void apply_tool_overrides(const CustomGCodeTable &table,
         record_mode != Slic3r::CustomGCode::MultiAsSingle)
         return;
 
+    std::map<coord_t, extruder_index_t> changes;
+    for (const CustomGCodeRow &row : table.rows)
+        if (row.type == Slic3r::CustomGCode::ToolChange)
+            changes[scale_to_layer_coord(row.print_z_mm)] = custom_gcode_row_extruder_index(row, extruder_count);
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
         PrintingGroup group = plan.group(group_idx);
-        const std::vector<std::vector<const CustomGCodeRow *>> layer_rows = rows_by_layer(table, group);
-        std::optional<extruder_index_t> selected_tool = first_object_tool(plan, group);
+        const std::optional<extruder_index_t> initial_tool = first_object_tool(plan, group);
         for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
-            for (const CustomGCodeRow *row : layer_rows[layer_idx])
-                if (row->type == Slic3r::CustomGCode::ToolChange)
-                    selected_tool = custom_gcode_row_extruder_index(*row, extruder_count);
+            std::optional<extruder_index_t> selected_tool = initial_tool;
+            const std::map<coord_t, extruder_index_t>::const_iterator next = changes.upper_bound(group.layer_group(layer_idx).print_z());
+            if (next != changes.begin())
+                selected_tool = std::prev(next)->second;
             if (selected_tool) {
                 PrintingLayerGroup layer = group.layer_group(layer_idx);
                 move_object_extrusions_to_tool(plan, group, layer, *selected_tool);
@@ -244,27 +208,7 @@ void apply_color_event_tools(const CustomGCodeTable &table,
                              Slic3r::CustomGCode::Mode print_mode,
                              uint32_t extruder_count)
 {
-    const Slic3r::CustomGCode::Mode record_mode = effective_record_mode(table);
-    std::vector<std::vector<std::optional<extruder_index_t>>> targets(plan.group_count());
-
-    /* Resolve every ambiguity before creating or moving any tool group. */
-    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
-        PrintingGroup group = plan.group(group_idx);
-        const std::vector<std::vector<const CustomGCodeRow *>> layer_rows = rows_by_layer(table, group);
-        targets[group_idx].resize(group.layer_group_count());
-        for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
-            for (const CustomGCodeRow *row : layer_rows[layer_idx]) {
-                const std::optional<extruder_index_t> target =
-                    color_event_tool(*row, print_mode, record_mode, extruder_count);
-                if (!target)
-                    continue;
-                if (targets[group_idx][layer_idx] && targets[group_idx][layer_idx] != target)
-                    throw std::runtime_error(
-                        "Several color changes require different tools on the same layer.");
-                targets[group_idx][layer_idx] = target;
-            }
-        }
-    }
+    const CustomGCodeColorTargets targets = color_event_targets(table, plan, print_mode, extruder_count);
 
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
         PrintingGroup group = plan.group(group_idx);

@@ -271,7 +271,8 @@ class PythonOrchestratorBridgeViewTests(unittest.TestCase):
                       ui_target_file="filament.ui", ui_page="Infill", ui_group="Selectors",
                       option_key="example_selector", invalidates_step=self.generated.STEP_NONE,
                       strict_selection=True, read_with_one_provider=True, show_with_one_provider=True,
-                      provider_settings_rules=False, auto_value=True, value_when_absent="")
+                      provider_settings_rules=False, auto_value=True, value_when_absent="",
+                      mode=self.generated.RAW_CONFIG_OPTION_MODE_SUSI)
         self.assertTrue(view.register_exclusive_group(10001, **fields))
         orchestrator, step, copied = host.group_declaration
         self.assertEqual((orchestrator, step), (10, 10001))
@@ -282,6 +283,11 @@ class PythonOrchestratorBridgeViewTests(unittest.TestCase):
             self.assertEqual(copied[name], expected, name)
         self.assertEqual(copied["has_invalidates_step"], 1)
         self.assertEqual(copied["has_value_when_absent"], 1)
+        self.assertEqual(copied["has_mode"], 1)
+        self.assertEqual([name for name, _type in self.generated.RawExclusiveGroupDef._fields_][-3:],
+                         ["value_when_absent", "has_mode", "mode"])
+        self.assertTrue(view.register_exclusive_group(10001, exclusive_group="default", declaring_plugin_id="example.provider"))
+        self.assertEqual(host.group_declaration[2]["has_mode"], 0)
         host.declaration_result = 0
         self.assertFalse(view.register_exclusive_group(10001, **fields))
         host.declaration_result = -1

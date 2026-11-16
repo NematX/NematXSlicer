@@ -93,7 +93,7 @@ const raw_used_config_key k_used_config_keys[] = {
     { "skirt_brim", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "min_skirt_length", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "draft_shield", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "complete_objects", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
+    { "print_plan_builder", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "complete_objects_one_skirt", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "resolution_internal", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "first_layer_height", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
@@ -131,6 +131,8 @@ const char *const k_defined_config_keys[] = {
 // rules that decide when they stay editable. Both run once from
 // inilialize_impl().
 void initialize_default_skirt_generator_settings(orchestrator_handle *orchestrator);
+// Keep the shared-skirt switch editable only in zero-step By object mode; the
+// borrowed host copies the rule, and registration failures follow the host API.
 void add_default_skirt_generator_gui_rules(orchestrator_handle *orchestrator);
 
 struct SkirtOutput
@@ -944,7 +946,9 @@ void generate_default_skirt(const plugin_run_context *run_ctx, orchestrator_hand
         return;
 
     storage_handle *storage = run_ctx->plugin_storage;
-    if (print_config.get("complete_objects").get_bool() &&
+    // The API exposes the stored selection; with one active builder it can differ from the effective selection.
+    if (print_config.get("print_plan_builder").serialize() == "ordering.plan_builder.by_object" &&
+        print_config.float_or_default("complete_objects_step", 0.) == 0. &&
         !print_config.get("complete_objects_one_skirt").get_bool()) {
         std::vector<std::vector<SkirtOutput>> outputs(print.object_count());
         for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
@@ -1037,18 +1041,12 @@ void initialize_default_skirt_generator_settings(orchestrator_handle *orchestrat
 
 void add_default_skirt_generator_gui_rules(orchestrator_handle *orchestrator)
 {
-    using slic3r_api::any_of;
     using slic3r_api::GuiCondition;
     using slic3r_api::GuiRule;
-    using slic3r_api::non_zero;
-    using slic3r_api::true_;
 
-    const GuiCondition sequential = any_of({
-        true_("complete_objects"),
-        non_zero("parallel_objects_step")
-    });
+    const GuiCondition sequential = slic3r_api::string_equals("print_plan_builder", "ordering.plan_builder.by_object");
     GuiRule::activate("complete_objects_one_skirt")
-        .when(sequential)
+        .when(slic3r_api::all_of({sequential, slic3r_api::float_equals("complete_objects_step", 0.)}))
         .scope(RAW_PRESET_TYPE_FFF_PRINT)
         .add_to(orchestrator);
 }

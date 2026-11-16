@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationBridgeDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// bridge calibration samples on the plater using whole-object printing.
 
 class ComboBox;
 
@@ -22,6 +24,7 @@ public:
     
 protected:
     void create_buttons(wxStdDialogButtonSizer* buttons) override;
+    // Create whole-object bridge samples varying the requested setting.
     void create_geometry(std::string setting_key, bool add);
     void create_geometry_flow_ratio(wxCommandEvent& event_args) { create_geometry("bridge_flow_ratio", false);  }
     void create_geometry_overlap(wxCommandEvent& event_args) { create_geometry("bridge_overlap", true); }

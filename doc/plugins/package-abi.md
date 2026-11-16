@@ -11,7 +11,7 @@ slicer_version = 2.7.63.0-alpha+UNKNOWN
 slic3r_plugin_types.h = 4.1
 slic3r_orchestrator.h = 3.5
 slic3r_slicing_step.h = 2.4
-slic3r_config_def.h = 1.6
+slic3r_config_def.h = 1.7
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
 steps/slic3r_step_gcode_export.h = 4.2
@@ -39,6 +39,15 @@ version: a table built before the change would be refused. Growing such a
 structure is a major version. The G-code thumbnail service
 (`slic3r_gcode_thumbnail.h`) is at 2.0 for this reason: its encoder table
 gained the optional `encode_image` callback.
+
+Config-def 1.7 appends optional selector visibility flags (`has_mode`, `mode`)
+to `raw_exclusive_group_def`. The host reads them only when `struct_size`
+includes both fields. Older descriptors and descriptors without `has_mode`
+keep the Advanced/Expert and SuperSlicer visibility flags.
+
+Config-option 3.1 adds `graph_data_create()` and `graph_data_free()` for standalone
+host graphs copied from plugin points. Borrowed configuration graphs remain read-only
+and must not be freed. Existing 3.0 packages remain compatible.
 
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming

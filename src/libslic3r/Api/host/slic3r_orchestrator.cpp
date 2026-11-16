@@ -350,6 +350,8 @@ int32_t orchestrator_register_exclusive_group(orchestrator_handle *orch, slicing
         traits.provider_settings_rules = def->provider_settings_rules != 0;
         traits.auto_value = def->auto_value != 0;
         if (def->has_value_when_absent) traits.value_when_absent = def->value_when_absent;
+        if (def->struct_size >= offsetof(raw_exclusive_group_def, mode) + sizeof(def->mode) && def->has_mode)
+            traits.mode = def->mode;
         return to_orchestrator(orch)->record_exclusive_group_declaration(step, std::move(owned));
     } catch (...) { return -2; }
 }

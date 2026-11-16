@@ -50,6 +50,7 @@
 #include "libslic3r/Plugins/GCode/Firmware/RepRapGCodeFirmware.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/SprinterGCodeFirmware.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
@@ -97,8 +98,8 @@ void prepare_mixed_height_print(Print &print,
     config.set_deserialize_strict({
         {"first_layer_height", "0.2"},
         {"support_material", "0"},
-        {"complete_objects", "0"},
-        {"parallel_objects_step", "0"},
+        {"print_plan_builder", "ordering.plan_builder.by_layer"},
+        {"complete_objects_step", "0"},
         {"seam_visibility", "0"}
     });
     initialize_mixed_height_cube_print(print, model, config, first_tool, second_tool);
@@ -324,7 +325,7 @@ TEST_CASE("Configured layer and filament scripts become scoped plan events",
     CHECK_FALSE(changed_tool.events.has_before());
     CHECK_FALSE(plan.events.has_after());
 }
-// Verify the between-object event sees the legacy object index on the producer-selected side of the move.
+// Initialize the complete plan, then verify the finished-copy count on the producer-selected side of the move.
 TEST_CASE("Between-object scripts select the requested side of the group move",
           "[plugins][gcode][script-type][extrusion-edit][sequential]")
 {
@@ -359,6 +360,10 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
     plan.groups.emplace_back();
     plan.groups.back().printing_catalog_ids.push_back(
         plan.find_or_add_object_instance(print.objects()[1], 0));
+    PluginStorage catalog_storage;
+    slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
+        reinterpret_cast<const print_handle *>(&print), reinterpret_cast<printing_plan_handle *>(&plan),
+        reinterpret_cast<storage_handle *>(&catalog_storage));
 
     config.option<ConfigOptionBool>("between_objects_gcode_before_move")->value = false;
     Steps::StepExtrusionEdition::clear(print);
@@ -383,7 +388,7 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
     ScriptStateFirmwareProbe firmware(scripts, script_storage_handle);
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
     const slic3r_api::PrintingPlan plan_view = printing_plan_view(print);
-    firmware.setup(print_view.config());
+    firmware.begin_print(print_view, plan_view);
     CHECK(firmware.begin_group(plan_view.group(0)).empty());
     CHECK(firmware.begin_group(plan_view.group(1)).empty());
     CHECK(firmware.begin_group(plan_view.group(2)).empty());
@@ -400,7 +405,7 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
 
     ScriptStateFirmwareProbe before_move_firmware(scripts, script_storage_handle);
     const slic3r_api::PrintingPlan refreshed_plan_view = printing_plan_view(print);
-    before_move_firmware.setup(print_view.config());
+    before_move_firmware.begin_print(print_view, refreshed_plan_view);
     CHECK(before_move_firmware.begin_group(refreshed_plan_view.group(0)).empty());
     CHECK(before_move_firmware.write_event(refreshed_plan_view.group(0).events().after()) ==
           "; between 0:First_object 1:Second_object I0\n");
@@ -1393,7 +1398,7 @@ TEST_CASE("Exported scripts read the legacy export variables",
             {"solid_infill_extruder", "1"},
             {"top_solid_layers", "0"},
             {"bottom_solid_layers", "0"},
-            {"complete_objects", sequential ? "1" : "0"},
+            {"print_plan_builder", sequential ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"},
             {"step_perimeter_plugin", "perimeter.generator.classic"},
             {"step_surface_generation_plugin", "surface.initial_typed_surface_builder"},
             {"step_wipetower_plugin", "wipe_tower.manager.default"},
@@ -1429,6 +1434,8 @@ TEST_CASE("Exported scripts read the legacy export variables",
         Model model;
         Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
                          print, model, config);
+        model.objects()[0].instances.front()->set_offset(Vec3d(40., 40., 0.));
+        model.objects()[1].instances.front()->set_offset(Vec3d(100., 40., 0.));
         for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"})
             model.objects()[1].config.set_deserialize_strict(key, "2");
         print.apply(model, config);

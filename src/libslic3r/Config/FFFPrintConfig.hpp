@@ -729,9 +729,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionInts,                 bed_temperature))
     ((ConfigOptionFloatOrPercent,       bridge_precision))
     ((ConfigOptionInts,                 chamber_temperature))
-    ((ConfigOptionBool,                 complete_objects))
-    ((ConfigOptionBool,                 complete_objects_one_brim))
-    ((ConfigOptionEnum<CompleteObjectSort>, complete_objects_sort))
     ((ConfigOptionFloats,               colorprint_heights))
     //((ConfigOptionBools,                cooling))
     ((ConfigOptionEnum<DraftShield>,    draft_shield))
@@ -767,9 +764,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionBool,                 ooze_prevention))
     ((ConfigOptionString,               output_filename_format))
     ((ConfigOptionGraphs,               overhangs_dynamic_fan_speed))
-    ((ConfigOptionBool,                 parallel_islands))
-    ((ConfigOptionFloat,                parallel_objects_step))
-    ((ConfigOptionFloat,                parallel_objects_step_max_z))
     ((ConfigOptionStrings,              post_process))
     ((ConfigOptionPoint,                priming_position))
     ((ConfigOptionString,               print_custom_setting))
@@ -813,9 +807,19 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
 
 )
 
+// Return whether printing builds each whole object before the next one.
+bool print_complete_objects(const ConfigBase &config);
+
+// Return the requested object order, or model order when the setting is absent.
+CompleteObjectSort complete_objects_sort(const ConfigBase &config);
+// Return whether printing builds object by object, whole or in height steps.
+bool print_by_object(const ConfigBase &config);
+
 //static inline
+// Return the preferred arrangement clearance, without imposing a placement requirement.
 double min_object_distance(const PrintConfig& config); //TODO: remove
 //static inline
+// Return preferred clearance at the given height, excluding per-copy skirts when a step makes them global.
 double min_object_distance(const ConfigBase* config, double height = 0); //TODO: remove
 
 // This object is mapped to Perl as Slic3r::Config::Full.

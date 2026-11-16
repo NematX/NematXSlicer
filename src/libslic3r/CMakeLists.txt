@@ -467,10 +467,15 @@ set(SLIC3R_SOURCES
 	Plugins/Ordering/KDTreeOrderingEngine.hpp
 	Plugins/Ordering/NearestNeighborOrderingEngine.cpp
 	Plugins/Ordering/NearestNeighborOrderingEngine.hpp
-	Plugins/Ordering/DefaultPlanBuilder.cpp
+	Plugins/Ordering/ByLayerPlanBuilder.cpp
+	Plugins/Ordering/ByObjectPlanBuilder.cpp
+	Plugins/Ordering/IslandStacks.cpp
+	Plugins/Ordering/IslandStacks.hpp
 	Plugins/Ordering/ObjectInstanceCatalog.hpp
 	Plugins/Ordering/ObjectInstanceCatalog.cpp
 	Plugins/Ordering/DefaultToolGroupOrdering.cpp
+	Plugins/Ordering/PlanBuilderCommon.cpp
+	Plugins/Ordering/PlanBuilderCommon.hpp
 	Plugins/Ordering/PrintingExtrusionPreSort.cpp
 	Plugins/Ordering/PrintingExtrusionPreSort.hpp
 	Plugins/Ordering/XYSerpentineExtrusionTreeOrdering.cpp

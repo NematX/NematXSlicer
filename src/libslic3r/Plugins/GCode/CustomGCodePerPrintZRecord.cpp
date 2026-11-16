@@ -20,8 +20,9 @@ Custom G-code PrintRecord reader
 ================================
 
 The Model publishes custom height markers as a column-oriented DynamicConfig.
-This file is the single decoder used by all pipeline plugins that consume
-those markers. It transforms the columnar record into a validated
+This file decodes those markers for consumers requiring validated rows.
+ByObjectPlanBuilder.cpp separately reads their geometric barriers and ignores
+stale tool selections under its own policy. This decoder transforms the record into a validated
 `CustomGCodeTable` and provides the common rules for matching rows to plan
 layers and determining the printer mode.
 
@@ -39,12 +40,16 @@ The normal execution flow is:
     `-- use the stored mode, or infer SingleExtruder, MultiAsSingle, or
         MultiExtruder from the marker rows when the stored mode is undefined
 
-    rows_by_layer()
-    `-- assign each marker to the first PrintingLayerGroup whose print Z is
-        greater than or equal to the marker Z
+    rows_by_plan()
+    `-- assign each marker once to the first PrintingLayerGroup in plan order
+        whose print Z is greater than or equal to the marker Z
 
-`printing_plan_mode()` inspects the tools used by object extrusions, rather
-than support or auxiliary extrusions, to distinguish a true multi-extruder
+    color_event_targets()
+    `-- resolve compatible color tools at those locations before tool ordering
+        and reject conflicting targets without changing the plan
+
+`printing_plan_mode()` inspects the original region-island tools of object
+extrusions, rather than substituted plan tools or support and auxiliary tools, to distinguish a true multi-extruder
 plan from a multi-extruder printer operating as a single tool. This distinction
 is used by both marker-ordering and marker-event plugins. Tool values are
 one-based in the stored record and become zero-based when returned to plan
@@ -57,6 +62,22 @@ consumer that maps them; this reader does not silently discard them.
 */
 
 namespace slic3r_api::GCodeGeneration::CustomGCodePerPrintZPlugin {
+// Return row pointers indexed by group and layer, assigning each row only at the
+// first qualifying plan location. Above-plan rows stay unmapped. The table must
+// outlive the result; allocation and plan API failures propagate without mutation.
+CustomGCodePlanRows rows_by_plan(const CustomGCodeTable &table, const ConstPrintingPlan &plan);
+
+// Map rows once and return each layer's required first tool, including converted
+// single-printer ToolChanges. Incompatible modes have no targets. Conflicting
+// color tools, conversion, allocation and API failures propagate without plan mutation.
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count);
+
+// Classify the printer using known tools on the source region islands of object
+// extrusions present in the borrowed plan. Tool overrides leave those sources
+// unchanged, so every consumer sees the same mode. Single-tool printers remain
+// SingleExtruder; API failures propagate without modifying the print or plan.
+Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrintingPlan &plan);
 namespace {
 
 /*
@@ -221,9 +242,14 @@ Slic3r::CustomGCode::Mode printing_plan_mode(const Print &print, const ConstPrin
             const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
             for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
                 const ConstPrintingToolGroup tool = layer.tool_group(tool_idx);
-                for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx)
-                    if (printing_extrusion_is_object(plan, group, tool.extrusion(extrusion_idx)))
-                        object_tools.insert(tool.extruder_id());
+                for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx) {
+                    const ConstPrintingExtrusion extrusion = tool.extrusion(extrusion_idx);
+                    if (printing_extrusion_is_object(plan, group, extrusion)) {
+                        const extruder_index_t source_tool = extrusion.region_island().extruder_id();
+                        if (source_tool != EXTRUDER_ID_UNKNOWN)
+                            object_tools.insert(source_tool);
+                    }
+                }
             }
         }
     }
@@ -252,17 +278,50 @@ bool printing_extrusion_is_object(const ConstPrintingPlan &plan,
     return false;
 }
 
-std::vector<std::vector<const CustomGCodeRow *>> rows_by_layer(
-    const CustomGCodeTable &table,
-    const ConstPrintingGroup &group)
+CustomGCodeColorTargets color_event_targets(const CustomGCodeTable &table, const ConstPrintingPlan &plan,
+    Slic3r::CustomGCode::Mode print_mode, uint32_t extruder_count)
 {
-    std::vector<std::vector<const CustomGCodeRow *>> result(group.layer_group_count());
+    CustomGCodeColorTargets targets(plan.group_count());
+    const CustomGCodePlanRows mapped = rows_by_plan(table, plan);
+    const Slic3r::CustomGCode::Mode record_mode = effective_record_mode(table);
+    const bool compatible = (print_mode == Slic3r::CustomGCode::MultiExtruder) ==
+        (record_mode == Slic3r::CustomGCode::MultiExtruder);
+    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
+        targets[group_idx].resize(plan.group(group_idx).layer_group_count());
+        for (uint32_t layer_idx = 0; compatible && layer_idx < targets[group_idx].size(); ++layer_idx)
+            for (const CustomGCodeRow *row : mapped[group_idx][layer_idx]) {
+                const bool converted = row->type == Slic3r::CustomGCode::ToolChange &&
+                    print_mode == Slic3r::CustomGCode::SingleExtruder && record_mode == Slic3r::CustomGCode::MultiAsSingle;
+                if (row->type != Slic3r::CustomGCode::ColorChange && !converted)
+                    continue;
+                const extruder_index_t tool = print_mode == Slic3r::CustomGCode::SingleExtruder ?
+                    extruder_index_t(0) : custom_gcode_row_extruder_index(*row, extruder_count);
+                if (targets[group_idx][layer_idx] && *targets[group_idx][layer_idx] != tool)
+                    throw std::runtime_error("Several color changes require different tools on the same layer.");
+                targets[group_idx][layer_idx] = tool;
+            }
+    }
+    return targets;
+}
+
+CustomGCodePlanRows rows_by_plan(
+    const CustomGCodeTable &table,
+    const ConstPrintingPlan &plan)
+{
+    CustomGCodePlanRows result(plan.group_count());
+    for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx)
+        result[group_idx].resize(plan.group(group_idx).layer_group_count());
     for (const CustomGCodeRow &row : table.rows) {
         const coord_t row_print_z = scale_to_layer_coord(row.print_z_mm);
-        for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
-            if (group.layer_group(layer_idx).print_z() >= row_print_z) {
-                result[layer_idx].push_back(&row);
-                break;
+        bool mapped = false;
+        for (uint32_t group_idx = 0; !mapped && group_idx < plan.group_count(); ++group_idx) {
+            const ConstPrintingGroup group = plan.group(group_idx);
+            for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
+                if (group.layer_group(layer_idx).print_z() >= row_print_z) {
+                    result[group_idx][layer_idx].push_back(&row);
+                    mapped = true;
+                    break;
+                }
             }
         }
     }

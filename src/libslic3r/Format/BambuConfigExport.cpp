@@ -23,6 +23,7 @@
 #include "OrcaConfigKeys.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
+#include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 
 /*
@@ -66,7 +67,7 @@ Operation notes:
 - a percentage becomes the ratio Orca stores (95% :  0.95)
 - bridge_type                      thick_bridges (nozzle :  1, flow :  0)
 - infill_every_layers              infill_combination (1 :  0, 10 :  1), via the value table
-- retract_lift_top, complete_objects, machine_limits_usage, gcode_label_objects, gcode_flavor,
+- retract_lift_top, print_plan_builder, machine_limits_usage, gcode_label_objects, gcode_flavor,
 - seam_position, thumbnails_format, filament_type, the infill patterns
 - renamed values, via the value table
 - ensure_vertical_shell_thickness  disabled :  none; enabled_old :  ensure_critical_only (2 perimeters),
@@ -216,8 +217,8 @@ const std::vector<BambuExportValueRule> k_value_rules = {
     {"retract_lift_top", "All surfaces", "All Surfaces"},
     {"retract_lift_top", "Not on top", "Bottom Only"},
     {"retract_lift_top", "Only on top", "Top Only"},
-    {"complete_objects", "0", "by layer"},
-    {"complete_objects", "1", "by object"},
+    {"print_plan_builder", "ordering.plan_builder.by_layer", "by layer"},
+    {"print_plan_builder", "ordering.plan_builder.by_object", "by object"},
     {"machine_limits_usage", "time_estimate_only", "0"},
     {"machine_limits_usage", "emit_to_gcode", "1"},
     {"gcode_label_objects", "disabled", "0"},
@@ -239,8 +240,16 @@ BambuConfigTranslation translate_config_to_bambu(const ConfigBase &config)
         if (!config.writes_key(key, ConfigWriteTarget::GCode))
             continue;
         const ConfigOption *option = config.optptr(key);
-        if (option != nullptr && option->is_enabled())
-            translate_option(config, key, *option, translation, unmapped_count);
+        if (option != nullptr && option->is_enabled()) {
+            if (key == "print_plan_builder") {
+                // A lone active provider overrides a contradictory stored selector.
+                const ConfigOptionString effective(print_by_object(config) ?
+                    "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
+                translate_option(config, key, effective, translation, unmapped_count);
+            } else {
+                translate_option(config, key, *option, translation, unmapped_count);
+            }
+        }
     }
     translate_custom_variables(config, translation);
     if (unmapped_count > 0)

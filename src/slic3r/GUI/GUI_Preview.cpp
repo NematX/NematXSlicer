@@ -462,10 +462,7 @@ wxBoxSizer* Preview::create_layers_slider_sizer()
     m_layers_slider = new DoubleSlider::Control(this, wxID_ANY, 0, 0, 0, 100);
     std::lock_guard lock(m_layers_slider->lock_render());
 
-    m_layers_slider->SetDrawMode(wxGetApp().get_current_printer_technology() == ptSLA,
-                                 wxGetApp().preset_bundle->fff_prints.get_edited_preset().config.opt_bool("complete_objects") ||
-                                     (wxGetApp().preset_bundle->fff_prints.get_edited_preset().config.opt_float("parallel_objects_step") > 0 &&
-                                      !wxGetApp().preset_bundle->fff_prints.get_edited_preset().config.opt_bool("parallel_islands")));
+    m_layers_slider->SetDrawMode(wxGetApp().get_current_printer_technology() == ptSLA);
     m_layers_slider->enable_action_icon(wxGetApp().is_editor());
 
     sizer->Add(m_layers_slider, 0, wxEXPAND, 0);
@@ -616,9 +613,8 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool sho
     m_layers_slider->SetSelectionSpan(idx_low, idx_high);
     m_layers_slider->SetTicksValues(ticks_info_from_model);
     
-    bool sequential_print = wxGetApp().preset_bundle->fff_prints.get_edited_preset().config.opt_bool("complete_objects");
     bool sla_print_technology = plater->printer_technology() == ptSLA;
-    m_layers_slider->SetDrawMode(sla_print_technology, sequential_print);
+    m_layers_slider->SetDrawMode(sla_print_technology);
     std::vector<double> layers_max_heights;
     if (show_gcode_data && !sla_print_technology)
         layers_max_heights = m_canvas->get_gcode_layers_max_heights();
