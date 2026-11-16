@@ -6,6 +6,7 @@
 #include "SupportDemandPainting.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -32,11 +33,12 @@ The normal execution flow is:
     run_impl()
     |-- project the painted support facets into per-layer polygons
     `-- for every layer island:
-        |-- intersect enforcer painting with the island and union it with demand
+        |-- intersect enforcer painting with the island's overhang and union it with demand
         `-- enlarge blocker painting slightly and subtract it from demand
 
 Enforcer painting can create demand where no demand existed, but it is clipped
-to the current island, and is ignored while the object prints no support (Common::object_support_enabled()).
+to the overhang of the current island (the part that the layer below does not
+cover; nothing on the first layer), and is ignored while the object prints no support (Common::object_support_enabled()).
 Blocker painting changes only existing demand. Enforcers
 are applied before blockers, so a blocker can suppress demand created by an
 enforcer in the same layer. The small blocker offset prevents boundary-touching
@@ -55,8 +57,9 @@ namespace {
 const char *k_support_demand_painting_id = "support.demand.painting";
 const char *k_dependencies[] = { nullptr };
 
-// Clips layer painting to an island and adds it through the common demand publisher.
-void add_painting_to_island(const plugin_run_context *run_ctx, const LayerIsland &island, const ClipperContext &clipper,
+// Clips layer painting to the overhang of an island, the part that lower (the layer below, null on the first layer) does not cover,
+// and adds it through the common demand publisher.
+void add_painting_to_island(const plugin_run_context *run_ctx, const LayerIsland &island, const Layer *lower, const ClipperContext &clipper,
                             const std::vector<StoredPolygonCollection> &painting, uint32_t layer_idx);
 // Removes layer blocker painting through the common enlarged subtraction.
 void remove_painting_from_island(const plugin_run_context *run_ctx, const LayerIsland &island, const ClipperContext &clipper,
@@ -78,14 +81,19 @@ bool has_layer_painting(const std::vector<StoredPolygonCollection> &by_layer, ui
 // Intersects borrowed painting for a valid layer with its island, then publishes its union with demand through Common; missing painting leaves demand unchanged and cancellation/geometry/allocation failures propagate.
 void add_painting_to_island(const plugin_run_context *run_ctx,
                             const LayerIsland &island,
+                            const Layer *lower,
                             const ClipperContext &clipper,
                             const std::vector<StoredPolygonCollection> &painting,
                             uint32_t layer_idx)
 {
-    if (!has_layer_painting(painting, layer_idx))
+    // The first layer stands on the bed: nothing there asks for support.
+    if (lower == nullptr || !has_layer_painting(painting, layer_idx))
         return;
 
-    ClipperOperand enforced = clipper_intersection(clipper(island.slice()), clipper(painting[layer_idx]));
+    // Only the overhang asks for support: a facet sloping down across several layers is projected into each of them, partly
+    // over the layer below.
+    ClipperOperand enforced = clipper_diff(clipper_intersection(clipper(island.slice()), clipper(painting[layer_idx])),
+                                           Common::accumulate_lower_slices(clipper, clipper(), *lower));
     Common::add_to_demand(run_ctx, island, clipper, std::move(enforced));
 }
 
@@ -184,11 +192,12 @@ void SupportDemandPainting::run_impl(const plugin_run_context *run_ctx) const
         throw_if_cancelled(run_ctx);
 
         const Layer layer = object.layer(layer_idx);
+        const std::optional<Layer> lower = layer_idx > 0 ? std::optional<Layer>(object.layer(layer_idx - 1)) : std::nullopt;
         for (uint32_t island_idx = 0; island_idx < layer.island_count(); ++island_idx) {
             throw_if_cancelled(run_ctx);
 
             const LayerIsland island = layer.island(island_idx);
-            add_painting_to_island(run_ctx, island, clipper, enforcers, layer_idx);
+            add_painting_to_island(run_ctx, island, lower ? &*lower : nullptr, clipper, enforcers, layer_idx);
             remove_painting_from_island(run_ctx, island, clipper, blockers, layer_idx);
             progress().increment();
         }

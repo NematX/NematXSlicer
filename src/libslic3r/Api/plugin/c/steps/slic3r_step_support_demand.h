@@ -40,7 +40,9 @@ Normal plugin usage:
 3. Read an island's demand with layer_island_get_support_demand(), or get it
    in mutable form with support_demand_get_island_mutable() and edit the
    returned collection in place: add, replace, clip or clear its ExPolygons.
-   Demand areas should stay inside the island slice.
+   Demand areas should stay inside the island slice and outside the slices of
+   the layer below: the support families read the demand as overhang, and an
+   area that the layer below covers still places a contact under it.
 
 The print/object data tree is read-only context for this step; the demand of
 each island is the only mutable data.

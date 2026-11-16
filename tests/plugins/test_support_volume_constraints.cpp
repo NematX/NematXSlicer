@@ -380,6 +380,55 @@ TEST_CASE("A support column ends one contact distance under the object above it"
     CHECK(top == Approx(3.85).margin(1e-6));
 }
 
+// A support enforcer volume around the slab's overhang, or support enforcer painting on the roof's underside (facets 12 and 13,
+// after the post's 12), with automatic support off, asks for support on the same surface as the automatic demand: the roof's
+// underside. The support layers must then be the same, whatever the support layer height.
+TEST_CASE("Support enforcers over an overhang give the support layers of the automatic demand", "[plugins][support-volumes][support-demand]")
+{
+    const char *style = GENERATE("grid", "tree");
+    const char *height = GENERATE("0", "0.3", "0.22", "0.13");
+    CAPTURE(style, height);
+    enum class Demand { automatic, volume, painting };
+    const auto layer_list = [&](Demand demand) {
+        DynamicPrintConfig config = SG::config(style, false, 2);
+        config.set_deserialize_strict({{"support_material_layer_height", height},
+                                       {"support_material_auto", demand == Demand::automatic ? "1" : "0"}});
+        Print print;
+        Model model;
+        Test::init_print({SG::slab(false)}, print, model, config);
+        if (demand != Demand::automatic) {
+            for (ModelObject &model_object : model.objects()) {
+                if (demand == Demand::volume) {
+                    model_object.add_volume(zone_box(3., -1., 0., 10., 10., 6.), ModelVolumeType::SUPPORT_ENFORCER, false);
+                } else {
+                    // "4" is the encoded enforcer state of a painted facet. reset() renews the painting's timestamp, so that
+                    // Print::apply() copies it into the print, already applied once.
+                    ModelVolume &part = *model_object.volumes.front();
+                    part.supported_facets.reset();
+                    part.supported_facets.reserve(2);
+                    for (int facet : {12, 13})
+                        part.supported_facets.set_triangle_from_string(facet, "4");
+                    part.supported_facets.shrink_to_fit();
+                }
+            }
+            print.apply(model, config);
+            print.validate();
+            print.set_status_silent();
+        }
+        SG::prefix(print);
+        SG::family(print);
+        // "print_z/height" in mm, readable in a failure report.
+        std::vector<std::string> result;
+        for (const Layer *layer : auxiliary_layers(print.object(0)))
+            result.push_back(std::to_string(layer->unscaled_print_z()) + "/" + std::to_string(layer->unscaled_height()));
+        return result;
+    };
+    const std::vector<std::string> automatic = layer_list(Demand::automatic);
+    REQUIRE_FALSE(automatic.empty());
+    CHECK(layer_list(Demand::volume) == automatic);
+    CHECK(layer_list(Demand::painting) == automatic);
+}
+
 // Without support_material the columns are kept in the project but print nothing.
 TEST_CASE("Support columns print nothing when support is disabled", "[plugins][support-volumes][support-column]")
 {
