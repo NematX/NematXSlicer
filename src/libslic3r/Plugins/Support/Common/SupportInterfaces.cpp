@@ -110,7 +110,8 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
 // Mechanism: the foot is out.base.front() when it starts on the bed (bottom_print_z() == 0); otherwise nothing is done, so a
 // support without a base slab on the bed, such as tips standing alone on the bed, is not widened. The foot is grown by the
 // raft_first_layer_expansion setting of the object (minus EPSILON), in at least 5 steps of at most the first layer flow width,
-// each step being cut by the first object layer slices grown by p.gap_xy, so the foot never crosses the object. With no expansion
+// each step being cut by the first object layer slices and its no-support zones grown by p.gap_xy, so the foot never crosses the
+// object or a zone. With no expansion
 // the foot is only cut. The footprints of the top contacts and interfaces that start on the bed, grown by EPSILON, are then
 // subtracted, so that the dense slabs keep their area.
 // Inputs: layers must contain the object's first layer as layers[0]; out.storage must stay valid, it holds the temporary areas.
@@ -129,7 +130,8 @@ void expand_first_layer_foot(const Object &object, const std::vector<Layer> &lay
             if (slab->bottom_print_z() == 0)
                 interface.append_move_from(clipper_offset(clipper(slab->polygons), float(scale_d(EPSILON)), join_type, 0.).to_polygon_collection());
     Polys &foot = out.base.front()->polygons;
-    const Polys trimming = clipper_offset(clipper(layers[0].slices()), double(p.gap_xy), join_type, 0.).to_polygon_collection();
+    const Polys trimming = clipper_offset(support_obstacle(clipper, layers[0], 0, out.no_support_zones), double(p.gap_xy), join_type,
+                                          0.).to_polygon_collection();
     const double expansion = std::max(0., scale_d(object.config().get("raft_first_layer_expansion").get_float()) - scale_d(EPSILON));
     if (expansion > SCALED_EPSILON) {
         const int steps = std::max(5, int(std::ceil(expansion / p.first_flow.width)));

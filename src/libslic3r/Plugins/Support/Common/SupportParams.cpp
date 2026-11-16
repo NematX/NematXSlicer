@@ -2,11 +2,14 @@
 #include "SupportParams.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <set>
 
+#include "ClipperResults.hpp"
 #include "SupportPaths.hpp"
+#include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/LayerHeightLimits.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
@@ -30,7 +33,8 @@
 
    object_layers() lists borrowed object-layer views in layer-id order; object_has_support_demand() checks their islands for demand.
    The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
-   are shared by the demand modifiers and the tree family, so that both slice the volumes alike.
+   are shared by the demand modifiers and the support families, so that all of them slice the volumes alike;
+   slice_support_volumes() unites every volume of one type, as the families need for the no-support zones.
    Extruder height limits use LayerHeightLimits.hpp before millimeter z-step
    rounding, matching the host's shared policy without changing flow derivation.
 
@@ -312,6 +316,58 @@ std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volum
     }
 
     return out;
+}
+
+// The slicing inputs are prepared only when a volume of the type exists, so an object without one costs a scan of its volumes.
+std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
+                                                             storage_handle *storage, const plugin_run_context *run_ctx)
+{
+    std::vector<StoredExPolygonCollection> united;
+    std::vector<float> slice_zs;
+    c_mesh_slicing_params params = {};
+    bool prepared = false;
+    for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx) {
+        const Volume volume = object.volume(volume_idx);
+        if (volume.type() != type)
+            continue;
+        if (!prepared) {
+            slice_zs = layer_slice_zs(object);
+            params = support_modifier_slicing_params(print, object);
+            prepared = true;
+        }
+        std::vector<StoredExPolygonCollection> slices = slice_support_modifier_volume(volume, slice_zs, params, storage, run_ctx);
+        if (slices.empty())
+            continue;
+        if (united.empty()) {
+            united = std::move(slices);
+            continue;
+        }
+        // Every volume is sliced at the same Z values, so both vectors have one collection per object layer.
+        assert(slices.size() == united.size());
+        const ClipperContext clipper(storage);
+        for (size_t layer_idx = 0; layer_idx < std::min(slices.size(), united.size()); ++layer_idx) {
+            if (united[layer_idx].empty()) {
+                united[layer_idx] = std::move(slices[layer_idx]);
+            } else if (!slices[layer_idx].empty()) {
+                throw_if_cancelled(run_ctx);
+                ClipperOperand both = clipper(united[layer_idx]);
+                both += clipper(slices[layer_idx]);
+                united[layer_idx] = native_expolygons(clipper_union(both));
+            }
+        }
+    }
+    return united;
+}
+
+ClipperOperand support_obstacle(const ClipperContext &clipper, const Layer &layer, size_t layer_idx,
+                                const std::vector<StoredExPolygonCollection> &zones)
+{
+    ClipperOperand obstacle = clipper(layer.slices());
+    if (layer_idx < zones.size() && !zones[layer_idx].empty()) {
+        obstacle += clipper(zones[layer_idx]);
+        return clipper_union(obstacle);
+    }
+    return obstacle;
 }
 
 } // namespace slic3r_api::Support::Common

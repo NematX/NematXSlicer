@@ -32,6 +32,7 @@
 #include "SupportSettings.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_run_context.h"
 #include "libslic3r/Api/plugin/c/slic3r_volume.h"
+#include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 
 namespace slic3r_api::Support::Common {
@@ -110,9 +111,9 @@ std::vector<Layer> object_layers(const Object &object);
 // Reports whether any island of the borrowed object has support demand.
 bool object_has_support_demand(const Object &object);
 
-/* ---- Support modifier volumes (enforcers and blockers) ----
-   The demand modifiers and the tree family both slice these volumes at the slice Z of every object layer. The helpers below are
-   shared by them so that both slice the volumes alike. */
+/* ---- Support modifier volumes (enforcers, blockers and no-support zones) ----
+   The demand modifiers slice the enforcers and blockers, and the support families slice the no-support zones, at the slice Z of
+   every object layer. The helpers below are shared by them so that all of them slice the volumes alike. */
 
 // The slice Z of every object layer (mm), the heights the modifier volumes are sliced at.
 std::vector<float> layer_slice_zs(const Object &object);
@@ -129,6 +130,18 @@ std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volum
                                                                      const c_mesh_slicing_params &base_params,
                                                                      storage_handle *storage,
                                                                      const plugin_run_context *run_ctx);
+
+// The union of every volume of the given type of the object, sliced like slice_support_modifier_volume() at the slice Z of every
+// object layer: one collection per object layer, in storage. The result is an empty vector when the object has no such volume,
+// and the union does not depend on the order of the volumes. run_ctx gives the cancellation checks and may be null.
+std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
+                                                             storage_handle *storage, const plugin_run_context *run_ctx);
+
+// What the support keeps clear of on one object layer: the layer slices, united with the no-support zones sliced for that layer
+// (zones holds one collection per object layer, or nothing). Without a zone on the layer the operand is the slices themselves,
+// so the clearance of an object without zones is unchanged. The operand borrows the layer and the zones until it is consumed.
+ClipperOperand support_obstacle(const ClipperContext &clipper, const Layer &layer, size_t layer_idx,
+                                const std::vector<StoredExPolygonCollection> &zones);
 
 } // namespace slic3r_api::Support::Common
 

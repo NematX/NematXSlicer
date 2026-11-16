@@ -8,8 +8,8 @@
    explained in SupportPublication.cpp.
 
    run_support_family() shares the style and demand filters, constructs the run's
-   parameters once, calls the family's slab generator, publishes its slabs and
-   finishes progress. The generated slabs live until publication returns.
+   parameters once, slices the object's no-support zones, calls the family's slab
+   generator, publishes its slabs and finishes progress. The generated slabs live until publication returns.
 
        Common::publish(context, object, params, support, orchestrator); */
 #ifndef plugins_support_common_publication_hpp_
@@ -39,7 +39,7 @@ bool merged_into_base(bool merge, bool base_takes_contact, bool z_has_base, bool
 // the result lives in the storage of surfaces.
 StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering);
 }
-// Publish the slabs as auxiliary layers, grouped by print Z and thickness, with one region-island per extruder and clipped fill surfaces; a branch slab becomes sparse support of the base extruder, and one interface id per print Z and the thinnest group published first keep the native numbering and order.
+// Remove the no-support zones of support from its slabs, then publish the slabs as auxiliary layers, grouped by print Z and thickness, with one region-island per extruder and clipped fill surfaces; a branch slab becomes sparse support of the base extruder, and one interface id per print Z and the thinnest group published first keep the native numbering and order.
 // The slabs and storage stay owned by the caller. Rejected writes leave published layers in place and throw silent
 // PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
 // cancellation), otherwise std::runtime_error. context is the calling plugin's borrowed run context, used only after
@@ -48,7 +48,7 @@ StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces,
 void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator);
 // A family fills the borrowed run's slabs using its single shared parameter object.
 using GenerateSupport = void (*)(const plugin_run_context *, const Print &, const Object &, const SupportParams &, GeneratedSupport &);
-// Filters styles and demand, constructs one parameter object, generates and publishes slabs, then finishes valid runs' progress.
+// Filters styles and demand, constructs one parameter object, slices the no-support zones, generates and publishes slabs, then finishes valid runs' progress.
 void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
                         SupportStyle first_style, SupportStyle second_style, GenerateSupport generate);
 } // namespace slic3r_api::Support::Common

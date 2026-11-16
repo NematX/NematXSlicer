@@ -26,7 +26,7 @@ void SupportFamilyTree::inilialize_impl(storage_handle *) const
 
 namespace {
 // Tree branch settings read by the routing and the slab placement, beyond the geometry keys of SupportParams. "resolution" is the
-// print slicing resolution that cleans the support blockers sliced by TreeVolumes.
+// print slicing resolution that cleans the no-support zones sliced by TreeVolumes.
 const raw_used_config_key k_tree_keys[] = {
     {"resolution", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_tree_angle", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
