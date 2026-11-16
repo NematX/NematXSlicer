@@ -136,6 +136,8 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
 void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
 // Fill intermediate slabs from projected columns and remove portions inside contacts.
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
+// Clip the sparse body to the dense contacts/interfaces that remain above it, projected down through the object.
+void clip_sparse_to_dense(const Run &run, Common::GeneratedSupport &out);
 // Merge consecutive sparse body slabs when the upper one covers the lower core within the overhang limit.
 void merge_sparse_layers(const Run &run, Common::GeneratedSupport &out);
 // Return whether the part of the lower footprint outside the upper slab is clear of the object, contacts and interfaces.
@@ -180,8 +182,10 @@ void generate_support(const plugin_run_context *context, const Print &print, con
     Common::carve_interfaces(params, params.style == Common::SupportStyle::Snug, out);
     // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
-    if (params.style == Common::SupportStyle::GridMerged)
+    if (params.style == Common::SupportStyle::GridMerged) {
+        clip_sparse_to_dense(run, out);
         merge_sparse_layers(run, out);
+    }
 }
 
 namespace {
@@ -463,6 +467,46 @@ bool border_is_clear(const Run &run, const Common::GeneratorLayer &border, const
         }
     }
     return true;
+}
+
+// Builds the dense footprint of every object layer from the contacts and carved interfaces, projects it down through the object with
+// the XY clearance, then clips every sparse body slab to that footprint grown by half a support line. The first-layer foot is kept.
+void clip_sparse_to_dense(const Run &run, Common::GeneratedSupport &out)
+{
+    const ClipperContext &clipper = run.clipper;
+    const auto layer_index = [&run](coord_t z) {
+        const std::vector<Layer>::const_iterator it = std::lower_bound(run.layers.begin(), run.layers.end(), z,
+            [](const Layer &layer, coord_t value) { return layer.print_z() < value; });
+        return it != run.layers.end() && it->print_z() == z ? int(it - run.layers.begin()) : -1;
+    };
+    std::vector<Polys> dense;
+    dense.reserve(run.layers.size());
+    for (size_t index = 0; index < run.layers.size(); ++index)
+        dense.emplace_back(run.storage);
+    for (const Common::GeneratorLayers *slabs : {&out.top, &out.bottom, &out.interfaces})
+        for (const Common::GeneratorLayer *slab : *slabs) {
+            const int index = layer_index(slab->print_z);
+            if (index >= 0 && slab->height > 0)
+                dense[size_t(index)] = polygons(clipper_union2(clipper(dense[size_t(index)]), clipper(slab->polygons)));
+        }
+    for (int index = int(run.layers.size()) - 1; index >= 0; --index) {
+        throw_if_cancelled(run.context);
+        if (size_t(index + 1) < dense.size())
+            dense[size_t(index)] = polygons(clipper_union2(clipper(dense[size_t(index)]), clipper(dense[size_t(index + 1)])));
+        const Polys clearance = polygons(clipper_offset(clipper(run.layers[size_t(index)].slices()), double(run.p.gap_xy)));
+        dense[size_t(index)] = polygons(clipper_diff(clipper(dense[size_t(index)]), clipper(clearance)));
+    }
+    for (Common::GeneratorLayer *base : out.base) {
+        if (base->polygons.empty() || base->bottom_print_z() == 0)
+            continue;
+        const int index = layer_index(base->print_z);
+        if (index < 0)
+            continue;
+        const Polys mask = polygons(clipper_offset(clipper(dense[size_t(index)]),
+            run.p.base_flow.spacing / 2 + 5));
+        base->polygons = polygons(clipper_intersection(clipper(base->polygons), clipper(mask)));
+        base->polygons.ensure_valid(run.p.resolution);
+    }
 }
 
 // Merges contiguous sparse body slabs bottom-up. A prism extends when its core, shrunk by the overhang limit, is covered by the next
