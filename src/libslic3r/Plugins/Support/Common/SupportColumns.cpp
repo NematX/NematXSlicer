@@ -17,7 +17,7 @@
 
 /* Implementation of the support columns (see SupportColumns.hpp).
 
-   The columns are added after the family, on its finished slabs, in three phases:
+   The columns are added after the family, on its finished slabs, in four phases:
    1. Heights: the Z span of every column comes from its transformed mesh, rounded to the machine Z step; the spans are united.
       A span is never lowered to the bed: the column starts where its mesh starts.
    2. Slabs: the sparse slabs of out.base that meet a span carry the column there. The parts of the spans that no sparse slab
@@ -28,13 +28,17 @@
       the areas of the contacts and interfaces that overlap the slab in Z. A sparse section then joins the slab's polygons by a
       union, after the first-layer widening of the family's foot (widen_first_layer_area()) when the slab lies on the bed; an interface section becomes a new top interface slab with the slab's print Z and height, so that publication gives
       the dense role the area both kinds cover.
+   4. Tops: under an object surface, a column ends where the family's own top contact would lie (the contact distance below the
+      surface, lower under hanging bridge threads), not where the object layer grid happens to cut it: its area is removed from the
+      column slabs rising above that Z, and caps on the grid fill it from the bottom of those slabs up to that Z.
    Sparse slabs do not overlap each other in Z, so a column area is printed by one slab only. The geometry lives in out's storage.
 
        add_support_columns()
        |-- column_spans(): Z spans of the columns
        |-- uncovered() / gap_pieces(): new base slabs where no sparse slab covers a span
        |-- slice_support_volumes(): sparse and interface column sections at the middle of every carrying slab
-       `-- column_clearance(): object, zones, contacts and interfaces removed before the union */
+       |-- column_clearance(): object, zones, contacts and interfaces removed before the union
+       `-- cap_column_tops(): column tops at the top contact Z under the object surfaces */
 
 namespace slic3r_api::Support::Common {
 namespace {
@@ -56,6 +60,13 @@ std::vector<Interval> gap_pieces(const Interval &gap, const std::vector<Layer> &
 // and the contacts and interfaces of out that overlap the slab in Z. Empty when nothing is near.
 std::optional<ClipperOperand> column_clearance(const ClipperContext &clipper, const std::vector<Layer> &layers,
                                                const SupportParams &params, const GeneratedSupport &out, const GeneratorLayer &slab);
+// Ends the columns of each kind under an object surface at the Z of the family's top contact under that surface
+// (top_contact_z(); the bridge contact's lower Z for the whole surface when its layer has bridges). Under object layer id, the area
+// of the column section of layer id - 1 that layer id - 1 does not cover is removed from the column slabs of that kind (out.base,
+// or dense_slabs for the interface columns) that rise above that Z below the surface; new slabs of that kind then fill this area
+// from the bottom of the lowest of them up to that Z, cut like the gaps and trimmed like any column section.
+void cap_column_tops(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
+                     const std::vector<Layer> &layers, GeneratedSupport &out, GeneratorLayers &dense_slabs);
 
 coord_t on_z_grid(double z_mm, double z_step)
 {
@@ -173,6 +184,61 @@ std::optional<ClipperOperand> column_clearance(const ClipperContext &clipper, co
                 add(clipper(other->polygons));
     return clearance;
 }
+
+void cap_column_tops(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
+                     const std::vector<Layer> &layers, GeneratedSupport &out, GeneratorLayers &dense_slabs)
+{
+    if (layers.size() < 2)
+        return;
+    const Config print_config = print.config();
+    const ClipperContext clipper(out.storage);
+    const coord_t step = layers.back().height();
+    for (const bool dense : {false, true}) {
+        const std::vector<StoredExPolygonCollection> sections = slice_support_volumes(print, object,
+            dense ? RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN : RAW_VOLUME_TYPE_SUPPORT_COLUMN, out.storage, context);
+        GeneratorLayers &slabs = dense ? dense_slabs : out.base;
+        GeneratorLayers caps;
+        for (size_t id = 1; id < layers.size() && id < sections.size(); ++id) {
+            if (sections[id - 1].empty())
+                continue;
+            throw_if_cancelled(context);
+            const StoredPolygonCollection under = clipper_intersection(clipper(sections[id - 1]),
+                clipper_diff(clipper(layers[id].slices()), clipper(layers[id - 1].slices()))).to_polygon_collection();
+            if (under.empty())
+                continue;
+            const std::optional<TopContactZ> contact = top_contact_z(layers, print_config, params, id, out.storage);
+            if (!contact)
+                continue;
+            const coord_t ceiling = contact->bridge_z ? *contact->bridge_z : contact->z;
+            const coord_t surface = layers[id].bottom_z();
+            coord_t from = ceiling;
+            for (GeneratorLayer *slab : slabs) {
+                if (slab->print_z <= ceiling || slab->bottom_print_z() >= surface)
+                    continue;
+                // A slab that the clearance already emptied under the surface still bounds the part to fill below the ceiling.
+                from = std::min(from, slab->bottom_print_z());
+                if (slab->polygons.empty())
+                    continue;
+                slab->polygons = clipper_diff(clipper(slab->polygons), clipper(under)).to_polygon_collection();
+                slab->polygons.ensure_valid(params.resolution);
+            }
+            if (ceiling - from < params.min_height)
+                continue;
+            for (const Interval &piece : gap_pieces({from, ceiling}, layers, step, params.min_height)) {
+                if (piece.second - piece.first < params.min_height)
+                    continue;
+                GeneratorLayer &cap = add_layer(out, dense ? LayerType::TopInterface : LayerType::Base, piece.second, piece.first,
+                                                piece.second - piece.first);
+                ClipperOperand area = clipper(under);
+                const std::optional<ClipperOperand> clearance = column_clearance(clipper, layers, params, out, cap);
+                cap.polygons = (clearance ? clipper_diff(area, *clearance) : clipper_union(area)).to_polygon_collection();
+                cap.polygons.ensure_valid(params.resolution);
+                caps.push_back(&cap);
+            }
+        }
+        slabs.insert(slabs.end(), caps.begin(), caps.end());
+    }
+}
 } // namespace
 
 bool has_support_columns(const Object &object)
@@ -265,6 +331,8 @@ void add_support_columns(const plugin_run_context *context, const Print &print, 
             dense_slabs.push_back(&dense_slab);
         }
     }
+    // Phase 4: the column tops under the object surfaces.
+    cap_column_tops(context, print, object, params, layers, out, dense_slabs);
     out.interfaces.insert(out.interfaces.end(), dense_slabs.begin(), dense_slabs.end());
 }
 } // namespace slic3r_api::Support::Common

@@ -350,6 +350,36 @@ TEST_CASE("A support column inside the object or a no-support zone prints nothin
     }
 }
 
+// A column that rises into the slab's roof (bottom at z = 4) ends one contact distance below it, like the top contact of the
+// automatic support, and not on the object layer grid: 0.15 mm under 0.2 mm layers puts its top at z = 3.85. Automatic support is
+// off, so all the support under the roof is the column.
+TEST_CASE("A support column ends one contact distance under the object above it", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "tree");
+    CAPTURE(style);
+    DynamicPrintConfig config = SG::config(style, false, 0);
+    config.set_deserialize_strict({{"support_material_auto", "0"}, {"support_material_contact_distance", "0.15"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab(false)}, print, model, config);
+    for (ModelObject &model_object : model.objects())
+        model_object.add_volume(zone_box(6., 2., 0., 2., 2., 4.5), ModelVolumeType::SUPPORT_COLUMN, false);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    SG::prefix(print);
+    SG::family(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<ExPolygons> columns = object.slice_support_volumes(ModelVolumeType::SUPPORT_COLUMN);
+    REQUIRE(columns.size() > 10);
+    const ExPolygons footprint = columns[10];
+    double top = 0;
+    for (const Layer *layer : auxiliary_layers(object))
+        if (area_mm2(intersection_ex(support_surfaces(*layer), footprint)) > 1.)
+            top = std::max(top, layer->unscaled_print_z());
+    CHECK(top == Approx(3.85).margin(1e-6));
+}
+
 // Without support_material the columns are kept in the project but print nothing.
 TEST_CASE("Support columns print nothing when support is disabled", "[plugins][support-volumes][support-column]")
 {

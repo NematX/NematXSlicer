@@ -7,7 +7,8 @@
    sparse slabs (base, intermediate or branch) at their middle Z, each interface column section becomes a top interface slab of the
    same print Z and height (publication then removes its area from the sparse slab), and new base slabs carry the column where no sparse slab
    covers its height. The column keeps clear of the object and of the no-support zones like the family's own slabs, and leaves
-   the contacts and interfaces their areas, so no area is printed twice. A column is never extended to the bed.
+   the contacts and interfaces their areas, so no area is printed twice. Under an object surface a column ends at the Z of the
+   family's top contact. A column is never extended to the bed.
 
        if (has_support_columns(object))
            add_support_columns(context, print, object, params, support); */
@@ -28,7 +29,8 @@ bool has_support_columns(const Object &object);
 // height receives the support interface column sections; the column heights that no sparse slab covers get new base slabs,
 // cut at the tops of the object layers (or every top layer height above the object) and never thinner than params.min_height.
 // Before it joins a slab, a section loses the object and the no-support zones of out grown by params.gap_xy within the Z gaps of
-// the slab, and the areas of every contact and interface slab that overlaps it in Z. Does nothing when has_support_columns() is
+// the slab, and the areas of every contact and interface slab that overlaps it in Z. Under an object surface the column ends at the
+// Z of the family's top contact (top_contact_z()) instead of the object layer grid. Does nothing when has_support_columns() is
 // false. The new slabs and their geometry are owned by out; cancellation, geometry and allocation failures propagate.
 void add_support_columns(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
                          GeneratedSupport &out);
