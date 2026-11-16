@@ -25,12 +25,13 @@ namespace slic3r_api::Support::Common {
 // interface column volume.
 bool has_support_columns(const Object &object);
 // Adds the object's support columns to the slabs of out. Each sparse slab of out.base whose printable interval meets a column
-// receives the support column sections at its middle Z (widened like the support foot on the bed layer), and a new top interface slab of out.interfaces with the same print Z and
-// height receives the support interface column sections; the column heights that no sparse slab covers get new base slabs,
-// cut at the tops of the object layers (or every top layer height above the object) and never thinner than params.min_height.
+// receives the support column sections at its middle Z (widened like the support foot on the bed layer), and a new top interface
+// slab of out.interfaces with the same print Z and height receives the support interface column sections. The column heights that
+// no sparse slab covers get new base slabs: on the object layers when support_material_synchronize_layers is set, otherwise every
+// support_material_layer_height from their bottom (after a first-layer slab on the bed), never thinner than params.min_height.
 // Before it joins a slab, a section loses the object and the no-support zones of out grown by params.gap_xy within the Z gaps of
 // the slab, and the areas of every contact and interface slab that overlaps it in Z. Under an object surface the column ends at the
-// Z of the family's top contact (top_contact_z()) instead of the object layer grid. Does nothing when has_support_columns() is
+// Z of the family's top contact (top_contact_z()); a rest too thin to print there joins the slab below in one thicker cap. Does nothing when has_support_columns() is
 // false. The new slabs and their geometry are owned by out; cancellation, geometry and allocation failures propagate.
 void add_support_columns(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
                          GeneratedSupport &out);

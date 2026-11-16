@@ -260,8 +260,8 @@ TEST_CASE("A support column alone becomes support over its own height in each bu
             ++carrying;
         }
     }
-    // Three millimeters of 0.2 mm object layers.
-    CHECK(carrying >= 14);
+    // Three millimeters of 0.25 mm column layers: the default support layer height is the maximum, 0.3 mm, kept 0.05 mm below it.
+    CHECK(carrying >= 12);
 }
 
 // The column keeps the object clearance: a column through the cube prints only outside the cube grown by the XY gap.
@@ -311,7 +311,7 @@ TEST_CASE("A support interface column becomes interface support and wins over a 
         CHECK(areas.sparse == Approx(2.).margin(0.1));
         ++carrying;
     }
-    CHECK(carrying >= 12);
+    CHECK(carrying >= 10);
 }
 
 // On the bed layer a column is widened like the support foot, by raft_first_layer_expansion; the layers above keep its section.
@@ -427,6 +427,71 @@ TEST_CASE("Support enforcers over an overhang give the support layers of the aut
     REQUIRE_FALSE(automatic.empty());
     CHECK(layer_list(Demand::volume) == automatic);
     CHECK(layer_list(Demand::painting) == automatic);
+}
+
+// The heights of the column layers that carry the given footprint, from the bottom.
+std::vector<double> column_heights(const PrintObject &object, const ExPolygons &footprint)
+{
+    std::vector<double> heights;
+    for (const Layer *layer : auxiliary_layers(object))
+        if (area_mm2(intersection_ex(support_surfaces(*layer), footprint)) > 1.)
+            heights.push_back(layer->unscaled_height());
+    return heights;
+}
+
+// A column alone, from z = 1 to 6 beside a 5 mm cube of 0.2 mm layers, follows the support layer height, above the cube too:
+// 0.25 mm asked, or 0 for the maximum (0.3 mm) kept one minimum height (0.05 mm) below it. Synchronized support layers follow the
+// object layers instead, and their top height above the object.
+TEST_CASE("Support columns alone follow the support layer height unless the layers are synchronized", "[plugins][support-volumes][support-column]")
+{
+    const char *height = GENERATE("0.25", "0");
+    const bool synchronized = GENERATE(false, true);
+    CAPTURE(height, synchronized);
+    Print print;
+    Model model;
+    column_print(print, model, "grid", {zone_box(14., 2., 1., 2., 2., 5.)}, true, ModelVolumeType::SUPPORT_COLUMN, {}, {},
+                 {"support_material_layer_height", height, "support_material_synchronize_layers", synchronized ? "1" : "0"});
+    const PrintObject &object = print.object(0);
+    const std::vector<ExPolygons> columns = object.slice_support_volumes(ModelVolumeType::SUPPORT_COLUMN);
+    REQUIRE(columns.size() > 10);
+    const std::vector<double> heights = column_heights(object, columns[10]);
+    CHECK(heights.size() == (synchronized ? 25 : 20));
+    for (double layer_height : heights)
+        CHECK(layer_height == Approx(synchronized ? 0.2 : 0.25).margin(1e-6));
+}
+
+// Under the slab's roof (bottom at z = 4) with a 0.18 mm contact distance, the column top lies at 3.82 mm. On 0.2 mm column
+// layers the last 0.02 mm cannot be printed alone: the 3.6 to 3.8 mm layer gives up the column area under the roof, and one
+// 0.22 mm cap prints it up to 3.82 mm. No column layer is thinner than the minimum height.
+TEST_CASE("A support column merges a rest too thin to print into one thicker top layer", "[plugins][support-volumes][support-column]")
+{
+    DynamicPrintConfig config = SG::config("grid", false, 0);
+    config.set_deserialize_strict({{"support_material_auto", "0"}, {"support_material_contact_distance", "0.18"},
+                                   {"support_material_layer_height", "0.2"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab(false)}, print, model, config);
+    for (ModelObject &model_object : model.objects())
+        model_object.add_volume(zone_box(6., 2., 0., 2., 2., 4.5), ModelVolumeType::SUPPORT_COLUMN, false);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    SG::prefix(print);
+    SG::family(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<ExPolygons> columns = object.slice_support_volumes(ModelVolumeType::SUPPORT_COLUMN);
+    REQUIRE(columns.size() > 10);
+    const ExPolygons footprint = columns[10];
+    const Layer *top = nullptr;
+    for (const Layer *layer : auxiliary_layers(object))
+        if (area_mm2(intersection_ex(support_surfaces(*layer), footprint)) > 1.) {
+            CHECK(layer->unscaled_height() >= 0.05 - 1e-6);
+            if (top == nullptr || layer->scaled_print_z() > top->scaled_print_z())
+                top = layer;
+        }
+    REQUIRE(top != nullptr);
+    CHECK(top->unscaled_print_z() == Approx(3.82).margin(1e-6));
+    CHECK(top->unscaled_height() == Approx(0.22).margin(1e-6));
 }
 
 // Without support_material the columns are kept in the project but print nothing.

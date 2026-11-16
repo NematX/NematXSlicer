@@ -21,8 +21,9 @@
    1. Heights: the Z span of every column comes from its transformed mesh, rounded to the machine Z step; the spans are united.
       A span is never lowered to the bed: the column starts where its mesh starts.
    2. Slabs: the sparse slabs of out.base that meet a span carry the column there. The parts of the spans that no sparse slab
-      covers are cut at the object layer tops (above the object, every top layer height) into new base slabs; a piece thinner
-      than the minimum support height joins its neighbor.
+      covers become new base slabs (cut_span()): on the object layers when the support layers are synchronized, otherwise every
+      support layer height from their bottom, after a first-layer slab on the bed; a rest thinner than the minimum support height
+      joins the slab below.
    3. Areas: every column is sliced once at the middle Z of every carrying slab. A section loses the object clearance (the object
       layers within the slab's Z gaps, with their no-support zones, grown by the XY gap, as the grid family trims its slabs) and
       the areas of the contacts and interfaces that overlap the slab in Z. A sparse section then joins the slab's polygons by a
@@ -30,12 +31,13 @@
       the dense role the area both kinds cover.
    4. Tops: under an object surface, a column ends where the family's own top contact would lie (the contact distance below the
       surface, lower under hanging bridge threads), not where the object layer grid happens to cut it: its area is removed from the
-      column slabs rising above that Z, and caps on the grid fill it from the bottom of those slabs up to that Z.
+      column slabs rising above that Z, and caps fill it from the bottom of those slabs up to that Z. A rest too thin to print joins
+      the slab below in one thicker cap, under that surface only.
    Sparse slabs do not overlap each other in Z, so a column area is printed by one slab only. The geometry lives in out's storage.
 
        add_support_columns()
        |-- column_spans(): Z spans of the columns
-       |-- uncovered() / gap_pieces(): new base slabs where no sparse slab covers a span
+       |-- column_slicing() / uncovered() / cut_span(): new base slabs where no sparse slab covers a span
        |-- slice_support_volumes(): sparse and interface column sections at the middle of every carrying slab
        |-- column_clearance(): object, zones, contacts and interfaces removed before the union
        `-- cap_column_tops(): column tops at the top contact Z under the object surfaces */
@@ -53,9 +55,22 @@ std::vector<Interval> united(std::vector<Interval> intervals);
 std::vector<Interval> column_spans(const Object &object, double z_step);
 // The parts of the spans that no interval of covered (sorted and disjoint) overlaps.
 std::vector<Interval> uncovered(const std::vector<Interval> &spans, const std::vector<Interval> &covered);
-// The gap cut at the tops of the object layers inside it, and every step above the last object layer; a piece thinner than
-// min_height joins the piece below it, or the one above for the first piece. A gap thinner than min_height stays one thin piece.
-std::vector<Interval> gap_pieces(const Interval &gap, const std::vector<Layer> &layers, coord_t step, coord_t min_height);
+// How the columns cut the slabs they create (all heights scaled). Synchronized, they follow the object layers, and step is the
+// top object layer height used above the object. Otherwise they start at the bottom of the part to fill (first_height on the bed)
+// and go up by step, the support layer height kept between min_height and max_height - min_height, so that a rest thinner than
+// min_height can join the slab below without exceeding max_height.
+struct ColumnSlicing {
+    bool synchronized = false;
+    coord_t step = 0, first_height = 0, min_height = 0, max_height = 0;
+};
+// The slicing of the object's columns, from support_material_synchronize_layers and support_material_layer_height (0 selects the
+// maximum support height, as for the grid family).
+ColumnSlicing column_slicing(const Object &object, const SupportParams &params, const std::vector<Layer> &layers);
+// The span cut into slabs by the slicing. Synchronized: at the object layer tops inside the span and every step above the object;
+// a piece thinner than min_height joins the piece below it, or the one above for the first piece. Otherwise: every step from the
+// bottom (after first_height on the bed); a last piece thinner than min_height joins the one below while the sum stays within
+// max_height, and is dropped otherwise. The caller drops a single piece thinner than min_height.
+std::vector<Interval> cut_span(const Interval &span, const std::vector<Layer> &layers, const ColumnSlicing &slicing);
 // What a column section loses on the slab: the object layers within the slab's Z gaps with their zones, grown by the XY gap,
 // and the contacts and interfaces of out that overlap the slab in Z. Empty when nothing is near.
 std::optional<ClipperOperand> column_clearance(const ClipperContext &clipper, const std::vector<Layer> &layers,
@@ -64,9 +79,11 @@ std::optional<ClipperOperand> column_clearance(const ClipperContext &clipper, co
 // (top_contact_z(); the bridge contact's lower Z for the whole surface when its layer has bridges). Under object layer id, the area
 // of the column section of layer id - 1 that layer id - 1 does not cover is removed from the column slabs of that kind (out.base,
 // or dense_slabs for the interface columns) that rise above that Z below the surface; new slabs of that kind then fill this area
-// from the bottom of the lowest of them up to that Z, cut like the gaps and trimmed like any column section.
+// from the bottom of the lowest of them up to that Z, cut like the gaps and trimmed like any column section. A rest thinner than
+// min_height instead takes the area from the slab of that kind ending at its bottom, and one cap prints both up to that Z, when
+// that cap stays within max_height; otherwise the rest stays empty.
 void cap_column_tops(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
-                     const std::vector<Layer> &layers, GeneratedSupport &out, GeneratorLayers &dense_slabs);
+                     const std::vector<Layer> &layers, const ColumnSlicing &slicing, GeneratedSupport &out, GeneratorLayers &dense_slabs);
 
 coord_t on_z_grid(double z_mm, double z_step)
 {
@@ -133,27 +150,66 @@ std::vector<Interval> uncovered(const std::vector<Interval> &spans, const std::v
     return gaps;
 }
 
-std::vector<Interval> gap_pieces(const Interval &gap, const std::vector<Layer> &layers, coord_t step, coord_t min_height)
+ColumnSlicing column_slicing(const Object &object, const SupportParams &params, const std::vector<Layer> &layers)
 {
-    std::vector<coord_t> cuts{gap.first};
-    for (const Layer &layer : layers)
-        if (layer.print_z() > gap.first && layer.print_z() < gap.second)
-            cuts.push_back(layer.print_z());
-    const coord_t object_top = layers.empty() ? 0 : layers.back().print_z();
-    if (step > 0)
-        for (coord_t z = std::max(object_top, gap.first) + step; z < gap.second; z += step)
-            cuts.push_back(z);
-    cuts.push_back(gap.second);
-    std::vector<Interval> pieces;
-    for (size_t idx = 1; idx < cuts.size(); ++idx) {
-        if (!pieces.empty() && cuts[idx] - cuts[idx - 1] < min_height)
-            pieces.back().second = cuts[idx];
-        else
-            pieces.emplace_back(cuts[idx - 1], cuts[idx]);
+    const Config config = object.config();
+    ColumnSlicing slicing;
+    slicing.synchronized = config.get("support_material_synchronize_layers").get_bool();
+    slicing.first_height = scale_to_layer_coord(params.first_layer_height);
+    slicing.min_height = params.min_height;
+    slicing.max_height = scale_to_layer_coord(params.max_support_height);
+    if (slicing.synchronized) {
+        slicing.step = layers.empty() ? scale_to_layer_coord(params.layer_height) : layers.back().height();
+        return slicing;
     }
-    if (pieces.size() > 1 && pieces.front().second - pieces.front().first < min_height) {
-        pieces[1].first = pieces.front().first;
-        pieces.erase(pieces.begin());
+    const coord_t raw = slab_step(config.get("support_material_layer_height").get_float_or_percent(),
+                                  params.base_flow_mm.nozzle_diameter, params.max_support_height);
+    const coord_t upper = std::max(slicing.min_height, slicing.max_height - slicing.min_height);
+    slicing.step = std::clamp(on_z_grid(unscaled(raw), params.z_step), slicing.min_height, upper);
+    return slicing;
+}
+
+std::vector<Interval> cut_span(const Interval &span, const std::vector<Layer> &layers, const ColumnSlicing &slicing)
+{
+    std::vector<coord_t> cuts{span.first};
+    if (slicing.synchronized) {
+        for (const Layer &layer : layers)
+            if (layer.print_z() > span.first && layer.print_z() < span.second)
+                cuts.push_back(layer.print_z());
+        const coord_t object_top = layers.empty() ? 0 : layers.back().print_z();
+        if (slicing.step > 0)
+            for (coord_t z = std::max(object_top, span.first) + slicing.step; z < span.second; z += slicing.step)
+                cuts.push_back(z);
+    } else {
+        coord_t z = span.first;
+        if (z == 0 && slicing.first_height > 0 && slicing.first_height < span.second)
+            cuts.push_back(z = slicing.first_height);
+        if (slicing.step > 0)
+            for (z += slicing.step; z < span.second; z += slicing.step)
+                cuts.push_back(z);
+    }
+    cuts.push_back(span.second);
+    std::vector<Interval> pieces;
+    if (slicing.synchronized) {
+        for (size_t idx = 1; idx < cuts.size(); ++idx) {
+            if (!pieces.empty() && cuts[idx] - cuts[idx - 1] < slicing.min_height)
+                pieces.back().second = cuts[idx];
+            else
+                pieces.emplace_back(cuts[idx - 1], cuts[idx]);
+        }
+        if (pieces.size() > 1 && pieces.front().second - pieces.front().first < slicing.min_height) {
+            pieces[1].first = pieces.front().first;
+            pieces.erase(pieces.begin());
+        }
+        return pieces;
+    }
+    for (size_t idx = 1; idx < cuts.size(); ++idx)
+        pieces.emplace_back(cuts[idx - 1], cuts[idx]);
+    if (pieces.size() > 1 && pieces.back().second - pieces.back().first < slicing.min_height) {
+        const Interval rest = pieces.back();
+        pieces.pop_back();
+        if (rest.second - pieces.back().first <= slicing.max_height)
+            pieces.back().second = rest.second;
     }
     return pieces;
 }
@@ -186,13 +242,12 @@ std::optional<ClipperOperand> column_clearance(const ClipperContext &clipper, co
 }
 
 void cap_column_tops(const plugin_run_context *context, const Print &print, const Object &object, const SupportParams &params,
-                     const std::vector<Layer> &layers, GeneratedSupport &out, GeneratorLayers &dense_slabs)
+                     const std::vector<Layer> &layers, const ColumnSlicing &slicing, GeneratedSupport &out, GeneratorLayers &dense_slabs)
 {
     if (layers.size() < 2)
         return;
     const Config print_config = print.config();
     const ClipperContext clipper(out.storage);
-    const coord_t step = layers.back().height();
     for (const bool dense : {false, true}) {
         const std::vector<StoredExPolygonCollection> sections = slice_support_volumes(print, object,
             dense ? RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN : RAW_VOLUME_TYPE_SUPPORT_COLUMN, out.storage, context);
@@ -222,9 +277,21 @@ void cap_column_tops(const plugin_run_context *context, const Print &print, cons
                 slab->polygons = clipper_diff(clipper(slab->polygons), clipper(under)).to_polygon_collection();
                 slab->polygons.ensure_valid(params.resolution);
             }
-            if (ceiling - from < params.min_height)
-                continue;
-            for (const Interval &piece : gap_pieces({from, ceiling}, layers, step, params.min_height)) {
+            std::vector<Interval> pieces;
+            if (ceiling - from >= params.min_height) {
+                pieces = cut_span({from, ceiling}, layers, slicing);
+            } else if (ceiling > from) {
+                // A rest too thin to print: the slab ending at its bottom gives up the area, and one cap prints both.
+                const GeneratorLayers::iterator below = std::find_if(slabs.begin(), slabs.end(), [from](const GeneratorLayer *slab) {
+                    return slab->print_z == from && slab->height > 0 && !slab->polygons.empty();
+                });
+                if (below != slabs.end() && ceiling - (*below)->bottom_print_z() <= slicing.max_height) {
+                    (*below)->polygons = clipper_diff(clipper((*below)->polygons), clipper(under)).to_polygon_collection();
+                    (*below)->polygons.ensure_valid(params.resolution);
+                    pieces.emplace_back((*below)->bottom_print_z(), ceiling);
+                }
+            }
+            for (const Interval &piece : pieces) {
                 if (piece.second - piece.first < params.min_height)
                     continue;
                 GeneratorLayer &cap = add_layer(out, dense ? LayerType::TopInterface : LayerType::Base, piece.second, piece.first,
@@ -274,9 +341,9 @@ void add_support_columns(const plugin_run_context *context, const Print &print, 
                 break;
             }
     }
-    const coord_t step = layers.empty() ? scale_to_layer_coord(params.layer_height) : layers.back().height();
+    const ColumnSlicing slicing = column_slicing(object, params, layers);
     for (const Interval &gap : uncovered(spans, united(std::move(covered))))
-        for (const Interval &piece : gap_pieces(gap, layers, step, params.min_height)) {
+        for (const Interval &piece : cut_span(gap, layers, slicing)) {
             if (piece.second - piece.first < params.min_height)
                 continue;
             GeneratorLayer &slab = add_layer(out, LayerType::Base, piece.second, piece.first, piece.second - piece.first);
@@ -332,7 +399,7 @@ void add_support_columns(const plugin_run_context *context, const Print &print, 
         }
     }
     // Phase 4: the column tops under the object surfaces.
-    cap_column_tops(context, print, object, params, layers, out, dense_slabs);
+    cap_column_tops(context, print, object, params, layers, slicing, out, dense_slabs);
     out.interfaces.insert(out.interfaces.end(), dense_slabs.begin(), dense_slabs.end());
 }
 } // namespace slic3r_api::Support::Common
