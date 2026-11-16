@@ -1,5 +1,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 #include "SupportPublication.hpp"
+#include "SupportColumns.hpp"
 #include "SupportCounters.hpp"
 
 #include <algorithm>
@@ -42,7 +43,8 @@
    Slab ring bounding boxes are cached per height group. Each island intersection keeps only rings whose boxes
    can touch its contour box, in original order; enclosing rings and boundary touches remain in the operand.
    run_support_family() shares the style and demand filters, constructs one parameter object, slices the object's
-   no-support zones once, calls the family's slab generator, publishes the slabs and finishes progress for valid payloads.
+   no-support zones once, calls the family's slab generator, adds the support columns, publishes the slabs and finishes
+   progress for valid payloads. An object with columns runs its family even without support demand.
    Publication first removes the zones from every slab (remove_no_support_zones()), after everything the family grew.
    A matching family marks its surface calculation complete even for empty demand;
    a different family cannot certify that result.
@@ -52,6 +54,7 @@
        run_support_family()
            |-- slice_support_volumes() [the no-support zones of every object layer]
            |-- generate() [the selected family's slab-generator callback]
+           |-- add_support_columns() [SupportColumns.hpp, only with support columns]
            `-- publish()
                |-- remove_no_support_zones() [only when the object has zones]
                |-- collect_publication_z() [group slabs by exact heights]
@@ -136,11 +139,12 @@ void run_support_family(const plugin_run_context *context, orchestrator_handle *
     const Object object(payload->object);
     const SupportStyle style = support_style(object.config());
     if (style == first_style || style == second_style) {
-        if (object_has_support_demand(object)) {
+        if (object_has_support_demand(object) || has_support_columns(object)) {
             const SupportParams params(print, object);
             GeneratedSupport support(context->plugin_storage);
             support.no_support_zones = slice_support_volumes(print, object, RAW_VOLUME_TYPE_NO_SUPPORT_ZONE, support.storage, context);
             generate(context, print, object, params, support);
+            add_support_columns(context, print, object, params, support);
             publish(context, object, params, support, orchestrator);
         }
         // Empty demand is a completed result for this style, not a missing producer.

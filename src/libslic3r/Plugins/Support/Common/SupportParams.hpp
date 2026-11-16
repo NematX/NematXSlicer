@@ -136,6 +136,10 @@ std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volum
 // and the union does not depend on the order of the volumes. run_ctx gives the cancellation checks and may be null.
 std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
                                                              storage_handle *storage, const plugin_run_context *run_ctx);
+// The same union at the given slice Z values (mm, non-decreasing) instead of the object layers: one collection per Z.
+std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
+                                                             const std::vector<float> &slice_zs, storage_handle *storage,
+                                                             const plugin_run_context *run_ctx);
 
 // What the support keeps clear of on one object layer: the layer slices, united with the no-support zones sliced for that layer
 // (zones holds one collection per object layer, or nothing). Without a zone on the layer the operand is the slices themselves,

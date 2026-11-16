@@ -322,8 +322,17 @@ std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volum
 std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
                                                              storage_handle *storage, const plugin_run_context *run_ctx)
 {
+    for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx)
+        if (object.volume(volume_idx).type() == type)
+            return slice_support_volumes(print, object, type, layer_slice_zs(object), storage, run_ctx);
+    return {};
+}
+
+std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print, const Object &object, raw_volume_type type,
+                                                             const std::vector<float> &slice_zs, storage_handle *storage,
+                                                             const plugin_run_context *run_ctx)
+{
     std::vector<StoredExPolygonCollection> united;
-    std::vector<float> slice_zs;
     c_mesh_slicing_params params = {};
     bool prepared = false;
     for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx) {
@@ -331,7 +340,6 @@ std::vector<StoredExPolygonCollection> slice_support_volumes(const Print &print,
         if (volume.type() != type)
             continue;
         if (!prepared) {
-            slice_zs = layer_slice_zs(object);
             params = support_modifier_slicing_params(print, object);
             prepared = true;
         }

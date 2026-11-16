@@ -1,12 +1,13 @@
-/* No-support zones in the built-in support families.
+/* No-support zones and support columns in the built-in support families.
 
    A no-support zone is avoided by the support like the object: every family adds the zone to the object outline of its
-   clearance, and publication removes the zone from every slab once more. These cases slice the overhanging slab of
-   support_grid_test_helpers.hpp, add zone volumes to its object and run the production support step, then read the
+   clearance, and publication removes the zone from every slab once more. A support column becomes sparse support over its own
+   height, whether or not a surface asks for support. These cases slice the overhanging slab of support_grid_test_helpers.hpp
+   (zones) or a plain cube (columns), add the helper volumes to its object and run the production support step, then read the
    published support surfaces of every auxiliary layer.
 
-       zone case
-       |-- zone_print(): slab scene, zone volumes, SG::prefix() and SG::family()
+       zone or column case
+       |-- zone_print() / column_print(): scene, helper volumes, SG::prefix() and SG::family()
        |-- zones_under(): native zone slices of the object layers that overlap an auxiliary layer
        |-- support_area() / zone_overlap(): published support surfaces, alone and inside the zones
        `-- SG::layer_surface_areas(): bottom contacts and interfaces, which must not appear on a zone
@@ -55,6 +56,24 @@ void zone_print(Print &print, Model &model, const char *style, const std::vector
         print.validate();
         print.set_status_silent();
     }
+    SG::prefix(print);
+    SG::family(print);
+}
+
+// Slices a plain 10 x 10 x 5 mm cube, which asks for no support, with the given support columns, and runs the support family of
+// the style; support_material off keeps the columns but disables the support.
+void column_print(Print &print, Model &model, const char *style, const std::vector<TriangleMesh> &columns, bool support = true)
+{
+    const bool filled = std::string(style) == "filled";
+    DynamicPrintConfig config = SG::config(style, filled, filled ? 0 : 2);
+    config.set_deserialize_strict({{"support_material", support ? "1" : "0"}});
+    Test::init_print({make_cube(10., 10., 5.)}, print, model, config);
+    for (ModelObject &model_object : model.objects())
+        for (const TriangleMesh &column : columns)
+            model_object.add_volume(TriangleMesh(column), ModelVolumeType::SUPPORT_COLUMN, false);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
     SG::prefix(print);
     SG::family(print);
 }
@@ -200,4 +219,70 @@ TEST_CASE("A distant no-support zone leaves the support unchanged", "[plugins][s
         const double difference = area_mm2(diff_ex(actual, wanted)) + area_mm2(diff_ex(wanted, actual));
         CHECK(difference < 1e-6);
     }
+}
+
+// A column beside a cube that asks for no support becomes sparse support over its own height only: its 2 x 2 mm section on every
+// layer between z = 1 and 4, nothing below it (the column is not extended to the bed) and nothing above it.
+TEST_CASE("A support column alone becomes support over its own height in each built-in family", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "snug", "tree", "organic", "filled");
+    CAPTURE(style);
+    Print print;
+    Model model;
+    column_print(print, model, style, {zone_box(14., 2., 1., 2., 2., 3.)});
+    const PrintObject &object = print.object(0);
+    const std::vector<ExPolygons> columns = object.slice_support_volumes(ModelVolumeType::SUPPORT_COLUMN);
+    REQUIRE(columns.size() > 10);
+    const ExPolygons footprint = columns[10];
+    REQUIRE(area_mm2(footprint) == Approx(4.).margin(0.05));
+    size_t carrying = 0;
+    for (const Layer *layer : auxiliary_layers(object)) {
+        const double middle = layer->unscaled_print_z() - 0.5 * layer->unscaled_height();
+        const double area = area_mm2(support_surfaces(*layer));
+        CAPTURE(layer->unscaled_print_z(), layer->unscaled_height(), area);
+        if (middle < 1. || middle > 4.) {
+            CHECK(area < 1e-6);
+        } else {
+            // All the support of the layer is the column section.
+            CHECK(area == Approx(4.).margin(0.1));
+            CHECK(area_mm2(intersection_ex(support_surfaces(*layer), footprint)) == Approx(area).margin(1e-3));
+            ++carrying;
+        }
+    }
+    // Three millimeters of 0.2 mm object layers.
+    CHECK(carrying >= 14);
+}
+
+// The column keeps the object clearance: a column through the cube prints only outside the cube grown by the XY gap.
+TEST_CASE("A support column keeps clear of the object", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "tree", "filled");
+    CAPTURE(style);
+    Print print;
+    Model model;
+    // x = 8 to 14 crosses the cube's side at x = 10.
+    column_print(print, model, style, {zone_box(8., 2., 1., 6., 2., 3.)});
+    const PrintObject &object = print.object(0);
+    double printed = 0;
+    for (const Layer *layer : auxiliary_layers(object)) {
+        const ExPolygons support = support_surfaces(*layer);
+        printed += area_mm2(support);
+        for (size_t idx = 0; idx < object.layer_count(); ++idx) {
+            const Layer &object_layer = object.layer(idx);
+            if (object_layer.scaled_print_z() > layer->scaled_print_z() - layer->scaled_height() &&
+                object_layer.scaled_print_z() - object_layer.scaled_height() < layer->scaled_print_z())
+                CHECK(area_mm2(intersection_ex(support, object_layer.lslices())) < 1e-4);
+        }
+    }
+    // The part outside the cube, 4 x 2 mm less the XY gap, is printed.
+    CHECK(printed > 1.);
+}
+
+// Without support_material the columns are kept in the project but print nothing.
+TEST_CASE("Support columns print nothing when support is disabled", "[plugins][support-volumes][support-column]")
+{
+    Print print;
+    Model model;
+    column_print(print, model, "grid", {zone_box(14., 2., 1., 2., 2., 3.)}, false);
+    CHECK(print.object(0).auxiliary_layers().empty());
 }
