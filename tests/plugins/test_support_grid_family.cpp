@@ -12,7 +12,8 @@ slab on a post needs bed-reaching columns; a low platform also needs bottom
 contacts. Surface position bits encode which side of the object is supported.
 These tests exercise the real STEP_SUPPORT dispatcher and API publication.
 Variable-height cantilevers additionally check temporary slab placement and
-the published support tops before a complete G-code export.
+the published support tops before a complete G-code export. Separate roof bays
+exercise coplanar contact ordering through geometry, publication and export.
 
 Representative direct calls (branches are not a timeline):
 
@@ -211,6 +212,67 @@ TEST_CASE("Grid variable height contacts slabs and export follow each roof", "[p
         CAPTURE(bay, highest, expected);
         CHECK(highest == Approx(expected).margin(1e-4));
     }
+}
+
+// Alternate bed-reaching bays with short gaps above platforms, giving neighbouring top contacts equal extremes after synchronization.
+// Inspect their real generated spans before publishing and exporting both supported grid styles.
+TEST_CASE("Synchronized roof bays preserve all contact heights through export", "[plugins][support-grid][support-contact-order][plugin-e2e][gcode]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    const char *style = GENERATE("grid", "snug");
+    CAPTURE(style);
+    DynamicPrintConfig config = SG::config(style, false, 2);
+    config.set_deserialize_strict({{"layer_height", "0.1"}, {"first_layer_height", "0.1"},
+        {"nozzle_diameter", "0.25,0.25"}, {"min_layer_height", "0.0125,0.0125"},
+        {"max_layer_height", "0.2,0.2"}, {"support_material_synchronize_layers", "1"},
+        {"support_material_layer_height", "100%"}, {"support_material_interface_layer_height", "0.1"},
+        {"support_material_contact_distance", "0.05"}, {"support_material_bottom_contact_distance", "0"},
+        {"support_material_spacing", "0.2"}, {"support_material_with_sheath", "1"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin2"},
+        {"filament_diameter", "1.75,1.75"}});
+    TriangleMesh mesh;
+    for (int i = 0; i < 24; ++i) {
+        const double roof_z = 0.2 + 0.1 * i;
+        TriangleMesh bay = make_cube(4., 8., roof_z);
+        TriangleMesh roof = make_cube(12., 8., 0.1);
+        roof.translate(0.f, 0.f, float(roof_z));
+        bay.merge(roof);
+        // The platform leaves exactly one 0.1-mm contact slab between the two 0.05-mm plane gaps.
+        if (i % 2 == 1) bay.merge(make_cube(12., 8., roof_z - 0.2));
+        bay.translate(float(20 * (i % 6)), float(20 * (i / 6)), 0.f);
+        mesh.merge(bay);
+    }
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    const SG::Generated generated(print, object);
+    REQUIRE(generated.support.top.size() == 24);
+    REQUIRE(generated.support.bottom.size() == 12);
+    for (const Common::GeneratorLayer *contact : generated.support.top) {
+        CAPTURE(unscaled(contact->print_z), unscaled(contact->bottom_z));
+        CHECK(contact->height >= params.min_height);
+        CHECK(contact->height <= scale_to_layer_coord(0.1));
+        CHECK(contact->bottom_z + contact->height == contact->print_z);
+    }
+    REQUIRE_NOTHROW(SG::family(print));
+    REQUIRE_FALSE(object.auxiliary_layers().empty());
+    for (const Layer &layer : object.auxiliary_layers()) CHECK(layer.scaled_height() > 0);
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
+        code = Test::GCode::read_text_file(path);
+    } catch (...) {
+        Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Test::GCode::remove_output_pair(path);
+    CHECK(code.find(";TYPE:Support material") != std::string::npos);
+    CHECK(code.find(";TYPE:Support material interface") != std::string::npos);
 }
 
 // Slice a thin cantilever with nozzle-sized bridge threads, compare raw contact placement with generated contacts, and retain
