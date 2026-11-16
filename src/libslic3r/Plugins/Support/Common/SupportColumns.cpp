@@ -12,6 +12,7 @@
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 
 /* Implementation of the support columns (see SupportColumns.hpp).
@@ -25,7 +26,7 @@
    3. Areas: every column is sliced once at the middle Z of every carrying slab. A section loses the object clearance (the object
       layers within the slab's Z gaps, with their no-support zones, grown by the XY gap, as the grid family trims its slabs) and
       the areas of the contacts and interfaces that overlap the slab in Z. A sparse section then joins the slab's polygons by a
-      union; an interface section becomes a new top interface slab with the slab's print Z and height, so that publication gives
+      union, after the first-layer widening of the family's foot (widen_first_layer_area()) when the slab lies on the bed; an interface section becomes a new top interface slab with the slab's print Z and height, so that publication gives
       the dense role the area both kinds cover.
    Sparse slabs do not overlap each other in Z, so a column area is printed by one slab only. The geometry lives in out's storage.
 
@@ -246,10 +247,12 @@ void add_support_columns(const plugin_run_context *context, const Print &print, 
         const std::optional<ClipperOperand> clearance = column_clearance(clipper, layers, params, out, slab);
         if (has_sparse) {
             ClipperOperand column = clipper(sparse[idx]);
-            if (clearance)
-                column = clipper_diff(column, *clearance);
+            StoredPolygonCollection area = (clearance ? clipper_diff(column, *clearance) : clipper_union(column)).to_polygon_collection();
+            // On the bed layer the column gets the same widened foot as the family's own support.
+            if (slab.bottom_print_z() == 0 && !layers.empty())
+                area = widen_first_layer_area(object, layers, params, out, area);
             ClipperOperand both = clipper(slab.polygons);
-            both += column;
+            both += clipper(area);
             slab.polygons = clipper_union(both).to_polygon_collection();
             slab.polygons.ensure_valid(params.resolution);
         }

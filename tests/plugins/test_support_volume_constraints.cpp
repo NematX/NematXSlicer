@@ -60,14 +60,18 @@ void zone_print(Print &print, Model &model, const char *style, const std::vector
     SG::family(print);
 }
 
-// Slices a plain 10 x 10 x 5 mm cube, which asks for no support, with the given columns of the given type and the given sparse
-// support columns, and runs the support family of the style; support_material off keeps the columns but disables the support.
+// Slices a plain 10 x 10 x 5 mm cube, which asks for no support, with the given columns of the given type, the given sparse support
+// columns and the given zones, and runs the support family of the style; support_material off keeps the columns but disables the
+// support. overrides holds setting keys and values in turn.
 void column_print(Print &print, Model &model, const char *style, const std::vector<TriangleMesh> &columns, bool support = true,
-                  ModelVolumeType type = ModelVolumeType::SUPPORT_COLUMN, const std::vector<TriangleMesh> &sparse_columns = {})
+                  ModelVolumeType type = ModelVolumeType::SUPPORT_COLUMN, const std::vector<TriangleMesh> &sparse_columns = {},
+                  const std::vector<TriangleMesh> &zones = {}, const t_config_option_keys &overrides = {})
 {
     const bool filled = std::string(style) == "filled";
     DynamicPrintConfig config = SG::config(style, filled, filled ? 0 : 2);
     config.set_deserialize_strict({{"support_material", support ? "1" : "0"}});
+    for (size_t idx = 0; idx + 1 < overrides.size(); idx += 2)
+        config.set_deserialize_strict(overrides[idx], overrides[idx + 1]);
     Test::init_print({make_cube(10., 10., 5.)}, print, model, config);
     for (ModelObject &model_object : model.objects())
         for (const TriangleMesh &column : columns)
@@ -75,6 +79,9 @@ void column_print(Print &print, Model &model, const char *style, const std::vect
     for (ModelObject &model_object : model.objects())
         for (const TriangleMesh &column : sparse_columns)
             model_object.add_volume(TriangleMesh(column), ModelVolumeType::SUPPORT_COLUMN, false);
+    for (ModelObject &model_object : model.objects())
+        for (const TriangleMesh &zone : zones)
+            model_object.add_volume(TriangleMesh(zone), ModelVolumeType::NO_SUPPORT_ZONE, false);
     print.apply(model, config);
     print.validate();
     print.set_status_silent();
@@ -305,6 +312,42 @@ TEST_CASE("A support interface column becomes interface support and wins over a 
         ++carrying;
     }
     CHECK(carrying >= 12);
+}
+
+// On the bed layer a column is widened like the support foot, by raft_first_layer_expansion; the layers above keep its section.
+TEST_CASE("A support column standing on the bed gets the widened support foot", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "tree");
+    CAPTURE(style);
+    Print print;
+    Model model;
+    column_print(print, model, style, {zone_box(16., 2., 0., 2., 2., 3.)}, true, ModelVolumeType::SUPPORT_COLUMN, {}, {},
+                 {"raft_first_layer_expansion", "2"});
+    const std::vector<const Layer *> layers = auxiliary_layers(print.object(0));
+    REQUIRE(layers.size() > 2);
+    // A 2 x 2 mm section grown by 2 mm on every side covers about 6 x 6 mm less its rounded corners.
+    CHECK(area_mm2(support_surfaces(*layers.front())) > 25.);
+    CHECK(area_mm2(support_surfaces(*layers[2])) == Approx(4.).margin(0.1));
+}
+
+// A column that the clearance removes entirely, inside the object or inside a no-support zone, prints nothing at all.
+TEST_CASE("A support column inside the object or a no-support zone prints nothing", "[plugins][support-volumes][support-column]")
+{
+    const char *style = GENERATE("grid", "tree", "filled");
+    CAPTURE(style);
+    {
+        Print print;
+        Model model;
+        column_print(print, model, style, {zone_box(4., 4., 1., 2., 2., 3.)});
+        CHECK(support_area(print.object(0)) < 1e-6);
+    }
+    {
+        Print print;
+        Model model;
+        column_print(print, model, style, {zone_box(14., 2., 1., 2., 2., 3.)}, true, ModelVolumeType::SUPPORT_COLUMN, {},
+                     {zone_box(13., 1., 0., 4., 4., 5.)});
+        CHECK(support_area(print.object(0)) < 1e-6);
+    }
 }
 
 // Without support_material the columns are kept in the project but print nothing.

@@ -24,7 +24,7 @@ namespace slic3r_api::Support::Common {
 // interface column volume.
 bool has_support_columns(const Object &object);
 // Adds the object's support columns to the slabs of out. Each sparse slab of out.base whose printable interval meets a column
-// receives the support column sections at its middle Z, and a new top interface slab of out.interfaces with the same print Z and
+// receives the support column sections at its middle Z (widened like the support foot on the bed layer), and a new top interface slab of out.interfaces with the same print Z and
 // height receives the support interface column sections; the column heights that no sparse slab covers get new base slabs,
 // cut at the tops of the object layers (or every top layer height above the object) and never thinner than params.min_height.
 // Before it joins a slab, a section loses the object and the no-support zones of out grown by params.gap_xy within the Z gaps of

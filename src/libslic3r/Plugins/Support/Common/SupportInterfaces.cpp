@@ -117,19 +117,26 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
 // Inputs: layers must contain the object's first layer as layers[0]; out.storage must stay valid, it holds the temporary areas.
 // The foot is normalized at p.resolution (ensure_valid) at the end, and p.first_flow.width must be positive: it sets the step size.
 // Effects and ownership: the polygons of the foot are replaced in place and the slab keeps its owner (out); the other slabs are
-// not changed. The brim and the skirt are ignored: the foot may use all the room of the first layer.
+// not changed. The brim and the skirt are ignored: the foot may use all the room of the first layer. widen_first_layer_area()
+// holds this widening, which the support columns apply to their own bed sections.
 // Families: the grid's first base slab is a base slab; the tree style's is its first base slab (type Intermediate until the tree
 // types it as Base), and the organic style's is its first branch slab, which the flange of the first layer then follows.
 void expand_first_layer_foot(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out)
 {
     if (out.base.empty() || out.base.front()->bottom_print_z() != 0) return;
+    out.base.front()->polygons = widen_first_layer_area(object, layers, p, out, out.base.front()->polygons);
+}
+
+Polys widen_first_layer_area(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, const GeneratedSupport &out,
+                             const Polys &area)
+{
     const ClipperContext clipper(out.storage);
     Polys interface(out.storage);
-    for (GeneratorLayers *slabs : {&out.top, &out.interfaces})
+    for (const GeneratorLayers *slabs : {&out.top, &out.interfaces})
         for (const GeneratorLayer *slab : *slabs)
             if (slab->bottom_print_z() == 0)
                 interface.append_move_from(clipper_offset(clipper(slab->polygons), float(scale_d(EPSILON)), join_type, 0.).to_polygon_collection());
-    Polys &foot = out.base.front()->polygons;
+    Polys foot = area.readonly().clone(out.storage);
     const Polys trimming = clipper_offset(support_obstacle(clipper, layers[0], 0, out.no_support_zones), double(p.gap_xy), join_type,
                                           0.).to_polygon_collection();
     const double expansion = std::max(0., scale_d(object.config().get("raft_first_layer_expansion").get_float()) - scale_d(EPSILON));
@@ -140,6 +147,7 @@ void expand_first_layer_foot(const Object &object, const std::vector<Layer> &lay
     } else foot = clipper_diff(clipper(foot), clipper(trimming)).to_polygon_collection();
     foot = clipper_diff(clipper(foot), clipper(interface)).to_polygon_collection();
     foot.ensure_valid(p.resolution);
+    return foot;
 }
 
 namespace {
