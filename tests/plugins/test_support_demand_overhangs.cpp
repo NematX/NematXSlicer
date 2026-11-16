@@ -201,10 +201,11 @@ TEST_CASE("SupportDemandOverhangs switches around the slope angle", "[plugins][s
 {
     // This prism has a 60 degree sloped side. The implementation adds 1 degree
     // to support_material_threshold to make the UI value inclusive, so config
-    // values 58 and 60 exercise effective thresholds of 59 and 61 degrees.
+    // values 58 and 61 exercise effective thresholds of 59 and 62 degrees.
     // Just below the shape angle, the layer below is expanded enough and no
-    // support demand should appear. Just above it, the same slope is considered
-    // unsupported.
+    // support demand should appear. Above it, the same slope is considered
+    // unsupported. The effective 61 degrees is left out: its 0.023 mm strips
+    // are as wide as the residue filter radius tested below.
     const TriangleMesh sixty_degree_slope = make_sloped_cube_with_surface_angle(60.);
     
     const DemandSummary just_below_slope = run_support_demand(
@@ -215,9 +216,25 @@ TEST_CASE("SupportDemandOverhangs switches around the slope angle", "[plugins][s
         sixty_degree_slope, support_demand_config(true, true, 59, 0));
     REQUIRE_FALSE(has_meaningful_demand(just_at_slope));
 
-    const DemandSummary just_above_slope = run_support_demand(
-        sixty_degree_slope, support_demand_config(true, true, 60, 0));
-    REQUIRE(has_meaningful_demand(just_above_slope));
+    const DemandSummary above_slope = run_support_demand(
+        sixty_degree_slope, support_demand_config(true, true, 61, 0));
+    REQUIRE(has_meaningful_demand(above_slope));
+}
+
+TEST_CASE("SupportDemandOverhangs drops the residues of a slope at the threshold", "[plugins][support-demand]")
+{
+    // With 1 mm layers, the 60.5 degree slope steps 0.566 mm per layer. The
+    // effective 61 degrees allows 0.554 mm, leaving 0.012 mm strips, narrower
+    // than dgap = 0.554 - 0.532 = 0.023 mm between 61 and 62 degrees: they are
+    // removed. The effective 62 degrees allows 0.532 mm, leaving 0.034 mm
+    // strips, wider than its 0.022 mm dgap: they stay.
+    const TriangleMesh slope = make_sloped_cube_with_surface_angle(60.5);
+
+    const DemandSummary residue = run_support_demand(slope, support_demand_config(true, true, 60, 0));
+    REQUIRE(residue.area_mm2 == Approx(0.));
+
+    const DemandSummary strip = run_support_demand(slope, support_demand_config(true, true, 61, 0));
+    REQUIRE(has_meaningful_demand(strip));
 }
 
 TEST_CASE("SupportDemandOverhangs uses support_material_enforce_layers for early layers", "[plugins][support-demand]")
