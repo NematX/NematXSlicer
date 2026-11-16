@@ -534,7 +534,7 @@ GeneratorLayer &add_layer(GeneratedSupport &out, LayerType type, coord_t z, coor
     layer.print_z = z;
     layer.bottom_z = bottom;
     layer.height = height;
-    // A top contact is already cleared against the lower layer; its zero collision span excludes the coplanar object layer from trimming.
+    // A top contact starts with a zero collision span; the grid family's XY trimming still covers its printed height.
     layer.height_block = type == LayerType::Intermediate || type == LayerType::Base ? height : 0;
     return layer;
 }
