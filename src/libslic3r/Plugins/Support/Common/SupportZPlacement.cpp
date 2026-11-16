@@ -22,15 +22,17 @@
    middle thicknesses together and spaces the whole interval in one pass. The handed-over layout
    (place_handed_over_interval) places the dense stacks at the interface step, gives the middle to the splitter, and
    splits the whole interval evenly when the stacks leave no usable middle. The synchronized layout is grid-only:
-   contacts that share a print Z take the bottom contact's span first, and each interval is then cut on the Z of the
-   object layers. Bridge footprints use caller-owned lazy per-layer pieces: thread starts select raw fill and perimeter
+    contacts that share a print Z take the bottom contact's span first. At a shared extreme, top contacts follow print Z
+    so an unknown lower contact acquires its height before a known higher contact consumes the interval. Each interval is
+    then cut on the Z of the object layers. Bridge footprints use caller-owned lazy per-layer pieces: thread starts select raw fill and perimeter
    rings for each slab, and copies compose them in region order followed by work-island perimeter order. */
 
 namespace slic3r_api::Support::Common {
 namespace {
 constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
-// Synchronizes coplanar contact thicknesses when requested and returns contacts sorted by extreme Z.
+// Synchronizes coplanar contact thicknesses when requested and sorts by extreme Z, top before bottom, then print Z within each type.
+// The last ordering assigns an unknown lower top contact before a higher contact with the same extreme consumes its interval.
 GeneratorLayers prepare_contact_extremes(bool sync, GeneratedSupport &out);
 // Place one interval of the handed-over layout between start and end. The previous top contact keeps its span as one slab first;
 // the current top contact, when it has no thickness yet, becomes the top dense slab. Returns the Z where the current extreme ends.
@@ -278,8 +280,9 @@ GeneratorLayers prepare_contact_extremes(bool sync, GeneratedSupport &out)
     GeneratorLayers extremes = out.top;
     extremes.insert(extremes.end(), out.bottom.begin(), out.bottom.end());
     std::sort(extremes.begin(), extremes.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
-        return a->extreme_z() < b->extreme_z() || (a->extreme_z() == b->extreme_z() &&
-            a->type == LayerType::TopContact && b->type == LayerType::BottomContact);
+        if (a->extreme_z() != b->extreme_z()) return a->extreme_z() < b->extreme_z();
+        if (a->type != b->type) return a->type == LayerType::TopContact;
+        return a->print_z < b->print_z;
     });
     return extremes;
 }

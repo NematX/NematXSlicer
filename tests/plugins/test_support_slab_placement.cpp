@@ -11,7 +11,8 @@
    intermediate slabs between a bottom contact on the first layer and a top contact, or between top contacts, and reads
    the base slabs bottom first. The checks cover the handed-over layout (dense stacks, the middle given to the splitter,
    the even split of an interval that the stacks cannot fill) and the grid layout as the reference.
-   The resolution of a slab height setting by slab_step is also checked directly. */
+    The resolution of a slab height setting by slab_step is also checked directly. A synchronized contact chain
+    checks that assigning coplanar contact spans cannot strand another top contact with zero printable height. */
 
 using namespace Slic3r;
 namespace SC = slic3r_api::Support::Common;
@@ -93,6 +94,34 @@ TEST_CASE("Slab step resolves zero absolute percentage and negative settings", "
     CHECK(SC::slab_step(c_float_or_percent{50., true}, 0.4, 0.3) == scale_to_layer_coord(0.2));
     CHECK(SC::slab_step(c_float_or_percent{-0.1, false}, 0.4, 0.3) == 0);
     CHECK(SC::slab_step(c_float_or_percent{-50., true}, 0.4, 0.3) == 0);
+}
+
+// Consecutive plane-gap contacts can share an extreme after coplanar spans are assigned; unknown heights still need placement.
+TEST_CASE("Synchronized contact chains assign every top contact height", "[plugins][support-grid][support-placement][support-contact-order]")
+{
+    PluginStorage storage;
+    SC::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    SC::SlabSpacing rules = spacing(2);
+    rules.first_z = scale_to_layer_coord(0.1);
+    rules.min_height = scale_to_layer_coord(0.0125);
+    rules.base_step = scale_to_layer_coord(0.2);
+    rules.machine_step = 0;
+    rules.synchronize = true;
+    // Long lists exercise the production sort beyond its small-range insertion-sort implementation.
+    for (int i = 0; i < 64; ++i) {
+        const coord_t z = scale_to_layer_coord(0.15 + 0.1 * i);
+        support.top.push_back(&SC::add_layer(support, SC::LayerType::TopContact, z, z, 0));
+        if (i % 2 == 1)
+            support.bottom.push_back(&SC::add_layer(support, SC::LayerType::BottomContact, z,
+                z - scale_to_layer_coord(0.1), scale_to_layer_coord(0.1)));
+    }
+    SC::place_intermediate_slabs(rules, {}, support);
+    for (const SC::GeneratorLayer *contact : support.top) {
+        CAPTURE(unscaled(contact->print_z), unscaled(contact->bottom_z));
+        CHECK(contact->height >= rules.min_height);
+        CHECK(contact->height <= rules.interface_step);
+        CHECK(contact->bottom_z + contact->height == contact->print_z);
+    }
 }
 
 // The dense slabs stand right above the bottom contact and right under the top contact, the splitter gets the sparse span between

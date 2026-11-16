@@ -8,8 +8,9 @@
 /* Publication of hand-typed slabs, without a support family. Each test fills a GeneratedSupport with slabs of chosen
    types, publishes it through Common::publish and reads the auxiliary layers back. A branch slab is published as a
    sparse surface of the base extruder, just like a base slab. Every area keeps one owner: an
-   interface keeps the area it shares with a branch, and a branch keeps the area it shares with a base slab. The last
-   test runs the support toolpath step with each sparse algorithm and checks that both slabs print. */
+   interface keeps the area it shares with a branch, and a branch keeps the area it shares with a base slab. Diagnostic
+   tests check that rejected dimensions identify the source slab without silently removing its material.
+   The toolpath check runs each sparse algorithm and checks that both slabs print. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -119,6 +120,31 @@ Sides count_sides(const PrintObject &object)
 }
 
 } // namespace
+
+// Invalid nonempty contacts must fail with the rejected dimensions and provenance, not disappear from the result.
+TEST_CASE("Publication explains invalid support contact dimensions", "[plugins][support-publication][support-layer-diagnostic]")
+{
+    const bool unassigned_height = GENERATE(true, false);
+    CAPTURE(unassigned_height);
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    slice_cube(print);
+    PluginStorage storage;
+    GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    add_slab(support, support.top, LayerType::TopContact, rect_polygon(2., 2., 6., 6.));
+    GeneratorLayer &contact = *support.top.front();
+    if (unassigned_height) contact.height = 0;
+    else contact.print_z = 0;
+    contact.bottom_z = contact.print_z - contact.height;
+    contact.object_above = 6;
+    REQUIRE_THROWS_WITH(publish_support(print, support),
+        Catch::Matchers::Contains(unassigned_height ? "printable height must be positive" : "print Z must be positive") &&
+        Catch::Matchers::Contains(unassigned_height ? "print Z=0.600000 mm, height=0.000000 mm" :
+                                                     "print Z=0.000000 mm, height=0.200000 mm") &&
+        Catch::Matchers::Contains("source=top contact; object layer above=6"));
+    CHECK(print.object(0).auxiliary_layers().empty());
+    CHECK_FALSE(contact.polygons.empty());
+}
 
 // Publishes two separated role islands plus an empty slab with counters enabled between joined runs; verifies every
 // per-island union, including empty-input unions and normalization, while scoped restoration preserves enablement on failure.

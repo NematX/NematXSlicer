@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <map>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -43,7 +46,9 @@
    run_support_family() shares the style and demand filters, constructs one parameter object, calls the family's
    slab generator, publishes the slabs and finishes progress for valid payloads.
    A matching family marks its surface calculation complete even for empty demand;
-   a different family cannot certify that result.
+   a different family cannot certify that result. If the host refuses an auxiliary layer,
+   publication reports its object, source slab and exact dimensions; invalid dimensions
+   are distinguished from host refusal of an otherwise positive-height, positive-Z layer.
 
    Representative calls:
 
@@ -220,7 +225,31 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     layer_handle *layer = object_add_auxiliary_layer(object, height, z, z - height / 2);
     if (!layer) {
         throw_if_cancelled(context);
-        throw std::runtime_error("Cannot create support layer");
+        // Keep the rejected values and their producer visible rather than dropping the slab's material.
+        const GeneratorLayer &source = *sorted[begin];
+        std::ostringstream message;
+        message.imbue(std::locale::classic());
+        message << std::fixed << std::setprecision(6)
+                << "Cannot create support layer for object '" << Object(object).name() << "': ";
+        if (height <= 0) message << "printable height must be positive";
+        else if (z <= 0) message << "print Z must be positive";
+        else message << "host rejected a layer with positive height and print Z";
+        message << " (print Z=" << unscaled(z) << " mm, height=" << unscaled(height)
+                << " mm, bottom Z=" << unscaled(source.bottom_z) << " mm; scaled print Z=" << z
+                << ", scaled height=" << height << "; source=";
+        switch (source.type) {
+        case LayerType::TopContact: message << "top contact"; break;
+        case LayerType::BottomContact: message << "bottom contact"; break;
+        case LayerType::TopInterface: message << "top interface"; break;
+        case LayerType::BottomInterface: message << "bottom interface"; break;
+        case LayerType::Base: message << "base"; break;
+        case LayerType::Intermediate: message << "intermediate"; break;
+        case LayerType::Branch: message << "branch"; break;
+        }
+        if (source.object_above != size_t(-1)) message << "; object layer above=" << source.object_above;
+        if (source.object_below != size_t(-1)) message << "; object layer below=" << source.object_below;
+        message << ").";
+        throw std::runtime_error(message.str());
     }
     LayerSupportProperty *property = static_cast<LayerSupportProperty *>(plugin_property_get_or_add_data_mutable(
         orchestrator, layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));
