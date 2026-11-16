@@ -65,7 +65,10 @@ typedef enum c_infill_flag {
     /* The pattern runs through the Arachne variable-width path. */
     C_INFILL_FLAG_USE_ARACHNE = 1u << 6,
     /* The pattern frame may cross the fill angle. */
-    C_INFILL_FLAG_CAN_ANGLE_CROSS = 1u << 7
+    C_INFILL_FLAG_CAN_ANGLE_CROSS = 1u << 7,
+    /* Full-density lines stay inside the surface: they keep half a spacing from its border (no
+       overlap with a perimeter), and their phase is chosen to cover the largest area. */
+    C_INFILL_FLAG_INSIDE_COVERAGE = 1u << 8
 } c_infill_flag;
 
 /*
