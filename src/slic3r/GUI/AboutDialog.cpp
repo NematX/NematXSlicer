@@ -294,6 +294,33 @@ AboutDialog::AboutDialog()
         vsizer->Add(version, 0, wxALIGN_LEFT | wxBOTTOM, 10);
     }
     
+    // build information
+    {
+        const wxString build_string = format_wxstr("%1%: %2%", _L("Build type"), SLIC3R_BUILD_TYPE);
+        wxStaticText* build = new wxStaticText(this, wxID_ANY, build_string, wxDefaultPosition, wxDefaultSize);
+        wxFont build_font = GetFont();
+        #ifdef __WXMSW__
+        build_font.SetPointSize(build_font.GetPointSize()-1);
+        #else
+            build_font.SetPointSize(11);
+        #endif
+        build->SetFont(build_font);
+        vsizer->Add(build, 0, wxALIGN_LEFT | wxBOTTOM, 10);
+    }
+    // target platform
+    {
+        const wxString platform_string = format_wxstr("%1%: %2%", _L("Platform"), SLIC3R_PLATFORM);
+        wxStaticText* platform = new wxStaticText(this, wxID_ANY, platform_string, wxDefaultPosition, wxDefaultSize);
+        wxFont platform_font = GetFont();
+        #ifdef __WXMSW__
+        platform_font.SetPointSize(platform_font.GetPointSize()-1);
+        #else
+            platform_font.SetPointSize(11);
+        #endif
+        platform->SetFont(platform_font);
+        vsizer->Add(platform, 0, wxALIGN_LEFT | wxBOTTOM, 10);
+    }
+
     // text
     m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO/*NEVER*/);
     {
@@ -416,7 +443,11 @@ void AboutDialog::onCopyrightBtn(wxEvent &)
 void AboutDialog::onCopyToClipboard(wxEvent&)
 {
     wxTheClipboard->Open();
-    wxTheClipboard->SetData(new wxTextDataObject(_L("Version") + " " + std::string(SLIC3R_VERSION)));
+    wxTheClipboard->SetData(new wxTextDataObject(format_wxstr(
+        "%1% %2%\n%3%: %4%\n%5%: %6%",
+        _L("Version"), SLIC3R_VERSION,
+        _L("Build type"), SLIC3R_BUILD_TYPE,
+        _L("Platform"), SLIC3R_PLATFORM)));
     wxTheClipboard->Close();
 }
 
