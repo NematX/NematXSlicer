@@ -416,14 +416,23 @@ class PythonVolumeViewTests(unittest.TestCase):
             self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE: "is_seam_position",
             self.generated.RAW_VOLUME_TYPE_BRIM_PATCH: "is_brim",
             self.generated.RAW_VOLUME_TYPE_BRIM_NEGATIVE: "is_brim",
+            self.generated.RAW_VOLUME_TYPE_SUPPORT_COLUMN: "is_support_column",
+            self.generated.RAW_VOLUME_TYPE_NO_SUPPORT_ZONE: "is_no_support_zone",
+            self.generated.RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN: "is_support_interface_column",
         }
+        self.assertEqual(self.generated.RAW_VOLUME_TYPE_SUPPORT_COLUMN, 11)
+        self.assertEqual(self.generated.RAW_VOLUME_TYPE_NO_SUPPORT_ZONE, 12)
+        self.assertEqual(self.generated.RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN, 13)
         for handle, (volume_type, predicate) in enumerate(role_checks.items(), 20):
             api.host.volume_types[handle] = volume_type
             volume = self.views.Volume(api, handle)
             with self.subTest(volume_type=volume_type):
                 self.assertTrue(getattr(volume, predicate)())
-                if predicate in {"is_support_enforcer", "is_support_blocker"}:
-                    self.assertTrue(volume.is_support_modifier())
+                # Demand modifiers and geometry modifiers stay two disjoint families.
+                self.assertEqual(volume.is_support_modifier(),
+                                 predicate in {"is_support_enforcer", "is_support_blocker"})
+                self.assertEqual(volume.is_support_geometry_modifier(),
+                                 predicate in {"is_support_column", "is_no_support_zone", "is_support_interface_column"})
 
         painted_handle = 45
         api.host.volume_types[painted_handle] = self.generated.RAW_VOLUME_TYPE_MODEL_PART

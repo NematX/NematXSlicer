@@ -29,6 +29,11 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out);
 // layer grown by gap_xy, then remove from it the footprints of the contacts and interfaces on the bed. Other slabs are not changed.
 // Details are in the definition.
 void expand_first_layer_foot(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out);
+// The widening of expand_first_layer_foot() applied to any sparse area of the bed layer: the area grown by raft_first_layer_expansion
+// without crossing the first object layer and its no-support zones grown by gap_xy, less the contacts and interfaces of out on the
+// bed. The result lives in out.storage; area and out are unchanged.
+StoredPolygonCollection widen_first_layer_area(const Object &object, const std::vector<Layer> &layers, const SupportParams &p,
+                                               const GeneratedSupport &out, const StoredPolygonCollection &area);
 } // namespace slic3r_api::Support::Common
 
 #endif

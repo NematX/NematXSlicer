@@ -21,6 +21,9 @@
        `-- check_helper_slicing()
            |-- native_slices(): reference for all parameter settings
            `-- slice_to_expolygons(): public API checked against that reference
+
+   The [support-volumes] cases check the support column and no-support zone volume types: their ABI values and views,
+   their 3MF round trip, and the copy of their kind and transform by Print::apply().
 */
 #include <catch2/catch.hpp>
 
@@ -77,13 +80,131 @@
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/TriangleMeshSlicer.hpp"
+
+// The numeric values are part of the plugin ABI: plugins compare them without the C++ enum.
+static_assert(int(Slic3r::ModelVolumeType::SUPPORT_COLUMN) == 11 && RAW_VOLUME_TYPE_SUPPORT_COLUMN == 11);
+static_assert(int(Slic3r::ModelVolumeType::NO_SUPPORT_ZONE) == 12 && RAW_VOLUME_TYPE_NO_SUPPORT_ZONE == 12);
+static_assert(int(Slic3r::ModelVolumeType::SUPPORT_INTERFACE_COLUMN) == 13 && RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN == 13);
+
+// Projects store both support-geometry volumes as non-printing helpers, in their place among the volumes.
+TEST_CASE("Support columns and no-support zones keep their type, identity and transform in 3MF", "[volume][support-volumes]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    CHECK(ModelVolume::type_from_string("SupportColumn") == ModelVolumeType::SUPPORT_COLUMN);
+    CHECK(ModelVolume::type_from_string("NoSupportZone") == ModelVolumeType::NO_SUPPORT_ZONE);
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::SUPPORT_COLUMN) == "SupportColumn");
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::NO_SUPPORT_ZONE) == "NoSupportZone");
+    CHECK(ModelVolume::type_from_string("SupportInterfaceColumn") == ModelVolumeType::SUPPORT_INTERFACE_COLUMN);
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) == "SupportInterfaceColumn");
+
+    Model model;
+    ModelObject *object = model.add_object("part", "part.stl", make_cube(4, 4, 1.5));
+    object->add_instance()->set_offset(Vec3d(10, 12, 0));
+    object->add_instance()->set_offset(Vec3d(30, 12, 0));
+    ModelVolume *column = object->add_volume(make_cylinder(1, 3), ModelVolumeType::SUPPORT_COLUMN, false);
+    column->name = "Pillar";
+    column->set_offset(Vec3d(8, 2, 0.5));
+    column->set_scaling_factor(Vec3d(1, 2, 1));
+    ModelVolume *zone = object->add_volume(make_cube(1, 2, 0.6), ModelVolumeType::NO_SUPPORT_ZONE, false);
+    zone->name = "Keep clear";
+    zone->set_offset(Vec3d(-3, 1, 0.35));
+    zone->set_rotation(Vec3d(0, 0, 0.4));
+
+    for (const ModelVolume *helper : {column, zone}) {
+        const slic3r_api::Volume view(reinterpret_cast<const volume_handle *>(helper));
+        CHECK(view.is_support_geometry_modifier());
+        CHECK_FALSE(view.is_support_modifier());
+        CHECK_FALSE(view.is_model_part());
+        CHECK_FALSE(view.is_modifier());
+        CHECK(helper->is_support_volume());
+        CHECK_FALSE(helper->is_support_modifier());
+    }
+    CHECK(slic3r_api::Volume(reinterpret_cast<const volume_handle *>(column)).is_support_column());
+    CHECK(slic3r_api::Volume(reinterpret_cast<const volume_handle *>(zone)).is_no_support_zone());
+    // Helpers are not printable material: the printable bounds are the cube only.
+    const BoundingBoxf3 printable = object->instance_bounding_box(0);
+    CHECK(printable.size().x() == Approx(4));
+    CHECK(printable.size().y() == Approx(4));
+    CHECK(printable.size().z() == Approx(1.5));
+
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("support-volumes-" + std::to_string(column->id().id) + ".3mf");
+    struct ArchiveOwner {
+        std::filesystem::path path;
+        // Remove only the archive created by this case.
+        ~ArchiveOwner() { std::error_code error; std::filesystem::remove(path, error); }
+    } archive{path};
+    const DynamicPrintConfig saved_config;
+    REQUIRE(store_3mf(path.u8string().c_str(), &model, &saved_config));
+    Model loaded;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(path.u8string().c_str(), config, substitutions, &loaded, false, false));
+    REQUIRE(loaded.objects().size() == 1);
+    const ModelObject &restored = loaded.objects().front();
+    REQUIRE(restored.volumes.size() == 3);
+    REQUIRE(restored.instances.size() == 2);
+    CHECK(restored.volumes[0]->is_model_part());
+    for (size_t idx : {size_t(1), size_t(2)}) {
+        const ModelVolume &saved = *object->volumes[idx];
+        const ModelVolume &read = *restored.volumes[idx];
+        CAPTURE(idx);
+        CHECK(read.type() == saved.type());
+        CHECK(read.name == saved.name);
+        const BoundingBoxf3 expected = saved.mesh().transformed_bounding_box(saved.get_matrix());
+        const BoundingBoxf3 actual = read.mesh().transformed_bounding_box(read.get_matrix());
+        CHECK(actual.min.isApprox(expected.min, 1e-5));
+        CHECK(actual.max.isApprox(expected.max, 1e-5));
+    }
+    CHECK(restored.instances[0]->get_offset().isApprox(object->instances[0]->get_offset()));
+    CHECK(restored.instances[1]->get_offset().isApprox(object->instances[1]->get_offset()));
+}
+
+// Conversions between demand and geometry support volumes keep the engine ID, so the applied copy must take the new kind.
+TEST_CASE("Support volume kind changes and moves synchronize the applied Print", "[volume][support-volumes][replay]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    ModelObject *object = model.add_object("part", "part.stl", make_cube(4, 4, 1.5));
+    object->add_instance();
+    Print print;
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    print.apply(model, config);
+    const ObjectID part_id = object->volumes.front()->id();
+    ModelVolume *helper = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::SUPPORT_COLUMN, false);
+    const ObjectID helper_id = helper->id();
+    for (const ModelVolumeType type : {ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::SUPPORT_BLOCKER,
+             ModelVolumeType::NO_SUPPORT_ZONE, ModelVolumeType::SUPPORT_ENFORCER, ModelVolumeType::NO_SUPPORT_ZONE,
+             ModelVolumeType::SUPPORT_INTERFACE_COLUMN, ModelVolumeType::SUPPORT_COLUMN}) {
+        CAPTURE(int(type));
+        helper->set_type(type);
+        helper->set_offset(helper->get_offset() + Vec3d(0.25, 0.5, 0));
+        print.apply(model, config);
+        REQUIRE(print.objects().size() == 1);
+        const ModelObject &applied = *print.object(0).model_object();
+        REQUIRE(applied.volumes.size() == 2);
+        CHECK(applied.volumes.front()->id() == part_id);
+        CHECK(applied.volumes.back()->id() == helper_id);
+        CHECK(applied.volumes.back()->type() == type);
+        CHECK(applied.volumes.back()->get_matrix().isApprox(helper->get_matrix()));
+    }
+    object->delete_volume(1);
+    print.apply(model, config);
+    REQUIRE(print.object(0).model_object()->volumes.size() == 1);
+    CHECK(print.object(0).model_object()->volumes.front()->is_model_part());
+}
 
 namespace {
 

@@ -14,7 +14,7 @@ namespace {
 
 bool is_part_type_writable(ModelVolumeType type)
 {
-    return type >= ModelVolumeType::MODEL_PART && type <= ModelVolumeType::BRIM_NEGATIVE &&
+    return type >= ModelVolumeType::MODEL_PART && type <= ModelVolumeType::SUPPORT_INTERFACE_COLUMN &&
         type != ModelVolumeType::SEAM_POSITION_INSIDE_CENTER;
 }
 
@@ -43,6 +43,9 @@ bool shape_allowed(ModelVolumeType type, const std::string &shape)
         return shape == "small_sphere" || shape == "sphere";
     if (type == ModelVolumeType::SEAM_POSITION_CENTER_Z)
         return shape == "small_cylinder";
+    if (type == ModelVolumeType::SUPPORT_COLUMN || type == ModelVolumeType::NO_SUPPORT_ZONE ||
+        type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN)
+        return shape == "box" || shape == "cylinder";
     if (type == ModelVolumeType::MODEL_PART || type == ModelVolumeType::NEGATIVE_VOLUME ||
         type == ModelVolumeType::PARAMETER_MODIFIER || type == ModelVolumeType::SUPPORT_BLOCKER ||
         type == ModelVolumeType::SUPPORT_ENFORCER || type == ModelVolumeType::SEAM_POSITION_INSIDE)
@@ -75,7 +78,8 @@ std::optional<ModelVolumeType> parse_part_type(std::string_view name)
         {"seam_position_center_z", ModelVolumeType::SEAM_POSITION_CENTER_Z},
         {"seam_position_inside_center", ModelVolumeType::SEAM_POSITION_INSIDE_CENTER},
         {"seam_position_inside", ModelVolumeType::SEAM_POSITION_INSIDE}, {"brim_patch", ModelVolumeType::BRIM_PATCH},
-        {"brim_negative", ModelVolumeType::BRIM_NEGATIVE}
+        {"brim_negative", ModelVolumeType::BRIM_NEGATIVE}, {"support_column", ModelVolumeType::SUPPORT_COLUMN},
+        {"no_support_zone", ModelVolumeType::NO_SUPPORT_ZONE}, {"support_interface_column", ModelVolumeType::SUPPORT_INTERFACE_COLUMN}
     };
     for (const std::pair<std::string_view, ModelVolumeType> &entry : types)
         if (entry.first == name)
@@ -99,7 +103,8 @@ bool is_loadable_part_type(ModelVolumeType type)
     return type == ModelVolumeType::MODEL_PART || type == ModelVolumeType::NEGATIVE_VOLUME ||
         type == ModelVolumeType::PARAMETER_MODIFIER || type == ModelVolumeType::SUPPORT_BLOCKER ||
         type == ModelVolumeType::SUPPORT_ENFORCER || type == ModelVolumeType::BRIM_PATCH ||
-        type == ModelVolumeType::BRIM_NEGATIVE;
+        type == ModelVolumeType::BRIM_NEGATIVE || type == ModelVolumeType::SUPPORT_COLUMN ||
+        type == ModelVolumeType::NO_SUPPORT_ZONE || type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN;
 }
 
 SceneChange set_part_type(ModelObject &object, ModelVolume &volume, ModelVolumeType type)
@@ -285,6 +290,9 @@ SceneChange add_shape(ModelObject &target, size_t instance_index, const ShapeReq
     else if (volume->is_brim()) base = "Brim";
     else if (volume->is_support_enforcer()) base = "Support";
     else if (volume->is_support_blocker()) base = "Blocker";
+    else if (volume->is_support_column()) base = "Column";
+    else if (volume->is_no_support_zone()) base = "NoSupport";
+    else if (volume->is_support_interface_column()) base = "InterfaceColumn";
     std::string display = request.shape;
     if (display == "small_sphere") display = "sphere";
     if (display == "small_cylinder") display = "cylinder";

@@ -3,7 +3,7 @@
 
    A tree branch is a disc of some radius centred on a node placed on an object layer. TreeVolumes answers, for a
    radius and a layer, which 2D areas the node must not enter:
-   - getCollision: the object and its support blockers grown by the radius and the XY distance, with the Z gaps
+   - getCollision: the object grown by the radius and the XY distance, and its no-support zones grown by the radius, with the Z gaps
      above and below the layer. Each real-Z window includes layers closer than its gap, within Z rounding tolerance,
      and keeps the native XY ramp above the layer;
    - getAvoidance: the places from which a node cannot descend to the build plate (or to the model) within the
@@ -82,9 +82,9 @@ static constexpr const coord_t SUPPORT_TREE_COLLISION_RESOLUTION = scale_i(0.5);
 class TreeVolumes
 {
 public:
-    // Reads the object once, in run_storage: it slices blockers and simplifies outlines; ordered unions are initialized lazily per layer.
+    // Reads the object once, in run_storage: it slices no-support zones and simplifies outlines; ordered unions are initialized lazily per layer.
     // Radius-dependent areas are computed on demand. The areas are owned by run_storage, which must outlive this object. The context, which must
-    // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers
+    // outlive it too, is checked before and after the slicing of each zone volume and between its cleaned layers
     // (the slicing of one mesh checks it too, at the coarse granularity of the native slicer)
     // and by every later computation.
     TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
@@ -340,7 +340,7 @@ private:
     std::vector<slic3r_api::StoredExPolygonCollection> m_placeable_regions;
     // Publishes each immutable radius-zero union before concurrent readers use that layer.
     std::deque<std::once_flag> m_placeable_regions_once;
-    // Support blockers of each layer, avoided like the object; empty when the object has no blocker.
+    // No-support zones of each layer, avoided like the object; empty when the object has no zone.
     std::vector<slic3r_api::StoredExPolygonCollection> m_anti_overhang;
     // The settings that give the radii of the tips and the branch sizes.
     TreeSettings m_settings;

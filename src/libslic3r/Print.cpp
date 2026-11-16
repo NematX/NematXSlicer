@@ -1407,7 +1407,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
             // Notify the user in that case.
             if (! object->has_support() && warnings) {
                 for (const ModelVolume* mv : object->model_object()->volumes) {
-                    bool has_enforcers = mv->is_support_enforcer() ||
+                    bool has_enforcers = mv->is_support_enforcer() || mv->is_support_column() ||
                         (mv->is_model_part() && mv->supported_facets.has_facets(*mv, EnforcerBlockerType::ENFORCER));
                     if (has_enforcers) {
                         warnings->emplace_back("_SUPPORTS_OFF");

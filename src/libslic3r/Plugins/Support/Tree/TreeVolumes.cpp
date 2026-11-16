@@ -25,7 +25,7 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 
 /* Collision, avoidance and placeable areas of the tree branches, computed per object layer and branch radius.
 
-   The object layers are read once, from their outlines and the support blockers. precalculate() then computes, for the
+   The object layers are read once, from their outlines and the no-support zones, which the branches avoid like the object. precalculate() then computes, for the
    radii the tips can reach, the layers where a branch of that radius may stand:
    - the collision: the outline grown by the radius and the XY distance, merged over the Z gaps above and below;
    - the avoidance: the collision propagated upwards, one layer at a time, by the maximum move of each layer, so that a
@@ -165,15 +165,15 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     m_avoidance_cache_holefree_to_model(run_storage),
     m_wall_restrictions_cache(run_storage)
 {
-    // The constructor does the two once-only readings of the object, in the run storage: it slices the support blockers and it
+    // The constructor does the two once-only readings of the object, in the run storage: it slices the no-support zones and it
     // simplifies the outline of every layer. Unions for offsets are computed at first use of each layer.
 
-    // The support blockers of every layer: the union of all the blocker volumes, which are sliced at the slice Z of the layers.
-    // The slices use the print resolution to clean the outlines, where the native PrintObject::slice_support_blockers() uses the
-    // default one: a contour lies within `resolution` of the native contour.
-    const std::vector<float> slice_zs = Common::layer_slice_zs(object);
-    const c_mesh_slicing_params slicing_params = Common::support_modifier_slicing_params(print, object);
-    // One scratch storage holds blocker-union and outline-simplification temporaries; their results move to run storage.
+    // The no-support zones of every layer: the union of all the zone volumes, sliced at the slice Z of the layers with the print
+    // resolution, by the helper shared with the other support families. Support blockers only change the demand: they are not
+    // obstacles of the branches.
+    // The helper checks the context before and after slicing each volume and between its cleaned layers; the slicing of one mesh
+    // checks it too, at the coarse granularity of the native slicer.
+    m_anti_overhang = Common::slice_support_volumes(print, object, RAW_VOLUME_TYPE_NO_SUPPORT_ZONE, run_storage, m_context);
     const uint32_t layer_count = object.layer_count();
     m_layer_outlines.reserve(layer_count);
     m_layer_outline_regions.reserve(layer_count);
@@ -184,36 +184,8 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
         m_layer_outline_regions.emplace_back(run_storage);
         m_placeable_regions.emplace_back(run_storage);
     }
+    // One scratch storage holds the outline-simplification temporaries; their results move to run storage.
     with_scratch_storage([&](storage_handle *scratch_storage) {
-        for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++ volume_idx) {
-            const slic3r_api::Volume volume = object.volume(volume_idx);
-            if (volume.type() != RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
-                continue;
-            // The helper checks the context before and after slicing the volume and between its cleaned layers; the slicing of one mesh checks it too, at the coarse granularity of the native slicer.
-            std::vector<StoredExPolygonCollection> slices = Common::slice_support_modifier_volume(volume, slice_zs, slicing_params, run_storage, m_context);
-            if (slices.empty())
-                continue;
-            if (m_anti_overhang.empty()) {
-                m_anti_overhang = std::move(slices);
-                continue;
-            }
-            // Every volume is sliced at the same Z values, so the sizes are equal; only the common layers are merged if they ever differ.
-            assert(slices.size() == m_anti_overhang.size());
-            const size_t merged_layers = std::min(slices.size(), m_anti_overhang.size());
-            for (size_t layer_idx = 0; layer_idx < merged_layers; ++ layer_idx) {
-                if (m_anti_overhang[layer_idx].empty())
-                    m_anti_overhang[layer_idx] = std::move(slices[layer_idx]);
-                else if (! slices[layer_idx].empty()) {
-                    // The union is computed in the scratch storage and its content moved into the collection of the run storage.
-                    StoredExPolygonCollection both(scratch_storage);
-                    both.append_copy_from(m_anti_overhang[layer_idx]);
-                    both.append_copy_from(slices[layer_idx]);
-                    StoredExPolygonCollection united = expolygons_union(scratch_storage, both);
-                    m_anti_overhang[layer_idx].move_from(united);
-                }
-            }
-        }
-
         // The outline of every layer, simplified with the resolution of the settings, moved to the run storage.
         for (uint32_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx) {
             const StoredPolygonCollection rings = to_polygons(scratch_storage, object.layer(layer_idx).slices());
@@ -222,7 +194,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
             slic3r_api::throw_if_cancelled(m_context);
         }
     });
-    // The helper that slices the blockers may drop a cancellation at the boundary of its job: no half-built object leaves the constructor.
+    // The helper that slices the zones may drop a cancellation at the boundary of its job: no half-built object leaves the constructor.
     throw_if_interrupted();
     // The maximum move keeps a margin of 2 scaled units (2 nm) against rounding errors.
     for (coord_t move : settings.max_move)

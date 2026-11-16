@@ -38,8 +38,8 @@
    - a reference returned by a getter stays valid and unchanged when its cache grows to a later layer;
    - many threads requesting keys that are not precalculated all get the reference areas (stress test);
    - a lazy computation checks the cancellation of the context given to the constructor and throws PluginCancelled, also from a cancelled TBB group, without publishing a partial area;
-   - the support blockers: one box, a curved blocker (cylinder) and two overlapping boxes are sliced like the native ones, within the
-      resolution of the slicing, and enter the collision;
+   - the no-support zones: one box, a curved zone (cylinder) and two overlapping boxes are sliced like the native ones, within the
+      resolution of the slicing, and enter the collision, while a support blocker stays out of it;
    - physical Z gaps include only closer object layers (within Z rounding tolerance), and model-root surfaces use the last layer
      at or below the bottom-gap boundary. A one-layer ledge makes these choices observable independently of branch routing.
    After precalculate(), a lazy computation logs an error line "Had to calculate ...". The tests capture the log to assert that a
@@ -364,21 +364,22 @@ TEST_CASE("Tree windows include physical neighbours for small and large Z gaps",
     check_physical_gap_ledge(false, 2., gap);
 }
 
-// The support blockers of the object are avoided like the object. The volumes slice them with the helper shared with the demand
-// modifiers, at the print resolution, where the native PrintObject::slice_support_blockers() uses the default resolution: a contour
+// The no-support zones of the object are avoided like the object. The volumes slice them with the helper shared with the other
+// support families, at the print resolution, where the native PrintObject::slice_support_volumes() uses the default resolution: a contour
 // lies within the resolution of the native one, so the slices are compared with the native ones by the area between them, which is
-// bounded by the perimeter times the resolution. The blocker volumes stand beside the post, under the roof.
+// bounded by the perimeter times the resolution. The zone volumes stand beside the post, under the roof.
 namespace {
-// A sliced print of the scene with the given blocker meshes (object coordinates, as the slab: the roof is at z 4 to 5).
-void make_blocker_print(Print &print, Model &model, const std::vector<TriangleMesh> &blockers)
+// A sliced print of the scene with the given helper meshes of the given type (object coordinates, as the slab: the roof is at z 4 to 5).
+void make_zone_print(Print &print, Model &model, const std::vector<TriangleMesh> &zones,
+                     ModelVolumeType type = ModelVolumeType::NO_SUPPORT_ZONE)
 {
     DynamicPrintConfig config = SG::config("tree", false, 3);
     config.set_deserialize_strict({{"support_material_xy_spacing", "3"}});
     Test::init_print({SG::slab(true)}, print, model, config);
-    if (! blockers.empty()) {
+    if (! zones.empty()) {
         for (ModelObject &model_object : model.objects())
-            for (const TriangleMesh &blocker : blockers)
-                model_object.add_volume(TriangleMesh(blocker), ModelVolumeType::SUPPORT_BLOCKER, false);
+            for (const TriangleMesh &zone : zones)
+                model_object.add_volume(TriangleMesh(zone), type, false);
         print.apply(model, config);
         print.validate();
         print.set_status_silent();
@@ -386,22 +387,22 @@ void make_blocker_print(Print &print, Model &model, const std::vector<TriangleMe
     SG::prefix(print);
 }
 
-// Slices the blocker volumes of the print with the helper TreeVolumes uses, takes the union of the volumes layer by layer with the
-// native clipper, and checks on every layer that the area between this union and the native slice_support_blockers() stays within
+// Slices the zone volumes of the print with the helper TreeVolumes uses, takes the union of the volumes layer by layer with the
+// native clipper, and checks on every layer that the area between this union and the native slice_support_volumes() stays within
 // the bound of the layer. The bound is 1e-3 mm2 when nothing is simplified (boxes: only rounding differs) and the perimeter times
 // the resolution of the slicing when the outline is curved (the cleaning of the outline moves it by up to the resolution).
 // Returns the number of layers that have a native slice.
-size_t compare_blocker_slices(const Print &print, storage_handle *run_storage, bool curved)
+size_t compare_zone_slices(const Print &print, storage_handle *run_storage, bool curved)
 {
     size_t sliced_layers = 0;
     const slic3r_api::Object object = SG::object_view(print.object(0));
-    const std::vector<ExPolygons> native = print.object(0).slice_support_blockers();
+    const std::vector<ExPolygons> native = print.object(0).slice_support_volumes(ModelVolumeType::NO_SUPPORT_ZONE);
     const std::vector<float> zs = slic3r_api::Support::Common::layer_slice_zs(object);
     const c_mesh_slicing_params params = slic3r_api::Support::Common::support_modifier_slicing_params(SG::print_view(print), object);
     const double resolution = scale_d(params.resolution);
     std::vector<Polygons> api(native.size());
     for (uint32_t idx = 0; idx < object.volume_count(); ++ idx) {
-        if (object.volume(idx).type() != RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
+        if (object.volume(idx).type() != RAW_VOLUME_TYPE_NO_SUPPORT_ZONE)
             continue;
         const std::vector<slic3r_api::StoredExPolygonCollection> slices =
             slic3r_api::Support::Common::slice_support_modifier_volume(object.volume(idx), zs, params, run_storage, nullptr);
@@ -423,19 +424,20 @@ size_t compare_blocker_slices(const Print &print, storage_handle *run_storage, b
     return sliced_layers;
 }
 // A box of the given size with its minimum corner at (x, y, z), in object coordinates.
-TriangleMesh blocker_box(double x, double y, double z, double sx, double sy, double sz)
+TriangleMesh zone_box(double x, double y, double z, double sx, double sy, double sz)
 {
     TriangleMesh box = make_cube(sx, sy, sz);
     box.translate(x, y, z);
     return box;
 }
 
-// The collision of radius 0 on a layer, copied into the run storage, for the scene with the given blockers.
-slic3r_api::StoredPolygonCollection blocker_collision(storage_handle *run_storage, const std::vector<TriangleMesh> &blockers, TF::LayerIndex layer)
+// The collision of radius 0 on a layer, copied into the run storage, for the scene with the given helper volumes.
+slic3r_api::StoredPolygonCollection zone_collision(storage_handle *run_storage, const std::vector<TriangleMesh> &zones, TF::LayerIndex layer,
+                                                   ModelVolumeType type = ModelVolumeType::NO_SUPPORT_ZONE)
 {
     Print print;
     Model model;
-    make_blocker_print(print, model, blockers);
+    make_zone_print(print, model, zones, type);
     const TF::TreeSettings settings = ST::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
     Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, run_storage, nullptr);
     slic3r_api::StoredPolygonCollection copy(run_storage);
@@ -446,32 +448,39 @@ slic3r_api::StoredPolygonCollection blocker_collision(storage_handle *run_storag
 }
 
 // One box: its collision contains the collision of the object alone and is larger by the box.
-TEST_CASE("Support blockers are part of the collision", "[plugins][support-tree-routing][tree-volumes]")
+TEST_CASE("No-support zones are part of the collision and support blockers are not", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     // The storage owns the collections below and the areas of the volumes, so it is declared first.
     PluginStorage storage;
     storage_handle *run_storage = SG::handle(storage);
     constexpr TF::LayerIndex layer = 8;
-    const slic3r_api::StoredPolygonCollection without = blocker_collision(run_storage, {}, layer);
-    // The scene grows the object by the 3 mm XY distance, so the post reaches x = 7 on this layer, while a blocker enters the
-    // collision with its own outline (radius 0). A 3 x 3 mm blocker at x = 9 to 12 does not touch the grown post, so the collision
+    const slic3r_api::StoredPolygonCollection without = zone_collision(run_storage, {}, layer);
+    // The scene grows the object by the 3 mm XY distance, so the post reaches x = 7 on this layer, while a zone enters the
+    // collision with its own outline (radius 0). A 3 x 3 mm zone at x = 9 to 12 does not touch the grown post, so the collision
     // gains exactly its 9 mm2.
-    const slic3r_api::StoredPolygonCollection with = blocker_collision(run_storage, { blocker_box(9., 2., 1., 3., 3., 2.) }, layer);
+    const slic3r_api::StoredPolygonCollection with = zone_collision(run_storage, { zone_box(9., 2., 1., 3., 3., 2.) }, layer);
     const double added_mm2 = PM::mm2(TF::polygons_area(with) - TF::polygons_area(without));
     CAPTURE(added_mm2);
     CHECK(added_mm2 == Approx(9.).margin(0.05));
     const slic3r_api::StoredPolygonCollection lost = TF::polygons_diff(run_storage, without, with);
     CHECK(PM::mm2(TF::polygons_area(lost)) < 1e-3);
+    // A support blocker only removes support demand: the same box as a blocker leaves the collision of the object alone.
+    const slic3r_api::StoredPolygonCollection blocked = zone_collision(run_storage, { zone_box(9., 2., 1., 3., 3., 2.) }, layer,
+                                                                      ModelVolumeType::SUPPORT_BLOCKER);
+    const slic3r_api::StoredPolygonCollection gained = TF::polygons_diff(run_storage, blocked, without);
+    const slic3r_api::StoredPolygonCollection dropped = TF::polygons_diff(run_storage, without, blocked);
+    CHECK(PM::mm2(TF::polygons_area(gained)) < 1e-3);
+    CHECK(PM::mm2(TF::polygons_area(dropped)) < 1e-3);
 
     Print print;
     Model model;
-    make_blocker_print(print, model, { blocker_box(5., 2., 1., 3., 3., 2.) });
-    CHECK(compare_blocker_slices(print, run_storage, false) > 0);
+    make_zone_print(print, model, { zone_box(5., 2., 1., 3., 3., 2.) });
+    CHECK(compare_zone_slices(print, run_storage, false) > 0);
 }
 
-// A curved blocker: the slices follow the native ones within the resolution along the whole contour.
-TEST_CASE("Curved support blockers are sliced within the resolution of the native slices", "[plugins][support-tree-routing][tree-volumes]")
+// A curved zone: the slices follow the native ones within the resolution along the whole contour.
+TEST_CASE("Curved no-support zones are sliced within the resolution of the native slices", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     PluginStorage storage;
@@ -479,31 +488,31 @@ TEST_CASE("Curved support blockers are sliced within the resolution of the nativ
     Model model;
     TriangleMesh cylinder = make_cylinder(1.5, 2.);
     cylinder.translate(6.5, 4., 1.);
-    make_blocker_print(print, model, { cylinder });
-    CHECK(compare_blocker_slices(print, SG::handle(storage), true) > 0);
+    make_zone_print(print, model, { cylinder });
+    CHECK(compare_zone_slices(print, SG::handle(storage), true) > 0);
 }
 
-// Two overlapping blockers are united: the slices equal the native union, and the collision equals the one of a single blocker that
+// Two overlapping zones are united: the slices equal the native union, and the collision equals the one of a single zone that
 // has the shape of the two (the offset of the union is the union of the offsets for boxes, up to the resolution).
-TEST_CASE("Overlapping support blockers are united like the native ones", "[plugins][support-tree-routing][tree-volumes]")
+TEST_CASE("Overlapping no-support zones are united like the native ones", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     PluginStorage storage;
     storage_handle *run_storage = SG::handle(storage);
     constexpr TF::LayerIndex layer = 8;
-    TriangleMesh first = blocker_box(5., 2., 1., 3., 3., 2.);
-    TriangleMesh second = blocker_box(6.5, 3.5, 1., 3., 3., 2.);
+    TriangleMesh first = zone_box(5., 2., 1., 3., 3., 2.);
+    TriangleMesh second = zone_box(6.5, 3.5, 1., 3., 3., 2.);
     TriangleMesh both = first;
     both.merge(second);
 
     Print print;
     Model model;
-    make_blocker_print(print, model, { first, second });
-    CHECK(compare_blocker_slices(print, run_storage, false) > 0);
+    make_zone_print(print, model, { first, second });
+    CHECK(compare_zone_slices(print, run_storage, false) > 0);
 
-    const slic3r_api::StoredPolygonCollection two_volumes = blocker_collision(run_storage, { first, second }, layer);
-    const slic3r_api::StoredPolygonCollection one_volume = blocker_collision(run_storage, { both }, layer);
-    const slic3r_api::StoredPolygonCollection only_first = blocker_collision(run_storage, { first }, layer);
+    const slic3r_api::StoredPolygonCollection two_volumes = zone_collision(run_storage, { first, second }, layer);
+    const slic3r_api::StoredPolygonCollection one_volume = zone_collision(run_storage, { both }, layer);
+    const slic3r_api::StoredPolygonCollection only_first = zone_collision(run_storage, { first }, layer);
     // The collision of the merged mesh and the one of the two volumes differ by rounding along the contour: perimeter x resolution.
     const double resolution = scale_d(SG::print_view(print).config().get("resolution").get_float());
     const double bound = PM::mm2(total_length(SG::native(one_volume)) * resolution);
@@ -511,7 +520,7 @@ TEST_CASE("Overlapping support blockers are united like the native ones", "[plug
     const slic3r_api::StoredPolygonCollection missing = TF::polygons_diff(run_storage, one_volume, two_volumes);
     CHECK(PM::mm2(TF::polygons_area(extra)) <= bound);
     CHECK(PM::mm2(TF::polygons_area(missing)) <= bound);
-    // The second blocker counts: its part outside of the first one enlarges the collision.
+    // The second zone counts: its part outside of the first one enlarges the collision.
     CHECK(PM::mm2(TF::polygons_area(two_volumes) - TF::polygons_area(only_first)) > 2.);
 }
 // The placeable areas of radius 0 are computed together with the collision of radius 0. A cold cache must not hand the collision back

@@ -1,10 +1,12 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 #include "SupportPublication.hpp"
+#include "SupportColumns.hpp"
 #include "SupportCounters.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -40,16 +42,21 @@
    host's ordered insertion keeps the thickest layer first at that Z.
    Slab ring bounding boxes are cached per height group. Each island intersection keeps only rings whose boxes
    can touch its contour box, in original order; enclosing rings and boundary touches remain in the operand.
-   run_support_family() shares the style and demand filters, constructs one parameter object, calls the family's
-   slab generator, publishes the slabs and finishes progress for valid payloads.
+   run_support_family() shares the style and demand filters, constructs one parameter object, slices the object's
+   no-support zones once, calls the family's slab generator, adds the support columns, publishes the slabs and finishes
+   progress for valid payloads. An object with columns runs its family even without support demand.
+   Publication first removes the zones from every slab (remove_no_support_zones()), after everything the family grew.
    A matching family marks its surface calculation complete even for empty demand;
    a different family cannot certify that result.
 
    Representative calls:
 
        run_support_family()
+           |-- slice_support_volumes() [the no-support zones of every object layer]
            |-- generate() [the selected family's slab-generator callback]
+           |-- add_support_columns() [SupportColumns.hpp, only with support columns]
            `-- publish()
+               |-- remove_no_support_zones() [only when the object has zones]
                |-- collect_publication_z() [group slabs by exact heights]
                `-- publish_group() [publish groups thinnest first at each Z]
 
@@ -113,6 +120,10 @@ void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &area
 // Installs typed surfaces by extruder on the borrowed island.
 void install_island_surfaces(const plugin_run_context *context, storage_handle *storage, const ClipperContext &clipper,
     layer_island_handle *island, const IslandSurfaces &areas, extruder_index_t base_extruder, extruder_index_t interface_extruder);
+// Removes from every listed slab the no-support zones of the object layers whose Z span overlaps the slab's printable interval
+// (print_z - height to print_z). The family already keeps its slabs clear of the zones with the object clearance; this catches
+// what grew after that trim (interface regularization, the first-layer foot), so no published surface enters a zone.
+void remove_no_support_zones(const Object &object, const SupportParams &params, const ClipperContext &clipper, GeneratedSupport &support);
 
 } // namespace
 
@@ -128,10 +139,12 @@ void run_support_family(const plugin_run_context *context, orchestrator_handle *
     const Object object(payload->object);
     const SupportStyle style = support_style(object.config());
     if (style == first_style || style == second_style) {
-        if (object_has_support_demand(object)) {
+        if (object_has_support_demand(object) || has_support_columns(object)) {
             const SupportParams params(print, object);
             GeneratedSupport support(context->plugin_storage);
+            support.no_support_zones = slice_support_volumes(print, object, RAW_VOLUME_TYPE_NO_SUPPORT_ZONE, support.storage, context);
             generate(context, print, object, params, support);
+            add_support_columns(context, print, object, params, support);
             publish(context, object, params, support, orchestrator);
         }
         // Empty demand is a completed result for this style, not a missing producer.
@@ -148,6 +161,8 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
     Counters::add(Counters::totals.publication_calls);
     storage_handle *storage = support.storage;
     const ClipperContext clipper(storage);
+    if (!support.no_support_zones.empty())
+        remove_no_support_zones(object, params, clipper, support);
     GeneratorLayers sorted = support.top;
     sorted.insert(sorted.end(), support.bottom.begin(), support.bottom.end());
     sorted.insert(sorted.end(), support.base.begin(), support.base.end());
@@ -180,6 +195,35 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
 }
 
 namespace {
+// The object layers are in print-Z order, so the layers overlapping a slab are one run found by binary search; slabs without
+// overlapping zone keep their polygons unchanged.
+void remove_no_support_zones(const Object &object, const SupportParams &params, const ClipperContext &clipper, GeneratedSupport &support)
+{
+    const std::vector<Layer> layers = object_layers(object);
+    for (GeneratorLayers *slabs : {&support.top, &support.bottom, &support.base, &support.interfaces})
+        for (GeneratorLayer *slab : *slabs) {
+            if (slab->polygons.empty())
+                continue;
+            const coord_t lower = slab->print_z - slab->height;
+            std::vector<Layer>::const_iterator layer = std::upper_bound(layers.begin(), layers.end(), lower,
+                [](coord_t z, const Layer &candidate) { return z < candidate.print_z(); });
+            std::optional<ClipperOperand> zones;
+            for (; layer != layers.end() && layer->bottom_z() < slab->print_z; ++layer) {
+                const size_t layer_idx = size_t(layer - layers.begin());
+                if (layer_idx >= support.no_support_zones.size() || support.no_support_zones[layer_idx].empty())
+                    continue;
+                if (zones)
+                    *zones += clipper(support.no_support_zones[layer_idx]);
+                else
+                    zones.emplace(clipper(support.no_support_zones[layer_idx]));
+            }
+            if (!zones)
+                continue;
+            slab->polygons = clipper_diff(clipper(slab->polygons), *zones).to_polygon_collection();
+            slab->polygons.ensure_valid(params.resolution);
+        }
+}
+
 // Walks borrowed sorted slabs from a valid begin index through the equal-Z run, collecting height ranges and metadata in order;
 // returns owned index ranges without changing slabs, ignores empty rings for counts, and allocation failures propagate.
 PublicationZ collect_publication_z(const GeneratorLayers &sorted, size_t begin, coord_t z)

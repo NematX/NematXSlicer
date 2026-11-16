@@ -149,15 +149,15 @@ TEST_CASE("Clipper 2.2 rejects 1.x packages and accepts earlier 2.x minors", "[p
     }
 }
 
-TEST_CASE("Package requiring slic3r_volume.h 1.x is rejected by the 2.0 host", "[plugins][abi][volume]")
+TEST_CASE("Volume API 2.1 rejects 1.x packages and keeps 2.0 packages compatible", "[plugins][abi][volume]")
 {
-    // The host exposes slic3r_volume.h 2.0 (one cancellable slicing function with a status).
+    // The host exposes slic3r_volume.h 2.1: the 2.0 slicing function plus the two support-geometry volume types.
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     const std::vector<PluginApiRequirement>::const_iterator volume = std::find_if(host.begin(), host.end(),
         [](const PluginApiRequirement &contract) { return contract.header == "slic3r_volume.h"; });
     REQUIRE(volume != host.end());
     CHECK(volume->version.major == 2);
-    CHECK(volume->version.minor == 0);
+    CHECK(volume->version.minor == 1);
 
     for (const char *version : {"1.0", "1.2", "1.65535"}) {
         PluginPackageMetadata metadata;
@@ -167,12 +167,14 @@ TEST_CASE("Package requiring slic3r_volume.h 1.x is rejected by the 2.0 host", "
         CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
         CHECK(metadata.compatibility.message().find("slic3r_volume.h") != std::string::npos);
     }
-    // The current major is still accepted.
-    PluginPackageMetadata current;
-    std::string error;
-    REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
-        "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_volume.h=2.0\n", current, error));
-    CHECK(current.compatibility.compatible());
+    // A 2.0 package and a package requiring the new types are accepted; a later minor is not.
+    for (const char *version : {"2.0", "2.1", "2.2"}) {
+        PluginPackageMetadata current;
+        std::string error;
+        REQUIRE(parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
+            "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_volume.h=") + version + "\n", current, error));
+        CHECK(current.compatibility.compatible() == (std::string(version) != "2.2"));
+    }
 }
 
 TEST_CASE("DLL and package validators share the same contract registry", "[plugins][abi][loader]")

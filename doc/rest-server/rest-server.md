@@ -727,6 +727,9 @@ stable values:
 | `support_blocker` / `support_enforcer` | Support-demand blocker or enforcer |
 | `seam_position_center` / `seam_position_center_z` / `seam_position_inside` | Seam helper volume |
 | `brim_patch` / `brim_negative` | Brim enforcer or blocker |
+| `support_column` | Volume that asks for sparse support inside it |
+| `no_support_zone` | Volume that forbids support inside it |
+| `support_interface_column` | Volume that asks for dense interface support inside it |
 
 `painted` lists the painting channels present on the part. Stable channel names
 are `support` for support painting and `mmu` for multi-material painting,
@@ -1280,7 +1283,8 @@ name returns `200` without a commit. Object names affect slicing; part names do 
 - `set_part_type/{part_id}` accepts `{"type":"modifier"}`. Writable values are
   `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`,
   `seam_position_center`, `seam_position_center_z`, `seam_position_inside`,
-  `brim_patch`, and `brim_negative`. The last solid part cannot change type;
+  `brim_patch`, `brim_negative`, `support_column`, `no_support_zone`, and `support_interface_column`.
+  The last solid part cannot change type;
   cut and embossed-object restrictions apply. Response: `{"id":...,"type":...}`.
 - `rename/{id}` accepts `{"name":"Bracket"}` for an object or part. A name is
   1–255 UTF-8 bytes without control characters, as a session name (§5.3.1;
@@ -1292,7 +1296,8 @@ name returns `200` without a commit. Object names affect slicing; part names do 
   solid/negative parts require explicit cut invalidation. Response lists every
   removed ID in `deleted`; a retained sole part keeps its REST ID.
 - `add_part/{object_id}?type=...` uploads STL, OBJ, or 3MF. Loadable types are
-  solid, negative, modifier, support blocker/enforcer, and brim patch/negative.
+  solid, negative, modifier, support blocker/enforcer, brim patch/negative, support column,
+  no support zone, and support interface column.
   Response: `{"part_id":...,"type":...}`.
 - `add_shape/{object_id}` requires `type` and `shape`; optional `size`, `position`,
   and reference `instance` control dimensions and platter placement. Shapes are
@@ -1303,6 +1308,7 @@ name returns `200` without a commit. Object names affect slicing; part names do 
   |---|---|
   | `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`, `seam_position_inside` | `box`, `cylinder`, `sphere`, `slab` |
   | `brim_patch`, `brim_negative` | `square`, `circle` |
+  | `support_column`, `no_support_zone`, `support_interface_column` | `box`, `cylinder` |
   | `seam_position_center` | `small_sphere`, `sphere` |
   | `seam_position_center_z` | `small_cylinder` |
 

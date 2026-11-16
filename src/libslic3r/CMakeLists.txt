@@ -592,6 +592,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/SupportBridgeStrokes.cpp
 	Plugins/Support/Common/SupportBridgeStrokes.hpp
 	Plugins/Support/Common/SupportCloseZ.hpp
+	Plugins/Support/Common/SupportColumns.cpp
+	Plugins/Support/Common/SupportColumns.hpp
 	Plugins/Support/Common/SupportCounters.cpp
 	Plugins/Support/Common/SupportCounters.hpp
 	Plugins/Support/Common/SupportDemand.cpp

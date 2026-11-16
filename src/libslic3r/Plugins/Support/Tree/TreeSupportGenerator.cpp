@@ -54,6 +54,8 @@
       starts on the bed (the first tree base slab, or the first organic branch slab, whose flange follows it; tips on the bed
       without a base slab are not widened) by raft_first_layer_expansion; the support ignores the brim and the skirt; the base slabs
       take their branch type.
+   In steps 1, 5 and 6, the object outline includes the no-support zones of its layer (GeneratedSupport::no_support_zones):
+   the branches and contacts keep clear of a zone like of the object. Step 2 uses the object alone: nothing rests on a zone.
 
    Everything is written on the plugin API: the object and the print are views, the areas are polygon collections of the plugin
    storage. The slabs, which the family publishes, live in the run storage (the polygons of Common::GeneratorLayer). Every
@@ -97,8 +99,10 @@ struct RootRest {
     coord_t radius = 0;
 };
 
-// The object outline of every layer grown by the XY distance, in the scratch storage; the slabs keep clear of it.
-PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy);
+// The object outline of every layer grown by the XY distance, in the scratch storage; the slabs keep clear of it. With zones (one
+// collection per object layer, see GeneratedSupport::no_support_zones), each outline also covers the no-support zones of its layer.
+PolygonList keep_out_outlines(const LayerList &layers, const std::vector<slic3r_api::StoredExPolygonCollection> &zones,
+                              storage_handle *scratch, coord_t gap_xy);
 // Indices of the nodes that no node carries: the lowest nodes of the branches, where they stop.
 std::vector<size_t> root_nodes(const RoutedTree &tree);
 // Where a root that stands on the model comes to rest: the object layer below it that takes its unsupported part, or none
@@ -249,9 +253,14 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
     with_scratch_storage([&](storage_handle *scratch) {
         // All bridge-trimming passes below visit slabs sequentially; pieces live until this scratch-storage job ends.
         Common::BridgeFootprintCache bridge_cache;
-        const PolygonList keep_out = keep_out_outlines(layers, scratch, settings.xy_distance);
+        // keep_out is the object alone: the roots and floors rest on it. avoid adds the no-support zones, which the branches and the
+        // contacts keep clear of like the object but never rest on.
+        const PolygonList keep_out = keep_out_outlines(layers, {}, scratch, settings.xy_distance);
+        const PolygonList zone_keep_out = out.no_support_zones.empty() ? PolygonList()
+            : keep_out_outlines(layers, out.no_support_zones, scratch, settings.xy_distance);
+        const PolygonList &avoid = out.no_support_zones.empty() ? keep_out : zone_keep_out;
         if (organic)
-            smooth_organic_branches(settings.layer_print_z_mm, keep_out, trees, context);
+            smooth_organic_branches(settings.layer_print_z_mm, avoid, trees, context);
         std::vector<RootRest> rests = root_rests(layers, trees, keep_out, settings, scratch);
         add_floors(layers, rests, resting_parts, keep_out, params, scratch, out);
         raise_stems_onto_floors(out, rests);
@@ -267,22 +276,22 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         // on, but the other object layers near it (the neighbouring steps of a slope) must stay a full gap away too: only the layer
         // it supports or rests on is kept.
         for (Common::GeneratorLayer *contact : out.top)
-            trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_above, scratch);
+            trim_slab(*contact, layers, avoid, gap_above, gap_below, contact->object_above, scratch);
         for (Common::GeneratorLayer *contact : out.bottom)
-            trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_below, scratch);
+            trim_slab(*contact, layers, avoid, gap_above, gap_below, contact->object_below, scratch);
         // Trim contacts before projection so the projected areas follow the grid's order: it trims before carving interfaces.
         if (!without_interfaces)
             trim_bridge_footprints(out.top, layers, print_config, params, scratch, bridge_cache);
         trim_bridge_footprints(out.bottom, layers, print_config, params, scratch, bridge_cache);
         Common::project_interface_contacts(params, out);
         slic3r_api::throw_if_cancelled(context);
-        draw_branches(segments, trees, organic, layers, keep_out, gap_above, gap_below, scratch, context, out);
+        draw_branches(segments, trees, organic, layers, avoid, gap_above, gap_below, scratch, context, out);
         // Trim slabs too: a bridge thicker than one layer can reach into their Z span.
         // The search starts from the slab top and uses the bridges of the gap window and the keep-out XY gap.
         trim_bridge_footprints(out.base, layers, print_config, params, scratch, bridge_cache);
         Common::GeneratorLayers drawn_slabs = out.base;
         if (without_interfaces) {
-            draw_tip_contacts(segments, trees, organic, layers, keep_out, gap_above, gap_below, scratch, context, out);
+            draw_tip_contacts(segments, trees, organic, layers, avoid, gap_above, gap_below, scratch, context, out);
             trim_bridge_footprints(out.top, layers, print_config, params, scratch, bridge_cache);
             drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
         }
@@ -321,13 +330,25 @@ void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedS
 }
 
 namespace {
-// Each outline is the rings of the slices of the layer offset with round joins, as the legacy tree grows them.
-PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy)
+// Each outline is the rings of the slices of the layer offset with round joins, as the legacy tree grows them; a layer with a zone
+// offsets the union of its slices and zone instead.
+PolygonList keep_out_outlines(const LayerList &layers, const std::vector<slic3r_api::StoredExPolygonCollection> &zones,
+                              storage_handle *scratch, coord_t gap_xy)
 {
     PolygonList outlines;
     outlines.reserve(layers.size());
-    for (const slic3r_api::Layer &layer : layers)
-        outlines.push_back(polygons_offset(scratch, layer.slices(), double(gap_xy), CLIPPER_JOIN_ROUND));
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx) {
+        const slic3r_api::Layer &layer = layers[layer_idx];
+        if (layer_idx < zones.size() && !zones[layer_idx].empty()) {
+            slic3r_api::StoredExPolygonCollection both(scratch);
+            both.append_copy_from(layer.slices());
+            both.append_copy_from(zones[layer_idx]);
+            const slic3r_api::StoredExPolygonCollection united = expolygons_union(scratch, both);
+            outlines.push_back(polygons_offset(scratch, united, double(gap_xy), CLIPPER_JOIN_ROUND));
+        } else {
+            outlines.push_back(polygons_offset(scratch, layer.slices(), double(gap_xy), CLIPPER_JOIN_ROUND));
+        }
+    }
     return outlines;
 }
 
