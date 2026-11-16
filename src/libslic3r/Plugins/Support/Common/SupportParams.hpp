@@ -110,6 +110,9 @@ struct SupportParams
 std::vector<Layer> object_layers(const Object &object);
 // Reports whether any island of the borrowed object has support demand.
 bool object_has_support_demand(const Object &object);
+// Whether the object prints support at all: support_material, or forced support layers (support_material_enforce_layers > 0),
+// as the host's PrintObject::has_support(). Support enforcers, painted or volumes, add demand only then.
+bool object_support_enabled(const Object &object);
 
 /* ---- Support modifier volumes (enforcers, blockers and no-support zones) ----
    The demand modifiers slice the enforcers and blockers, and the support families slice the no-support zones, at the slice Z of

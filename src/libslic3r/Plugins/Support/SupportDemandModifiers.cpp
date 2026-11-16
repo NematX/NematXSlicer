@@ -39,7 +39,8 @@ The normal execution flow is:
 
 Each modifier volume is sliced once and its polygons are reused for all layer
 islands at the same Z. Enforcers can create demand where none existed, but only
-inside the object island. Blockers affect only existing demand. A small offset
+inside the object island, and only while the object prints support (support_material or forced
+support layers, Common::object_support_enabled()). Blockers affect only existing demand. A small offset
 is applied to blocker polygons before subtraction so boundary-touching areas
 are not left as support demand because of polygon-rounding differences.
 
@@ -247,6 +248,8 @@ void SupportDemandModifiers::run_impl(const plugin_run_context *run_ctx) const
         return;
     }
 
+    // With support disabled the enforcers ask for nothing; the blockers still remove the forced layers' demand.
+    const bool enforce = Common::object_support_enabled(object);
     ClipperContext clipper(storage);
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
@@ -258,7 +261,7 @@ void SupportDemandModifiers::run_impl(const plugin_run_context *run_ctx) const
             const LayerIsland island = layer.island(island_idx);
             for (const SlicedSupportModifier &modifier : modifiers) {
                 throw_if_cancelled(run_ctx);
-                if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_ENFORCER)
+                if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_ENFORCER && enforce)
                     add_enforcers_to_island(island, clipper, modifier.slices, layer_idx, run_ctx);
                 else if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
                     remove_blockers_from_island(island, clipper, modifier.slices, layer_idx, run_ctx);

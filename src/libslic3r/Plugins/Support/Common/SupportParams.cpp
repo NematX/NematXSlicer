@@ -269,6 +269,12 @@ bool object_has_support_demand(const Object &object)
     return false;
 }
 
+bool object_support_enabled(const Object &object)
+{
+    const Config config = object.config();
+    return config.get("support_material").get_bool() || config.get("support_material_enforce_layers").get_int() > 0;
+}
+
 std::vector<float> layer_slice_zs(const Object &object)
 {
     std::vector<float> slice_zs;

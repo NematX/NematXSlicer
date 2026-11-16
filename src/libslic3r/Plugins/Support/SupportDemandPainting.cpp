@@ -13,6 +13,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 
 /*
 SupportDemandPainting
@@ -35,7 +36,8 @@ The normal execution flow is:
         `-- enlarge blocker painting slightly and subtract it from demand
 
 Enforcer painting can create demand where no demand existed, but it is clipped
-to the current island. Blocker painting changes only existing demand. Enforcers
+to the current island, and is ignored while the object prints no support (Common::object_support_enabled()).
+Blocker painting changes only existing demand. Enforcers
 are applied before blockers, so a blocker can suppress demand created by an
 enforcer in the same layer. The small blocker offset prevents boundary-touching
 polygons from surviving a boolean difference because of rounding differences.
@@ -171,8 +173,9 @@ void SupportDemandPainting::run_impl(const plugin_run_context *run_ctx) const
     }
 
     storage_handle *storage = run_ctx->plugin_storage;
-    std::vector<StoredPolygonCollection> enforcers = project_painting_to_polygons(
-        storage, object, RAW_FACET_PAINTING_FDM_SUPPORT, RAW_FACET_PAINTING_ENFORCER);
+    // With support disabled the painted enforcers ask for nothing; the painted blockers still apply.
+    std::vector<StoredPolygonCollection> enforcers = Common::object_support_enabled(object) ? project_painting_to_polygons(
+        storage, object, RAW_FACET_PAINTING_FDM_SUPPORT, RAW_FACET_PAINTING_ENFORCER) : std::vector<StoredPolygonCollection>();
     std::vector<StoredPolygonCollection> blockers = project_painting_to_polygons(
         storage, object, RAW_FACET_PAINTING_FDM_SUPPORT, RAW_FACET_PAINTING_BLOCKER);
 

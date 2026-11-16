@@ -591,6 +591,26 @@ TEST_CASE("SupportDemandModifiers adds support enforcers", "[plugins][support-de
     REQUIRE(has_meaningful_demand(summary));
 }
 
+TEST_CASE("Support enforcers ask for nothing while the object prints no support", "[plugins][support-demand]")
+{
+    // The same enforcer volume and the same painted enforcer facets as above: with support_material off and no forced support
+    // layer they add no demand; one forced support layer counts as printing support, so they apply again.
+    const Box model_box = {-10., -10., 0., 10., 10., 10.};
+    const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, {-6., -6., 0., 6., 6., 10.}};
+    const auto painted = []() {
+        Model model = make_model(make_box({-10., -10., 0., 10., 10., 10.}), {});
+        paint_support_facets(*model.objects().begin()->volumes.front(), EnforcerBlockerType::ENFORCER, {0, 1});
+        return model;
+    };
+    CHECK_FALSE(has_meaningful_demand(run_support_demand(make_model(make_box(model_box), {enforcer}),
+        support_demand_config(false, false, 0, 0))));
+    CHECK_FALSE(has_meaningful_demand(run_support_demand(painted(), support_demand_config(false, false, 0, 0))));
+    const double forced_alone = run_support_demand(make_model(make_box(model_box), {}), support_demand_config(false, false, 0, 1)).area_mm2;
+    CHECK(run_support_demand(make_model(make_box(model_box), {enforcer}), support_demand_config(false, false, 0, 1)).area_mm2 >
+          forced_alone + 0.1);
+    CHECK(run_support_demand(painted(), support_demand_config(false, false, 0, 1)).area_mm2 > forced_alone + 0.1);
+}
+
 TEST_CASE("SupportDemandModifiers removes support with blockers", "[plugins][support-demand]")
 {
     // The enforcer and blocker use the same rectangular prism. The enforcer
