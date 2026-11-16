@@ -2393,7 +2393,10 @@ TEST_CASE_METHOD(PluginUpdaterFunctionalFixture,
     write_test_file(package / "changelog.json", "invalid json");
     updater.reload_all_plugins();
     synchronize({{"1.0.0.0", slicer_version, "zip1"}});
-    CHECK(updater.plugin(plugin_id)->available_packages.front().notes_error.find((package / "changelog.json").string()) != std::string::npos);
+    // The message may write the path with either separator on Windows, depending on how the temporary directory was spelled.
+    std::string notes_error = updater.plugin(plugin_id)->available_packages.front().notes_error;
+    std::replace(notes_error.begin(), notes_error.end(), '\\', '/');
+    CHECK(notes_error.find((package / "changelog.json").generic_string()) != std::string::npos);
     std::optional<bool> result;
     updater.load_changelogs(plugin_id, [&result](bool success) { result = success; });
     REQUIRE(http.pending_count() == 1);
