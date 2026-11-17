@@ -980,6 +980,7 @@ void init_categories(PrintConfigDef &definition)
         "support_material_interface_speed",
         "support_material_speed", 
         "support_material_xy_spacing",
+        "support_material_contact_xy_spacing",
         "travel_speed", "travel_speed_z",
         // gapfill
         "gap_fill_flow_match_perimeter",
@@ -6281,6 +6282,25 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comAdvancedE | comPrusa;
     // Default is half the external perimeter width.
     def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
+
+    def = definition.add("support_material_contact_xy_spacing", coFloatOrPercent, ptFFF);
+    def->label = L("Contact XY separation");
+    def->full_label = L("XY separation between an object and its support contacts");
+    def->category = OptionCategory::support;
+    def->invalidates_step = STEP_SUPPORT;
+    def->tooltip = L("If enabled and smaller than the XY separation, the support contact layers, the ones touching the object,"
+                   " only keep this separation from it. The layers below a top contact (above a bottom contact) come back"
+                   " to the XY separation by steps of 0.67 nozzle diameter per layer, so sharp corners, small areas and the"
+                   " top of steep slopes keep their support. The other support keeps the XY separation."
+                   "\nIf expressed as percentage (for example 10%), it will be calculated over external perimeter width."
+                   "\nThe tree and organic supports ignore it.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "external_perimeter_extrusion_width";
+    def->min = 0;
+    def->max_literal = { 10, false};
+    def->can_be_disabled = true;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(disable_default_option(new ConfigOptionFloatOrPercent(10, true)));
 
     def = definition.add("support_material_angle", coFloat, ptFFF);
     def->label = L("Pattern angle");

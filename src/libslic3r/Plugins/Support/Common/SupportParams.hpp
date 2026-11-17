@@ -80,6 +80,12 @@ struct SupportParams
     c_float_or_percent bottom_expansion = {};
     // Thinnest printable layer and XY gap to the object (scaled), and the internal resolution (scaled).
     coord_t min_height = 0, gap_xy = 0, resolution = SCALED_EPSILON;
+    // Contact mode: support_material_contact_xy_spacing is enabled and below gap_xy. The contact slabs then keep only
+    // gap_xy_contact (scaled) from the object, and the cone of a contact, shrunk by contact_cone_step (scaled) per support
+    // layer, joins the slabs of the next contact_cone_layers layers. Otherwise gap_xy_contact is gap_xy and the cones are off.
+    bool contact_mode = false;
+    coord_t gap_xy_contact = 0, contact_cone_step = 0;
+    size_t contact_cone_layers = 0;
     // Interface line density in (0, 1]; the base density when there is no interface layer.
     double interface_density = 0;
     // Configured clear gap between sparse support lines (mm), shared by density calculation and the grid raster spacing.
