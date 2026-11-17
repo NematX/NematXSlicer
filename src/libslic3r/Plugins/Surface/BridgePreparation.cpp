@@ -40,10 +40,11 @@
            |       `-- append_prepared() [internal classification and metadata]
            `-- set_region_island_fill_surfaces() [host callback, one collection at a time]
 
-   Recipe::run_impl() sets the direction and requests separate rows. It runs as
+   Recipe::run_impl() sets the direction, requests separate rows and fits their pitch,
+   within bridge_overlap and bridge_overlap_min, and their phase to the area (BridgeRows.hpp). It runs as
    an infill-recipe modifier, not as a call from Preparation::run_impl(). The infill
    generator calls validate_recipe() after every modifier has run, so a later
-   modifier cannot silently replace the prepared direction or parallel rows.
+   modifier cannot silently replace the prepared direction or parallel rows, nor space them outside the settings.
 
    Input surfaces stay unchanged while output collections are built in plugin
    storage. They are checked before replacement, but each collection is replaced
@@ -52,6 +53,7 @@
 */
 #include "BridgePreparation.hpp"
 #include "BridgeGeometry.hpp"
+#include "BridgeRows.hpp"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -214,8 +216,16 @@ private:
     const char *const *dependencies_impl() const noexcept override { return recipe_dependencies; }
     // Place the modifier in the normal recipe chain; final validation follows all modifiers.
     int32_t priority_impl() const noexcept override { return 20; }
-    // Use the chosen bridge angle and request separate parallel rows. Ignore
-    // a missing run payload or a surface without BridgeSurfaceInfo.
+    // Return the key count, or also fill a caller-sized buffer with the overlap settings that bound the row pitch.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override {
+        if (keys!=nullptr) {
+            keys[0]={"bridge_overlap",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE};
+            keys[1]={"bridge_overlap_min",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE};
+        }
+        return 2;
+    }
+    // Use the chosen bridge angle, request separate parallel rows and fit their pitch and phase to the area
+    // (BridgeRows.hpp). Ignore a missing run payload or a surface without BridgeSurfaceInfo.
     void run_impl(const plugin_run_context *run_ctx) const override;
 };
 
@@ -728,6 +738,16 @@ void Recipe::run_impl(const plugin_run_context *run_ctx) const
     params.connection=C_INFILL_CONNECTION_NOT_CONNECTED;
     params.anchor_length=0.; params.anchor_length_max=0.; params.link_max_length=0;
     params.infill_flags &= ~C_INFILL_FLAG_CAN_ANGLE_CROSS;
+    // Fit the rows: the pitch within the overlap settings and the phase that cover the bridge best. Without a fitting row the
+    // recipe keeps its nominal pitch and lets the pattern choose the phase.
+    if (ctx->primary_region==nullptr || !(params.spacing>0.)) return;
+    const BridgeRows::PitchRange range=BridgeRows::pitch_range(LayerRegion(ctx->primary_region).print_region().config(),
+        params.spacing,unscaled(params.flow.nozzle_diameter));
+    const BridgeRows::Fit fit=BridgeRows::fit(run_ctx->plugin_storage,Surface(ctx->surface).expolygon(),params.bridge_angle,params.spacing,range);
+    if (!fit.found()) return;
+    params.density=float(params.spacing/fit.pitch);
+    params.bridge_offset=fit.phase;
+    params.infill_flags |= C_INFILL_FLAG_DONT_ADJUST;
 }
 }
 
@@ -764,7 +784,13 @@ void validate_recipe(const surface_handle *surface, const raw_infill_pattern_par
     const c_flow transport=layer_region_get_infill_bridge_flow(region,RAW_EXTRUSION_ROLE_SOLID_INFILL);
     const extruder_index_t tool=layer_region_get_role_extruder(region,RAW_EXTRUSION_ROLE_SOLID_INFILL);
     const bool internal=Surface(surface).get(BridgeSurfaceInfo::key)->core_rule==2;
-    if (!params.flow.is_bridge || params.flow_mult!=1.f || params.density!=1.f ||
+    // The recipe pass may space the rows within the overlap settings and place them with bridge_offset.
+    const BridgeRows::PitchRange range=BridgeRows::pitch_range(LayerRegion(region).print_region().config(),reference.spacing,
+        unscaled(transport.nozzle_diameter));
+    const double pitch=params.density>0.f ? params.spacing/double(params.density) : 0.;
+    const bool spaced=params.density==1.f ||
+        (pitch>=range.minimum*(1.-1e-6) && pitch<=range.maximum*(1.+1e-6) && params.bridge_offset>=0);
+    if (!params.flow.is_bridge || params.flow_mult!=1.f || !spaced ||
         params.extrusion_role!=(internal ? RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL : RAW_EXTRUSION_ROLE_BRIDGE_INFILL) || params.surface_type!=surface_get_type(surface) ||
         tool==EXTRUDER_ID_UNKNOWN || params.extruder!=uint16_t(tool+1) ||
         params.flow.spacing!=scale_i(reference.spacing) || std::abs(params.spacing-reference.spacing)>1e-7 ||

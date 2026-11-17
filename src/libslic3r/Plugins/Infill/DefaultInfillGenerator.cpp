@@ -532,6 +532,7 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
         infill_flags |= C_INFILL_FLAG_CAN_ANGLE_CROSS;
     // A bridge gets no gap fill, so its line phase alone decides its coverage; lines along the border are welcome there,
     // they rest on the perimeters. This only places fixed-width lines: variable widths would fill a bridge better.
+    // A prepared bridge gets its pitch and phase from the bridge recipe pass (BridgeRows.hpp); the pattern keeps that phase.
     if (bridge)
         infill_flags |= C_INFILL_FLAG_BEST_COVERAGE;
     recipe.raw.infill_flags = infill_flags;

@@ -22,10 +22,10 @@ ExpansionMargins expansion_margins(const layer_region_handle *region);
 // Register external/internal classification and direction/extension, with its
 // recipe activation partner. Registration failure throws; the first host must outlive it.
 void register_surface(orchestrator_handle *orch);
-// Register the pass that requests parallel bridge rows, using the same long-lived host.
+// Register the pass that requests parallel bridge rows and fits their pitch and phase, using the same long-lived host.
 void register_recipe(orchestrator_handle *orch);
 // For surfaces marked with BridgeSurfaceInfo, reject incompatible direction,
-// pattern, flow or tool settings before caching. Borrow the region and pattern id
+// pattern, flow or tool settings, or a row pitch outside the overlap settings, before caching. Borrow the region and pattern id
 // for this check; a null surface or a surface without that marker needs no check.
 void validate_recipe(const surface_handle *surface, const raw_infill_pattern_params &params,
     const char *pattern_id, const layer_region_handle *region);

@@ -217,7 +217,9 @@ DynamicPrintConfig depth_budget_config()
         {"infill_dense","0"},{"bridge_type","nozzle"},{"bridge_flow_ratio","100%"},{"bridge_fill_pattern","rectilinear"},
         {"bridge_angle","0"},{"bridged_infill_margin","0"},{"bridged_infill_uniform_margin","0"},{"internal_bridge_expansion","0"},
         {"infill_overlap","0"},{"bridge_volume_compensation","bridge.finalize_surface_volume"},{"bridge_volume_compensation_enabled","1"},
-        {"filament_diameter","1.75"},{"extrusion_multiplier","1"},{"retract_length","0"},{"retract_restart_extra","0"},{"wipe","0"}});
+        {"filament_diameter","1.75"},{"extrusion_multiplier","1"},{"retract_length","0"},{"retract_restart_extra","0"},{"wipe","0"},
+        // Rows at the 0.4 mm flow spacing: the budgets below are per row of that pitch, independent of the row fit.
+        {"bridge_overlap","100%"},{"bridge_overlap_min","100%"}});
     return config;
 }
 
@@ -722,6 +724,40 @@ TEST_CASE("Real bridge pipelines preserve native circular flow and export local 
     }
 }
 
+// The recipe pass fits the rows of a prepared bridge: their pitch stays within bridge_overlap and bridge_overlap_min, and
+// it is the same between every two neighbouring rows.
+TEST_CASE("Prepared bridge rows take one pitch within the overlap settings", "[plugins][bridge-pipeline][bridge-preparation][bridge-rows]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Activation active(true,"ordering.extrusion_tree.advanced",false);
+    DynamicPrintConfig config=depth_budget_config();
+    config.set_deserialize_strict({{"bridge_overlap","90%"},{"bridge_overlap_min","80%"}});
+    Model model;Print print;
+    Test::init_print({cavity_mesh(6,0,2)},print,model,config);print.process();
+    // The roof starts above the two-layer cavity; bridge_angle 0 prints its rows along X.
+    std::vector<double> rows;
+    for (const LayerSliceIsland &island : print.object(0).layer(2).islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const auto &[role,root] : region.extrusion_buckets())
+                visit_paths(root,[&rows](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+                    if (attributes.role!=ExtrusionRole::BridgeInfill) return;
+                    const Polyline line=leaf.polyline_ref().to_polyline();
+                    double y=0.;
+                    for (const Point &point : line.points) y+=unscaled(point.y());
+                    rows.push_back(y/double(line.points.size()));
+                });
+    std::sort(rows.begin(),rows.end());
+    rows.erase(std::unique(rows.begin(),rows.end(),[](double a,double b) { return b-a<.05; }),rows.end());
+    REQUIRE(rows.size()>=10);
+    std::vector<double> pitches;
+    for (size_t idx=1;idx<rows.size();++idx) pitches.push_back(rows[idx]-rows[idx-1]);
+    const auto [low,high]=std::minmax_element(pitches.begin(),pitches.end());
+    INFO("pitch from "<<*low<<" to "<<*high<<" over "<<rows.size()<<" rows");
+    CHECK(*low>=.4/.9-1e-3);
+    CHECK(*high<=.4/.8+1e-3);
+    CHECK(*high-*low<.01);
+}
+
 TEST_CASE("Bridge compensation regenerates nominal infill on Slicing replay and survives Print replay", "[plugins][bridge-pipeline][bridge-volume][checkpoint]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1076,6 +1112,9 @@ TEST_CASE("Bridge and ensuring declared settings pass a linear STL slicing and e
     add_values("bridge_precision", {"0.01", "50%"});
     domains.push_back(E2E::enum_domain("bridge_type"));
     add_values("bridge_flow_ratio", {"50%", "100%", "150%"});
+    // The row pitch range: equal densities fix it, a lower minimum lets the row fit widen it.
+    add_values("bridge_overlap", {"50%", "100%"});
+    add_values("bridge_overlap_min", {"50%", "100%"});
     // Grid is not a valid 100% pattern (FFFPrintConfig::validate). Couple only
     // that boundary to rectilinear; keep other density changes independent.
     domains.push_back({{"fill_density","fill_pattern"}, {
