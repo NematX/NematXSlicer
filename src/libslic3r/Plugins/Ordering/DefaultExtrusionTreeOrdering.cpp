@@ -61,7 +61,7 @@ The normal call flow is:
         |   |-- move the selected child into the fixed prefix
         |   `-- prepare_child_for_entry()
         |       |-- rotate_loop_to_legal_seam() for loops
-        |       |-- reverse_tree() for a selected reverse candidate
+        |       |-- reverse_tree_keeping_loops() for a selected reverse candidate
         |       `-- recurse into sortable children
         `-- publish EntryPointProperty{root.front(), root.back()}
 
@@ -224,7 +224,7 @@ void prepare_child_for_entry(storage_handle *storage,
         TreeOrderingGeometry::disable_rotation_recursively(child, run_ctx);
     } else if (candidate.reverse_before_printing) {
         throw_if_cancelled(run_ctx);
-        TreeOrderingGeometry::reverse_tree(child, run_ctx);
+        ExtrusionTree::reverse_tree_keeping_loops(child, run_ctx);
     }
 }
 

@@ -152,6 +152,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Perimeter/DetectOverhang.hpp"
 #include "libslic3r/Plugins/Perimeter/ExtraPerimetersOnOverhangs.hpp"
 #include "libslic3r/Plugins/Perimeter/FuzzySkin.hpp"
+#include "libslic3r/Plugins/Perimeter/LoopDirection.hpp"
 #include "libslic3r/Plugins/Perimeter/MarkFirstLoop.hpp"
 #include "libslic3r/Plugins/Perimeter/OnlyOnePerimeterFirstLayer.hpp"
 #include "libslic3r/Plugins/Perimeter/OnlyOnePerimeterOnTop.hpp"
@@ -885,6 +886,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Perimeter::DetectOverhangPlugin::register_detect_overhang_plugin);
     register_builtin_plugin(orchestrator, "perimeter.post_process.fuzzy_skin",
         slic3r_api::Perimeter::FuzzySkinPlugin::register_fuzzy_skin_plugin);
+    register_builtin_plugin(orchestrator, "perimeter.post_process.loop_direction",
+        slic3r_api::Perimeter::LoopDirectionPlugin::register_loop_direction_plugin);
     register_builtin_plugin(orchestrator, "perimeter.generator.arachne",
         slic3r_api::Perimeter::ArachnePerimeterGeneratorPlugin::register_arachne_perimeter_generator_plugin);
     register_builtin_plugin(orchestrator, "perimeter.generator.classic",

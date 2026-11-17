@@ -64,7 +64,7 @@ TEST_CASE("Perimeter generators pass their linear STL export catalogues",
     namespace E2E = Test::PluginE2E;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
-    std::vector<const char *> providers{CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR};
+    std::vector<const char *> providers{CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR};
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
     providers.push_back(PYTHON_SIMPLE_PERIMETER_GENERATOR);
 #endif

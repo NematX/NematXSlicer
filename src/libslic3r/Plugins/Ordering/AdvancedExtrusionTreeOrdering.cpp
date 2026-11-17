@@ -113,7 +113,7 @@ and extreme-point helpers do not change the traversal order.
 A collection marked with BridgeAtomicStrand represents one continuous split
 bridge row. Treat it as a single candidate: do not spatially sort its children or
 choose their directions independently. Any permitted reversal applies to the
-whole sequence through reverse_tree(), then final ordering locks its descendant
+whole sequence through reverse_tree_keeping_loops(), then final ordering locks its descendant
 permissions. The marker is not permission to reverse an otherwise fixed path.
 */
 
@@ -1181,7 +1181,7 @@ void reverse_entity_tree(
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    TreeOrderingGeometry::reverse_tree(entity, run_ctx);
+    ExtrusionTree::reverse_tree_keeping_loops(entity, run_ctx);
     throw_if_cancelled(run_ctx);
     if (estimates != nullptr)
         reverse_cached_estimates(entity.readonly(), *estimates, run_ctx);

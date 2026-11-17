@@ -245,8 +245,9 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
 
 
     // overhangs
-    const GuiCondition can_reverse = all_of({ non_zero("perimeters"), true_("overhangs"),
-        false_("perimeter_reverse"), int_not_equals("perimeter_generator", int(PerimeterGeneratorType::Arachne)) });
+    // The loop direction post-process reverses overhangs for every perimeter generator, unless perimeter_reverse
+    // already reverses every loop.
+    const GuiCondition can_reverse = all_of({ non_zero("perimeters"), true_("overhangs"), false_("perimeter_reverse") });
     add_rule({ "overhangs_reverse" }, can_reverse);
     add_rule({ "overhangs_reverse_threshold" },
              all_of({ can_reverse, true_("overhangs_reverse") }));

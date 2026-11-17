@@ -42,7 +42,11 @@ Normal plugin usage:
 3. Inspect the layer regions attached to the island and build one or more
    region groups. Each group is represented by an array of layer_region_handle
    pointers. The array order has no semantic meaning; the group is treated as a
-   set.
+   set. Later steps read some settings from the first region of a group: keep
+   apart the regions that disagree on perimeter_direction, perimeter_reverse,
+   overhangs_reverse or overhangs_reverse_threshold, which the
+   perimeter.post_process.loop_direction plugin applies. That plugin gives every
+   closed loop its printing direction, so a generator need not orient its loops.
 
 4. For each group, call run_region_group(ctx, regions, count, root_area,
    generator_state, generate_node).
