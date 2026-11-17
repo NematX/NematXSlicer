@@ -6,7 +6,7 @@
 
 /* Tower enumeration from the Print's settings, as Slic3r::wipe_tower_footprints().
 
-The settings are read from the Print config (nozzles, complete_objects, vase
+The settings are read from the Print config (nozzles, print sequence, vase
 mode), from its default object config (global tower) and from each object's
 config (instance towers). An instance's XY translation is not in the SDK, but
 object_get_instance_shift() is that translation plus the object's centring
@@ -33,7 +33,11 @@ std::vector<TowerFootprint> towers_of_print(const slic3r_api::Print &print)
     const slic3r_api::Config print_config = print.config();
     if (print_config.size("nozzle_diameter", 0) <= 1 || print_config.get("spiral_vase").get_bool())
         return towers;
-    const bool complete_objects = print_config.get("complete_objects").get_bool();
+    // Complete objects: the By object plan builder without a height step, as the host's print_complete_objects().
+    // The step setting belongs to that builder, so it is absent, and read as 0, while the builder is inactive.
+    const bool complete_objects =
+        print_config.get("print_plan_builder").serialize() == "ordering.plan_builder.by_object" &&
+        print_config.float_or_default("complete_objects_step", 0.) == 0.;
     const slic3r_api::Config defaults = print.default_object_config();
     if (defaults.get("wipe_tower").get_bool() && !complete_objects)
         append_tower(towers, print_config, defaults, defaults.get("wipe_tower_x").get_float(),
