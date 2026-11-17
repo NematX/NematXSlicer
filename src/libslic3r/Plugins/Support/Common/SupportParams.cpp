@@ -219,6 +219,15 @@ SupportParams::SupportParams(const Print &print, const Object &object)
         external_width = std::max(external_width, object.region_flow_mm(region_idx, raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
                                                                         layer_height, 2).width);
     gap_xy = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_width));
+    // Contact gap: active only when enabled and below gap_xy; the cones then shrink by 0.67 interface nozzle per layer.
+    const ConfigOption contact_xy = config.get("support_material_contact_xy_spacing");
+    const coord_t contact_gap = scale_i(contact_xy.get_effective_value(external_width));
+    contact_mode = config_option_is_enabled(contact_xy.handle(), -1) != 0 && contact_gap < gap_xy;
+    gap_xy_contact = contact_mode ? contact_gap : gap_xy;
+    if (contact_mode) {
+        contact_cone_step = std::max(coord_t(1), scale_i(0.67 * interface_flow_mm.nozzle_diameter));
+        contact_cone_layers = size_t((gap_xy - gap_xy_contact + contact_cone_step - 1) / contact_cone_step);
+    }
     bottom_expansion = config.get("support_material_bottom_interface_expansion").get_float_or_percent();
 
     // Line densities from the configured gaps between lines.

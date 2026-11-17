@@ -375,7 +375,7 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     // ----- support material and raft ------------------------------------
     add_rule({ "support_material_style", "support_material_extrusion_width",
                "support_material_contact_distance_type", "support_material_xy_spacing",
-               "support_material_bottom_interface_layers",
+               "support_material_contact_xy_spacing", "support_material_bottom_interface_layers",
                "support_material_interface_layers" }, have_support);
 
     add_rule({ "support_material_threshold" },

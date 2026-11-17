@@ -266,7 +266,8 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     const char *const support_keys[] = {
         "support_material_style", "support_material_extrusion_width",
         "support_material_contact_distance_type", "support_material_xy_spacing",
-        "support_material_bottom_interface_layers", "support_material_interface_layers"
+        "support_material_contact_xy_spacing", "support_material_bottom_interface_layers",
+        "support_material_interface_layers"
     };
     for (const char *key : support_keys)
         set(key, have_support);

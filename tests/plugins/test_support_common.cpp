@@ -986,6 +986,47 @@ TEST_CASE("Support params use the unset minimum layer height of small nozzles", 
     CHECK(params.support_min_height == Approx(slic3r_api::min_layer_height_mm(0., 0.05)));
 }
 
+// The contact gap applies only when support_material_contact_xy_spacing is enabled and below the XY gap; the cones then
+// shrink by 0.67 interface nozzle per layer until they lie beyond the XY gap.
+TEST_CASE("Support params enable the contact gap only below the XY gap", "[plugins][support-common][support-contact-xy]")
+{
+    struct Case { const char *xy, *contact; bool mode; };
+    const Case cases[] = {
+        {"1.5", "!0.1", false}, // disabled
+        {"1.5", "0.1", true},
+        {"1.5", "1.5", false},  // not below the XY gap
+        {"0", "0", false},      // no XY gap to reduce
+    };
+    for (const Case &c : cases) {
+        CAPTURE(c.xy, c.contact);
+        DynamicPrintConfig config = SG::config("grid", false, 3, false);
+        config.set_deserialize_strict({{"support_material_xy_spacing", c.xy}, {"support_material_contact_xy_spacing", c.contact}});
+        Print print;
+        Model model;
+        Test::init_print({SG::slab()}, print, model, config);
+        const Common::SupportParams params = SG::params(print, print.object(0));
+        CHECK(params.contact_mode == c.mode);
+        if (!c.mode) {
+            CHECK(params.gap_xy_contact == params.gap_xy);
+            CHECK(params.contact_cone_layers == 0);
+            continue;
+        }
+        CHECK(params.gap_xy_contact == scale_i(0.1));
+        const coord_t step = scale_i(0.67 * params.interface_flow_mm.nozzle_diameter);
+        CHECK(params.contact_cone_step == step);
+        CHECK(params.contact_cone_layers == size_t(std::ceil(double(scale_i(1.5) - scale_i(0.1)) / double(step))));
+    }
+    // A percent applies to the external perimeter width, like the XY gap.
+    DynamicPrintConfig config = SG::config("grid", false, 3, false);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "200%"}, {"support_material_contact_xy_spacing", "10%"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    const Common::SupportParams params = SG::params(print, print.object(0));
+    REQUIRE(params.contact_mode);
+    CHECK(params.gap_xy_contact == Approx(double(params.gap_xy) / 20.).margin(2));
+}
+
 TEST_CASE("Support enum helpers read every serialized value", "[plugins][support-common]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();

@@ -413,7 +413,7 @@ TEST_CASE("Grid variable height filament bridge contacts retain or merge their n
     Common::GeneratorLayer &probe = Common::add_layer(raw, Common::LayerType::TopContact, bridge_z + scale_to_layer_coord(0.001),
         bridge_z + scale_to_layer_coord(0.001) - scale_to_layer_coord(0.2), scale_to_layer_coord(0.2));
     const slic3r_api::StoredExPolygonCollection threads = Common::bridge_footprint(raw.storage, layers,
-        SG::print_view(print).config(), params, probe.print_z, probe);
+        SG::print_view(print).config(), params, probe.print_z, probe, params.gap_xy);
     REQUIRE_FALSE(threads.empty());
     CHECK(area(intersection_ex(SG::native(generated.support.top.front()->polygons), to_polygons(SG::native(threads)))) > 0.);
     if (close_contacts) {

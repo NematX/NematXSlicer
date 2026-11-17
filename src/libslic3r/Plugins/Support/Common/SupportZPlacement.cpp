@@ -615,17 +615,18 @@ double bridging_height_avg_mm(const Config &print_config, const Layer &layer, co
 // reaches up to the limit passes the limit. For each layer the walk does two independent passes:
 //  - Region pass: regions are visited in order and the pass stops at the FIRST region whose thread starts at or above the
 //    limit; later regions of that layer are not examined. Each region visited before that adds the bridge fill surfaces of
-//    the work region islands it belongs to, grown by gap_xy, and sets overlaps. If the first region already stops the pass,
+//    the work region islands it belongs to, grown by gap, and sets overlaps. If the first region already stops the pass,
 //    overlaps stays false.
 //  - Perimeter pass: for each work region island with perimeters, unless one of its regions has a thread starting at or above
-//    the limit, the overhang perimeter footprints are added through bridge_areas (grown by gap_xy).
+//    the limit, the overhang perimeter footprints are added through bridge_areas (grown by gap).
 // The layer walk ends after the first layer whose region pass left overlaps false. A soluble support gets nothing.
 // The result is a new collection owned by the caller. A supplied cache belongs to this object/settings/storage combination
 // and is accessed sequentially by grid/tree trimming; without one, pieces live only for this call. Layer metadata and each piece
 // publish only a complete value, so geometry/allocation failures propagate and leave the failed slot retryable. Temporary pieces
 // and returned geometry use storage, which must outlive the cache. Soluble support initializes no cache.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab, BridgeFootprintCache *cache)
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab, coord_t gap,
+                                           BridgeFootprintCache *cache)
 {
     StoredExPolygonCollection footprint(storage);
     if (p.soluble) return footprint;
@@ -647,9 +648,9 @@ StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::v
             const LayerRegion &region = pieces.regions[region_idx];
             if (bridge_region_start(pieces, layer, region, print_config, filament) >= upper) break;
             overlaps = true;
-            append_region_bridge_fills(storage, clipper, pieces, region_idx, bridge_fill, p.gap_xy, footprint);
+            append_region_bridge_fills(storage, clipper, pieces, region_idx, bridge_fill, gap, footprint);
         }
-        append_bridge_perimeters(storage, pieces, layer, print_config, filament, upper, p.gap_xy, footprint);
+        append_bridge_perimeters(storage, pieces, layer, print_config, filament, upper, gap, footprint);
         if (!overlaps) break;
     }
     return footprint;

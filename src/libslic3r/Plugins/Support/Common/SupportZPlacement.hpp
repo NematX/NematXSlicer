@@ -144,16 +144,16 @@ struct BridgeFootprintCache {
     std::vector<std::optional<BridgeFootprintLayer>> layers;
 };
 
-// Footprints, grown by gap_xy, of the object bridges (thick bridge fills and overhang perimeters) whose thread starts below
+// Footprints, grown by gap, of the object bridges (thick bridge fills and overhang perimeters) whose thread starts below
 // the top of the slab plus the gap above, found in the object layers from the first one that begins at or above from_z. The layers
 // that begin below from_z are not examined: the caller removes their outlines itself, so from_z is the slab top plus the gap above
 // for a caller whose outline trimming reaches that far, and the slab top for one that trims only the layers its Z span crosses.
 // A slab must not stand where those threads hang. The bridge height follows p.distance_type. The areas are raw offsets, neither
 // united nor normalized: the caller unites and normalizes them as it needs. Empty for a soluble support. The caller owns the
 // returned collection. cache, when supplied, retains pieces in storage for this object/settings combination and must be
-// accessed sequentially; nullptr uses a cache local to this call. An exception from bridging_height_avg_mm (unknown bridge type) propagates.
+// accessed sequentially and with a single gap; nullptr uses a cache local to this call. An exception from bridging_height_avg_mm (unknown bridge type) propagates.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab,
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab, coord_t gap,
                                            BridgeFootprintCache *cache = nullptr);
 
 } // namespace slic3r_api::Support::Common

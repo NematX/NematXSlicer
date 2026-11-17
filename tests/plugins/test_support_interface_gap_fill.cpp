@@ -479,6 +479,8 @@ std::vector<E2E::Domain> domains()
             {{"coupled soluble contacts", {{"support_material_contact_distance_type", "none"},
                 {"support_material_contact_distance", "0"}, {"support_material_bottom_contact_distance", "0"}}}}},
         {{"support_material_xy_spacing"}, {{"xy clearance", {{"support_material_xy_spacing", "0.4"}}}}},
+        {{"support_material_contact_xy_spacing", "support_material_xy_spacing"},
+            {{"coupled contact clearance", {{"support_material_contact_xy_spacing", "0.1"}, {"support_material_xy_spacing", "1"}}}}},
         {{"support_material_layer_height", "support_material_interface_layer_height", "layer_height", "first_layer_height"},
             {{"coupled layer heights", {{"support_material_layer_height", "0.15"}, {"support_material_interface_layer_height", "0.15"},
                 {"layer_height", "0.15"}, {"first_layer_height", "0.15"}}}}},
