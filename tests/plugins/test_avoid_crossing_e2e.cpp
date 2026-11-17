@@ -218,7 +218,114 @@ void append_points(const ExtrusionEntity &entity, std::vector<coord_t> &points);
 size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role = RAW_EXTRUSION_ROLE_NONE);
 // Copy ordered scope handles for immediate inspection while their owning Print remains alive.
 void collect_scope_handles(slic3r_api::MutableExtrusionEntity entity,
-                          std::vector<slic3r_api::MutableExtrusionEntity> &scopes);
+                           std::vector<slic3r_api::MutableExtrusionEntity> &scopes);
+// Publish a real two-island print and require every deviated plan route to occur
+// as consecutive, non-extruding G-code XY moves, not just as isolated vertices.
+Result no_travel_export(Print &print, const DynamicPrintConfig &config);
+
+Result no_travel_export(Print &print, const DynamicPrintConfig &config)
+{
+    print.set_status_silent();
+    print.process();
+    Test::GCode::select_printing_plan_firmware(print, "marlin2");
+    const auto reference = Test::GCode::temporary_gcode_path();
+    const auto output = Test::GCode::temporary_gcode_path();
+    auto &host = Orchestrator::instance();
+    host.export_gcode(print, reference.string(), nullptr);
+    const auto selection = host.select_gcode_exporter(print, print.full_print_config());
+    REQUIRE(selection.plugin_id == k_default_gcode_exporter_id);
+    REQUIRE(Test::export_print_to(host, print, print.full_print_config(), reference.string(), output.string(), selection) == output.string());
+    Result result;
+    for (const auto &group : print.printing_plan()->groups)
+        for (const auto &layer : group.layers)
+            for (const auto &tool : layer.tool_groups)
+                for (const auto &extrusion : tool.extrusions)
+                    collect_travels(*extrusion.root, {}, result);
+    std::vector<Point> emitted;
+    GCodeReader reader;
+    reader.apply_config(config);
+    reader.parse_buffer(Test::GCode::read_text_file(output), [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (line.extruding(state) && line.dist_XY(state) > 0.)
+            result.volume += line.dist_E(state) * PI * 1.75 * 1.75 / 4.;
+        // Extrusions break the sequence; they cannot complete a detour match.
+        if (line.extruding(state)) emitted.emplace_back(std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max());
+        else if ((line.cmd_is("G0") || line.cmd_is("G1")) && !line.has_e() && (line.has_x() || line.has_y()))
+            emitted.push_back(line.new_XY_scaled(state));
+    });
+    REQUIRE(result.volume > 0.);
+    for (const auto &route : result.travels) {
+        if (route.size() <= 6) continue;
+        bool found = false;
+        const size_t count = route.size()/3 - 1;
+        for (size_t begin = 0; begin + count <= emitted.size() && !found; ++begin) {
+            bool matches = true;
+            for (size_t p = 1; p <= count; ++p)
+                if (std::abs(double(emitted[begin+p-1].x()) - route[3*p]) > scale_i(0.001) ||
+                    std::abs(double(emitted[begin+p-1].y()) - route[3*p+1]) > scale_i(0.001)) {
+                    matches = false; break;
+                }
+            found = matches;
+        }
+        CHECK(found);
+    }
+    Test::GCode::remove_output_pair(reference);
+    Test::GCode::remove_output_pair(output);
+    return result;
+}
+
+TEST_CASE("Simple NoTravel routing reaches G-code and replays model edits", "[plugins][plugin-e2e][no-travel-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    auto &host = Orchestrator::instance();
+    TravelActivation active(host);
+    REQUIRE(active.success);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.default");
+    config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "1"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"fill_density", "0"}, {"top_solid_layers", "1"},
+        {"bottom_solid_layers", "1"}, {"avoid_crossing_perimeters", "0"}, {"retract_lift", "0"}});
+    TriangleMesh mesh = make_cube(4., 4., 0.6);
+    TriangleMesh right = make_cube(4., 4., 0.6);
+    right.translate(20., 0., 0.); mesh.merge(right);
+    Model model;
+    auto *object = model.add_object("two islands", "islands.stl", mesh);
+    object->add_instance()->set_offset(Vec3d(40., 40., 0.));
+    Print replay;
+    replay.apply(model, config);
+    const auto baseline = no_travel_export(replay, config);
+    CHECK(baseline.deviated == 0);
+    auto *helper = object->add_volume(make_cube(4., 8., 1.), ModelVolumeType::NO_TRAVEL, false);
+    helper->set_offset(Vec3d(10., -2., 0.));
+    for (int edit = 0; edit < 5; ++edit) {
+        CAPTURE(edit);
+        if (edit == 1) helper->set_offset(Vec3d(12., -2., 0.));
+        if (edit == 2) helper->set_type(ModelVolumeType::SEAM_POSITION_CENTER_Z);
+        if (edit == 3) helper->set_type(ModelVolumeType::NO_TRAVEL);
+        if (edit == 4) object->delete_volume(1);
+        replay.apply(model, config);
+        const auto changed = no_travel_export(replay, config);
+        Print fresh;
+        fresh.apply(model, config);
+        const auto expected = no_travel_export(fresh, config);
+        CHECK(changed.travels == expected.travels);
+        CHECK(changed.volume == Approx(expected.volume));
+        CHECK(changed.volume == Approx(baseline.volume));
+        if (edit == 0 || edit == 1 || edit == 3) {
+            REQUIRE(changed.deviated > 0);
+            const double x = edit == 0 ? 50. : 52.;
+            const ExPolygons core{ExPolygon(Polygon(Points{Point::new_scale(x+0.002, 38.002),
+                Point::new_scale(x+3.998, 38.002), Point::new_scale(x+3.998, 45.998), Point::new_scale(x+0.002, 45.998)}))};
+            for (const auto &route : changed.travels) {
+                if (route.size() <= 6) continue; // Ordinary detours, not out-of-scope layer entries.
+                Polyline path;
+                for (size_t p = 0; p < route.size(); p += 3) path.points.emplace_back(route[p], route[p+1]);
+                CHECK(intersection_pl(Polylines{path}, core).empty());
+            }
+        } else CHECK(changed.deviated == 0);
+        if (edit == 4) CHECK(changed.travels == baseline.travels);
+    }
+}
 
 // Vary support crossing settings independently through slicing, routing, wiping and text publication.
 TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin-e2e][support-crossing-e2e]")

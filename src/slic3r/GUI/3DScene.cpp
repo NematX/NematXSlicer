@@ -280,6 +280,7 @@ const ColorRGBA GLVolume::SEAM_POSITION_COLOR      = { 0.8f, 0.9f, 0.2f, 0.5f };
 const ColorRGBA GLVolume::INTERNAL_SEAM_POSITION_COLOR = { 0.2f, 0.8f, 0.9f, 0.5f }; // cyan
 const ColorRGBA GLVolume::BRIM_PATCH_COLOR         = { 0.2f, 1.0f, 5.0f, 0.5f }; //cyan
 const ColorRGBA GLVolume::BRIM_NEGATIVE_COLOR      = { 0.7f, 0.2f, 1.0f, 0.5f }; //blue-purple
+const ColorRGBA GLVolume::NO_TRAVEL_COLOR          = { 1.0f, 0.45f, 0.1f, 0.5f }; // orange
 
 GLVolume::GLVolume(float r, float g, float b, float a)
     : m_sla_shift_z(0.0)
@@ -331,7 +332,7 @@ void GLVolume::set_render_color(bool force_transparent)
                 color == SUPPORT_BLOCKER_COLOR || color == SUPPORT_ENFORCER_COLOR ||
                 color == SUPPORT_COLUMN_COLOR || color == NO_SUPPORT_ZONE_COLOR || color == SUPPORT_INTERFACE_COLUMN_COLOR ||
                 color == SEAM_POSITION_COLOR || color == INTERNAL_SEAM_POSITION_COLOR ||
-                color == BRIM_PATCH_COLOR || color == BRIM_NEGATIVE_COLOR)
+                color == BRIM_PATCH_COLOR || color == BRIM_NEGATIVE_COLOR || color == NO_TRAVEL_COLOR)
                 set_render_color(ColorRGBA(rc.r() * color.r(), rc.g() * color.g(), rc.b() * color.b(), rc.a() * color.a()));
             else
                 set_render_color(rc);
@@ -376,6 +377,8 @@ ColorRGBA color_from_model_volume(const ModelVolume& model_volume)
         color = GLVolume::BRIM_PATCH_COLOR;
     else if (model_volume.is_brim_negative())
         color = GLVolume::BRIM_NEGATIVE_COLOR;
+    else if (model_volume.is_no_travel())
+        color = GLVolume::NO_TRAVEL_COLOR;
 
     return color;
 }

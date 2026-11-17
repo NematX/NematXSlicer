@@ -409,6 +409,7 @@ class PythonVolumeViewTests(unittest.TestCase):
                          self.generated.RAW_VOLUME_TYPE_SEAM_POSITION_INTERNAL_CENTER_Z)
         api = self.make_api()
         role_checks = {
+            self.generated.RAW_VOLUME_TYPE_NO_TRAVEL: "is_no_travel",
             self.generated.RAW_VOLUME_TYPE_MODEL_PART: "is_model_part",
             self.generated.RAW_VOLUME_TYPE_NEGATIVE_VOLUME: "is_negative",
             self.generated.RAW_VOLUME_TYPE_PARAMETER_MODIFIER: "is_modifier",
@@ -437,6 +438,7 @@ class PythonVolumeViewTests(unittest.TestCase):
                                  predicate in {"is_support_enforcer", "is_support_blocker"})
                 self.assertEqual(volume.is_support_geometry_modifier(),
                                  predicate in {"is_support_column", "is_no_support_zone", "is_support_interface_column"})
+                self.assertEqual(volume.is_no_travel(), volume_type == self.generated.RAW_VOLUME_TYPE_NO_TRAVEL)
 
         painted_handle = 45
         api.host.volume_types[painted_handle] = self.generated.RAW_VOLUME_TYPE_MODEL_PART

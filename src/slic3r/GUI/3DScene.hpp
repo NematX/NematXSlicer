@@ -87,6 +87,8 @@ public:
     static const ColorRGBA INTERNAL_SEAM_POSITION_COLOR;
     static const ColorRGBA BRIM_PATCH_COLOR;
     static const ColorRGBA BRIM_NEGATIVE_COLOR;
+    // Keep travel-avoidance volumes distinct from material and support modifiers.
+    static const ColorRGBA NO_TRAVEL_COLOR;
 
     enum EHoverState : unsigned char
     {
