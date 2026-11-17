@@ -530,6 +530,10 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
         infill_flags |= C_INFILL_FLAG_USE_ARACHNE;
     if (region_config.fill_angle_cross)
         infill_flags |= C_INFILL_FLAG_CAN_ANGLE_CROSS;
+    // A bridge gets no gap fill, so its line phase alone decides its coverage; lines along the border are welcome there,
+    // they rest on the perimeters. This only places fixed-width lines: variable widths would fill a bridge better.
+    if (bridge)
+        infill_flags |= C_INFILL_FLAG_BEST_COVERAGE;
     recipe.raw.infill_flags = infill_flags;
     recipe.raw.extruder = region.region().extruder(extrusion_role, object);
     recipe.raw.priority = int32_t(surface.priority);
