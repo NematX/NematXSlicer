@@ -1452,7 +1452,7 @@ TEST_CASE("Bridge preparation detects its direction and respects explicit zero a
 }
 
 // Without any anchor, no bridge direction can be detected: the external bridge
-// follows the fill direction of its layer instead of stopping the slicing.
+// silently follows the fill direction of its layer instead of stopping the slicing.
 TEST_CASE("An external bridge without a detectable direction follows the fill direction of its layer","[plugins][bridge-preparation]")
 {
     Fixture fixture({{"bridge_angle","!0"},{"fill_angle","30"},{"fill_angle_template",""},
@@ -1470,11 +1470,17 @@ TEST_CASE("An external bridge without a detectable direction follows the fill di
         island.fill_regions(first);ApiInternal::LayerIslandAccess::set_infill_areas(island,ExPolygons{island.get_slice()});
     }
     Layer::build_up_down_graph(object.layer(0),object.layer(1));
+    Orchestrator &orch=Orchestrator::instance();
+    (void)orch.consume_plugin_messages();
     fixture.prepare();
     const Surface &bridge=fixture.bridge();
     CHECK(std::abs(std::remainder(bridge.bridge_angle-30.*PI/180.,PI))<1e-5);
     REQUIRE(bridge.get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr);
     CHECK_FALSE(bool(bridge.get_property<slic3r_api::BridgeSurfaceInfo>()->angle_from_user));
+    for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages()) {
+        CHECK(message.message.find("no bridge direction could be detected")==std::string::npos);
+        CHECK(message.message.find("the bridge follows the fill direction of its layer")==std::string::npos);
+    }
 }
 
 // A second region covering the first one gives the bridge two physical owners, which
