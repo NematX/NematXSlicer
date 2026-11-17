@@ -22,7 +22,13 @@
     island fill surfaces because production no longer fills those caches. Its
     concrete extrusion classes are rebuilt from generic tree leaves with the
     same geometry and effective flow attributes, preserving loop boundaries.
-    Single-layer print Z groups reuse their per-layer overlap areas while retaining both sets of checks. */
+    Single-layer print Z groups reuse their per-layer overlap areas while retaining both sets of checks.
+    Exception: the family fills its rectilinear interfaces with C_INFILL_FLAG_BEST_COVERAGE, which moves the lines to the
+    phase that covers the surface best, and the native filler does not know this flag. Where the interface paths of a Z then
+    differ from the native ones by one percent or more, they must instead leave at most one point of percent more of the dense
+    support surfaces uncovered than the native paths. The strict score of the support interfaces keeps the lines off the
+    border, where native lines may overlap it, so this coverage is measured half a spacing inside the surfaces. Every other
+    role keeps the one-percent comparison. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -39,6 +45,11 @@ void record_layer_comparison(const std::string &section, PrintObject &object, La
                              const std::vector<SG::LayerSurfaceAreas> &published);
 // Run one model through every style, contact-distance and interface-count combination.
 void run_comparison(int model_id, bool same_tool = false);
+// Percent of the dense support surfaces published in surfaces_layer, shrunk by inset, that the interface paths of paths_layer
+// leave uncovered; each path covers its spacing (width minus the rounded flow section).
+double uncovered_interface_percent(const Layer &surfaces_layer, const Layer &paths_layer, coord_t inset);
+// Append the spacing footprint of every interface leaf of a borrowed extrusion tree.
+void interface_footprint(const ExtrusionEntity &entity, Polygons &out, const ExtrusionAttributes *attributes = nullptr);
 // Check published geometry and contact spacing independently of the native comparison; on_object false
 // means support may not rest on the object (build plate only).
 void check_family(const PrintObject &object, const slic3r_api::Support::Common::GeneratedSupport &support,
@@ -82,6 +93,37 @@ std::vector<InterfaceComparison> check_interface_patterns_of(Print &print, const
 void check_interface_pattern(int model_id, bool soluble);
 // Compare filament-distance bridge contacts and the margin-only contact area.
 void check_bridge_contact_pattern();
+
+void interface_footprint(const ExtrusionEntity &entity, Polygons &out, const ExtrusionAttributes *attributes)
+{
+    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
+    if (entity.has_polyline()) {
+        REQUIRE(attributes != nullptr);
+        if (attributes->role == ExtrusionRole::SupportMaterialInterface) {
+            const double spacing = attributes->width - attributes->height * (1. - PI / 4.);
+            polygons_append(out, offset(entity.polyline_ref().to_polyline(), scale_d(spacing / 2.), ClipperLib::jtRound, scale_d(0.002), ClipperLib::etOpenRound));
+        }
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children()) interface_footprint(*child, out, attributes);
+}
+
+double uncovered_interface_percent(const Layer &surfaces_layer, const Layer &paths_layer, coord_t inset)
+{
+    ExPolygons dense;
+    for (const LayerSliceIsland &island : surfaces_layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const Surface &surface : region.fill_surfaces())
+                if (surface.has_fill_solid()) dense.push_back(surface.expolygon);
+    dense = offset_ex(union_ex(dense), -double(inset));
+    const double total = area(dense);
+    if (total <= 0.) return 0.;
+    Polygons covered;
+    for (const LayerSliceIsland &island : paths_layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
+                if (region.has_extrusion(bucket)) interface_footprint(region.extrusion(bucket), covered);
+    return 100. * area(diff_ex(dense, covered)) / total;
+}
 
 // Walk the owned tree and check width, height and flow per leaf; the layer stays owned by the caller.
 void check_published_paths(const ExtrusionEntity &entity, const Layer &layer)
@@ -355,7 +397,10 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
         if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr)
             for (const Layer &layer : object.auxiliary_layers()) published.push_back(SG::layer_surface_areas(layer));
         const SG::Generated generated_support(print, object);
+        // The strict score keeps interface lines off the border: their coverage is compared half a spacing inside it.
+        const coord_t interface_inset = scale_i(SG::params(print, object).interface_flow_mm.spacing / 2.);
         check_family(object, generated_support.support, SG::params(print, object), model_id,
+
                      variant == nullptr || strcmp(variant, "buildplate_only") != 0);
         SG::toolpaths(print);
         const ObjectFingerprint support_fingerprint = object_fingerprint(object);
@@ -475,9 +520,21 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
                 REQUIRE(found != actual.end());
                 const double length_difference = reference.length > 0 ? std::abs(found->second.length - reference.length) / reference.length : found->second.length;
                 const double volume_difference = reference.volume > 0 ? std::abs(found->second.volume - reference.volume) / reference.volume : found->second.volume;
+                CAPTURE(length_difference, volume_difference);
+                // Interface paths moved by BEST_COVERAGE (see the file comment) must cover the dense surfaces at least as well.
+                if (key.second == uint16_t(ExtrusionRole::SupportMaterialInterface) && (length_difference >= 0.01 || volume_difference >= 0.01)) {
+                    const Layer *plugin_layer = nullptr;
+                    for (const Layer &layer : generated)
+                        if (layer.scaled_print_z() == z) plugin_layer = &layer;
+                    REQUIRE(plugin_layer != nullptr);
+                    const double plugin_uncovered = uncovered_interface_percent(*plugin_layer, *plugin_layer, interface_inset);
+                    const double native_uncovered = uncovered_interface_percent(*plugin_layer, legacy[id], interface_inset);
+                    CAPTURE(plugin_uncovered, native_uncovered);
+                    CHECK(plugin_uncovered <= native_uncovered + 1.);
+                    continue;
+                }
                 maximum_length_difference = std::max(maximum_length_difference, length_difference);
                 maximum_volume_difference = std::max(maximum_volume_difference, volume_difference);
-                CAPTURE(length_difference, volume_difference);
                 if (!honeycomb) {
                     CHECK(length_difference < 0.01);
                     CHECK(volume_difference < 0.01);
