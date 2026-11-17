@@ -366,12 +366,16 @@ void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::
 
 std::string gcode(Print & print)
 {
-	boost::filesystem::path temp = boost::filesystem::unique_path();
+	boost::filesystem::path temp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
     print.set_status_silent();
     print.process();
     Orchestrator::instance().export_gcode(print, temp.string(), nullptr);
-    boost::nowide::ifstream t(temp.string());
-	std::string str((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
+    std::string str;
+    {
+        boost::nowide::ifstream t(temp.string());
+        str.assign(std::istreambuf_iterator<char>(t), std::istreambuf_iterator<char>());
+    }
+    // Windows cannot remove a file that is still open.
 	boost::nowide::remove(temp.string().c_str());
 	return str;
 }
