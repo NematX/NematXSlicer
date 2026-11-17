@@ -61,14 +61,14 @@ The normal call flow is:
     |   `-- spatially_order_entity() recursively
     `-- finalize_plan_geometry()
         `-- finalize_entity()
-            |-- reverse_tree() for nearer reversible exits
+            |-- reverse_tree_keeping_loops() for nearer reversible exits
             |-- SeamPlacerRouter::place_seam() for atomic loops
             `-- disable_ordering_flags_recursively()
 
 A collection marked with BridgeAtomicStrand represents one continuous split
 bridge row. Treat it as a single candidate: do not spatially sort its children or
 choose their directions independently. Any permitted reversal applies to the
-whole sequence through reverse_tree(), then final ordering locks its descendant
+whole sequence through reverse_tree_keeping_loops(), then final ordering locks its descendant
 permissions. The marker is not permission to reverse an otherwise fixed path.
 */
 
@@ -541,7 +541,7 @@ c_point finalize_entity(MutableExtrusionEntity entity,
         squared_distance(current_position, entity.back()) <
             squared_distance(current_position, entity.front())) {
         throw_if_cancelled(run_ctx);
-        TreeOrderingGeometry::reverse_tree(entity, run_ctx);
+        ExtrusionTree::reverse_tree_keeping_loops(entity, run_ctx);
     }
 
     // Whole-strand orientation is settled above; do not orient pieces independently.

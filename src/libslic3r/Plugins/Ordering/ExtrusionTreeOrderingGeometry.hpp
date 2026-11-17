@@ -10,6 +10,7 @@
 
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
+#include "libslic3r/Plugins/Common/ExtrusionTreeReverse.hpp"
 
 /*
 Geometry queries and tree mutations for built-in extrusion-tree orderers.
@@ -21,11 +22,12 @@ which seam, direction, or ordering should be selected.
 
 A marked bridge strand is one continuous unit even when splitting gave it child
 paths. Test atomic_strand() before descending into a tree; any permitted reversal
-uses reverse_tree() on the complete strand, then final ordering can lock its flags.
+uses ExtrusionTree::reverse_tree_keeping_loops() on the complete strand, then final
+ordering can lock its flags.
 
 Example after choosing to reverse a MutableExtrusionEntity strand:
     if (atomic_strand(strand.readonly()) && strand.readonly().reversible())
-        reverse_tree(strand, run_ctx);
+        ExtrusionTree::reverse_tree_keeping_loops(strand, run_ctx);
 */
 
 namespace slic3r_api { namespace Ordering { namespace TreeOrderingGeometry {
@@ -33,11 +35,6 @@ namespace slic3r_api { namespace Ordering { namespace TreeOrderingGeometry {
 // Return whether this node has a nonzero strand marker; callers must not reorder
 // or reverse its descendants independently, even when the collection is reversible.
 bool atomic_strand(const ExtrusionEntity &entity);
-
-/* Reverse every local path and child order so the complete tree runs backward. */
-void reverse_tree(
-    MutableExtrusionEntity entity,
-    const plugin_run_context *run_ctx = nullptr);
 
 /* Compatibility entry point for guarded legal rotation. The actual entry can be
    the current start behind a barrier, a direct composite's existing entry, or a

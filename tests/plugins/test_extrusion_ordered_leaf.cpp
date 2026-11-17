@@ -506,7 +506,7 @@ TEST_CASE("Reversing an authorized unit reverses every stored node without comma
             };
             collect(collect, *root);
             REQUIRE(root->can_reverse());
-            if (sdk) slic3r_api::Ordering::TreeOrderingGeometry::reverse_tree(mutable_view(*root));
+            if (sdk) slic3r_api::ExtrusionTree::reverse_tree(mutable_view(*root));
             else root->reverse();
             const auto check = [&](const auto &self, const ExtrusionEntity &original, const ExtrusionEntity &actual) -> void {
                 CHECK(std::find(handles.begin(), handles.end(), &actual) != handles.end());
@@ -552,12 +552,53 @@ TEST_CASE("Reversing an authorized unit reverses every stored node without comma
                 REQUIRE(collection->entities().size() == root->child_count());
                 CHECK(collection->entities().front() == &root->child(0));
             }
-            if (sdk) slic3r_api::Ordering::TreeOrderingGeometry::reverse_tree(mutable_view(*root));
+            if (sdk) slic3r_api::ExtrusionTree::reverse_tree(mutable_view(*root));
             else root->reverse();
             ExtrusionEntityUPtr restored = root->clone_canonical();
             check_canonical_copy(*before, *restored);
         }
     }
+}
+
+// An ordering provider reverses a collection without turning around the closed loops inside it, which end where they
+// start; the pieces of a loop still turn with it.
+TEST_CASE("Reversing a tree for ordering keeps the direction of its closed children", "[plugins][extrusion][tree-reverse]")
+{
+    using namespace Slic3r;
+    const Points open_a{{0, 0}, {1000, 0}};
+    const Points loop_points{{1000, 0}, {2000, 0}, {2000, 1000}, {1000, 0}};
+    const Points open_b{{1000, 0}, {1000, 2000}};
+    for (const bool keep : {false, true})
+        for (const bool loop_reversible : {false, true}) {
+            CAPTURE(keep, loop_reversible);
+            ExtrusionEntityUPtr root = std::make_unique<ExtrusionEntityCollection>();
+            root->append_child(std::make_unique<ExtrusionEntity>(true, ArcPolyline(open_a)));
+            root->append_child(std::make_unique<ExtrusionEntity>(loop_reversible, ArcPolyline(loop_points)));
+            root->append_child(std::make_unique<ExtrusionEntity>(true, ArcPolyline(open_b)));
+            root->set_can_sort_reverse(false, true);
+            if (keep)
+                slic3r_api::ExtrusionTree::reverse_tree_keeping_loops(mutable_view(*root));
+            else
+                slic3r_api::ExtrusionTree::reverse_tree(mutable_view(*root));
+
+            REQUIRE(root->child_count() == 3);
+            Points expected_loop = loop_points;
+            if (!keep)
+                std::reverse(expected_loop.begin(), expected_loop.end());
+            CHECK(root->child(0).polyline_ref().to_polyline().points == Points{{1000, 2000}, {1000, 0}});
+            CHECK(root->child(1).polyline_ref().to_polyline().points == expected_loop);
+            CHECK(root->child(2).polyline_ref().to_polyline().points == Points{{1000, 0}, {0, 0}});
+        }
+
+    // A loop made of one closed path: reversing the loop reverses its path.
+    ExtrusionEntityUPtr loop = std::make_unique<ExtrusionEntity>(true);
+    loop->append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(loop_points)));
+    loop->set_can_sort_reverse(false, true);
+    REQUIRE(loop->is_loop());
+    slic3r_api::ExtrusionTree::reverse_tree_keeping_loops(mutable_view(*loop));
+    Points reversed_loop = loop_points;
+    std::reverse(reversed_loop.begin(), reversed_loop.end());
+    CHECK(loop->child(0).polyline_ref().to_polyline().points == reversed_loop);
 }
 
 // Seam eligibility uses stored geometry and permission, never the legacy type's unconditional loop answer.

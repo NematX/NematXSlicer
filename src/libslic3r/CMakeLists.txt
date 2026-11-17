@@ -261,6 +261,8 @@ set(SLIC3R_SOURCES
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
 	Plugins/Common/ClipperHelpers.hpp
+	Plugins/Common/ExtrusionTreeReverse.cpp
+	Plugins/Common/ExtrusionTreeReverse.hpp
 	Plugins/Common/PluginEdgeGrid.cpp
 	Plugins/Common/PluginEdgeGrid.hpp
 	Plugins/Common/PolygonWorkBuffers.hpp
