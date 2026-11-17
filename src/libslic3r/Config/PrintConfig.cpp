@@ -1106,11 +1106,13 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         }
     }
 
+    // complete_objects 0 becomes the By layer builder and 1 the By object builder.
     // A stored selector wins over the obsolete switch. Rename the original entry
     // because text loaders consume the mapped entries for their original keys.
-    // The obsolete switch marks a full legacy configuration. Partial files with
-    // only a height step do not select By object. Pair conversion cannot inspect
-    // another key, so it converts only the switch and cannot clear a height step.
+    // The obsolete switch marks a full legacy configuration: 0 with a height step
+    // still selects By object. Partial files with only a height step do not select
+    // By object. Pair conversion cannot inspect another key, so it converts only
+    // the switch and cannot clear a height step.
     const bool has_builder = has(dict, "print_plan_builder");
     const bool has_step = has(dict, "parallel_objects_step");
     double object_step = 0.;
@@ -1128,7 +1130,7 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         } else if (object_step > 0.) {
             set("print_plan_builder", "ordering.plan_builder.by_object");
         } else {
-            erase();
+            set("print_plan_builder", "ordering.plan_builder.by_layer");
         }
     }
 

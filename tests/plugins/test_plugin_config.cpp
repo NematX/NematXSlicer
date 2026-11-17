@@ -3789,7 +3789,8 @@ TEST_CASE("Legacy print sequence uses the obsolete switch as its conversion mark
     key = "complete_objects";
     value = "0";
     PrintConfigDef::handle_legacy_pair(key, value);
-    CHECK(key.empty());
+    CHECK(key == "print_plan_builder");
+    CHECK(value == "ordering.plan_builder.by_layer");
 }
 
 // Load the old object-step names through profile and project readers, then verify
