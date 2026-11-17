@@ -667,7 +667,7 @@ TEST_CASE("Bridge axial expansion preserves rows and stops before holes","[plugi
 
 // A 3 mm wide bridge holds exactly six rows of the 0.5 mm sparsest pitch, which the fit must find; a triangle has no
 // whole number of rows, but searching the pitch range must still cover it at least as well as the densest pitch alone.
-// Every fit stays in its pitch range.
+// Every fit stays in its pitch range and overflows at most what it leaves uncovered.
 TEST_CASE("Bridge rows fit their pitch and phase to the bridge area","[plugins][bridge-preparation][bridge-rows]")
 {
     PluginStorage storage;storage_handle *handle=reinterpret_cast<storage_handle *>(&storage);
@@ -689,7 +689,17 @@ TEST_CASE("Bridge rows fit their pitch and phase to the bridge area","[plugins][
         CHECK(best.pitch>=range.minimum-1e-9);CHECK(best.pitch<=range.maximum+1e-9);
         INFO("best "<<best.coverage<<" at "<<best.pitch<<", densest "<<densest.coverage);
         CHECK(best.coverage>=densest.coverage-1e-9);
+        CHECK(best.overflow<=1.-best.coverage+1e-9);
     }
+    // Rows along the inner edge of an L must not spill over its corner: the sparsest 0.5 mm pitch covers more of it but
+    // its third row overflows beyond what the rows leave uncovered, so the fit takes a denser pitch.
+    const ExPolygon l_shape(Polygon(Points{Point(0,0),Point(scale_i(5.),0),Point(scale_i(5.),scale_i(1.3)),
+        Point(scale_i(1.3),scale_i(1.3)),Point(scale_i(1.3),scale_i(4.5)),Point(0,scale_i(4.5))}));
+    const BridgeRows::Fit l_fit=BridgeRows::fit(handle,slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&l_shape)),0.,.4,range);
+    INFO("L "<<l_fit.coverage<<" overflow "<<l_fit.overflow<<" at "<<l_fit.pitch);
+    REQUIRE(l_fit.found());
+    CHECK(l_fit.overflow<=1.-l_fit.coverage+1e-9);
+    CHECK(l_fit.pitch<range.maximum-1e-3);
 }
 
 // Core and allowed domain of a sliced part's bridge printed along Y. A core edge ends at

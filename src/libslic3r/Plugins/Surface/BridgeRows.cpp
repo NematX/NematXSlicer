@@ -9,14 +9,19 @@
    are vertical, puts the first row at the left of the rotated bounding box plus bridge_offset, keeps a row where
    it reaches the area shrunk by 0.48 spacing and draws it to the area shrunk by 0.05 spacing. fit() rebuilds
    these two contours and the area in the same frame as rings of points, then scores a candidate pitch and phase:
-   each kept row covers a band one pitch wide, sampled by four parallel cuts. The covered area inside the bridge
-   and the part outside it, both divided by the bridge area, are the coverage and the overflow.
+   each kept row covers a band one pitch wide along its drawn length. The area of the bridge inside that band and the
+   rest of the band, both divided by the bridge area, are the coverage and the overflow.
+
+   A candidate is valid only when its overflow is at most the uncovered part, 1 - coverage. Rows across a slanted
+   edge then overflow on one side to compensate the other side they leave bare, which discrete rows cannot avoid,
+   but rows parallel to an edge cannot spill beyond it, for example over the inner corner of an L.
 
        fit()
        |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
        |-- append_rings() [rotate the area and both contours into the row frame]
        `-- score() [kept rows, their bands and the covered and overflowing areas]
-           `-- intervals() [crossings of a vertical cut with rings, even-odd]
+           |-- intervals() [crossings of a vertical cut with rings, even-odd]
+           `-- clipped_area() [exact area of the bridge inside one band]
 
    All work vectors are local to one call. */
 #include "BridgeRows.hpp"
@@ -35,6 +40,10 @@ std::vector<std::pair<double, double>> intervals(const Rings &rings, double x);
 // Coverage and overflow, in fractions of total, of the rows at phase, phase + pitch... from the left of the area.
 Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
           double phase);
+// Signed area of rings inside the rectangle [x0, x1] x [y0, y1]; the sign follows the ring orientation, so holes
+// subtract from their contour. Each ring is clipped by the convex window (Sutherland-Hodgman), which gives the exact
+// area even when the clipped ring degenerates along the window.
+double clipped_area(const Rings &rings, double x0, double x1, double y0, double y1);
 
 void append_rings(Rings &out, const ExPolygon &area, double angle)
 {
@@ -67,7 +76,6 @@ std::vector<std::pair<double, double>> intervals(const Rings &rings, double x)
 Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
           double phase)
 {
-    constexpr int cuts = 4;
     double covered = 0., overflow = 0.;
     for (double x = left + phase; x <= right; x += pitch) {
         const std::vector<std::pair<double, double>> reached = intervals(inner, x);
@@ -75,13 +83,9 @@ Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left
             // A drawn row is an interval of the 0.05 spacing contour that meets the 0.48 spacing contour.
             if (std::none_of(reached.begin(), reached.end(), [&row](const std::pair<double, double> &r) { return r.second > row.first && r.first < row.second; }))
                 continue;
-            for (int cut = 0; cut < cuts; ++cut) {
-                double inside = 0.;
-                for (const std::pair<double, double> &part : intervals(area, x + pitch * ((cut + 0.5) / cuts - 0.5)))
-                    inside += std::max(0., std::min(part.second, row.second) - std::max(part.first, row.first));
-                covered += inside * pitch / cuts;
-                overflow += (row.second - row.first - inside) * pitch / cuts;
-            }
+            const double inside = std::abs(clipped_area(area, x - pitch / 2., x + pitch / 2., row.first, row.second));
+            covered += inside;
+            overflow += pitch * (row.second - row.first) - inside;
         }
     }
     Fit fit;
@@ -90,6 +94,42 @@ Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left
     fit.coverage = covered / total;
     fit.overflow = overflow / total;
     return fit;
+}
+
+double clipped_area(const Rings &rings, double x0, double x1, double y0, double y1)
+{
+    const double bounds[4] = {x0, x1, y0, y1};
+    double area = 0.;
+    Ring current, next;
+    for (const Ring &ring : rings) {
+        current = ring;
+        for (int side = 0; side < 4 && !current.empty(); ++side) {
+            const bool vertical = side < 2;
+            const double limit = bounds[side];
+            const auto inside = [vertical, side, limit](const std::pair<double, double> &p) {
+                const double value = vertical ? p.first : p.second;
+                return side % 2 == 0 ? value >= limit : value <= limit;
+            };
+            const auto cross = [vertical, limit](const std::pair<double, double> &a, const std::pair<double, double> &b) {
+                if (vertical) return std::make_pair(limit, a.second + (b.second - a.second) * (limit - a.first) / (b.first - a.first));
+                return std::make_pair(a.first + (b.first - a.first) * (limit - a.second) / (b.second - a.second), limit);
+            };
+            next.clear();
+            for (size_t i = 0; i < current.size(); ++i) {
+                const std::pair<double, double> &a = current[(i + current.size() - 1) % current.size()];
+                const std::pair<double, double> &b = current[i];
+                if (inside(b)) {
+                    if (!inside(a)) next.push_back(cross(a, b));
+                    next.push_back(b);
+                } else if (inside(a))
+                    next.push_back(cross(a, b));
+            }
+            std::swap(current, next);
+        }
+        for (size_t i = 0, j = current.empty() ? 0 : current.size() - 1; i < current.size(); j = i++)
+            area += current[j].first * current[i].second - current[i].first * current[j].second;
+    }
+    return area / 2.;
 }
 } // namespace
 
@@ -140,6 +180,8 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
     bool any = false;
     const auto consider = [&](double pitch, double phase) {
         const Fit candidate = score(area_rings, outer, inner, left, right, total_scaled, pitch, phase);
+        // Material outside the bridge may only stand for what its rows leave uncovered inside it.
+        if (candidate.overflow > 1. - candidate.coverage + 1e-9) return;
         if (!any || better(candidate, best)) best = candidate;
         any = true;
     };
@@ -148,6 +190,7 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
         const double pitch = low + pitch_step * i;
         for (int j = 0; j < 10; ++j) consider(pitch, pitch * j / 10.);
     }
+    if (!any) return Fit{};
     const Fit coarse = best;
     for (int i = -2; i <= 2; ++i) {
         const double pitch = std::clamp(coarse.pitch + pitch_step / 10. * i, low, high);
