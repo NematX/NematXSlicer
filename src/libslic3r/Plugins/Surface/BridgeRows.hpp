@@ -35,8 +35,9 @@ struct Fit {
 // stays between half and twice the nozzle diameter.
 PitchRange pitch_range(const Config &region_config, double spacing, double nozzle_diameter);
 // Search the pitch and phase of the rows along angle that cover area best: ten pitches by ten phases, then
-// five by five around the best with steps ten times finer. Equal coverages prefer less overflow, then the
-// densest pitch, then the smallest phase. Only rows whose overflow is at most 1 - coverage are valid; no valid
+// five by five around the best with steps ten times finer, then the phase that centers the best rows. Equal
+// coverages prefer less overflow, then the densest pitch, then the rows that leave the same space on both sides
+// of the area, then the smallest phase. Only rows whose overflow is at most 1 - coverage are valid; no valid
 // rows return a Fit that is not found().
 Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const PitchRange &range);
 }}

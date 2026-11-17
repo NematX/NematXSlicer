@@ -16,6 +16,9 @@
    edge then overflow on one side to compensate the other side they leave bare, which discrete rows cannot avoid,
    but rows parallel to an edge cannot spill beyond it, for example over the inner corner of an L.
 
+   Between parallel edges, several phases often cover the area equally well. The rows are then centered: the space
+   between the extent of the area across the rows and the outer kept rows is split between both sides.
+
        fit()
        |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
        |-- append_rings() [rotate the area and both contours into the row frame]
@@ -37,9 +40,15 @@ using Rings = std::vector<Ring>;
 void append_rings(Rings &out, const ExPolygon &area, double angle);
 // Sorted filled intervals of the vertical cut at x through rings, read with the even-odd rule.
 std::vector<std::pair<double, double>> intervals(const Rings &rings, double x);
+// A scored candidate and the positions across the rows of its first and last kept rows, to center equally good rows.
+struct Candidate {
+    Fit fit;
+    double first = 0., last = 0.;
+    bool kept = false;
+};
 // Coverage and overflow, in fractions of total, of the rows at phase, phase + pitch... from the left of the area.
-Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
-          double phase);
+Candidate score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
+                double phase);
 // Signed area of rings inside the rectangle [x0, x1] x [y0, y1]; the sign follows the ring orientation, so holes
 // subtract from their contour. Each ring is clipped by the convex window (Sutherland-Hodgman), which gives the exact
 // area even when the clipped ring degenerates along the window.
@@ -73,27 +82,34 @@ std::vector<std::pair<double, double>> intervals(const Rings &rings, double x)
     return out;
 }
 
-Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
-          double phase)
+Candidate score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
+                double phase)
 {
+    Candidate out;
     double covered = 0., overflow = 0.;
     for (double x = left + phase; x <= right; x += pitch) {
         const std::vector<std::pair<double, double>> reached = intervals(inner, x);
+        bool kept = false;
         for (const std::pair<double, double> &row : intervals(outer, x)) {
             // A drawn row is an interval of the 0.05 spacing contour that meets the 0.48 spacing contour.
             if (std::none_of(reached.begin(), reached.end(), [&row](const std::pair<double, double> &r) { return r.second > row.first && r.first < row.second; }))
                 continue;
+            kept = true;
             const double inside = std::abs(clipped_area(area, x - pitch / 2., x + pitch / 2., row.first, row.second));
             covered += inside;
             overflow += pitch * (row.second - row.first) - inside;
         }
+        if (kept) {
+            if (!out.kept) out.first = x;
+            out.last = x;
+            out.kept = true;
+        }
     }
-    Fit fit;
-    fit.pitch = pitch;
-    fit.phase = coord_t(std::llround(phase));
-    fit.coverage = covered / total;
-    fit.overflow = overflow / total;
-    return fit;
+    out.fit.pitch = pitch;
+    out.fit.phase = coord_t(std::llround(phase));
+    out.fit.coverage = covered / total;
+    out.fit.overflow = overflow / total;
+    return out;
 }
 
 double clipped_area(const Rings &rings, double x0, double x1, double y0, double y1)
@@ -170,18 +186,22 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
     // Areas below are in scaled units squared; convert the bridge area once.
     const double total_scaled = scale_d(scale_d(total));
     const double low = scale_d(range.minimum), high = scale_d(range.maximum);
-    const auto better = [](const Fit &a, const Fit &b) {
-        if (std::abs(a.coverage - b.coverage) > 1e-9) return a.coverage > b.coverage;
-        if (std::abs(a.overflow - b.overflow) > 1e-9) return a.overflow < b.overflow;
-        if (a.pitch != b.pitch) return a.pitch < b.pitch;
-        return a.phase < b.phase;
+    // Difference between the space left before the first kept row and after the last one, across the rows.
+    const auto imbalance = [left, right](const Candidate &c) { return c.kept ? std::abs((c.first - left) - (right - c.last)) : 0.; };
+    const auto better = [&imbalance](const Candidate &a, const Candidate &b) {
+        if (std::abs(a.fit.coverage - b.fit.coverage) > 1e-9) return a.fit.coverage > b.fit.coverage;
+        if (std::abs(a.fit.overflow - b.fit.overflow) > 1e-9) return a.fit.overflow < b.fit.overflow;
+        if (a.fit.pitch != b.fit.pitch) return a.fit.pitch < b.fit.pitch;
+        // Equally good rows are centered, so that both sides share the space they leave.
+        if (std::abs(imbalance(a) - imbalance(b)) > 1.) return imbalance(a) < imbalance(b);
+        return a.fit.phase < b.fit.phase;
     };
-    Fit best;
+    Candidate best;
     bool any = false;
     const auto consider = [&](double pitch, double phase) {
-        const Fit candidate = score(area_rings, outer, inner, left, right, total_scaled, pitch, phase);
+        const Candidate candidate = score(area_rings, outer, inner, left, right, total_scaled, pitch, phase);
         // Material outside the bridge may only stand for what its rows leave uncovered inside it.
-        if (candidate.overflow > 1. - candidate.coverage + 1e-9) return;
+        if (candidate.fit.overflow > 1. - candidate.fit.coverage + 1e-9) return;
         if (!any || better(candidate, best)) best = candidate;
         any = true;
     };
@@ -191,7 +211,7 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
         for (int j = 0; j < 10; ++j) consider(pitch, pitch * j / 10.);
     }
     if (!any) return Fit{};
-    const Fit coarse = best;
+    const Fit coarse = best.fit;
     for (int i = -2; i <= 2; ++i) {
         const double pitch = std::clamp(coarse.pitch + pitch_step / 10. * i, low, high);
         for (int j = -2; j <= 2; ++j) {
@@ -200,8 +220,16 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
             consider(pitch, phase);
         }
     }
-    if (!(best.coverage > 0.)) return Fit{};
-    best.pitch = unscaled(best.pitch);
-    return best;
+    // The sampled phases only approach the centered rows: also try the phase that centers the best rows exactly.
+    if (best.kept) {
+        const double pitch = best.fit.pitch;
+        double phase = double(best.fit.phase) + ((right - best.last) - (best.first - left)) / 2.;
+        phase -= std::floor(phase / pitch) * pitch;
+        consider(pitch, phase);
+    }
+    if (!(best.fit.coverage > 0.)) return Fit{};
+    Fit out = best.fit;
+    out.pitch = unscaled(out.pitch);
+    return out;
 }
 }}

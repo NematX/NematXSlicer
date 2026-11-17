@@ -700,6 +700,16 @@ TEST_CASE("Bridge rows fit their pitch and phase to the bridge area","[plugins][
     REQUIRE(l_fit.found());
     CHECK(l_fit.overflow<=1.-l_fit.coverage+1e-9);
     CHECK(l_fit.pitch<range.maximum-1e-3);
+    // Between parallel edges, five 0.5 mm rows cover a 2.6 or 2.63 mm wide band equally well at several phases: the
+    // rows are centered, the first one as far from its edge as the last one. 0.315 mm is not a sampled phase.
+    for (const double width : {2.6,2.63}) {
+        INFO("width "<<width);
+        const ExPolygon band=rectangle_expolygon(0,0,10,width);
+        const BridgeRows::Fit centered=BridgeRows::fit(handle,slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&band)),0.,.4,
+            BridgeRows::PitchRange{.5,.5});
+        REQUIRE(centered.found());
+        CHECK(unscaled(centered.phase)==Approx((width-2.)*.5).margin(1e-5));
+    }
 }
 
 // Core and allowed domain of a sliced part's bridge printed along Y. A core edge ends at
