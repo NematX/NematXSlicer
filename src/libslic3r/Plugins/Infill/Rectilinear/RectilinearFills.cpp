@@ -2851,10 +2851,12 @@ static coordf_t vertical_chord(const Polygons &polygons, coord_t x)
     return length;
 }
 
-// Distance from the left of box to the first full-density line that gives the longest lines inside the inner contours, among
-// sixteen phases and the centered one. Nearly equal coverages keep the phase closest to the centered one, so a symmetric shape
-// gets symmetric margins.
-static coord_t covering_phase(const Polygons &inner, const BoundingBox &box, coord_t spacing)
+// Distance from the left of box to the first full-density line that gives the best score, among sixteen phases and the
+// centered one. A line is extruded when it reaches the inner contours, then it runs to the outer ones. The default score is
+// the extruded length, which favours coverage even with lines along the border (bridges). The strict score counts only the
+// length inside the inner contours, so it avoids lines along the border (support interfaces, which keep an XY gap).
+// Nearly equal scores keep the phase closest to the centered one, so a symmetric shape gets symmetric margins.
+static coord_t covering_phase(const Polygons &outer, const Polygons &inner, const BoundingBox &box, coord_t spacing, bool strict)
 {
     const coord_t width = box.max.x() - box.min.x();
     const coord_t lines = std::max<coord_t>(1, width / spacing);
@@ -2866,7 +2868,8 @@ static coord_t covering_phase(const Polygons &inner, const BoundingBox &box, coo
         const coord_t phase = sample < 0 ? centered : coord_t(int64_t(spacing) * sample / samples);
         coordf_t score = 0.;
         for (coord_t x = box.min.x() + phase; x <= box.max.x(); x += spacing)
-            score += vertical_chord(inner, x);
+            if (const coordf_t inside = vertical_chord(inner, x); inside > 0.)
+                score += strict ? inside : vertical_chord(outer, x);
         coord_t distance = std::abs(phase - centered);
         distance = std::min(distance, spacing - distance);
         if (score > best_score * (1. + 1e-6) || (score >= best_score * (1. - 1e-6) && distance < best_distance)) {
@@ -2897,20 +2900,19 @@ bool FillRectilinear::fill_surface_by_lines(const slic3r_api::ExPolygon &expolyg
     assert(params.density > 0.0001f);
     coord_t line_spacing = _line_spacing_for_density(params);
 
-    // Inside coverage keeps the lines and their free ends half a spacing from the border, and chooses their phase below.
+    // Best coverage chooses the line phase below (see covering_phase()). The contour offsets stay: the overlap of the free ends
+    // primes and finishes the lines.
     // A bridge given its own offset keeps it.
-    const bool inside = (params.infill_flags & C_INFILL_FLAG_INSIDE_COVERAGE) != 0 && is_full_infill(params) &&
+    const bool best_coverage = (params.infill_flags & C_INFILL_FLAG_BEST_COVERAGE) != 0 && is_full_infill(params) &&
         !(params.flow.is_bridge != 0 && params.bridge_offset >= 0);
     // On the polygons of poly_with_offset, the infill lines will be connected.
     ExPolygonWithOffset poly_with_offset(
         this->plugin_storage,
         expolygon,
         - rotate_vector.first, 
-        inside ? scale_i(-0.48 * this->get_spacing()) :
         (scale_i(0 /*this->overlap*/ - /*(0.5 - INFILL_OVERLAP_OVER_SPACING)*/ 0.05 * this->get_spacing())), // outer offset, have to be > to the inner one (less negative)
         // inner offset (don't put 0.5, as it will cut full-filled area when it's exactly at the right place)
         // Note: this will put the fill 2% too far into the perimeter.
-        inside ? scale_i(-0.49 * this->get_spacing()) :
         (scale_i(0 /*this->overlap*/ - 0.48f * this->get_spacing())));
     if (poly_with_offset.n_contours_inner == 0) {
         // Not a single infill line fits.
@@ -2937,9 +2939,10 @@ bool FillRectilinear::fill_surface_by_lines(const slic3r_api::ExPolygon &expolyg
             refpt));
     }
     // compute_x0() puts the first full-density line half a spacing right of the box: move the box so that it lands on the phase.
-    if (inside && line_spacing > 0)
+    if (best_coverage && line_spacing > 0)
         bounding_box.min.x() -= (line_spacing + coord_t(SCALED_EPSILON)) / 2 -
-            covering_phase(poly_with_offset.polygons_inner, bounding_box, line_spacing);
+            covering_phase(poly_with_offset.polygons_outer, poly_with_offset.polygons_inner, bounding_box, line_spacing,
+                (params.infill_flags & C_INFILL_FLAG_BEST_COVERAGE_STRICT) != 0);
 
     // Intersect a set of equally spaced vertical lines with expolygon.
     std::vector<SegmentedIntersectionLine> segs = _vert_lines_for_polygon(poly_with_offset, bounding_box, params, line_spacing);

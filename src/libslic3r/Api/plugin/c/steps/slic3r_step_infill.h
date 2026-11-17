@@ -66,9 +66,13 @@ typedef enum c_infill_flag {
     C_INFILL_FLAG_USE_ARACHNE = 1u << 6,
     /* The pattern frame may cross the fill angle. */
     C_INFILL_FLAG_CAN_ANGLE_CROSS = 1u << 7,
-    /* Full-density lines stay inside the surface: they keep half a spacing from its border (no
-       overlap with a perimeter), and their phase is chosen to cover the largest area. */
-    C_INFILL_FLAG_INSIDE_COVERAGE = 1u << 8
+    /* Full-density lines cover the surface as well as they can: their phase is chosen to give the
+       longest extruded lines, a line near the border counting even where it overlaps the border. */
+    C_INFILL_FLAG_BEST_COVERAGE = 1u << 8,
+    /* With C_INFILL_FLAG_BEST_COVERAGE, only the part of the lines at least half a spacing from the
+       border counts, so the chosen phase avoids lines that overlap the border. For surfaces with a
+       clearance to keep, such as the XY gap of support interfaces. */
+    C_INFILL_FLAG_BEST_COVERAGE_STRICT = 1u << 9
 } c_infill_flag;
 
 /*

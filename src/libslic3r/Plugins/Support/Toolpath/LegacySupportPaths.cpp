@@ -655,8 +655,12 @@ void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_to
     const bool perimeter = flange || sheath;
     const std::string inner = flange ? std::string("rectilinear") : pattern;
     const raw_extrusion_role fill_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-    const raw_infill_pattern_params recipe = flange && base_filler ? raw_infill_pattern_params{} :
+    raw_infill_pattern_params recipe = flange && base_filler ? raw_infill_pattern_params{} :
         Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing, density, filler_angle, filler_z);
+    // Interfaces have no perimeter to hide a badly placed last line: their lines take the phase that covers the surface best.
+    // The strict score keeps the lines off the border, which the XY gap to the object makes mandatory.
+    if (!pass.as_base && !flange)
+        recipe.infill_flags |= C_INFILL_FLAG_BEST_COVERAGE | C_INFILL_FLAG_BEST_COVERAGE_STRICT;
     if (pass.contact && !overhang.empty()) contact_loops(storage, out.mutable_view(), pass.polygons, overhang, flow, geometry.resolution);
     StoredExPolygonCollection fused = sparse_filler ?
         clipper_offset2(clipper(pass.polygons), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection() :
