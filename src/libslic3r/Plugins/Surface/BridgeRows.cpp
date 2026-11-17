@@ -19,12 +19,20 @@
    Between parallel edges, several phases often cover the area equally well. The rows are then centered: the space
    between the extent of the area across the rows and the outer kept rows is split between both sides.
 
+   anchor() and anchored() carry a fit to another outline of the same bridge: the rows keep their absolute
+   positions, only the phase from the side of the new outline changes.
+
        fit()
-       |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
-       |-- append_rings() [rotate the area and both contours into the row frame]
+       |-- frame()
+       |   |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
+       |   `-- append_rings() [rotate the area and both contours into the row frame]
        `-- score() [kept rows, their bands and the covered and overflowing areas]
            |-- intervals() [crossings of a vertical cut with rings, even-odd]
            `-- clipped_area() [exact area of the bridge inside one band]
+
+       anchor() and anchored()
+       |-- frame_left() [side of the rotated bounding box]
+       `-- line_spacing() [the pattern's integer spacing of the rows]
 
    All work vectors are local to one call. */
 #include "BridgeRows.hpp"
@@ -36,6 +44,21 @@ namespace slic3r_api { namespace BridgeRows {
 namespace {
 using Ring = std::vector<std::pair<double, double>>;
 using Rings = std::vector<Ring>;
+// The area and the two row contours rotated into the frame where the rows are vertical, with the x extent of the area.
+struct Frame {
+    Rings area, outer, inner;
+    double left = 0., right = 0.;
+    float turn = 0.f;
+};
+// Build the frame of the rows along angle for the bridge flow spacing.
+Frame frame(storage_handle *storage, const ExPolygon &area, double angle, double spacing);
+// The row frame's turn for rows along angle, in the float precision of FillRectilinear.
+double frame_turn(double angle);
+// The left of area in the row frame: the side of its rotated bounding box from which the pattern places the rows.
+double frame_left(const ExPolygon &area, double angle);
+// The pattern's scaled line spacing for rows at pitch: the recipe passes the pitch as a float density of spacing.
+// Zero for an invalid spacing or pitch.
+coord_t line_spacing(double spacing, double pitch);
 // Append the contour and holes of area rotated by angle around the origin, as the rectilinear pattern rotates them.
 void append_rings(Rings &out, const ExPolygon &area, double angle);
 // Sorted filled intervals of the vertical cut at x through rings, read with the even-odd rule.
@@ -161,26 +184,62 @@ PitchRange pitch_range(const Config &region_config, double spacing, double nozzl
     return range;
 }
 
-Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const PitchRange &range)
+namespace {
+Frame frame(storage_handle *storage, const ExPolygon &area, double angle, double spacing)
 {
     const ClipperContext clipper(storage);
     const StoredExPolygonCollection outer_areas = clipper_offset(clipper(area), -scale_d(0.05 * spacing), CLIPPER_JOIN_MITER, 3.).to_expolygon_collection();
     const StoredExPolygonCollection inner_areas = clipper_offset(clipper(area), -scale_d(0.48 * spacing), CLIPPER_JOIN_MITER, 3.).to_expolygon_collection();
-    // The frame of FillRectilinear: rows along the bridge angle become vertical, in its float precision.
-    float turn = float(angle);
-    turn += float(PI / 2.);
-    Rings area_rings, outer, inner;
-    append_rings(area_rings, area, -double(turn));
-    for (const ExPolygon part : outer_areas.readonly()) append_rings(outer, part, -double(turn));
-    for (const ExPolygon part : inner_areas.readonly()) append_rings(inner, part, -double(turn));
-    double left = 0., right = 0.;
+    Frame out;
+    out.turn = float(frame_turn(angle));
+    append_rings(out.area, area, -double(out.turn));
+    for (const ExPolygon part : outer_areas.readonly()) append_rings(out.outer, part, -double(out.turn));
+    for (const ExPolygon part : inner_areas.readonly()) append_rings(out.inner, part, -double(out.turn));
     bool first = true;
-    for (const Ring &ring : area_rings)
+    for (const Ring &ring : out.area)
         for (const std::pair<double, double> &point : ring) {
-            left = first ? point.first : std::min(left, point.first);
-            right = first ? point.first : std::max(right, point.first);
+            out.left = first ? point.first : std::min(out.left, point.first);
+            out.right = first ? point.first : std::max(out.right, point.first);
             first = false;
         }
+    return out;
+}
+
+double frame_turn(double angle)
+{
+    // The frame of FillRectilinear: rows along the bridge angle become vertical.
+    float turn = float(angle);
+    turn += float(PI / 2.);
+    return double(turn);
+}
+
+double frame_left(const ExPolygon &area, double angle)
+{
+    Rings rings;
+    append_rings(rings, area, -frame_turn(angle));
+    double left = 0.;
+    bool first = true;
+    for (const Ring &ring : rings)
+        for (const std::pair<double, double> &point : ring) {
+            left = first ? point.first : std::min(left, point.first);
+            first = false;
+        }
+    return left;
+}
+
+coord_t line_spacing(double spacing, double pitch)
+{
+    if (!(spacing > 0.) || !(pitch > 0.)) return 0;
+    const float density = float(spacing / pitch);
+    return scale_i(spacing / double(density));
+}
+} // namespace
+
+Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const PitchRange &range)
+{
+    const Frame rows_frame = frame(storage, area, angle, spacing);
+    const Rings &area_rings = rows_frame.area, &outer = rows_frame.outer, &inner = rows_frame.inner;
+    const double left = rows_frame.left, right = rows_frame.right;
     const double total = unscaled(unscaled(area.area()));
     if (inner.empty() || !(total > 0.)) return Fit{};
     // Areas below are in scaled units squared; convert the bridge area once.
@@ -230,6 +289,23 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
     if (!(best.fit.coverage > 0.)) return Fit{};
     Fit out = best.fit;
     out.pitch = unscaled(out.pitch);
+    return out;
+}
+
+coord_t anchor(const ExPolygon &area, double angle, const Fit &fit)
+{
+    return coord_t(frame_left(area, angle)) + fit.phase;
+}
+
+Fit anchored(const ExPolygon &area, double angle, double spacing, double pitch, coord_t anchor)
+{
+    Fit out;
+    const coord_t step = line_spacing(spacing, pitch);
+    if (step <= 0) return out;
+    coord_t phase = (anchor - coord_t(frame_left(area, angle))) % step;
+    if (phase < 0) phase += step;
+    out.pitch = pitch;
+    out.phase = phase;
     return out;
 }
 }}

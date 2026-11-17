@@ -712,6 +712,39 @@ TEST_CASE("Bridge rows fit their pitch and phase to the bridge area","[plugins][
     }
 }
 
+// Preparation fits the rows of each prepared bridge once and stores them on its surfaces; the recipe pass carries them
+// to the outline it receives. On the same outline, they come back in the surface's direction, with the pitch and phase
+// of a fit of that outline.
+TEST_CASE("Prepared bridges store the rows fitted to their area","[plugins][bridge-preparation][bridge-rows]")
+{
+    PluginStorage storage;storage_handle *handle=reinterpret_cast<storage_handle *>(&storage);
+    const slic3r_api::PluginPropertyKey<slic3r_api::BridgePreparation::PreparedRows> rows_key=
+        slic3r_api::BridgePreparation::prepared_rows_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    for (const char *margin : {"0","25%"}) {
+        INFO("uniform margin "<<margin);
+        Fixture fixture({{"bridged_infill_uniform_margin",margin}});
+        fixture.frame();fixture.prepare();
+        const Surface &bridge=fixture.bridge();
+        const LayerRegion *region=nullptr;
+        for (const LayerRegionIsland &group : fixture.island().regions_islands())
+            if (!group.regions().empty()) { region=*group.regions().begin();break; }
+        REQUIRE(region!=nullptr);
+        const Flow flow=infill_bridge_flow(fixture.prepared.print.object(0).layer(1),*region,frSolidInfill);
+        const slic3r_api::Config config=slic3r_api::LayerRegion(reinterpret_cast<const layer_region_handle *>(region)).print_region().config();
+        const slic3r_api::ExPolygon area(reinterpret_cast<const expolygon_handle *>(&bridge.expolygon));
+        const BridgeRows::Fit fit=BridgeRows::fit(handle,area,bridge.bridge_angle,flow.spacing(),
+            BridgeRows::pitch_range(config,flow.spacing(),flow.nozzle_diameter()));
+        REQUIRE(fit.found());
+        const slic3r_api::BridgePreparation::PreparedRows *stored=rows_key.get(slic3r_api::Surface(reinterpret_cast<const surface_handle *>(&bridge)));
+        REQUIRE(stored!=nullptr);
+        CHECK(stored->angle==bridge.bridge_angle);
+        CHECK(stored->pitch==fit.pitch);
+        const BridgeRows::Fit carried=BridgeRows::anchored(area,stored->angle,flow.spacing(),stored->pitch,stored->anchor);
+        REQUIRE(carried.found());
+        CHECK(carried.phase==fit.phase);
+    }
+}
+
 // Core and allowed domain of a sliced part's bridge printed along Y. A core edge ends at
 // a domain vertex almost along a domain edge: uniting them cuts a thin sliver off the core.
 TEST_CASE("Axial bridge expansion accepts a core sliver lost by uniting it with its domain","[plugins][bridge-preparation]")
@@ -1849,17 +1882,27 @@ TEST_CASE("Final bridge recipes reject late changes to pattern flow angle role o
     const layer_region_handle *owner=reinterpret_cast<const layer_region_handle *>(&region);
     const surface_handle *source=reinterpret_cast<const surface_handle *>(&surface);
     const c_flow_mm flow=layer_region_get_infill_bridge_flow_mm(owner,RAW_EXTRUSION_ROLE_SOLID_INFILL);
+    orchestrator_handle *orch=reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance());
+    // The recipe pass places the rows that preparation stored, in their direction.
+    const slic3r_api::BridgePreparation::PreparedRows *rows=
+        slic3r_api::BridgePreparation::prepared_rows_key(orch).get(slic3r_api::Surface(source));
+    REQUIRE(rows!=nullptr);
+    CHECK(rows->angle==surface.bridge_angle);
+    const BridgeRows::Fit placed=BridgeRows::anchored(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&surface.expolygon)),
+        rows->angle,flow.spacing,rows->pitch,rows->anchor);
+    REQUIRE(placed.found());
     raw_infill_pattern_params nominal={};
     nominal.surface_type=static_cast<raw_surface_type>(surface.surface_type);
     nominal.extrusion_role=RAW_EXTRUSION_ROLE_BRIDGE_INFILL;
     nominal.flow=layer_region_get_infill_bridge_flow(owner,RAW_EXTRUSION_ROLE_SOLID_INFILL);
-    nominal.spacing=flow.spacing;nominal.density=1.f;nominal.flow_mult=1.f;
-    nominal.extruder=1;nominal.bridge_angle=surface.bridge_angle;
+    nominal.spacing=flow.spacing;nominal.density=float(flow.spacing/placed.pitch);nominal.flow_mult=1.f;
+    nominal.bridge_offset=placed.phase;nominal.infill_flags=C_INFILL_FLAG_DONT_ADJUST;
+    nominal.extruder=1;nominal.bridge_angle=rows->angle;
     nominal.connection=C_INFILL_CONNECTION_NOT_CONNECTED;
-    REQUIRE_NOTHROW(slic3r_api::BridgePreparation::validate_recipe(source,nominal,"rectilinear",owner));
-    REQUIRE_NOTHROW(slic3r_api::BridgePreparation::validate_recipe(source,nominal,"monotonic",owner));
-    CHECK_THROWS(slic3r_api::BridgePreparation::validate_recipe(source,nominal,"grid",owner));
-    for (int field=0;field<10;++field) {
+    REQUIRE_NOTHROW(slic3r_api::BridgePreparation::validate_recipe(orch,source,nominal,"rectilinear",owner));
+    REQUIRE_NOTHROW(slic3r_api::BridgePreparation::validate_recipe(orch,source,nominal,"monotonic",owner));
+    CHECK_THROWS(slic3r_api::BridgePreparation::validate_recipe(orch,source,nominal,"grid",owner));
+    for (int field=0;field<13;++field) {
         raw_infill_pattern_params modified=nominal;
         if (field==0) modified.bridge_angle+=.1;
         if (field==1) modified.flow_mult=1.1f;
@@ -1871,7 +1914,11 @@ TEST_CASE("Final bridge recipes reject late changes to pattern flow angle role o
         if (field==7) modified.flow.mm3_per_mm*=1.1;
         if (field==8) modified.flow.height+=SCALED_LAYER_Z_STEP;
         if (field==9) modified.flow.spacing_ratio+=.1f;
+        // Moved or respaced rows, still within the overlap settings, are not the stored ones either.
+        if (field==10) modified.bridge_offset+=scale_i(.05);
+        if (field==11) modified.density=std::nextafter(modified.density,0.f);
+        if (field==12) modified.infill_flags&=~C_INFILL_FLAG_DONT_ADJUST;
         INFO("recipe field "<<field);
-        CHECK_THROWS(slic3r_api::BridgePreparation::validate_recipe(source,modified,"rectilinear",owner));
+        CHECK_THROWS(slic3r_api::BridgePreparation::validate_recipe(orch,source,modified,"rectilinear",owner));
     }
 }

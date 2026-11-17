@@ -12,6 +12,9 @@
    can add peripheral rows outside the unsupported area. The experimental volume provider checks
    their actual lower contacts when selected. Preparation does not generate supports or change flow.
 
+   The rows of each prepared bridge are fitted here, within bridge_overlap and bridge_overlap_min
+   (BridgeRows.hpp), and stored on its surfaces as PreparedRows with their direction.
+
    The resulting surfaces carry BridgeSurfaceInfo and are called prepared bridges.
    The recipe pass tells infill generation to print them as separate parallel rows.
    A recipe is the set of pattern, flow and connection parameters passed to an
@@ -33,18 +36,20 @@
            |   |-- direction() [external bridges]
            |   |-- make_groups() [compatible external bridges]
            |   |-- expand_bridge() [uniform growth, then axial ends]
-           |   |-- append_prepared() [external geometry and metadata]
+           |   |-- fit_components() [rows of each component]
+           |   |-- append_prepared() [external geometry, metadata and rows]
            |   `-- prepare_internal()
            |       |-- direction() [detection, or perpendicular sparse fallback]
            |       |-- expand_bridge() [internal end expansion only]
-           |       `-- append_prepared() [internal classification and metadata]
+           |       |-- fit_components()
+           |       `-- append_prepared() [internal classification, metadata and rows]
            `-- set_region_island_fill_surfaces() [host callback, one collection at a time]
 
-   Recipe::run_impl() sets the direction, requests separate rows and fits their pitch,
-   within bridge_overlap and bridge_overlap_min, and their phase to the area (BridgeRows.hpp). It runs as
+   Recipe::run_impl() requests separate rows in the direction and at the pitch and positions stored by
+   preparation, carried to the surface it receives. It runs as
    an infill-recipe modifier, not as a call from Preparation::run_impl(). The infill
    generator calls validate_recipe() after every modifier has run, so a later
-   modifier cannot silently replace the prepared direction or parallel rows, nor space them outside the settings.
+   modifier cannot silently replace the prepared direction or parallel rows, nor move the stored rows.
 
    Input surfaces stay unchanged while output collections are built in plugin
    storage. They are checked before replacement, but each collection is replaced
@@ -83,6 +88,8 @@ const raw_used_config_key used_keys[]={
     {"bridge_precision",RAW_CO_FLOAT_OR_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
     {"bridge_type",RAW_CO_ENUM,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
     {"bridge_flow_ratio",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
+    {"bridge_overlap",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
+    {"bridge_overlap_min",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
     {"internal_bridge_min_width",RAW_CO_FLOAT_OR_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
     {"internal_bridge_expansion",RAW_CO_BOOL,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
     {"fill_angle",RAW_CO_FLOAT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE},
@@ -117,6 +124,11 @@ struct Candidate {
     StoredExPolygonCollection core;
 };
 struct InternalCandidate { size_t piece; StoredExPolygonCollection core; };
+// The bridge flow spacing of a region and the pitch range of its rows, as the recipe pass gives them to the pattern.
+// A spacing that is not positive leaves the rows unfitted.
+struct RowsInputs { double spacing; BridgeRows::PitchRange range; };
+// One component of a prepared bridge and the rows fitted to it, if found.
+struct PreparedComponent { StoredExPolygonCollection area; BridgeRows::Fit fit; PreparedRows rows; };
 // Stop debug builds on a broken invariant of this plugin, then refuse the island
 // like any other failed check so that it keeps its input surfaces.
 [[noreturn]] void internal_error(const char *message)
@@ -143,14 +155,21 @@ double direction(orchestrator_handle *orch, const Config &print_config, const La
     const ExPolygonCollection &core, const ExPolygonCollection &lower, uint32_t layer_idx, bool &from_user,
     const Config *fallback=nullptr, uint32_t fallback_layer=0, double fallback_turn=90.);
 // Copy the source surface's data onto the extended area, store its chosen angle
-// and mark it with BridgeSurfaceInfo. A failed angle write throws before replacement.
+// and mark it with BridgeSurfaceInfo, and with the component's rows when they were found.
+// A failed angle write throws before replacement.
 void append_prepared(const run_ctx_surface_generation &ctx, Destination &destination, const Piece &source,
-    const ExPolygonCollection &areas, double angle, const BridgeSurfaceInfo &info);
+    const PreparedComponent &component, double angle, const BridgeSurfaceInfo &info, const PluginPropertyKey<PreparedRows> &rows_key);
 // Group nearby bridges before they take area from the surrounding infill. Each
 // member must match the group's representative, not just its immediate neighbor.
 std::vector<std::vector<size_t>> make_groups(storage_handle *storage,const std::vector<Candidate> &candidates,
     const std::vector<Piece> &pieces,const ExPolygonCollection &lower,const ExPolygonCollection &internal_cores,
     const plugin_run_context *run_ctx);
+// The bridge flow spacing and row pitch range of region.
+RowsInputs rows_inputs(const LayerRegion &region);
+// Split areas into its components and fit the rows of each one along angle (BridgeRows::fit()). The areas belong to
+// storage.
+std::vector<PreparedComponent> fit_components(storage_handle *storage, const RowsInputs &inputs, const ExPolygonCollection &areas,
+    double angle);
 // Find wide enough first solid covers before either bridge family claims anchors.
 // Their cores must not become receivers for neighboring external bridges.
 std::vector<InternalCandidate> internal_candidates(storage_handle *storage,const std::vector<Piece> &pieces,const ExPolygonCollection &sparse);
@@ -203,7 +222,7 @@ private:
 class Recipe final : public PluginBase {
 public:
     // Bind the recipe provider to the same long-lived host as preparation.
-    explicit Recipe(orchestrator_handle *orch) : PluginBase(orch) {}
+    explicit Recipe(orchestrator_handle *orch) : PluginBase(orch), m_rows(prepared_rows_key(orch)) {}
 private:
     // Identify the recipe member of the shared activation group.
     const char *id_impl() const noexcept override { return "infill.recipe.bridge_preparation"; }
@@ -215,17 +234,13 @@ private:
     const char *const *dependencies_impl() const noexcept override { return recipe_dependencies; }
     // Place the modifier in the normal recipe chain; final validation follows all modifiers.
     int32_t priority_impl() const noexcept override { return 20; }
-    // Return the key count, or also fill a caller-sized buffer with the overlap settings that bound the row pitch.
-    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override {
-        if (keys!=nullptr) {
-            keys[0]={"bridge_overlap",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE};
-            keys[1]={"bridge_overlap_min",RAW_CO_PERCENT,RAW_CONTAINER_TYPE_NONE,RAW_PRESET_TYPE_NONE};
-        }
-        return 2;
-    }
-    // Use the chosen bridge angle, request separate parallel rows and fit their pitch and phase to the area
-    // (BridgeRows.hpp). Ignore a missing run payload or a surface without BridgeSurfaceInfo.
+    // Request separate parallel rows in the direction and at the pitch and positions stored by preparation
+    // (PreparedRows), or in the surface's direction when none were stored. Ignore a missing run payload or a surface
+    // without BridgeSurfaceInfo.
     void run_impl(const plugin_run_context *run_ctx) const override;
+
+    // The rows that preparation stores on the surfaces.
+    const PluginPropertyKey<PreparedRows> m_rows;
 };
 
 void Preparation::inilialize_impl(storage_handle *) const
@@ -306,6 +321,7 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         for (const Surface surface : island.region_island(idx).fill_surfaces_collection())
             has_solid=has_solid || (surface_type_is_solid(surface.type()) && !surface_type_is_bridge(surface.type()));
     if (!has_bridges && (!has_solid || sparse.empty())) return;
+    const PluginPropertyKey<PreparedRows> rows_key=prepared_rows_key(orch);
     const size_t first_destination=outputs.size();
     std::vector<Piece> pieces;
     ClipperContext clipper(storage);
@@ -398,6 +414,7 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         domain=unite(storage,domain.readonly());
         StoredExPolygonCollection expanded=expand_bridge(storage,core.readonly(),domain.readonly(),candidate.angle,
             candidate.margins.axial,candidate.margins.uniform,run_ctx);
+        const std::vector<PreparedComponent> components=fit_components(storage,rows_inputs(source.region),expanded.readonly(),candidate.angle);
         StoredExPolygonCollection added=subtract(storage,expanded.readonly(),core.readonly());
         // Do not store a second polygon in the bridge property. Added anchors must
         // lie above lower slices, so subtracting those slices recovers the original area.
@@ -434,7 +451,8 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         info.policy_signature=(1469598103934665603ull^uint64_t(candidate.margins.axial))*1099511628211ull;
         info.policy_signature=(info.policy_signature^uint64_t(candidate.margins.uniform))*1099511628211ull;
         info.angle_from_user=candidate.from_user; info.extension_requested=candidate.margins.axial>0 || candidate.margins.uniform>0;
-        append_prepared(ctx,outputs[destination],source,expanded.readonly(),candidate.angle,info);
+        for (const PreparedComponent &component : components)
+            append_prepared(ctx,outputs[destination],source,component,candidate.angle,info,rows_key);
     }
     prepare_internal(orch,ctx,storage,island,layer_idx,island_idx,pieces,internals,sparse.readonly(),lower.readonly(),
         first_destination,outputs,claimed,run_ctx);
@@ -594,16 +612,44 @@ double direction(orchestrator_handle *orch, const Config &print_config, const La
 }
 
 void append_prepared(const run_ctx_surface_generation &ctx, Destination &destination, const Piece &source,
-    const ExPolygonCollection &areas, double angle, const BridgeSurfaceInfo &info)
+    const PreparedComponent &component, double angle, const BridgeSurfaceInfo &info, const PluginPropertyKey<PreparedRows> &rows_key)
 {
     const uint32_t start=destination.output.size();
-    ctx.append_surface_like(destination.output.mutable_handle(),source.source.handle(),areas.handle());
+    ctx.append_surface_like(destination.output.mutable_handle(),source.source.handle(),component.area.readonly().handle());
     for (uint32_t idx=start; idx<destination.output.size(); ++idx) {
         if (info.core_rule==2 && !destination.output.set_type(idx,source.source.type()|RAW_SURFACE_TYPE_MOD_BRIDGE))
             internal_error("The internal bridge classification could not be stored.");
         if (!destination.output.set_bridge_angle(idx,angle)) internal_error("The prepared bridge angle could not be stored.");
         destination.output.mutable_at(idx).get_or_add(BridgeSurfaceInfo::key)=info;
+        if (component.fit.found()) destination.output.mutable_at(idx).get_or_add(rows_key)=component.rows;
     }
+}
+
+RowsInputs rows_inputs(const LayerRegion &region)
+{
+    // What the recipe pass gives the pattern: the infill bridge flow of this region, and the overlap range of its rows.
+    RowsInputs inputs{layer_region_get_infill_bridge_flow_mm(region.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL).spacing,{}};
+    if (!(inputs.spacing>0.) || !std::isfinite(inputs.spacing)) {
+        inputs.spacing=0.;
+        return inputs;
+    }
+    const c_flow flow=layer_region_get_infill_bridge_flow(region.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
+    inputs.range=BridgeRows::pitch_range(region.print_region().config(),inputs.spacing,unscaled(flow.nozzle_diameter));
+    return inputs;
+}
+
+std::vector<PreparedComponent> fit_components(storage_handle *storage, const RowsInputs &inputs, const ExPolygonCollection &areas,
+    double angle)
+{
+    std::vector<PreparedComponent> components;
+    for (const ExPolygon area : areas) {
+        PreparedComponent component{StoredExPolygonCollection(storage),BridgeRows::Fit{},PreparedRows{}};
+        component.area.push_back(area);
+        if (inputs.spacing>0.) component.fit=BridgeRows::fit(storage,area,angle,inputs.spacing,inputs.range);
+        if (component.fit.found()) component.rows={angle,component.fit.pitch,int64_t(BridgeRows::anchor(area,angle,component.fit))};
+        components.push_back(std::move(component));
+    }
+    return components;
 }
 
 StoredExPolygonCollection lower_sparse(storage_handle *storage,const LayerIsland &island,const std::vector<Destination> &outputs)
@@ -667,6 +713,7 @@ void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation
     std::vector<Destination> &outputs,std::map<const layer_region_handle *,StoredExPolygonCollection> &claimed,
     const plugin_run_context *run_ctx)
 {
+    const PluginPropertyKey<PreparedRows> rows_key=prepared_rows_key(orch);
     StoredExPolygonCollection full=subtract(storage,lower,sparse);
     for (const InternalCandidate &candidate : candidates) {
         throw_if_cancelled(run_ctx);
@@ -721,7 +768,8 @@ void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation
             info.logical_key=(info.logical_key^value)*1099511628211ull;
         info.policy_signature=(uint64_t(extension)^uint64_t(scale_i(reach)))*1099511628211ull;
         info.angle_from_user=from_user;info.extension_requested=extension;
-        append_prepared(ctx,outputs[destination],piece,expanded.readonly(),angle,info);
+        for (const PreparedComponent &component : fit_components(storage,rows_inputs(piece.region),expanded.readonly(),angle))
+            append_prepared(ctx,outputs[destination],piece,component,angle,info,rows_key);
     }
 }
 
@@ -730,21 +778,26 @@ void Recipe::run_impl(const plugin_run_context *run_ctx) const
     const run_ctx_infill_surface_recipe_modifier *ctx=plugin_ctx_as_infill_surface_recipe_modifier(run_ctx);
     if (ctx==nullptr || ctx->surface==nullptr || Surface(ctx->surface).get(BridgeSurfaceInfo::key)==nullptr) return;
     raw_infill_pattern_params &params=*ctx->params;
-    params.bridge_angle=surface_get_bridge_angle(ctx->surface);
+    // The rows fitted by preparation carry the direction they were fitted for. Without them, preparation found no
+    // fitting row: the surface keeps its direction, the recipe its nominal pitch, and the pattern chooses the phase.
+    const PreparedRows *rows=Surface(ctx->surface).get(m_rows);
+    params.bridge_angle=rows!=nullptr ? rows->angle : surface_get_bridge_angle(ctx->surface);
     params.connection=C_INFILL_CONNECTION_NOT_CONNECTED;
     params.anchor_length=0.; params.anchor_length_max=0.; params.link_max_length=0;
     params.infill_flags &= ~C_INFILL_FLAG_CAN_ANGLE_CROSS;
-    // Fit the rows: the pitch within the overlap settings and the phase that cover the bridge best. Without a fitting row the
-    // recipe keeps its nominal pitch and lets the pattern choose the phase.
-    if (ctx->primary_region==nullptr || !(params.spacing>0.)) return;
-    const BridgeRows::PitchRange range=BridgeRows::pitch_range(LayerRegion(ctx->primary_region).print_region().config(),
-        params.spacing,unscaled(params.flow.nozzle_diameter));
-    const BridgeRows::Fit fit=BridgeRows::fit(run_ctx->plugin_storage,Surface(ctx->surface).expolygon(),params.bridge_angle,params.spacing,range);
+    if (rows==nullptr) return;
+    // Place them at the same absolute positions on the outline this surface has now.
+    const BridgeRows::Fit fit=BridgeRows::anchored(Surface(ctx->surface).expolygon(),rows->angle,params.spacing,rows->pitch,rows->anchor);
     if (!fit.found()) return;
     params.density=float(params.spacing/fit.pitch);
     params.bridge_offset=fit.phase;
     params.infill_flags |= C_INFILL_FLAG_DONT_ADJUST;
 }
+}
+
+PluginPropertyKey<PreparedRows> prepared_rows_key(orchestrator_handle *orch)
+{
+    return PluginPropertyKey<PreparedRows>::register_dynamic(orch,"surface.bridge_preparation.rows.v1");
 }
 
 ExpansionMargins expansion_margins(const layer_region_handle *handle)
@@ -765,11 +818,13 @@ ExpansionMargins expansion_margins(const layer_region_handle *handle)
     return margins;
 }
 
-void validate_recipe(const surface_handle *surface, const raw_infill_pattern_params &params,
+void validate_recipe(orchestrator_handle *orch, const surface_handle *surface, const raw_infill_pattern_params &params,
     const char *pattern_id, const layer_region_handle *region)
 {
     if (surface==nullptr || Surface(surface).get(BridgeSurfaceInfo::key)==nullptr) return;
-    const double angle=surface_get_bridge_angle(surface);
+    // Stored rows fix the direction; otherwise it is the one preparation gave the surface.
+    const PreparedRows *rows=prepared_rows_key(orch).get(Surface(surface));
+    const double angle=rows!=nullptr ? rows->angle : surface_get_bridge_angle(surface);
     if (pattern_id==nullptr || (std::strcmp(pattern_id,"rectilinear")!=0 && std::strcmp(pattern_id,"monotonic")!=0) ||
         !std::isfinite(params.bridge_angle) || angle<0. || std::abs(std::remainder(params.bridge_angle-angle,PI))>1e-9 ||
         params.connection!=C_INFILL_CONNECTION_NOT_CONNECTED || params.anchor_length!=0. || params.anchor_length_max!=0. ||
@@ -794,6 +849,12 @@ void validate_recipe(const surface_handle *surface, const raw_infill_pattern_par
         params.flow.nozzle_diameter!=transport.nozzle_diameter ||
         params.flow.mm3_per_mm!=transport.mm3_per_mm || params.flow.spacing_ratio!=transport.spacing_ratio)
         throw std::runtime_error("A final bridge recipe changed the prepared reference flow or spacing.");
+    if (rows==nullptr) return;
+    // The stored rows are printed as they are: a later modifier cannot respace or move them.
+    const BridgeRows::Fit fit=BridgeRows::anchored(Surface(surface).expolygon(),rows->angle,params.spacing,rows->pitch,rows->anchor);
+    if (!fit.found() || params.density!=float(params.spacing/fit.pitch) || params.bridge_offset!=fit.phase ||
+        (params.infill_flags&C_INFILL_FLAG_DONT_ADJUST)==0)
+        throw std::runtime_error("A final bridge recipe no longer places the rows stored by preparation.");
 }
 
 void register_surface(orchestrator_handle *orch)

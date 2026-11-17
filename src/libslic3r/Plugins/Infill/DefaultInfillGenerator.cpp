@@ -481,7 +481,8 @@ Slic3r::ExPolygons make_no_overlap_areas(const Slic3r::LayerSliceIsland &island,
     return result;
 }
 
-SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
+SurfaceInfillRecipe make_surface_recipe(orchestrator_handle *orch,
+                                        const run_ctx_generate_infill &ctx,
                                         const Slic3r::Print &print,
                                         const Slic3r::PrintObject &object,
                                         const Slic3r::Layer &layer,
@@ -609,7 +610,7 @@ SurfaceInfillRecipe make_surface_recipe(const run_ctx_generate_infill &ctx,
     }
 
     // A late modifier cannot silently replace the prepared bridge's directional contract.
-    BridgePreparation::validate_recipe(reinterpret_cast<const surface_handle *>(&surface),recipe.raw,
+    BridgePreparation::validate_recipe(orch,reinterpret_cast<const surface_handle *>(&surface),recipe.raw,
         ctx.pattern_plugin_id==nullptr ? nullptr : ctx.pattern_plugin_id(&ctx,recipe.raw.pattern_id),
         reinterpret_cast<const layer_region_handle *>(&region));
 
@@ -841,7 +842,7 @@ void DefaultInfillGenerator::setup_run_impl(const plugin_run_context *run_ctx) c
                         continue;
 
                     SurfaceInfillRecipe recipe =
-                        make_surface_recipe(*ctx, print, object, layer, island, region_island, *region, surface, run_ctx);
+                        make_surface_recipe(m_orchestrator, *ctx, print, object, layer, island, region_island, *region, surface, run_ctx);
                     if (recipe.raw.pattern_id == INFILL_PATTERN_RUNTIME_ID_INVALID || recipe.raw.density <= 0.f)
                         continue;
 
@@ -964,7 +965,7 @@ void DefaultInfillGenerator::run_impl(const plugin_run_context *run_ctx) const
                         continue;
 
                     SurfaceInfillRecipe recipe =
-                        make_surface_recipe(*ctx, print, object, layer, island, region_island, *region, surface, run_ctx);
+                        make_surface_recipe(m_orchestrator, *ctx, print, object, layer, island, region_island, *region, surface, run_ctx);
                     progress().increment();
                     if (recipe.raw.pattern_id == INFILL_PATTERN_RUNTIME_ID_INVALID || recipe.raw.density <= 0.f)
                         continue;
