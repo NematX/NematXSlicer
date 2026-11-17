@@ -30,19 +30,18 @@ perimeter slices dated by source-or-target membership. The planner subtracts
 expanded forbidden zones to form M, withdraws each M component into W, and
 validates against the original forbidden zones.
 Domain and obstacle-only hypotheses are ranked by estimated outside length plus
-weighted inside length. Validation checks forbidden material, endpoints, the budget
-and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
+weighted inside length. Construction retains exact endpoints; validation checks
+forbidden material, the budget and, when a usable obstacle-only reference exists,
+actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
 Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
 connectors follow expanded forbidden rings, including holes, between their selected points.
 Endpoints without a region or on auxiliary layers offer no domain attachment.
 Travels touching such endpoints include slices of the plan's objects as forbidden
 components, not the synthetic wipe tower. Endpoint-containing components are excluded
-so mixed travels can reach their in-part endpoint. Geometrically exhausted hypotheses
-retry after disabling the first original component crossed by the chord, or, if the
-chord is clear, by the initial best estimate (attachments and bridge). The cap is
-fixed on the components crossed by these two polylines; budget and
-outside-length rejection alone never disables material.
+so mixed travels can reach their in-part endpoint. The first hypothesis that passes
+validation is accepted; when all hypotheses fail, the planner returns and counts a
+straight fallback without changing the blocker set.
 The planner borrows this layer group's plan, index and Z to cache those slices.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
@@ -70,7 +69,7 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: rank hypotheses, retry with bounded blocker removal, accept a validated route
+            `-- ZonePlanner::path: rank hypotheses, accept the first validated route or count a straight fallback
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
                 `-- detour: extend a chord and call the public Clipper ring-detour operation
 */

@@ -24,28 +24,27 @@ not just route vertices. The fixture selects travel.advanced to keep its setting
 active while slicing, but invokes ZonePlanner directly without production wiring.
 Ranked candidate checks use real layer weights with provenance-matched perimeter endpoints,
 M membership, W ring attachments, and repeat queries to check deterministic ordering.
-A is an attractor material domain, W is its withdrawn boundary, and M2 denotes a second
-M component when a forbidden area splits one attractor.
+A is an attractor material domain and W is its withdrawn boundary. A forbidden
+area can split one attractor into several M components, which exercise the bridge
+and mixed-route choices.
 A reference with
 endpoints in expanded nozzle material checks that a clear chord remains a direct
 no-domain route when both endpoints are outside M.
 Bridge cases assert the selected exit and entry points on W rings rather than on an
 expanded contour, contour a forbidden top, and check the component approaches and the
-reference outside-length bound. An obstacle splitting one attractor exercises the M2
-bridge path; an offset pair of components places a bridge endpoint on a contour vertex.
+reference outside-length bound. An obstacle splitting one attractor exercises the
+bridge path; an offset pair of components places a bridge endpoint on a W-ring vertex.
 Endpoint scenes outside M assert that no attractor candidate is created, while fragmented
-M, mixed connectors and unavailable bridges exercise the covered M2 branches.
+M, mixed connectors and unavailable bridges exercise the remaining route branches.
 Mixed cases retain the nearest W ring point between a component and a far free endpoint.
 A bent hole's box overlaps a second hole containing an island; an unavailable
 box-selected bridge must leave the mixed hypotheses available.
 Support obstacle checks slice an overhanging roof and two posts, retaining real support
 printing extrusions. Controlled endpoint chords test each shifted component;
 the support roles are read from the sliced plan, not synthesized.
-Bounded blocker removal covers enclosing rings, platter components and blocked U-domain
-attachments. Budget-rejected spanning walls stay active. Equal zone/platter crossings
-prefer the zone; a budget failure after a geometric retry still counts one fallback.
-Only components crossed by the chord or by the initial best estimate are disabled,
-and repeated calls retain deterministic geometry.
+When no hypothesis passes, the planner keeps all blockers and counts one straight
+fallback. Budget-rejected spanning walls stay active.
+Repeated calls retain deterministic geometry and count one fallback per failed travel.
 Normal-layer provenance distinguishes synthetic in-part domain scenes from outside
 travels. Regionless and real adhesion/support scenes check platter blockers, ignored
 endpoint parts, both mixed directions and no attachment to a nearby attractor.
@@ -293,6 +292,8 @@ TEST_CASE("Zone planner routes filled obstacles and preserves exact endpoints", 
     SECTION("Endpoint zone ignored before margins merge") {
         areas = {rectangle(-1., -1., 2., 2.), rectangle(1.1, -1., 2., 2.)};
     }
+    // These cases exercise the complete-path material check: a real crossing must
+    // be rejected, while a hole, a vertex contact and only the expanded margin stay usable.
     SECTION("Crossing only a hole") {
         areas = {rectangle(-2., -4., 14., 8.)};
         work::Polygon hole = rectangle(-1., -3., 12., 6.).contour;
@@ -310,8 +311,8 @@ TEST_CASE("Zone planner routes filled obstacles and preserves exact endpoints", 
     SECTION("Multi-lobe component") {
         areas = {rectangle(3., -2., 1., 4.), rectangle(6., -2., 1., 4.), rectangle(3., 1., 4., 1.)};
     }
-    SECTION("Tangent vertex of expanded obstacle") { gap = pending(0., -8.4, 10., 1.6); expect_detour = false; }
-    SECTION("Segment along expanded edge") { gap = pending(0., -2.2, 10., -2.2); expect_detour = false; }
+    SECTION("Contact at an expanded obstacle vertex") { gap = pending(0., -8.4, 10., 1.6); expect_detour = false; }
+    SECTION("Travel through only the expanded margin") { gap = pending(0., -2.2, 10., -2.2); expect_detour = false; }
     for (const work::ExPolygon &area : areas)
         contributor.areas.push_back({zones::ZoneRole::Forbidden, {area}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
@@ -645,12 +646,11 @@ TEST_CASE("Zone planner caches tool margins and endpoint ignored sets independen
     CHECK(view.query(2, pending(0., 0., 10., 0.)).id == view.query(2, pending(0., 0., 10., 0., 1)).id);
     CHECK(planner.detours() == 2);
     CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 0);
     check_clear(small, {area}, owner.storage);
     check_clear(large, {area}, owner.storage);
 }
 
-TEST_CASE("Zone planner disables a ring enclosing either endpoint", "[plugins][zone-planner]")
+TEST_CASE("Zone planner falls back when a ring encloses either endpoint", "[plugins][zone-planner]")
 {
     const bool target_inside = GENERATE(false, true);
     Owner owner;
@@ -666,12 +666,9 @@ TEST_CASE("Zone planner disables a ring enclosing either endpoint", "[plugins][z
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> result = planner.path(0,
         target_inside ? pending(0., 0., 5., 0.) : pending(5., 0., 10., 0.));
-    REQUIRE(result.size() >= 2);
-    CHECK((result.size() > 2) == !target_inside);
-    CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 1);
-    CHECK(planner.detours() == size_t(!target_inside));
-    check_clear(result, {retained}, owner.storage);
+    REQUIRE(result.size() == 2);
+    CHECK(planner.fallbacks() == 1);
+    CHECK(planner.detours() == 0);
 }
 
 // Endpoints outside M do not use the old nearest-domain attachment rule.
@@ -698,13 +695,12 @@ TEST_CASE("Zone planner leaves endpoints outside M without attractor attachments
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK(route.size() == 2);
-    CHECK(planner.disabled_blockers() == 0);
     CHECK(planner.domain_routes() == 0);
     CHECK(planner.fallbacks() == 0);
     check_clear(route, {}, owner.storage);
 }
 
-TEST_CASE("Zone planner disables a crossed blocker when an endpoint is in its nozzle margin", "[plugins][zone-planner]")
+TEST_CASE("Zone planner falls back when a crossed blocker reaches an endpoint margin", "[plugins][zone-planner]")
 {
     Owner owner;
     FixedZones contributor;
@@ -716,13 +712,12 @@ TEST_CASE("Zone planner disables a crossed blocker when an endpoint is in its no
     const std::vector<c_point> result = planner.path(0,
         target_inside ? pending(0., 0., 6.1, 0.) : pending(3.9, 0., 10., 0.));
     CHECK(result.size() == 2);
-    CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 1);
+    CHECK(planner.fallbacks() == 1);
     CHECK(planner.detours() == 0);
 }
 
 // Real object slices supply an enclosing platter component; repeated calls exercise the ignored-component cache identity.
-TEST_CASE("Zone planner disables an enclosing platter component and reuses its ignored set", "[plugins][zone-planner]")
+TEST_CASE("Zone planner falls back for an enclosing platter component", "[plugins][zone-planner]")
 {
     Owner owner;
     owner.model.clear_objects();
@@ -760,13 +755,12 @@ TEST_CASE("Zone planner disables an enclosing platter component and reuses its i
         REQUIRE(route.size() == 2);
         CHECK(route.front().x == gap.source.position.x);
         CHECK(route.back().x == gap.target.position.x);
-        CHECK(planner.disabled_blockers() == t + 1);
-        CHECK(planner.fallbacks() == 0);
+        CHECK(planner.fallbacks() == t + 1);
     }
 }
 
-// Equal chord entry positions must relinquish the zone ring before the solid object, which can then still be avoided.
-TEST_CASE("Zone planner prefers the zone over a platter component at equal entry", "[plugins][zone-planner]")
+// Zone and platter blockers remain active; when no hypothesis passes, the planner counts one straight fallback.
+TEST_CASE("Zone planner falls back when zone and platter blockers remain", "[plugins][zone-planner]")
 {
     Owner owner;
     owner.slice();
@@ -786,14 +780,12 @@ TEST_CASE("Zone planner prefers the zone over a platter component at equal entry
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     const std::vector<c_point> route = planner.path(0, pending(x - 2., y + 10., x + 22., y + 10.));
-    REQUIRE(route.size() > 2);
-    CHECK(planner.disabled_blockers() == 1);
-    CHECK(planner.fallbacks() == 0);
-    check_clear(route, ac::platter_blockers(owner.context.plugin_storage, owner.plan, 0, Slic3r::scale_i(0.6)), owner.storage);
+    REQUIRE(route.size() == 2);
+    CHECK(planner.fallbacks() == 1);
 }
 
-// Nested enclosing rings force successive geometric failures, exhausting exactly the eligible component count before acceptance.
-TEST_CASE("Zone planner disables each enclosing ring once within the retry cap", "[plugins][zone-planner]")
+// Nested enclosing rings remain active, so each travel uses the counted straight fallback.
+TEST_CASE("Zone planner keeps nested rings and counts each fallback", "[plugins][zone-planner]")
 {
     const size_t count = GENERATE(size_t(1), size_t(3));
     Owner owner;
@@ -813,8 +805,7 @@ TEST_CASE("Zone planner disables each enclosing ring once within the retry cap",
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
     for (size_t t = 0; t < 2; ++t) {
         CHECK(planner.path(t, pending(0., 0., 10., 0.)).size() == 2);
-        CHECK(planner.disabled_blockers() == (t + 1) * count);
-        CHECK(planner.fallbacks() == 0);
+        CHECK(planner.fallbacks() == t + 1);
     }
 }
 
@@ -837,7 +828,6 @@ TEST_CASE("Zone planner keeps stacked walls when only the budget rejects detours
     const travel::PendingTravel gap = pending(0., 0., 12., 0.);
     const std::vector<c_point> first = planner.path(0, gap);
     REQUIRE(first.size() == 2);
-    CHECK(planner.disabled_blockers() == 0);
     CHECK(planner.fallbacks() == size_t(walls != 0));
     check_clear(first, {retained}, owner.storage);
     const std::vector<c_point> second = planner.path(1, gap);
@@ -846,7 +836,6 @@ TEST_CASE("Zone planner keeps stacked walls when only the budget rejects detours
         CHECK(first[i].x == second[i].x);
         CHECK(first[i].y == second[i].y);
     }
-    CHECK(planner.disabled_blockers() == 0);
 }
 
 TEST_CASE("Zone planner accepts real global adhesion provenance without an object instance", "[plugins][zone-planner]")
@@ -988,7 +977,6 @@ TEST_CASE("Zone planner applies auxiliary eligibility detour budgets and cancell
     const bool rejected = std::string(budget) == "0.1" || std::string(budget) == "1%";
     CHECK((result.size() > 2) == (enabled && !rejected));
     CHECK(planner.fallbacks() == size_t(enabled && rejected));
-    CHECK(planner.disabled_blockers() == 0);
 }
 
 // Check real top components independently so an endpoint's own top cannot erase a disjoint obstacle.
@@ -1360,7 +1348,6 @@ TEST_CASE("Zone planner weights an outside connector over an attractor", "[plugi
     CHECK(mixed_length > direct_length);
     CHECK(planner.domain_routes() == 1);
     CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 0);
 }
 
 // A reference that crosses original forbidden material must not reject an otherwise valid domain route.
@@ -1384,7 +1371,6 @@ TEST_CASE("Zone planner accepts a domain route when the reference crosses its ob
     CHECK(route.back().y == gap.target.position.y);
     CHECK(planner.domain_routes() == 1);
     CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 0);
     check_clear(route, {obstacle}, owner.storage);
 }
 
@@ -1432,10 +1418,8 @@ TEST_CASE("Zone planner keeps a clear chord when both endpoints are outside M", 
     CHECK(direct_clear == Approx(direct.length()).margin(2.));
     CHECK(planner.domain_routes() == 0);
     CHECK(planner.fallbacks() == 0);
-    CHECK(planner.disabled_blockers() == 0);
     CHECK(reference_planner.domain_routes() == 0);
     CHECK(reference_planner.fallbacks() == 0);
-    CHECK(reference_planner.disabled_blockers() == 0);
     CHECK(planned_outside > Slic3r::SCALED_EPSILON);
     check_clear(route, {obstacle}, owner.storage);
 }
@@ -1510,7 +1494,6 @@ TEST_CASE("Zone planner preserves an interior arc vertex near an endpoint", "[pl
     CHECK(route.front().y == gap.source.position.y);
     CHECK(route.back().x == gap.target.position.x);
     CHECK(route.back().y == gap.target.position.y);
-    CHECK(planner.disabled_blockers() == 0);
     CHECK(planner.fallbacks() == 0);
     check_clear(route, {obstacle}, owner.storage);
 }
@@ -1663,18 +1646,18 @@ TEST_CASE("Zone planner applies budgets eligibility and cancellation to domain p
     const std::vector<c_point> route = planner.path(0, gap);
     CHECK((route.size() > 2) == (enabled && !reject));
     CHECK(planner.fallbacks() == size_t(reject));
-    CHECK(planner.disabled_blockers() == 0);
     CHECK(planner.domain_routes() == size_t(enabled && !reject));
 }
 
-// Reject an attachment crossing a thin forbidden area while accepting the original chord, whose expanded nozzle margin is clear.
-TEST_CASE("Zone planner rejects a blocked attachment and accepts the clear chord", "[plugins][zone-planner]")
+// A 0.00075 mm wall is below Clipper's short-edge offset limit (0.005 times the
+// 0.2 mm nozzle radius, or 0.001 mm), so the expanded mask is empty. `blocked` must still
+// reject the direct candidate from its original-material crossing.
+TEST_CASE("Zone planner rejects a route crossing original material", "[plugins][zone-planner]")
 {
     Owner owner;
-    const work::ExPolygon obstacle = rectangle(-0.1, 0.25, 0.2, 0.01);
+    const work::ExPolygon obstacle = rectangle(4., -2., 0.00075, 4.);
     const travel::PendingTravel gap = owner.in_part(pending(0., 0., 10., 0.));
     FixedZones contributor;
-    contributor.areas.push_back({zones::ZoneRole::Attractor, {rectangle(-1., 0.5, 2., 2.)}, 0, SIZE_MAX, {}});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
@@ -1685,8 +1668,40 @@ TEST_CASE("Zone planner rejects a blocked attachment and accepts the clear chord
     CHECK(route.front().y == gap.source.position.y);
     CHECK(route.back().x == gap.target.position.x);
     CHECK(route.back().y == gap.target.position.y);
-    CHECK(planner.fallbacks() == 0);
+    CHECK(planner.fallbacks() == 1);
     CHECK(planner.domain_routes() == 0);
+    CHECK(planner.detours() == 0);
+}
+
+// The descending chord touches the wall's lower-left original vertex and then stays below the wall.
+// The same short-edge limit leaves only the original-material contact for `blocked` to inspect.
+TEST_CASE("Zone planner accepts contact at an original material vertex", "[plugins][zone-planner]")
+{
+    Owner owner;
+    const work::ExPolygon obstacle = rectangle(4., 0., 0.00075, 4.);
+    const travel::PendingTravel gap = owner.in_part(pending(0., 4., 10., -6.));
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Forbidden, {obstacle}, 0, SIZE_MAX, {}});
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view,
+                               owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const work::ExPolygons expanded = slic3r_api::PluginCommon::clipper::offset_ex(
+        owner.context.plugin_storage, {obstacle}, double(Slic3r::scale_i(0.2)));
+    REQUIRE(expanded.empty());
+    const work::Point source(gap.source.position.x, gap.source.position.y);
+    const work::Point target(gap.target.position.x, gap.target.position.y);
+    const work::Point corner(Slic3r::scale_i(4.), Slic3r::scale_i(0.));
+    work::Point contact;
+    REQUIRE(work::Line(source, target).distance_to_squared(corner, &contact) == 0.);
+    REQUIRE(contact == corner);
+    const std::vector<c_point> route = planner.path(0, gap);
+    REQUIRE(route.size() == 2);
+    CHECK(route.front().x == gap.source.position.x);
+    CHECK(route.front().y == gap.source.position.y);
+    CHECK(route.back().x == gap.target.position.x);
+    CHECK(route.back().y == gap.target.position.y);
+    CHECK(planner.fallbacks() == 0);
     CHECK(planner.detours() == 0);
     check_clear(route, {obstacle}, owner.storage);
 }

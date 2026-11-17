@@ -746,8 +746,7 @@ search for a nearby point inside the island.
 
 `avoid_crossing_perimeters_max_detour` limits extra length beyond the direct
 distance, in millimetres or as a percentage of that distance. Zero is unlimited.
-An over-budget route, or a result with fewer than two points, keeps straight
-travel.
+An over-budget route keeps straight travel.
 
 The implementation is internal to the host, under
 `src/libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/`, not a third-party API.
@@ -883,30 +882,22 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
    endpoint. A candidate with the option without a domain at both ends contours obstacles on the original chord.
    Estimates and construction share all selected bridge/entry/exit points.
    ZonePlanner never delegates to Legacy.
-4. **Validate, then retry.** Require exact endpoints, no segment crossing original
-   forbidden material and the complete-path detour budget. Actual outside-domain
-   length must not exceed that of one obstacle-only reference detour by more than
-   `SCALED_EPSILON`; when the source or target is strictly inside expanded forbidden
-   material, triple the reference outside length. Compute that reference at most once
-   per blocker set; if it crosses original material, the option without a domain is
-   unavailable and domain hypotheses are tried without this bound. Rejection tries the
-   next hypothesis. After exhaustion, only if no
-   hypothesis passed forbidden-material validation, disable the remaining original
-   forbidden component first crossed along the straight chord
-    or, if that chord is clear, along the initial best-ranked estimate polyline (including
-    attachments and bridge), and rebuild obstacles, M, W and hypotheses.
-   Budget-only or outside-length rejection keeps the counted straight fallback
-   without deactivation. This includes zone components
-   and slices of the plan's objects. Equal crossing positions prefer zone order,
-   component order, then object-slice order. Disabled components remain in the
-   ignored cache identity and are excluded from validation for this travel only.
-   Each component is disabled at most once; the number crossed by the initial chord
-   or initial best estimate (counting each component once) caps
-   deactivations. No crossed component, or reaching that cap without acceptance,
-   returns one counted straight fallback. `disabled_blockers` counts explicit
-    deactivations across calls, not endpoint exclusions. An accepted route using the option without a domain is not a fallback. `domain_routes`
-    counts accepted domain paths, `bridges` accepted inter-component bridges, and
-    `detours` accepted paths longer than the chord by more than `SCALED_EPSILON`.
+4. **Validate, then fall back.** Constructed routes retain the exact endpoints,
+   avoid original forbidden material and respect the complete-path detour budget.
+   The material check compares the complete path length with the length left by
+   Clipper's difference from the original forbidden areas; a loss greater than
+   `SCALED_EPSILON` rejects the route. Actual outside-domain length must not
+   exceed that of one obstacle-only reference detour by more than
+   `SCALED_EPSILON`; when the source or target is strictly inside expanded
+   forbidden material, triple the reference outside length. Compute that
+   reference once before trying hypotheses. If it crosses original material,
+   the option without a domain is unavailable and domain hypotheses are tried
+   without this bound. Rejection tries the next ranked hypothesis without
+   changing the blocker set. If none passes, return and count the straight path.
+   No blocker is removed or counted as disabled. An accepted route using the
+   option without a domain is not a fallback. `domain_routes` counts accepted
+   domain paths, `bridges` accepted inter-component bridges, and `detours`
+   accepted paths longer than the chord by more than `SCALED_EPSILON`.
 
 Spacing and island settings come from the target layer input, then the source
 when the target has no region, with nozzle diameter as the spacing fallback.
@@ -937,7 +928,7 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
         |-- append_component_path / route_on_boundary: follow each chosen component
         |-- detour: extend connectors and call the public Clipper ring-detour operation
         |-- detour_in_component: build an unextended M-to-W link
-        `-- validate all segments: accept, retry hypotheses or remove a crossed blocker within the component bound, then fall back
+        `-- validate all segments: accept the first passing hypothesis or count a straight fallback
 ```
 
 ### Crossing wipes and lift
