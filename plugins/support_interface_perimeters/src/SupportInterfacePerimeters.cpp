@@ -166,9 +166,11 @@ extern "C" SLIC3R_PLUGIN_API void register_plugin(orchestrator_handle *orchestra
     static Provider bottom(orchestrator, SurfaceRole::BottomInterface, "nematx.support.bottom_interface", Common::k_bottom_interface_role, 100, false);
     static Provider top_contact(orchestrator, SurfaceRole::TopContact, "nematx.support.top_contact", Common::k_top_contact_role, 190, false);
     static Provider top(orchestrator, SurfaceRole::TopInterface, "nematx.support.top_interface", Common::k_top_interface_role, 200, false);
-    struct Member { Provider *provider; const char *label; };
-    const Member members[]{{&bottom_contact, "Bottom support contact"}, {&bottom, "Bottom support interface"},
-        {&top_contact, "Top support contact"}, {&top, "Top support interface"}};
+    struct Member { Provider *provider; const char *label; const char *tooltip; };
+    const Member members[]{{&bottom_contact, Common::k_bottom_contact_label, Common::k_bottom_contact_tooltip},
+        {&bottom, Common::k_bottom_interface_label, Common::k_bottom_interface_tooltip},
+        {&top_contact, Common::k_top_contact_label, Common::k_top_contact_tooltip},
+        {&top, Common::k_top_interface_label, Common::k_top_interface_tooltip}};
     for (const Member &member : members) {
         Provider *provider = member.provider;
         orchestrator_register_plugin(orchestrator, provider->c_instance());
@@ -176,7 +178,7 @@ extern "C" SLIC3R_PLUGIN_API void register_plugin(orchestrator_handle *orchestra
         const plugin_instance instance = provider->c_instance();
         definition.exclusive_group = instance.vt->get_exclusive_group(instance.ctx);
         definition.label = member.label;
-        definition.tooltip = "Choose the provider for this support contact or interface role.";
+        definition.tooltip = member.tooltip;
         definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
         definition.category = RAW_OPTION_CATEGORY_SUPPORT;
         definition.auto_value = 1;
