@@ -7,7 +7,8 @@
    Both providers consume surfaces marked with BridgeSurfaceInfo. An external
    bridge's original unsupported core is reconstructed by subtracting linked
    lower slices. An internal bridge uses its complete prepared area as its
-   working core. The chosen direction and source-surface identity connect each
+   working core. The direction stored with the prepared rows (PreparedRows), or the
+   surface's direction when none were stored, and the source-surface identity connect each
    generated row to this geometry and to its owning region's settings.
 
    The default surface model asks BridgeSurfaceVolume::Index for a mean volume
@@ -121,6 +122,7 @@ const char *dependencies[]={"surface.bridge_preparation","infill.recipe.bridge_p
 // External core is recovered by subtracting lower slices; an internal bridge
 // uses its whole prepared area because its void is inside the lower model.
 // uniform_core is its clipped uniform expansion before the additional end margin.
+// angle is the direction the recipe printed the rows in.
 struct SurfaceWork {
     Surface surface;
     LayerIsland island;
@@ -133,6 +135,7 @@ struct SurfaceWork {
     bool peripheral_rows;
     double layer_height;
     double bottom_z;
+    double angle;
 };
 // A bucket is an extrusion tree for one region-island and role. Keep its original
 // root beside the corrected copy; after replacement, output owns the old contents.
@@ -428,7 +431,7 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
     const double length=unscaled(norm(finish-start));
     if (length<=0.) throw std::runtime_error("A prepared bridge strand has zero length.");
     const double ux=(finish.x-start.x)/scale_d(length),uy=(finish.y-start.y)/scale_d(length);
-    const double angle=work.surface.bridge_angle();
+    const double angle=work.angle;
     if (!std::isfinite(angle) || angle<0.) throw std::runtime_error("A prepared bridge lost its canonical direction.");
     const coord_t fill_resolution=std::min(scale_i(width)/16,
         std::max(SCALED_EPSILON,scale_i(print_config.get("resolution_internal").get_float())));
@@ -715,6 +718,7 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
         return;
     }
     const Object object(ctx->object);const Config print_config=Print(ctx->print).config();
+    const PluginPropertyKey<BridgePreparation::PreparedRows> rows_key=BridgePreparation::prepared_rows_key(m_orchestrator);
     const std::string prefix="Object '"+object.name()+"': ";
     Diagnostics diagnostics;
     std::map<uint64_t,SurfaceWork> surfaces;
@@ -752,7 +756,9 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                         input=mix(input,ctx->support_demand_computed);
                         if (ctx->support_demand_computed)
                             input=mix(input,geometry_key(ExPolygonCollection(ctx->get_requested_support_areas(island.handle()))));
-                        const double angle=surface.bridge_angle();
+                        // The recipe prints the stored rows in their own direction.
+                        const BridgePreparation::PreparedRows *rows=rows_key.get(surface);
+                        const double angle=rows!=nullptr ? rows->angle : surface.bridge_angle();
                         uint64_t bits=0;std::memcpy(&bits,&angle,sizeof(bits));input=mix(input,bits);
                         for (const char *key : {"min_layer_height","resolution_internal","bridge_volume_compensation_enabled","bridged_infill_uniform_margin"}) {
                             const bool regional=std::strcmp(key,"bridge_volume_compensation_enabled")==0 || std::strcmp(key,"bridged_infill_uniform_margin")==0;
@@ -771,7 +777,7 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                         input=mix(mix(input,uint64_t(margins.axial)),uint64_t(margins.uniform));
                         StoredExPolygonCollection uniform_core=expand_bridge(run_ctx->plugin_storage,core.readonly(),prepared.readonly(),angle,0,margins.uniform,run_ctx);
                         surfaces.emplace(surface.id(),SurfaceWork{surface,island,owner,std::move(core),std::move(uniform_core),input,floor,enabled,margins.uniform>0,
-                            layer_height,unscaled(layer.print_z()-layer.height())});affected=true;
+                            layer_height,unscaled(layer.print_z()-layer.height()),angle});affected=true;
                     } catch (const PluginCancelled &) {
                         throw;
                     } catch (const std::exception &error) {

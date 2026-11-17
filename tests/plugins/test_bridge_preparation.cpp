@@ -1161,6 +1161,45 @@ TEST_CASE("Real bridge patterns generate and finalize the new peripheral rows","
     }
 }
 
+// The rows stored by preparation fix their direction: a later change of the surface's angle neither turns the printed
+// rows nor makes volume correction refuse them as non-axial.
+TEST_CASE("Prepared bridge rows keep the direction they were fitted for","[plugins][bridge-preparation][bridge-volume]")
+{
+    Fixture fixture({{"bridged_infill_uniform_margin","0.6"},{"fill_density","100%"},{"fill_pattern","rectilinear"},{"bridge_fill_pattern","rectilinear"}});
+    fixture.frame();fixture.prepare();fixture.add_paths(false);
+    for (Layer &layer : fixture.prepared.print.object(0).layers())
+        for (LayerSliceIsland &island : layer.islands())
+            for (LayerRegionIsland &region : island.regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::INFILLS)) region.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+    Surface &bridge=fixture.bridge();
+    const double prepared=bridge.bridge_angle;
+    bridge.bridge_angle=std::fmod(prepared+PI/6.,PI);
+    Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells",
+        "infill.generator.default","rectilinear","monotonic","infill.post_process.full_fill_volume","infill.post_process.gap_fill"});
+    Steps::StepGenerateInfill::run_step(Orchestrator::instance(),fixture.prepared.print);
+    Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print);
+    size_t rows=0;
+    for (const LayerRegionIsland &region : fixture.island().regions_islands()) if (region.has_extrusion(LayerRegionIsland::INFILLS))
+        visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role!=ExtrusionRole::BridgeInfill) return;
+            const Vec2d along=(leaf.last_point()-leaf.first_point()).cast<double>();
+            CHECK(std::abs(std::remainder(std::atan2(along.y(),along.x())-prepared,PI))<1e-6);
+            ++rows;
+        });
+    REQUIRE(rows>0);
+    CHECK(finalize_skipped(fixture.prepared.print).empty());
+    // Correction may split a row into pieces of different flow; every piece carries its result.
+    size_t pieces=0,corrected=0;
+    for (const LayerRegionIsland &region : fixture.island().regions_islands()) if (region.has_extrusion(LayerRegionIsland::INFILLS))
+        visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role!=ExtrusionRole::BridgeInfill) return;
+            ++pieces;
+            if (leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr) ++corrected;
+        });
+    CHECK(pieces>=rows);
+    CHECK(corrected==pieces);
+}
+
 TEST_CASE("Bridge clearance uses actual footprint and highest real Z","[plugins][bridge-volume]")
 {
     Clearance::Index index;
