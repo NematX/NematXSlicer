@@ -41,12 +41,15 @@ Operation notes:
 - make_*_shapes() :  select a borrowed adapter or retain an owned result
 - traverse_pt() :  copy contours with their holes, parents first
 - order_tree_islands() :  rank multiple roots by decreasing box area
+- expolygons_have_reversed_rings() :  detect a hole misplaced at the tree root
 
 Representative direct calls (branches are not a timeline):
 
     PolyTreeShapes::to_expolygons()
         |-- traverse_pt()
-        `-- order_tree_islands()
+        |-- order_tree_islands()
+        `-- expolygons_have_reversed_rings()
+            `-- [reversed ring] positive union of all rings, then traverse again
 */
 
 namespace Slic3r {
@@ -136,6 +139,20 @@ static ExPolygons expolygons_from_polytree(const ClipperLib::PolyTree &tree)
     ExPolygons out;
     traverse_pt(&tree, &out);
     return out;
+}
+
+// True when a contour is not counter-clockwise or a hole not clockwise. Linear
+// in the number of points: no Clipper operation.
+static bool expolygons_have_reversed_rings(const ExPolygons &expolygons)
+{
+    for (const ExPolygon &expolygon : expolygons) {
+        if (!expolygon.contour.is_counter_clockwise())
+            return true;
+        for (const Polygon &hole : expolygon.holes)
+            if (!hole.is_clockwise())
+                return true;
+    }
+    return false;
 }
 
 static ClipperLib::PolyTree polytree_from_paths(const ClipperLib::Paths &paths, bool do_union)
@@ -291,6 +308,21 @@ public:
         traverse_pt(&m_tree, &out);
         // A one-pass tree can expose nested islands as independent roots; box area orders containers before contents in O(V + N log N), while also reordering unequal disjoint boxes.
         if (m_tree.ChildCount() > 1) order_tree_islands(out);
+        if (!expolygons_have_reversed_rings(out))
+            return out;
+
+        // Clipper sometimes attaches a hole to the tree root instead of its
+        // contour. traverse_pt() decides contour or hole by depth, so that hole
+        // became a separate island with a negative area. A union of all rings
+        // puts it back: inside its contour the two windings cancel. The positive
+        // fill rule drops isolated reversed artefacts instead of filling them.
+        ClipperLib::Clipper clipper;
+        clipper.AddPaths(to_paths(), ClipperLib::ptSubject, true);
+        ClipperLib::PolyTree repaired;
+        clipper.Execute(ClipperLib::ctUnion, repaired, ClipperLib::pftPositive, ClipperLib::pftPositive);
+        out.clear();
+        traverse_pt(&repaired, &out);
+        if (repaired.ChildCount() > 1) order_tree_islands(out);
         return out;
     }
 
