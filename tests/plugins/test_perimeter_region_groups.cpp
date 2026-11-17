@@ -60,6 +60,8 @@ struct PrintedLeaf
     }
 };
 
+// The generators that split islands into region groups, with the Python simple one when Python plugins are built.
+std::vector<const char *> generators();
 // Append the printable leaves of entity in tree order.
 void collect_printed_leaves(const ExtrusionEntity &entity, std::vector<PrintedLeaf> &out);
 // Summarize each captured group, sorted from left to right.
@@ -69,6 +71,15 @@ std::vector<PrintedLeaf> printed_leaves(const std::vector<PerimeterRegionIslandC
 // Run generator on the square island, with one override region on its right half when settings is not empty.
 std::vector<PerimeterRegionIslandCapture> run_half_override(const char *generator, const DynamicPrintConfig &config,
     const std::vector<std::pair<std::string, std::string>> &settings);
+
+std::vector<const char *> generators()
+{
+    std::vector<const char *> out{CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR};
+#ifdef SLIC3R_TEST_PYTHON_PLUGINS
+    out.push_back(PYTHON_SIMPLE_PERIMETER_GENERATOR);
+#endif
+    return out;
+}
 
 void collect_printed_leaves(const ExtrusionEntity &entity, std::vector<PrintedLeaf> &out)
 {
@@ -133,7 +144,7 @@ std::vector<PerimeterRegionIslandCapture> run_half_override(const char *generato
 TEST_CASE("Perimeter generators give each region group its own settings",
           "[plugins][perimeter][perimeter-region-groups]")
 {
-    for (const char *generator : {CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR}) {
+    for (const char *generator : generators()) {
         INFO(generator);
 
         // The extruder is chosen per region group, so each half must get its
@@ -180,7 +191,7 @@ TEST_CASE("A region group cut into several pieces keeps the perimeters of every 
     const DynamicPrintConfig config = perimeter_config({{"perimeters", "2"}, {"nozzle_diameter", "0.4,0.4"}});
     const std::vector<PerimeterRegionOverride> band{
         {rectangle_expolygon(-3., -10., 3., 10.), {{"perimeter_extruder", "2"}}}};
-    for (const char *generator : {CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR}) {
+    for (const char *generator : generators()) {
         INFO(generator);
         const std::vector<GroupSummary> groups = group_summaries(run_perimeter_region_islands_case(
             config, {generator}, rectangle_expolygon(-10., -10., 10., 10.), 1, band));
@@ -193,6 +204,32 @@ TEST_CASE("A region group cut into several pieces keeps the perimeters of every 
         CHECK(outer.max_x > scale_i(3.));
         CHECK(inner.min_x > scale_i(-3.));
         CHECK(inner.max_x < scale_i(3.));
+    }
+}
+
+TEST_CASE("Perimeter generators keep regions with different perimeter flows in separate groups",
+          "[plugins][perimeter][perimeter-region-groups]")
+{
+    // A group takes the flows of its first region, and the flows read the
+    // spacings, odd-layer changes and overlaps of both perimeter roles, so a
+    // region differing only by one of them must get its own group.
+    const DynamicPrintConfig config = perimeter_config({{"perimeters", "2"}});
+    for (const char *generator : generators()) {
+        for (const std::pair<std::string, std::string> &setting :
+             std::vector<std::pair<std::string, std::string>>{{"external_perimeter_extrusion_spacing", "0.5"},
+                                                              {"external_perimeter_extrusion_change_odd_layers", "0.5"},
+                                                              {"external_perimeter_overlap", "60%"},
+                                                              {"perimeter_extrusion_spacing", "0.5"},
+                                                              {"perimeter_extrusion_change_odd_layers", "0.5"},
+                                                              {"perimeter_overlap", "60%"}}) {
+            INFO(generator << " " << setting.first);
+            const std::vector<GroupSummary> groups = group_summaries(run_half_override(generator, config, {setting}));
+            REQUIRE(groups.size() == 2);
+            CHECK(groups[0].region_count == 1);
+            CHECK(groups[1].region_count == 1);
+            CHECK(groups[0].max_x < 0);
+            CHECK(groups[1].min_x > 0);
+        }
     }
 }
 
