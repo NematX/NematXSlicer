@@ -31,7 +31,8 @@ count and one extruder, and the host publishes each region group in a
 LayerRegionIsland keyed by its extruder. Regions of the island that disagree on
 these settings therefore must not share a group. RegionSettings cuts the
 island slice into the largest areas whose regions agree on the perimeter
-count, the perimeter extruder and every setting the two perimeter flows read.
+count, the perimeter extruder, every setting the two perimeter flows read and
+the direction settings that the loop direction post-process reads.
 Each connected piece of such an area becomes the root of one region group,
 which takes its flows from its first region and its perimeter count from the
 shared values. When all regions agree, the island stays one group rooted at
@@ -109,14 +110,18 @@ const char *k_external_perimeter_overlap_key = "external_perimeter_overlap";
 const char *k_perimeter_spacing_key = "perimeter_extrusion_spacing";
 const char *k_perimeter_odd_layers_key = "perimeter_extrusion_change_odd_layers";
 const char *k_perimeter_overlap_key = "perimeter_overlap";
+const char *k_perimeter_direction_key = "perimeter_direction";
+const char *k_perimeter_reverse_key = "perimeter_reverse";
+const char *k_overhangs_reverse_key = "overhangs_reverse";
+const char *k_overhangs_reverse_threshold_key = "overhangs_reverse_threshold";
 
 // used_config_keys is the plugin declaration: the host activates these settings
 // while this implementation is selected and invalidates its caches when they
 // change. The simple generator reads the wall count, and splits islands by the
 // extruder and the widths, like the classic generator, which declares the same
-// keys. The spacing, odd-layer and overlap flow settings are only compared:
-// declaring them here alone would give them selector activation rules that the
-// other perimeter generators do not have.
+// keys. The spacing, odd-layer and overlap flow settings and the loop direction
+// settings are only compared: declaring them here alone would give them selector
+// activation rules that the other perimeter generators do not have.
 const raw_used_config_key k_used_config_keys[] = {
     { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { k_perimeter_extruder_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
@@ -321,7 +326,8 @@ void SimplePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) const
         return;
 
     // The flows read the widths, spacings, odd-layer changes and overlaps of
-    // both perimeter roles, and the extruder gives their nozzle. Regions that
+    // both perimeter roles, the extruder gives their nozzle, and the loop
+    // direction plugin reads the direction settings of the group. Regions that
     // agree on all of them share one tree; an accept-all clip keeps the whole
     // slice when every region agrees.
     RegionSettings settings(run_ctx->plugin_storage,
@@ -335,7 +341,11 @@ void SimplePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) const
                                k_perimeter_width_key,
                                k_perimeter_spacing_key,
                                k_perimeter_odd_layers_key,
-                               k_perimeter_overlap_key }});
+                               k_perimeter_overlap_key,
+                               k_perimeter_direction_key,
+                               k_perimeter_reverse_key,
+                               k_overhangs_reverse_key,
+                               k_overhangs_reverse_threshold_key }});
     settings.segregate(island.slice());
 
     for (const auto &[values, clip] : settings.get_areas(k_perimeters_key)) {

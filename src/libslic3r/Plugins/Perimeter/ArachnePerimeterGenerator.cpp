@@ -10,9 +10,8 @@ ArachnePerimeterGenerator.cpp
 Implementation of the Arachne perimeter generator declared in
 ArachnePerimeterGenerator.hpp.
 
-The file holds the plugin metadata, the owned option definition and activation
-rule, the Arachne-to-host conversion helpers, the run callbacks and the
-registration entry point. run() converts host nodes into Arachne wall passes and
+The file holds the plugin metadata, the Arachne-to-host conversion helpers, the
+run callbacks and the registration entry point. run() converts host nodes into Arachne wall passes and
 publishes the closed and open extrusion entities back into the node property
 collections.
 */
@@ -22,24 +21,20 @@ collections.
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
-#include <iterator>
 #include <limits>
 #include <utility>
 #include <vector>
 
 #include "libslic3r/Arachne/WallToolPaths.hpp"
-#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
-#include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
-#include "libslic3r/ExtrusionGeometryUnits.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
@@ -58,7 +53,7 @@ run_region_group(), which owns the traversal of one region group's perimeter
 tree and calls generate_node() for each node that needs to be produced.
 
 One perimeter tree uses the flows, perimeter count, extruder, loop direction
-and Arachne wall settings of a single region, and the host publishes each
+settings and Arachne wall settings of a single region, and the host publishes each
 region group in a LayerRegionIsland keyed by its extruder. Regions of the
 island that disagree on these settings therefore must not share a group.
 RegionSettings, read through the public LayerIsland view of the island, cuts
@@ -100,9 +95,9 @@ The normal call flow is:
                     |-- compute inner areas and fill areas
                     `-- publish both area collections to the host
 
-Closed-loop direction follows the configured contour and hole direction,
-including the optional odd-layer reversal. Loop endpoints that are only
-epsilon-close are normalized before publication. The plugin is responsible
+Closed loops keep the direction of the Arachne lines; the loop direction
+post-process gives them their configured direction. Loop endpoints that are
+only epsilon-close are normalized before publication. The plugin is responsible
 for Arachne geometry conversion, while tree traversal and final storage remain
 owned by the perimeter step context.
 Constructive path values retain their direct flow and perimeter metadata when
@@ -120,6 +115,8 @@ const char *k_no_dependencies[] = { nullptr };
 
 const char *k_perimeters_key = "perimeters";
 const char *k_perimeter_reverse_key = "perimeter_reverse";
+const char *k_overhangs_reverse_key = "overhangs_reverse";
+const char *k_overhangs_reverse_threshold_key = "overhangs_reverse_threshold";
 const char *k_perimeter_extruder_key = "perimeter_extruder";
 const char *k_external_perimeter_width_key = "external_perimeter_extrusion_width";
 const char *k_perimeter_width_key = "perimeter_extrusion_width";
@@ -139,22 +136,17 @@ const char *k_wall_transition_length_key = "wall_transition_length";
 
 // used_config_keys is the plugin declaration: the host activates these settings
 // while this implementation is selected and invalidates its caches when they
-// change. Arachne reads the wall count and the reversal directly, and splits
-// islands by the extruder and the widths, like the classic generator, which
-// declares the same keys. The other flow settings, the loop direction and the
-// Arachne wall settings are compared but not declared: a selector rule of
-// this generator would enable them even where their core activation rules
-// disable them.
+// change. Arachne reads the wall count directly, and splits islands by the
+// extruder and the widths, like the classic generator, which declares the same
+// keys. The other flow settings, the loop direction settings and the Arachne
+// wall settings are compared but not declared: a selector rule of this
+// generator would enable them even where their core activation rules disable
+// them.
 const raw_used_config_key k_used_config_keys[] = {
     { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { k_perimeter_reverse_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { k_perimeter_extruder_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { k_external_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { k_perimeter_width_key, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
-};
-
-const char *const k_defined_config_keys[] = {
-    k_perimeter_reverse_key
 };
 
 // Transfer constructive path values into generic owned leaves with explicit parent permissions.
@@ -167,8 +159,6 @@ void append_open_paths(Slic3r::ExtrusionEntity &dst, Slic3r::ExtrusionPaths &&pa
 void append_arachne_line(Slic3r::ExtrusionEntity &dst,
                          const Slic3r::Arachne::ExtrusionLine &line,
                          size_t biggest_inset_idx, size_t inset_offset,
-                         const Slic3r::Layer &layer,
-                         const Slic3r::PrintRegionConfig &region_config,
                          const Slic3r::PrintConfig &print_config,
                          const Slic3r::Flow &external_flow, const Slic3r::Flow &internal_flow,
                          const plugin_run_context *run_ctx);
@@ -176,46 +166,10 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
 // Build one owned generic tree in Arachne's path order, checking cancellation between lines.
 Slic3r::ExtrusionEntity make_arachne_extrusions(
     const std::vector<Slic3r::Arachne::VariableWidthLines> &perimeters, size_t inset_offset,
-    const Slic3r::Layer &layer, const Slic3r::PrintRegionConfig &region_config,
     const Slic3r::PrintConfig &print_config,
     const Slic3r::Flow &external_flow, const Slic3r::Flow &internal_flow,
     const plugin_run_context *run_ctx);
 
-void initialize_arachne_perimeter_settings(orchestrator_handle *orchestrator)
-{
-    /*
-    Option definitions owned by this module. Each entry fixes the option type,
-    override scope, default and GUI metadata; defined keys are published in the
-    print presets, so profiles read and write them by name like any built-in
-    setting. Called once from inilialize_impl().
-    */
-    raw_config_option_def def = raw_config_option_def_init();
-
-    // ---- perimeter_reverse | preset=RAW_PRESET_TYPE_FFF_PRINT ----
-    def = raw_config_option_def_init();
-    def.opt_key = "perimeter_reverse";
-    def.type = RAW_CO_BOOL;
-    def.container_type = RAW_CONTAINER_TYPE_REGION;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_PERIMETER;
-    def.category = RAW_OPTION_CATEGORY_PERIMETER;
-    def.label = "Perimeter reversal on even layers";
-    def.tooltip = "On even layers, all perimeter loops are reversed (it disables the overhang reversal, so it doesn't double-reverse).That setting will likely create defects on the perimeters, so it's only useful is for materials that have some direction-dependent properties (stress lines).";
-    def.precision = 6;
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-}
-
-void add_arachne_perimeter_gui_rules(orchestrator_handle *orchestrator)
-{
-    // Perimeter reversal needs the Arachne generator and a non-zero perimeter count.
-    GuiRule::activate({ "perimeter_reverse" })
-        .when(non_zero("perimeters"))
-        .scope(RAW_PRESET_TYPE_FFF_PRINT)
-        .add_to(orchestrator);
-}
 const Slic3r::Layer *to_layer(const layer_handle *handle)
 {
     return reinterpret_cast<const Slic3r::Layer *>(handle);
@@ -313,8 +267,6 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
                          const Slic3r::Arachne::ExtrusionLine &line,
                          const size_t biggest_inset_idx,
                          const size_t inset_offset,
-                         const Slic3r::Layer &layer,
-                         const Slic3r::PrintRegionConfig &region_config,
                          const Slic3r::PrintConfig &print_config,
                          const Slic3r::Flow &external_flow,
                          const Slic3r::Flow &internal_flow,
@@ -325,7 +277,6 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
 
     const size_t absolute_inset_idx = inset_offset + line.inset_idx;
     const bool is_external = absolute_inset_idx == 0;
-    const bool is_contour = line.is_contour();
     const bool is_closed = line_is_closed(line);
     const Slic3r::ExtrusionRole role = is_external ?
         Slic3r::ExtrusionRole::ExternalPerimeter :
@@ -346,15 +297,6 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
         loop_property.perimeter_idx = int16_t(std::min<size_t>(
             absolute_inset_idx, size_t(std::numeric_limits<int16_t>::max())));
         loop_property.set_perimeter_role(loop_role);
-        const bool ccw_contour = region_config.perimeter_direction.value == Slic3r::PerimeterDirection::pdCCW_CW ||
-                                 region_config.perimeter_direction.value == Slic3r::PerimeterDirection::pdCCW_CCW;
-        const bool ccw_hole = region_config.perimeter_direction.value == Slic3r::PerimeterDirection::pdCW_CCW ||
-                              region_config.perimeter_direction.value == Slic3r::PerimeterDirection::pdCCW_CCW;
-        const Slic3r::ConfigOption *perimeter_reverse_opt = region_config.option("perimeter_reverse");
-        const bool need_ccw = ((perimeter_reverse_opt != nullptr && perimeter_reverse_opt->get_bool() && layer.id() % 2 == 1) ==
-                               (is_contour ? ccw_contour : ccw_hole));
-        if (need_ccw != !(Slic3r::extrusion_geometry_area(loop) > 0.))
-            loop.reverse();
 
         // Arachne may close a loop with points that are epsilon-close but not
         // bit-identical. Normalize the stored endpoint before later code
@@ -373,8 +315,6 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
 Slic3r::ExtrusionEntity make_arachne_extrusions(
     const std::vector<Slic3r::Arachne::VariableWidthLines> &perimeters,
     const size_t inset_offset,
-    const Slic3r::Layer &layer,
-    const Slic3r::PrintRegionConfig &region_config,
     const Slic3r::PrintConfig &print_config,
     const Slic3r::Flow &external_flow,
     const Slic3r::Flow &internal_flow,
@@ -385,8 +325,8 @@ Slic3r::ExtrusionEntity make_arachne_extrusions(
     for (const Slic3r::Arachne::VariableWidthLines &perimeter : perimeters) {
         throw_if_cancelled(run_ctx);
         for (const Slic3r::Arachne::ExtrusionLine &line : perimeter)
-            append_arachne_line(extrusion, line, biggest_inset_idx, inset_offset, layer, region_config, print_config,
-                                external_flow, internal_flow, run_ctx);
+            append_arachne_line(extrusion, line, biggest_inset_idx, inset_offset, print_config, external_flow,
+                                internal_flow, run_ctx);
     }
     return extrusion;
 }
@@ -466,8 +406,8 @@ int32_t generate_node(void *generator_context,
             wall_tool_paths.getToolPaths();
         throw_if_cancelled(context->run_ctx);
         Slic3r::ExtrusionEntity extrusion =
-            make_arachne_extrusions(perimeters, node->perimeter_idx, *state->layer, region_config, print_config,
-                                    outer_flow, inner_flow, context->run_ctx);
+            make_arachne_extrusions(perimeters, node->perimeter_idx, print_config, outer_flow, inner_flow,
+                                    context->run_ctx);
         throw_if_cancelled(context->run_ctx);
         extrusion_move_from(node->extrusions, reinterpret_cast<extrusion_entity_handle *>(&extrusion));
 
@@ -527,20 +467,6 @@ int32_t ArachnePerimeterGenerator::used_config_keys(raw_used_config_key *keys) c
     return int32_t(sizeof(k_used_config_keys) / sizeof(k_used_config_keys[0]));
 }
 
-int32_t ArachnePerimeterGenerator::defined_config_keys(const char **keys) const noexcept
-{
-    if (keys != nullptr)
-        for (size_t idx = 0; idx < std::size(k_defined_config_keys); ++idx)
-            keys[idx] = k_defined_config_keys[idx];
-    return int32_t(std::size(k_defined_config_keys));
-}
-
-void ArachnePerimeterGenerator::inilialize_impl(storage_handle *) const
-{
-    initialize_arachne_perimeter_settings(m_orchestrator);
-    add_arachne_perimeter_gui_rules(m_orchestrator);
-}
-
 const char *ArachnePerimeterGenerator::progress_message_format_impl() const noexcept
 {
     return "Arachne perimeter generator: %u / %u islands";
@@ -571,10 +497,11 @@ void ArachnePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) cons
         return;
 
     // The flows read the widths, spacings, odd-layer changes and overlaps of
-    // both perimeter roles, the extruder gives their nozzle, the loops follow
-    // the direction and reversal settings, and WallToolPaths reads the wall
-    // settings. Regions that agree on all of them share one tree; an
-    // accept-all clip keeps the whole slice when every region agrees.
+    // both perimeter roles, the extruder gives their nozzle, the loop direction
+    // plugin reads the direction and reversal settings of the group, and
+    // WallToolPaths reads the wall settings. Regions that agree on all of them
+    // share one tree; an accept-all clip keeps the whole slice when every
+    // region agrees.
     RegionSettings settings(run_ctx->plugin_storage,
                             island,
                             {{ k_perimeters_key,
@@ -589,6 +516,8 @@ void ArachnePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) cons
                                k_perimeter_overlap_key,
                                k_perimeter_direction_key,
                                k_perimeter_reverse_key,
+                               k_overhangs_reverse_key,
+                               k_overhangs_reverse_threshold_key,
                                k_min_bead_width_key,
                                k_min_feature_size_key,
                                k_wall_distribution_count_key,

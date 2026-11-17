@@ -233,6 +233,29 @@ TEST_CASE("Perimeter generators keep regions with different perimeter flows in s
     }
 }
 
+TEST_CASE("Perimeter generators keep regions with different loop direction settings in separate groups",
+          "[plugins][perimeter][perimeter-region-groups][loop-direction]")
+{
+    // The loop direction post-process reads the direction settings of a group's
+    // first region, so a region differing only by one of them must get its own group.
+    const DynamicPrintConfig config = perimeter_config({{"perimeters", "2"}});
+    for (const char *generator : generators()) {
+        for (const std::pair<std::string, std::string> &setting :
+             std::vector<std::pair<std::string, std::string>>{{"perimeter_direction", "cw_ccw"},
+                                                              {"perimeter_reverse", "1"},
+                                                              {"overhangs_reverse", "1"},
+                                                              {"overhangs_reverse_threshold", "1"}}) {
+            INFO(generator << " " << setting.first);
+            const std::vector<GroupSummary> groups = group_summaries(run_half_override(generator, config, {setting}));
+            REQUIRE(groups.size() == 2);
+            CHECK(groups[0].region_count == 1);
+            CHECK(groups[1].region_count == 1);
+            CHECK(groups[0].max_x < 0);
+            CHECK(groups[1].min_x > 0);
+        }
+    }
+}
+
 TEST_CASE("Arachne keeps regions with different wall settings in separate groups",
           "[plugins][perimeter][perimeter-region-groups][arachne]")
 {
@@ -241,8 +264,7 @@ TEST_CASE("Arachne keeps regions with different wall settings in separate groups
     const DynamicPrintConfig config = perimeter_config({{"perimeters", "2"}});
     for (const std::pair<std::string, std::string> &setting :
          std::vector<std::pair<std::string, std::string>>{{"wall_distribution_count", "3"},
-                                                          {"min_bead_width", "50%"},
-                                                          {"perimeter_direction", "cw_ccw"}}) {
+                                                          {"min_bead_width", "50%"}}) {
         INFO(setting.first);
         const std::vector<GroupSummary> groups =
             group_summaries(run_half_override(ARACHNE_PERIMETER_GENERATOR, config, {setting}));

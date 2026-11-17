@@ -13,7 +13,8 @@ external perimeter (external role and flow); the following loops are internal
 perimeters (internal role and flow, offsets at the internal spacing).
 
 Like the native provider, it never lets regions that disagree on the perimeter
-count, the extruder or a setting of the two flows share one tree: RegionSettings
+count, the extruder, a setting of the two flows or a loop direction setting
+share one tree: RegionSettings
 cuts the island slice into the largest areas where these settings agree, and
 each connected piece of such an area becomes the root of one region group.
 
@@ -53,7 +54,8 @@ from slic3r_api import (
 
 PLUGIN_ID = "python.perimeter.generator.simple"
 # The perimeter count first, as the key of the region groups, then the
-# extruder and every setting the two perimeter flows read.
+# extruder, every setting the two perimeter flows read and the direction
+# settings that the loop direction post-process reads.
 _GROUP_KEYS = [
     "perimeters",
     "perimeter_extruder",
@@ -65,6 +67,10 @@ _GROUP_KEYS = [
     "perimeter_extrusion_spacing",
     "perimeter_extrusion_change_odd_layers",
     "perimeter_overlap",
+    "perimeter_direction",
+    "perimeter_reverse",
+    "overhangs_reverse",
+    "overhangs_reverse_threshold",
 ]
 LOOP_ROLE_DEFAULT = 1 << 0
 LOOP_ROLE_HOLE = LOOP_ROLE_DEFAULT | (1 << 3)

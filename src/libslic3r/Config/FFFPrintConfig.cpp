@@ -4872,8 +4872,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->category = OptionCategory::perimeter;
     def->invalidates_step = STEP_PERIMETER;
     def->tooltip = L("Extrude perimeters that have an overhanging part in the reverse direction on even layers (not on odd layers like the first one)."
-        " This alternating pattern can significantly improve steep overhangs."
-        "\n!! this is a very slow algorithm !!");
+        " This alternating pattern can significantly improve steep overhangs.");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 

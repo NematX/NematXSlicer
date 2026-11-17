@@ -549,6 +549,7 @@ const char *const EXTRA_PERIMETERS_ON_OVERHANGS = "perimeter.post_process.extra_
 const char *const EXTRA_PERIMETER_OVERHANG_WAVE = "perimeter.post_process.extra_perimeter_overhang_wave";
 const char *const DETECT_OVERHANG = "perimeter.post_process.detect_overhang";
 const char *const FUZZY_SKIN = "perimeter.post_process.fuzzy_skin";
+const char *const LOOP_DIRECTION = "perimeter.post_process.loop_direction";
 const char *const INITIAL_TYPED_SURFACE_BUILDER = "surface.initial_typed_surface_builder";
 const char *const SOLID_SHELLS = "surface.solid_shells";
 const char *const TOP_SURFACE_EXPANSION = "surface.top_surface_expansion";
