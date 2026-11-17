@@ -5,14 +5,11 @@
 
 #include "SupportDemandOverhangs.hpp"
 
-#include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <string>
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
-#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
@@ -32,8 +29,6 @@ The normal execution flow is:
 
     run_impl()
     |-- read the object support settings
-    |-- warn_about_unreachable_demand(): warn once when the threshold asks for
-    |   support closer to the walls than the support XY gap allows
     |-- for each layer from bottom to top, compare it with the layer below
     |-- enlarge the lower-layer coverage according to the overhang threshold
     |   or the external-perimeter width
@@ -83,10 +78,6 @@ struct ObjectSupportDemandConfig
 // Computes an enforced-layer zero or the guarded horizontal allowance for one island.
 coord_t lower_layer_offset(const ObjectSupportDemandConfig &config, const Layer &lower_layer,
                            const LayerIsland &island, uint32_t layer_idx);
-// Reports one warning when the threshold allowance at the object layer height is smaller than the support XY gap: the
-// demand closer to the wall than that gap cannot be reached by support printed beside the layer below.
-void warn_about_unreachable_demand(const plugin_run_context *run_ctx, const Object &object,
-                                   const ObjectSupportDemandConfig &config);
 
 ObjectSupportDemandConfig read_object_config(const Object &object)
 {
@@ -136,30 +127,6 @@ coord_t lower_layer_offset(const ObjectSupportDemandConfig &config,
         return 0;
 
     return Common::overhang_margin(config.support_material_threshold, lower_layer.height(), island_external_perimeter_width(island), true);
-}
-
-void warn_about_unreachable_demand(const plugin_run_context *run_ctx, const Object &object,
-                                   const ObjectSupportDemandConfig &config)
-{
-    if (!has_auto_support(config) || config.support_material_threshold <= 0)
-        return;
-    const Config object_config = object.config();
-    const double layer_height = object_config.get("layer_height").get_float();
-    // A percent XY gap applies to the widest external perimeter, as in the support generators.
-    double external_width = 0;
-    for (uint32_t region_idx = 0; region_idx < object.print_region_count(); ++region_idx)
-        external_width = std::max(external_width, object.region_flow_mm(region_idx,
-            raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER), layer_height, 2).width);
-    const double gap_xy = object_config.get("support_material_xy_spacing").get_effective_value(external_width);
-    const coord_t allowance = Common::overhang_margin(config.support_material_threshold, scale_to_layer_coord(layer_height),
-                                                      scale_i(external_width), true);
-    if (allowance >= scale_i(gap_xy))
-        return;
-    const std::string message = "Object '" + object.name() + "': with support_material_threshold = " +
-        std::to_string(config.support_material_threshold) + " degrees and layer_height = " + std::to_string(layer_height) +
-        " mm, a step of " + std::to_string(unscaled(allowance)) + " mm already needs support, but support stays " +
-        std::to_string(gap_xy) + " mm (support_material_xy_spacing) away from the object: the narrowest overhangs get no support.";
-    report_warning(run_ctx, message.c_str());
 }
 
 // Converts and validates borrowed unsupported areas before unioning existing demand, then moves storage-owned polygons into the island without revalidation or a cancellation check; context must allow demand mutation and geometry/allocation failures propagate. Common unites first, then converts/validates/checks cancellation; changing that order could change output.
@@ -255,7 +222,6 @@ void SupportDemandOverhangs::run_impl(const plugin_run_context *run_ctx) const
     storage_handle *storage = run_ctx->plugin_storage;
     ClipperContext clipper(storage);
     const bool support_auto = has_auto_support(object_config);
-    warn_about_unreachable_demand(run_ctx, object, object_config);
 
     for (uint32_t layer_idx = 1; layer_idx < object.layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
