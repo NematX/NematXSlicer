@@ -19,6 +19,8 @@
    The file has three entry points. project_interface_contacts() and carve_interfaces() build the interfaces, in this order for a family
    whose base slabs do not cover the contacts. expand_first_layer_foot() then widens the first base slab. The widening uses the
    finalized contacts and interfaces (it keeps the foot clear of those on the bed), so it runs after carve_interfaces().
+   contact_cones() is independent of the windows: it walks the slabs away from each contact and shrinks the contact once per
+   slab whose column meets it, so a slab of another column at the same Z does not deepen the cone.
     The support ignores the brim and the skirt: it uses all the room it wants on the first layer.
     Projection and carving change polygons, not contact Z or contact order. Each
     entry validates the enabled contact lists once before its base-slab loop.
@@ -104,6 +106,50 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
         base.polygons = clipper_diff(clipper(base.polygons), clipper(united)).to_polygon_collection();
         base.polygons.ensure_valid(p.resolution);
     }
+}
+
+std::vector<Polys> contact_cones(coord_t step, size_t max_depth, const GeneratedSupport &out, const GeneratorLayers &slabs,
+                                 const std::vector<Polys> &columns)
+{
+    assert(columns.size() == slabs.size());
+    assert(std::is_sorted(slabs.begin(), slabs.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+        return a->print_z < b->print_z;
+    }));
+    std::vector<Polys> cones;
+    cones.reserve(slabs.size());
+    for (size_t i = 0; i < slabs.size(); ++i) cones.emplace_back(out.storage);
+    if (max_depth == 0 || slabs.empty()) return cones;
+    const ClipperContext clipper(out.storage);
+    // Walk from the slab next to the contact, away from it, and give each slab whose column meets the contact its cone.
+    const auto walk = [&](const GeneratorLayer &contact, size_t first, bool down) {
+        size_t depth = 1;
+        for (size_t i = first; i < slabs.size() && depth <= max_depth; down ? --i : ++i) {
+            if (clipper_intersection(clipper(columns[i]), clipper(contact.polygons)).empty()) continue;
+            Polys cone = clipper_offset(clipper(contact.polygons), -double(step * coord_t(depth)), join_type, 0.)
+                .to_polygon_collection();
+            if (cone.empty()) break;
+            cones[i].append_move_from(cone);
+            ++depth;
+        }
+    };
+    const auto print_z_less = [](const GeneratorLayer *slab, coord_t z) { return slab->print_z < z; };
+    for (const GeneratorLayer *contact : out.top) {
+        if (contact->polygons.empty()) continue;
+        // The last slab whose top lies at or under the bottom of the contact; size_t(-1) ends the downward walk.
+        const size_t end = size_t(std::upper_bound(slabs.begin(), slabs.end(), contact->bottom_z,
+            [](coord_t z, const GeneratorLayer *slab) { return z < slab->print_z; }) - slabs.begin());
+        if (end > 0) walk(*contact, end - 1, true);
+    }
+    for (const GeneratorLayer *contact : out.bottom) {
+        if (contact->polygons.empty()) continue;
+        // The first slab whose bottom lies at or above the top of the contact.
+        size_t first = size_t(std::lower_bound(slabs.begin(), slabs.end(), contact->print_z, print_z_less) - slabs.begin());
+        while (first < slabs.size() && slabs[first]->bottom_print_z() < contact->print_z) ++first;
+        walk(*contact, first, false);
+    }
+    for (Polys &cone : cones)
+        if (!cone.empty()) cone = clipper_union(clipper(cone)).to_polygon_collection();
+    return cones;
 }
 
 // Widen the first base slab, the foot of the support, to improve its adhesion to the bed.
