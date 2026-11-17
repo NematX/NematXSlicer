@@ -57,8 +57,8 @@ void register_support_toolpath_branch_plugin(orchestrator_handle *orchestrator)
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_sparse_role;
     definition.auto_value = 1;
-    definition.label = definition.exclusive_group;
-    definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
+    definition.label = Common::k_sparse_label;
+    definition.tooltip = Common::k_sparse_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.has_invalidates_step = 1;

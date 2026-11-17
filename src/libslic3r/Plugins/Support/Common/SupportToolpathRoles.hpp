@@ -26,6 +26,23 @@ inline constexpr const char *k_legacy_bottom_id = "support.toolpath.legacy_botto
 inline constexpr const char *k_legacy_top_id = "support.toolpath.legacy_top";
 inline constexpr const char *k_branch_sheath_id = "support.toolpath.branch_sheath";
 
+// Selector texts of each role, shared by every algorithm that can describe the role's group.
+inline constexpr const char *k_sparse_label = "Support body";
+inline constexpr const char *k_sparse_tooltip =
+    "Algorithm that prints the support body: the sparse layers between the bottom and top interfaces.";
+inline constexpr const char *k_bottom_contact_label = "Bottom support contact";
+inline constexpr const char *k_bottom_contact_tooltip =
+    "Algorithm that prints the support layer resting directly on the object, below the bottom interface.";
+inline constexpr const char *k_bottom_interface_label = "Bottom support interface";
+inline constexpr const char *k_bottom_interface_tooltip =
+    "Algorithm that prints the dense layers at the base of a support that starts on the object.";
+inline constexpr const char *k_top_interface_label = "Top support interface";
+inline constexpr const char *k_top_interface_tooltip =
+    "Algorithm that prints the dense layers at the top of the support, below the top contact.";
+inline constexpr const char *k_top_contact_label = "Top support contact";
+inline constexpr const char *k_top_contact_tooltip =
+    "Algorithm that prints the topmost support layer, directly under the supported surface of the object.";
+
 // One preferred algorithm for a role; both strings are borrowed static identifiers.
 struct ToolpathPreference {
     const char *role;

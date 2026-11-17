@@ -62,8 +62,8 @@ void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator)
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_sparse_role;
     definition.auto_value = 1;
-    definition.label = definition.exclusive_group;
-    definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
+    definition.label = Common::k_sparse_label;
+    definition.tooltip = Common::k_sparse_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.has_invalidates_step = 1;
@@ -79,8 +79,8 @@ void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator)
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_bottom_interface_role;
     definition.auto_value = 1;
-    definition.label = definition.exclusive_group;
-    definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
+    definition.label = Common::k_bottom_interface_label;
+    definition.tooltip = Common::k_bottom_interface_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.has_invalidates_step = 1;
@@ -96,8 +96,8 @@ void register_support_toolpath_top_plugin(orchestrator_handle *orchestrator)
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_top_interface_role;
     definition.auto_value = 1;
-    definition.label = definition.exclusive_group;
-    definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
+    definition.label = Common::k_top_interface_label;
+    definition.tooltip = Common::k_top_interface_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.has_invalidates_step = 1;
@@ -112,8 +112,8 @@ void register_support_toolpath_bottom_contact_plugin(orchestrator_handle *orches
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_bottom_contact_role;
-    definition.label = "Bottom support contact";
-    definition.tooltip = "Selects the algorithm that prints support contacts below the object.";
+    definition.label = Common::k_bottom_contact_label;
+    definition.tooltip = Common::k_bottom_contact_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
@@ -131,8 +131,8 @@ void register_support_toolpath_top_contact_plugin(orchestrator_handle *orchestra
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_top_contact_role;
-    definition.label = "Top support contact";
-    definition.tooltip = "Selects the algorithm that prints support contacts above the support.";
+    definition.label = Common::k_top_contact_label;
+    definition.tooltip = Common::k_top_contact_tooltip;
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
     definition.category = RAW_OPTION_CATEGORY_SUPPORT;
     definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
