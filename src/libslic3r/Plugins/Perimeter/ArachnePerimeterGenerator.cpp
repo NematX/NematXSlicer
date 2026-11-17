@@ -336,13 +336,11 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
     if (paths.empty())
         return;
 
-    annotate_paths(paths, absolute_inset_idx, loop_role);
-
     if (is_closed && paths.back().last_point().coincides_with_epsilon(paths.front().first_point())) {
+        // The loop carries the shell and the complete classification, which STEP_ORDERING validates on terminal
+        // loops. Its paths inherit them, like the paths that the classic generator wraps: a LOOP flag is rejected on
+        // a piece that is not closed, and a closed piece without it.
         Slic3r::ExtrusionEntity loop = make_path_sequence(std::move(paths), false, true);
-        // STEP_ORDERING validates the direct metadata of terminal loops. The
-        // path annotations above remain useful to path consumers, but the loop
-        // itself must retain the same shell and perimeter classification.
         Slic3r::ExtrusionPropertyLoopRole &loop_property =
             loop.get_or_add_property<Slic3r::ExtrusionPropertyLoopRole>();
         loop_property.perimeter_idx = int16_t(std::min<size_t>(
@@ -367,6 +365,8 @@ void append_arachne_line(Slic3r::ExtrusionEntity &dst,
         return;
     }
 
+    // An open line is no loop: its paths keep the shell and the classification without the LOOP flag.
+    annotate_paths(paths, absolute_inset_idx, Slic3r::ExtrusionLoopRole(loop_role & ~Slic3r::elrDefault));
     append_open_paths(dst, std::move(paths));
 }
 

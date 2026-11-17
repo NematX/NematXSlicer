@@ -64,7 +64,7 @@ TEST_CASE("Perimeter generators pass their linear STL export catalogues",
     namespace E2E = Test::PluginE2E;
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
-    std::vector<const char *> providers{CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR};
+    std::vector<const char *> providers{CLASSIC_PERIMETER_GENERATOR, SIMPLE_PERIMETER_GENERATOR, ARACHNE_PERIMETER_GENERATOR};
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
     providers.push_back(PYTHON_SIMPLE_PERIMETER_GENERATOR);
 #endif
@@ -94,6 +94,8 @@ TEST_CASE("Perimeter generators pass their linear STL export catalogues",
             {"second perimeter tool", {{"perimeter_extruder", "2"}, {"nozzle_diameter", "0.4,0.4"},
                 {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1,1"},
                 {"min_layer_height", "5%,5%"}, {"max_layer_height", "75%,75%"}}}}});
+        if (std::string(provider) == ARACHNE_PERIMETER_GENERATOR)
+            add("perimeter_reverse", {"0", "1"});
         if (std::string(provider) == CLASSIC_PERIMETER_GENERATOR) {
             for (const char *key : {"overhangs", "perimeter_round_corners", "thin_walls", "thin_walls_merge",
                                     "gap_fill_enabled", "gap_fill_last"})
