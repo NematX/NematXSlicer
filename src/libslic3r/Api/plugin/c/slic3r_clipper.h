@@ -6,7 +6,7 @@
 #define slic3r_clipper_h_
 
 #define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u
-#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 2u
+#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 3u
 
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
@@ -502,6 +502,63 @@ SLIC3R_HOST_API int32_t clipper_split_polyline_expolygons(storage_handle *storag
                                                           const expolygon_collection_handle *clip,
                                                           polyline_collection_handle **inside,
                                                           polyline_collection_handle **outside);
+
+/*
+Detour an open polyline around closed rings.
+
+Every path of rings is read as a closed ring, in the given order, without union or
+offset: outer contours and holes are handled the same way. The polyline crosses a
+ring where it goes from one side of that ring to the other. Touching a ring and
+coming back on the same side is not a crossing, and neither is a contact at the
+first or last point of the polyline. When the polyline runs along a ring edge and
+leaves on the other side, the crossing is where it leaves the edge.
+
+The crossings are visited in polyline order. When the ring of a crossing is crossed
+again later, the stretch of polyline between them is replaced by an arc of that
+ring: the ring is followed in the requested direction up to the first of those later
+crossings it meets. The visit continues after that exit and ignores the crossings
+of the replaced stretch. A crossing whose ring is not crossed again changes nothing.
+
+direction chooses which way to follow the ring:
+- CLIPPER_DETOUR_CW, CLIPPER_DETOUR_CCW: clockwise or counter-clockwise in XY;
+- CLIPPER_DETOUR_POLYGON, CLIPPER_DETOUR_REVERSE: along the order of the ring's
+  points, or against it;
+- CLIPPER_DETOUR_SHORTEST, CLIPPER_DETOUR_LONGEST: the shorter or longer way to the
+  next crossing of the same ring along the polyline (equal lengths follow the
+  ring's point order). This chooses a direction only; it does not search for the
+  shortest complete path.
+
+The first and last points, and every polyline point outside a replaced stretch, are
+kept exactly. Without any replacement the result is a point-for-point copy, also
+for an empty or one-point polyline. Crossing points are rounded to integers and can
+be one unit away from the exactly rounded intersection.
+
+Expected input: the polyline has no two equal consecutive points and never passes
+twice through the same point; for other polylines the result is unspecified. Rings
+may touch each other. Repeated consecutive ring points are ignored and a ring with
+fewer than three points is skipped. A ring touching itself is still followed, maybe
+the long way round. Two crossings closer than the floating-point precision of
+positions along the polyline can merge or vanish.
+
+polyline and rings are only read, and must stay alive during this synchronous call,
+which cannot be cancelled. The result is a new polyline owned by storage; release it
+with storage_free(). An empty result for a non-empty polyline is reserved for a
+geometric impossibility; no current input produces it. Returns NULL, without storing
+anything, for a NULL argument, an unknown direction or an internal failure; no
+exception crosses this C boundary.
+*/
+typedef enum clipper_detour_direction_t {
+    CLIPPER_DETOUR_CW = 0,
+    CLIPPER_DETOUR_CCW = 1,
+    CLIPPER_DETOUR_POLYGON = 2,
+    CLIPPER_DETOUR_REVERSE = 3,
+    CLIPPER_DETOUR_SHORTEST = 4,
+    CLIPPER_DETOUR_LONGEST = 5
+} clipper_detour_direction_t;
+
+SLIC3R_HOST_API polyline_handle *clipper_detour_polyline_expolygons(storage_handle *storage,
+    const polyline_handle *polyline, const clipper_shapes_handle *rings,
+    clipper_detour_direction_t direction);
 
 #ifdef __cplusplus
 }

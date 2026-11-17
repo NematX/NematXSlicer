@@ -120,7 +120,7 @@ class AbiPackagingTests(unittest.TestCase):
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT"], 59)
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_FAN_POLICY"], 60)
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_PRINTING_LAYER_TIME"], 61)
-        self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 6])
+        self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 7])
         self.assertEqual(catalog["headers"]["slic3r_orchestrator.h"]["version"], [3, 5])
         self.assertEqual(namespace["PLUGIN_INITIALIZE"]._restype_, ctypes.c_int32)
         self.assertEqual(self.generator.ctype_expr("raw_plugin_log_level", set(), {}), "ctypes.c_int")
@@ -198,6 +198,7 @@ class AbiPackagingTests(unittest.TestCase):
                 sorted(catalog["headers"]["slic3r_extrusion_entity.h"]["dependencies"]))
 
     def test_high_level_helpers_declare_their_native_contracts(self):
+        """Check wrapper dependencies, and that the C detour function is listed under slic3r_clipper.h."""
         runtime = ROOT / "src/libslic3r/Api/plugin/python"
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
@@ -360,11 +361,19 @@ class AbiPackagingTests(unittest.TestCase):
                         bindings.symbols[geometry_helper],
                     )
 
+            self.assertIn("slic3r_clipper.h",
+                          catalog.c_functions["clipper_detour_polyline_expolygons"])
             for clipper_helper in (
                 "clipper_clip_expolygons_with_subject_bbox",
+                "clipper_diff_ex",
                 "clipper_diff_polyline_expolygons",
+                "clipper_detour_polyline_expolygons",
+                "clipper_expand",
+                "clipper_intersection_ex",
                 "clipper_intersection_polyline_expolygons",
                 "clipper_split_polyline_expolygons",
+                "clipper_variable_offset_inner",
+                "clipper_variable_offset_inner_ex",
             ):
                 with self.subTest(clipper_helper=clipper_helper):
                     self.assertIn(

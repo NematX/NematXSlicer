@@ -11,6 +11,8 @@
 #include <memory>
 #include <vector>
 
+#include <boost/multiprecision/cpp_int.hpp>
+
 #include "libslic3r/Api/plugin/c/slic3r_clipper.h"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -32,7 +34,7 @@ variable inward offset validates per-vertex distances and coordinate margins
 before calling the native geometry routine; inputs are never changed.
 
 Native-result calls validate arguments, compute into local owning temporaries,
-then transfer a successful collection to PluginStorage. They catch all exceptions
+then transfer a successful result to PluginStorage. They catch all exceptions
 and return NULL without storing a result. The shape route does not provide that
 exception guarantee. Storage owns returned handles until free, clear or destruction;
 adapters borrow their source geometry for their entire use.
@@ -54,6 +56,7 @@ Plugin calls
 |-- clipper_variable_offset_inner_ex: validate and regroup vertex distances
 |   |-- variable_offset_inner_ex: compute inset areas using per-ring distances
 |   `-- store_expolygons: transfer the completed collection to storage
+|-- clipper_detour_polyline_expolygons: replace polyline stretches crossing rings by ring arcs
 `-- clipper_expand: expand individual rings, unite them and store Polygons
 */
 
@@ -73,6 +76,11 @@ expolygon_collection_handle *clipper_variable_offset_inner_ex(storage_handle *st
 // positive delta is required, and failures store nothing and return NULL.
 polygon_collection_handle *clipper_expand(storage_handle *storage,
     const polygon_collection_handle *polygons, double delta);
+// Compute the detour from borrowed inputs into a local polyline stored only once
+// complete; a NULL argument, an unknown direction or an exception returns NULL.
+polyline_handle *clipper_detour_polyline_expolygons(storage_handle *storage,
+    const polyline_handle *polyline, const clipper_shapes_handle *rings,
+    clipper_detour_direction_t direction);
 
 namespace Slic3r {
 
@@ -365,6 +373,354 @@ static ClipperLib::PolyTree united_polytree(ClipperLib::PolyTree tree)
     clipper.Execute(ClipperLib::ctUnion, united, ClipperLib::pftNonZero, ClipperLib::pftNonZero);
     return united;
 }
+
+/*
+Polyline detour around closed rings, used by clipper_detour_polyline_expolygons().
+
+A ring is one closed path of the supplied shapes: an outer contour or a hole, both
+handled the same way. The polyline crosses a ring where it goes from one side of
+that ring to the other. Touching a ring and coming back on the same side is not a
+crossing, and neither is a contact at the first or last point of the polyline.
+
+The detour runs in two steps.
+1. Find the crossings (detour_crossings). For each ring, every polyline segment is
+   intersected with every ring edge (detour_contacts). A contact is a single point,
+   or an interval when the polyline runs along an edge. Contacts that touch along
+   the polyline are merged. The polyline is then sampled in the middle of the free
+   stretch before and after each merged contact (detour_inside): when the two
+   samples are on different sides, the contact is a crossing, placed at its end.
+2. Replace polyline stretches (detour_polyline). The crossings are visited in
+   polyline order. When the ring of a crossing is crossed again later, detour_exit
+   chooses the walking direction on that ring and the exit: the first of those
+   later crossings met while walking. The polyline between the entry and the exit
+   is replaced by the ring vertices met on the way (detour_append_arc). The visit
+   continues after the exit, skipping the crossings of the replaced stretch. A
+   crossing whose ring is not crossed again changes nothing.
+
+A position on the polyline is a segment index plus the fraction along that segment;
+a position on a ring is an edge index plus the fraction along that edge, and a ring
+vertex is stored as fraction 0 of the edge starting there.
+
+Whether two segments intersect or overlap, and which way a ring turns, are decided
+exactly with 128-bit integer products of coordinate differences. Fractions, side
+samples, arc lengths and the rounded crossing points use floating point: crossings
+closer than its precision can merge, and a published point can be one unit away
+from the exact one. Each crossing keeps a single ring position, so a ring that
+touches itself may be followed the long way round.
+*/
+
+// Return a copy of subject in which the stretch between each paired entry and exit
+// crossing is replaced by the ring arc between them, as explained above.
+static Polyline detour_polyline(const Polyline &subject, const ClipperLib::Paths &paths,
+    clipper_detour_direction_t direction);
+
+// A position on a ring: the edge index and the fraction along that edge, in [0, 1).
+struct DetourRingPosition { size_t edge; long double fraction; };
+// A contact between the polyline and one ring: the polyline positions where it begins
+// and ends (equal for a single point), and the ring position and rounded point at its
+// end. The point is computed from its segment's own fraction, so a polyline with many
+// segments does not reduce its precision.
+struct DetourContact { long double begin, end; DetourRingPosition ring_end; Point end_point; };
+// A crossing: its polyline position, its ring position, the ring index and the rounded point.
+struct DetourCrossing { long double position; DetourRingPosition ring_position; size_t ring; Point point; };
+// A ring ready for the detour: its points without consecutive repeats, the length of
+// each edge (edge i goes from point i to the next one, the last edge closes the ring)
+// and whether the ring runs counter-clockwise.
+struct DetourRing {
+    ClipperLib::Path points;
+    std::vector<long double> lengths;
+    bool ccw = false;
+};
+// A product of two 64-bit coordinate differences can need up to 128 bits.
+using DetourWide = boost::multiprecision::int128_t;
+
+// For the crossing events[entry], whose ring is crossed next at events[next], set
+// follows to the walking direction (true along the ring's point order) and return the
+// index of the later crossing of the same ring met first in that direction.
+static size_t detour_exit(const std::vector<DetourCrossing> &events, size_t entry, size_t next,
+    const DetourRing &ring, clipper_detour_direction_t direction, bool &follows);
+// Append the ring vertices met when walking from one ring position to another, without both ends.
+static void detour_append_arc(Points &points, const DetourRing &ring, DetourRingPosition from,
+    DetourRingPosition to, bool follows);
+// Append point unless it equals the last point, so a junction is not emitted twice.
+static void detour_append(Points &points, const Point &point);
+// Return the crossings of every ring with at least three points, sorted along the
+// polyline, then by ring index for crossings at the same position.
+static std::vector<DetourCrossing> detour_crossings(const Polyline &subject,
+    const std::vector<DetourRing> &rings);
+// Return the contacts between the polyline and one ring without consecutive repeated
+// points, in no particular order. Zero-length polyline segments are skipped.
+static std::vector<DetourContact> detour_contacts(const Polyline &subject, const ClipperLib::Path &ring);
+// Return the unrounded XY point at a polyline position.
+static std::pair<long double, long double> detour_position(const Polyline &subject, long double position);
+// Return whether a point lies inside a ring, by counting the ring edges crossed by a
+// horizontal ray from the point (even-odd rule). The point must not lie on the ring.
+static bool detour_inside(const ClipperLib::Path &ring, const std::pair<long double, long double> &point);
+// Return the ring position at a fraction along an edge; the end of an edge (fraction 1)
+// becomes the start of the next edge, so each vertex has a single position.
+static DetourRingPosition detour_ring_position(size_t edge, long double fraction, size_t count);
+// Return the length of the ring arc from start to end, walking along the ring's point
+// order when follows is true and against it otherwise.
+static long double detour_arc_length(const DetourRing &ring, DetourRingPosition start,
+    DetourRingPosition end, bool follows);
+
+static Polyline detour_polyline(const Polyline &subject, const ClipperLib::Paths &paths,
+    clipper_detour_direction_t direction)
+{
+    if (subject.points.size() < 2)
+        return subject;
+    std::vector<DetourRing> rings(paths.size());
+    for (size_t index = 0; index < paths.size(); ++index) {
+        DetourRing &ring = rings[index];
+        for (const ClipperLib::IntPoint &point : paths[index])
+            if (ring.points.empty() || point != ring.points.back())
+                ring.points.push_back(point);
+        while (ring.points.size() > 1 && ring.points.front() == ring.points.back())
+            ring.points.pop_back();
+        const size_t count = ring.points.size();
+        size_t lowest = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const ClipperLib::IntPoint &a = ring.points[i], &b = ring.points[(i + 1) % count];
+            ring.lengths.push_back(std::hypot(static_cast<long double>(b.x()) - a.x(),
+                static_cast<long double>(b.y()) - a.y()));
+            if (a.y() < ring.points[lowest].y() || (a.y() == ring.points[lowest].y() && a.x() < ring.points[lowest].x()))
+                lowest = i;
+        }
+        // The lowest (then leftmost) vertex is always convex, so the turn made there
+        // gives the orientation of the whole ring.
+        if (count >= 3) {
+            const ClipperLib::IntPoint &p = ring.points[(lowest + count - 1) % count], &v = ring.points[lowest],
+                &q = ring.points[(lowest + 1) % count];
+            ring.ccw = DetourWide(v.x() - p.x()) * (q.y() - v.y()) - DetourWide(v.y() - p.y()) * (q.x() - v.x()) > 0;
+        }
+    }
+    const std::vector<DetourCrossing> events = detour_crossings(subject, rings);
+    Polyline result;
+    size_t next_original = 0;
+    for (size_t entry = 0; entry < events.size();) {
+        // Look for the next crossing of the same ring further along the polyline.
+        const DetourCrossing &e = events[entry];
+        size_t next = entry + 1;
+        while (next < events.size() && (events[next].ring != e.ring || events[next].position <= e.position))
+            ++next;
+        if (next == events.size()) {
+            ++entry;
+            continue;
+        }
+        bool follows = true;
+        const size_t exit = detour_exit(events, entry, next, rings[e.ring], direction, follows);
+        // Copy the original points up to the entry, then the entry, the arc and the exit.
+        while (next_original <= e.position)
+            detour_append(result.points, subject.points[next_original++]);
+        detour_append(result.points, e.point);
+        detour_append_arc(result.points, rings[e.ring], e.ring_position, events[exit].ring_position, follows);
+        detour_append(result.points, events[exit].point);
+        // Resume after the exit, skipping the original points and crossings it passed over.
+        next_original = size_t(events[exit].position) + 1;
+        for (entry = exit + 1; entry < events.size() && events[entry].position <= events[exit].position; ++entry) {}
+    }
+    if (result.points.empty())
+        return subject;
+    while (next_original < subject.points.size())
+        detour_append(result.points, subject.points[next_original++]);
+    return result;
+}
+
+static size_t detour_exit(const std::vector<DetourCrossing> &events, size_t entry, size_t next,
+    const DetourRing &ring, clipper_detour_direction_t direction, bool &follows)
+{
+    const DetourRingPosition from = events[entry].ring_position;
+    const long double forward = detour_arc_length(ring, from, events[next].ring_position, true);
+    const long double backward = detour_arc_length(ring, from, events[next].ring_position, false);
+    switch (direction) {
+    case CLIPPER_DETOUR_CW: follows = !ring.ccw; break;
+    case CLIPPER_DETOUR_CCW: follows = ring.ccw; break;
+    case CLIPPER_DETOUR_REVERSE: follows = false; break;
+    case CLIPPER_DETOUR_SHORTEST: follows = forward <= backward; break;
+    case CLIPPER_DETOUR_LONGEST: follows = forward >= backward; break;
+    default: follows = true; break;
+    }
+    // Crossings after next are also later on the polyline. On equal distances along
+    // the ring, the crossing that comes first on the polyline is kept.
+    size_t exit = next;
+    long double best = follows ? forward : backward;
+    for (size_t candidate = next + 1; candidate < events.size(); ++candidate) {
+        if (events[candidate].ring != events[entry].ring)
+            continue;
+        const long double length = detour_arc_length(ring, from, events[candidate].ring_position, follows);
+        if (length < best) {
+            best = length;
+            exit = candidate;
+        }
+    }
+    return exit;
+}
+
+static void detour_append_arc(Points &points, const DetourRing &ring, DetourRingPosition from,
+    DetourRingPosition to, bool follows)
+{
+    // A backward walk meets the vertices of the forward walk from to to from, in reverse order.
+    if (!follows)
+        std::swap(from, to);
+    // Walking forward, the vertices met are from.edge + 1 up to to.edge. Vertex to.edge
+    // is the end itself when to.fraction is 0, so it is not appended. When the end lies
+    // behind the start on the same edge, the walk goes once around the whole ring.
+    const size_t count = ring.points.size();
+    size_t vertices = (to.edge + count - from.edge) % count;
+    if (vertices == 0 && to.fraction < from.fraction)
+        vertices = count;
+    if (vertices > 0 && to.fraction == 0)
+        --vertices;
+    for (size_t i = 0; i < vertices; ++i) {
+        const ClipperLib::IntPoint &vertex =
+            ring.points[(from.edge + (follows ? 1 + i : vertices - i)) % count];
+        detour_append(points, Point(vertex.x(), vertex.y()));
+    }
+}
+
+static void detour_append(Points &points, const Point &point)
+{
+    if (points.empty() || points.back() != point)
+        points.push_back(point);
+}
+
+static std::vector<DetourCrossing> detour_crossings(const Polyline &subject,
+    const std::vector<DetourRing> &rings)
+{
+    std::vector<DetourCrossing> events;
+    const long double finish = subject.points.size() - 1;
+    for (size_t index = 0; index < rings.size(); ++index) {
+        const ClipperLib::Path &ring = rings[index].points;
+        if (ring.size() < 3)
+            continue;
+        std::vector<DetourContact> contacts = detour_contacts(subject, ring);
+        std::stable_sort(contacts.begin(), contacts.end(), [](const DetourContact &a, const DetourContact &b) {
+            return a.begin < b.begin || (a.begin == b.begin && a.end < b.end);
+        });
+        // Merge the contacts that touch or overlap along the polyline.
+        std::vector<DetourContact> groups;
+        for (const DetourContact &contact : contacts) {
+            if (groups.empty() || contact.begin > groups.back().end)
+                groups.push_back(contact);
+            else if (contact.end > groups.back().end) {
+                groups.back().end = contact.end;
+                groups.back().ring_end = contact.ring_end;
+                groups.back().end_point = contact.end_point;
+            }
+        }
+        // Compare the sides in the middle of the free stretches before and after each
+        // contact. A contact at either polyline end has no stretch on one side.
+        for (size_t i = 0; i < groups.size(); ++i) {
+            const DetourContact &contact = groups[i];
+            if (contact.begin == 0 || contact.end == finish)
+                continue;
+            const long double before = (contact.begin + (i == 0 ? 0 : groups[i - 1].end)) / 2;
+            const long double after = (contact.end + (i + 1 == groups.size() ? finish : groups[i + 1].begin)) / 2;
+            if (detour_inside(ring, detour_position(subject, before)) ==
+                detour_inside(ring, detour_position(subject, after)))
+                continue;
+            events.push_back({contact.end, contact.ring_end, index, contact.end_point});
+        }
+    }
+    std::stable_sort(events.begin(), events.end(), [](const DetourCrossing &a, const DetourCrossing &b) {
+        return a.position < b.position || (a.position == b.position && a.ring < b.ring);
+    });
+    return events;
+}
+
+static std::vector<DetourContact> detour_contacts(const Polyline &subject, const ClipperLib::Path &ring)
+{
+    // value / total lies in [0, 1] exactly when value lies between 0 and total.
+    const auto unit = [](const DetourWide &value, const DetourWide &total) {
+        return total > 0 ? 0 <= value && value <= total : total <= value && value <= 0;
+    };
+    std::vector<DetourContact> contacts;
+    for (size_t segment = 0; segment + 1 < subject.points.size(); ++segment) {
+        const Point &p = subject.points[segment], &q = subject.points[segment + 1];
+        const int64_t dx = q.x() - p.x(), dy = q.y() - p.y();
+        if (dx == 0 && dy == 0)
+            continue;
+        for (size_t edge = 0; edge < ring.size(); ++edge) {
+            const ClipperLib::IntPoint &a = ring[edge], &b = ring[(edge + 1) % ring.size()];
+            const int64_t ex = b.x() - a.x(), ey = b.y() - a.y();
+            const int64_t ax = a.x() - p.x(), ay = a.y() - p.y();
+            // cross is zero when the segment and the edge are parallel. Otherwise
+            // along / cross and across / cross are the fractions of their intersection
+            // along the segment and along the edge.
+            const DetourWide cross = DetourWide(dx) * ey - DetourWide(dy) * ex;
+            const DetourWide along = DetourWide(ax) * ey - DetourWide(ay) * ex;
+            if (cross != 0) {
+                const DetourWide across = DetourWide(ax) * dy - DetourWide(ay) * dx;
+                if (unit(along, cross) && unit(across, cross)) {
+                    const long double t = along.convert_to<long double>() / cross.convert_to<long double>();
+                    const long double u = across.convert_to<long double>() / cross.convert_to<long double>();
+                    contacts.push_back({segment + t, segment + t, detour_ring_position(edge, u, ring.size()),
+                        Point(coord_t(std::round(p.x() + t * dx)), coord_t(std::round(p.y() + t * dy)))});
+                }
+            } else if (along == 0) {
+                // The segment and the edge lie on the same line: the contact is their
+                // overlap, from begin to end along the segment, if they overlap at all.
+                const long double t0 = dx != 0 ? static_cast<long double>(ax) / dx : static_cast<long double>(ay) / dy;
+                const long double t1 = dx != 0 ? static_cast<long double>(ax + ex) / dx :
+                    static_cast<long double>(ay + ey) / dy;
+                const long double begin = std::max(0.L, std::min(t0, t1));
+                const long double end = std::min(1.L, std::max(t0, t1));
+                if (begin <= end) {
+                    // The overlap ends at an edge vertex, kept exact, or at the segment end q,
+                    // whose fraction along the edge is then computed.
+                    const long double u = end == t0 ? 0 : end == t1 ? 1 :
+                        std::clamp(ex != 0 ? (end * dx - ax) / ex : (end * dy - ay) / ey, 0.L, 1.L);
+                    const Point end_point = end == t0 ? Point(a.x(), a.y()) : end == t1 ? Point(b.x(), b.y()) : q;
+                    contacts.push_back({segment + begin, segment + end, detour_ring_position(edge, u, ring.size()), end_point});
+                }
+            }
+        }
+    }
+    return contacts;
+}
+
+static std::pair<long double, long double> detour_position(const Polyline &subject, long double position)
+{
+    const size_t segment = std::min(size_t(position), subject.points.size() - 2);
+    const long double t = position - segment;
+    const Point &a = subject.points[segment], &b = subject.points[segment + 1];
+    return {a.x() + t * (static_cast<long double>(b.x()) - a.x()),
+            a.y() + t * (static_cast<long double>(b.y()) - a.y())};
+}
+
+static bool detour_inside(const ClipperLib::Path &ring, const std::pair<long double, long double> &point)
+{
+    bool inside = false;
+    for (size_t i = 0; i < ring.size(); ++i) {
+        const ClipperLib::IntPoint &a = ring[i], &b = ring[(i + 1) % ring.size()];
+        if ((a.y() > point.second) != (b.y() > point.second) &&
+            point.first < a.x() + (point.second - a.y()) *
+                (static_cast<long double>(b.x()) - a.x()) / (static_cast<long double>(b.y()) - a.y()))
+            inside = !inside;
+    }
+    return inside;
+}
+
+static DetourRingPosition detour_ring_position(size_t edge, long double fraction, size_t count)
+{
+    if (fraction == 1)
+        return {(edge + 1) % count, 0};
+    return {edge, fraction};
+}
+
+static long double detour_arc_length(const DetourRing &ring, DetourRingPosition start,
+    DetourRingPosition end, bool follows)
+{
+    if (!follows)
+        std::swap(start, end);
+    if (start.edge == end.edge && end.fraction >= start.fraction)
+        return (end.fraction - start.fraction) * ring.lengths[start.edge];
+    long double length = (1 - start.fraction) * ring.lengths[start.edge] + end.fraction * ring.lengths[end.edge];
+    for (size_t edge = (start.edge + 1) % ring.points.size(); edge != end.edge; edge = (edge + 1) % ring.points.size())
+        length += ring.lengths[edge];
+    return length;
+}
+
 } // namespace Slic3r
 
 extern "C" {
@@ -1082,6 +1438,22 @@ int32_t clipper_split_polyline_expolygons(storage_handle *storage,
     *inside = inside_handle;
     *outside = outside_handle;
     return 1;
+}
+
+polyline_handle *clipper_detour_polyline_expolygons(storage_handle *storage,
+    const polyline_handle *polyline, const clipper_shapes_handle *rings,
+    clipper_detour_direction_t direction)
+{
+    if (storage == nullptr || polyline == nullptr || rings == nullptr ||
+        direction < CLIPPER_DETOUR_CW || direction > CLIPPER_DETOUR_LONGEST)
+        return nullptr;
+    try {
+        std::unique_ptr<Slic3r::Polyline> result = std::make_unique<Slic3r::Polyline>(
+            Slic3r::detour_polyline(*Slic3r::to_polyline(polyline), Slic3r::to_shapes(rings)->to_paths(), direction));
+        return reinterpret_cast<polyline_handle *>(Slic3r::to_storage(storage)->store(std::move(result)));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 } // extern "C"
