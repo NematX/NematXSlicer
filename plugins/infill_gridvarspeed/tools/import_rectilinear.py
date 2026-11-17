@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1] / "src" / "rectilinear"
 HASHES = {
     "RectilinearFills.cpp": "b6c79befd2038a7e715711a2903d8ebacadd3fd3d7a900a46425169276501f52",
     "PolygonWorkBuffers.hpp": "8389fc6f43ea9d67b1ea32bc677657bf89c1632cb5be9aba929d0eb65561650f",
-    "ClipperHelpers.hpp": "e7a18092e75c191be24ddfc33fa1d9f2a8b6d5b366936e3c11abb90cdf59f873",
+    "ClipperHelpers.hpp": "b1d8bb4b90ecfb44f53599d329f7986bb538db1aee5cc740a5416096cd666424",
     "WorkBuffers.hpp": "a4121d62a9298c9db02d7c178cea8def3c3cb4f233bd5f1d15dff620a19c3f99",
 }
 

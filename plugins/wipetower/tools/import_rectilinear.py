@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1] / "src" / "rectilinear"
 HASHES = {
     "WorkBuffers.hpp": "a4121d62a9298c9db02d7c178cea8def3c3cb4f233bd5f1d15dff620a19c3f99",
     "PolygonWorkBuffers.hpp": "8389fc6f43ea9d67b1ea32bc677657bf89c1632cb5be9aba929d0eb65561650f",
-    "ClipperHelpers.hpp": "e7a18092e75c191be24ddfc33fa1d9f2a8b6d5b366936e3c11abb90cdf59f873",
+    "ClipperHelpers.hpp": "b1d8bb4b90ecfb44f53599d329f7986bb538db1aee5cc740a5416096cd666424",
     "PluginEdgeGrid.hpp": "a091a8cbe33ef461c8df671aca3849bb4575143bded6b7795e8355f7c2fb35d9",
     "PluginEdgeGrid.cpp": "1ead8c7f362a87d0ce1d2d273c1b06f91c5cacc7aa01d0d18dff3034fdfc7078",
     "RectilinearConnect.hpp": "f7c15af206de45d4ce7d2bf7227b3b2fd5c07939dc6f5e5ff54ffcbcbf4bb65e",
