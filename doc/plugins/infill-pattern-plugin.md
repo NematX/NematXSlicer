@@ -11,12 +11,21 @@ shared `PatternPluginHelpers.hpp` utilities.
 
 ## Initialization
 
-Before the first run, the generator performs a discovery pass and reports the
+During `setup_run()`, the generator performs a discovery pass and reports the
 work groups of every pattern through `report_pattern_assignments()`. The host
-aggregates them and calls `setup()` once per used pattern with a
+services aggregate them and call `setup()` once per used pattern with a
 `run_ctx_infill_pattern_init` payload listing the objects and their groups. Use
 it to precompute per-object state (grids, bounding boxes, synchronization); the
 payload stays valid until the run for the same object completes.
+
+`STEP_INFILL` runs an ordered chain of object plugins through the common step
+runner, like post-infill. Alternative generators belong to its `generator`
+exclusive group; the selector keeps the existing `step_infill_plugin` key.
+Other plugins on the step run before or after the selected generator by priority.
+Every plugin phase has its own discovery/service context. All object discoveries
+finish before any object runs. The first `generate_pattern()` call of `run()`
+initializes the used patterns, once, with the groups of every object. A pass that
+does not generate paths does not initialize patterns or recipe modifiers.
 
 ## Step contract
 

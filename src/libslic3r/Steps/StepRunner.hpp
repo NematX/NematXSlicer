@@ -256,14 +256,17 @@ inline void validate_or_report(bool (*validator)(const Print &, std::string *),
 
 // Run one plugin on the listed objects. setup() prepares one run per listed
 // object, while each run sees its real object index among object_count objects.
-template<class PayloadFactory>
+struct ObjectStepReady { void operator()() const noexcept {} };
+
+template<class PayloadFactory, class BeforeRun = ObjectStepReady>
 void run_object_step_plugin(Orchestrator &orchestrator,
                             Print &print,
                             slicing_step_t step,
                             Plugin &plugin,
                             const std::vector<size_t> &object_indices,
                             size_t object_count,
-                            PayloadFactory payload_factory)
+                            PayloadFactory payload_factory,
+                            BeforeRun before_run = {})
 {
     assert(object_indices.size() <= UINT32_MAX);
     std::atomic_bool execution_error { false };
@@ -292,6 +295,10 @@ void run_object_step_plugin(Orchestrator &orchestrator,
     });
     throw_if_plugin_stopped(orchestrator, print, step, plugin, execution_error, "setup_run");
 
+    // Optional phase-local services may seal their discovery data here. No
+    // object worker is running, and execution has not yet borrowed that data.
+    before_run();
+
     parallel_for(size_t(0), object_indices.size(), [&host_context, &object_indices, &payload_factory, &run_context, &plugin](const size_t run_idx) {
         const size_t idx = object_indices[run_idx];
         plugin_run_context context_copy = run_context;
@@ -309,17 +316,18 @@ void run_object_step_plugin(Orchestrator &orchestrator,
 }
 
 // Run one plugin on objects 0 .. run_count-1 of a print with run_count objects.
-template<class PayloadFactory>
+template<class PayloadFactory, class BeforeRun = ObjectStepReady>
 void run_object_step_plugin(Orchestrator &orchestrator,
                             Print &print,
                             slicing_step_t step,
                             Plugin &plugin,
                             size_t run_count,
-                            PayloadFactory payload_factory)
+                            PayloadFactory payload_factory,
+                            BeforeRun before_run = {})
 {
     std::vector<size_t> object_indices(run_count);
     std::iota(object_indices.begin(), object_indices.end(), size_t(0));
-    run_object_step_plugin(orchestrator, print, step, plugin, object_indices, run_count, payload_factory);
+    run_object_step_plugin(orchestrator, print, step, plugin, object_indices, run_count, payload_factory, before_run);
 }
 
 template<class PayloadFactory>

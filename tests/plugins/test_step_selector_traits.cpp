@@ -904,7 +904,8 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     CHECK(exporter_table.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
 }
 
-// Check the keys, labels and declared settings of all nine selectors for entire steps.
+// Check whole-step selectors and the infill generator group that replaced its
+// whole-step exclusivity while retaining the preset's selector key.
 TEST_CASE("Whole-step selector traits come from their owner module",
           "[plugins][step-pipeline][selector-snapshot][selector-traits]")
 {
@@ -922,14 +923,13 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {STEP_SLICING, RAW_OPTION_CATEGORY_SLICING, RAW_PRESET_TYPE_FFF_PRINT, STEP_SLICING, false},
         {STEP_PERIMETER, RAW_OPTION_CATEGORY_PERIMETER, RAW_PRESET_TYPE_FFF_PRINT, STEP_PERIMETER, false},
         {STEP_INFILL_GROUP, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL_GROUP, false},
-        {STEP_INFILL, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL, false},
         {STEP_WIPETOWER, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_WIPETOWER, false},
         {STEP_LAYER_STICHING, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_LAYER_STICHING, false},
         {STEP_EXPORT, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_NONE, true},
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
-    REQUIRE(identities.size() == 9);
+    REQUIRE(identities.size() == sizeof(expected)/sizeof(expected[0]));
     for (const Expected &entry : expected) {
         INFO(int(entry.step));
         const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator identity = identities.find(entry.step);
@@ -953,6 +953,17 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         CHECK(group.ui_fragment == "page:Notes\ngroup:Exclusive step plugins\nline:" +
                                    std::string(identity->second.line_label) + "\nsetting:" + identity->second.key + "\nend_line\n");
     }
+    CHECK(identities.count(STEP_INFILL)==0);
+    const StepSelectorTraits *infill=host.step_selector(STEP_INFILL,"generator");
+    REQUIRE(infill!=nullptr);
+    CHECK(host.step_selector_is_builtin(STEP_INFILL,"generator"));
+    CHECK(infill->exclusive_group=="generator");
+    CHECK(infill->option_key=="step_infill_plugin");
+    CHECK(infill->category==RAW_OPTION_CATEGORY_INFILL);
+    CHECK(infill->option_preset_type==RAW_PRESET_TYPE_FFF_PRINT);
+    REQUIRE(infill->invalidates_step.has_value());
+    CHECK(*infill->invalidates_step==STEP_INFILL);
+    CHECK_FALSE(infill->show_with_one_provider);
 }
 
 // Check that firmware and reader choices replay G-code, while thumbnail and exporter choices affect only export.

@@ -739,7 +739,6 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_SLICING,        {"step_slicing_plugin",        "Slicing plugin",         "Slicing step plugin"}},
         {STEP_PERIMETER,      {"step_perimeter_plugin",      "Perimeter plugin",       "Perimeter step plugin"}},
         {STEP_INFILL_GROUP,   {"step_infill_group_plugin",   "Infill grouping plugin", "Infill grouping step plugin"}},
-        {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
         {GCODE_FIRMWARE,      {"gcode_flavor",               "G-code flavor",          "G-code flavor"}},

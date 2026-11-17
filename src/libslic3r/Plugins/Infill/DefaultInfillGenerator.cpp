@@ -54,7 +54,9 @@ grouped, and every group is reported to the host through
 report_pattern_assignments() so the used pattern plugins can be initialized
 once for the print. The recipes are kept in m_object_caches until run().
 
-run_impl() replays the cached groups instead of recomputing the recipes. Each
+run_impl() replays the cached groups instead of recomputing the recipes. Its
+first generate_pattern() call makes the host initialize the used patterns, once,
+with the groups that every object reported during discovery. Each
 surface still results in one pattern call, and the generated subtree is kept
 only when the pattern and density are valid. It receives an
 ExtrusionPropertyInfill containing the source surface id, the raw fill recipe
@@ -905,6 +907,7 @@ void DefaultInfillGenerator::setup_run_impl(const plugin_run_context *run_ctx) c
         }
     }
 
+    std::lock_guard<std::mutex> lock(m_cache_mutex);
     m_object_caches[&object] = std::move(cache);
 }
 
@@ -921,10 +924,17 @@ void DefaultInfillGenerator::run_impl(const plugin_run_context *run_ctx) const
     const Slic3r::Print &print = *reinterpret_cast<const Slic3r::Print *>(ctx->print);
     const Slic3r::PrintObject &object = *reinterpret_cast<const Slic3r::PrintObject *>(ctx->object);
 
-    const std::map<const Slic3r::PrintObject *, std::shared_ptr<DefaultInfillObjectWorkCache>>::iterator cached =
-        m_object_caches.find(&object);
-    if (cached != m_object_caches.end() && cached->second) {
-        for (const DefaultInfillWorkGroup &group : cached->second->groups) {
+    std::shared_ptr<DefaultInfillObjectWorkCache> cached;
+    {
+        std::lock_guard<std::mutex> lock(m_cache_mutex);
+        const auto found = m_object_caches.find(&object);
+        if (found != m_object_caches.end()) {
+            cached = std::move(found->second);
+            m_object_caches.erase(found);
+        }
+    }
+    if (cached) {
+        for (const DefaultInfillWorkGroup &group : cached->groups) {
             for (const DefaultInfillSurfaceWork &work : group.surfaces) {
                 throw_if_cancelled(run_ctx);
                 generate_surface_from_recipe(*ctx, *group.layer, *group.island, *group.region_island, *group.region,
@@ -933,8 +943,6 @@ void DefaultInfillGenerator::run_impl(const plugin_run_context *run_ctx) const
                 progress().increment();
             }
         }
-        // The recipes are no longer needed once the object has been filled.
-        m_object_caches.erase(cached);
         return;
     }
 

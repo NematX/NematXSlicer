@@ -87,6 +87,8 @@ set(SLIC3R_SOURCES
 	Api/host/slic3r_utils.cpp
 	Api/host/slic3r_volume.cpp
 	Api/host/steps/BridgeDetectorStep.cpp
+	Api/host/steps/InfillStep.cpp
+	Api/host/steps/InfillStep.hpp
 	Api/host/steps/LayerHeightStep.cpp
 	Api/host/steps/LayerHeightStep.hpp
 	Api/host/steps/PostSlicingStep.cpp
