@@ -137,12 +137,11 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
 // fallback_turn degrees. prepare_internal() turns by 90 so the bridge crosses the
 // lower sparse direction: it prefers the first overlapping lower sparse region's
 // configuration, otherwise the current region's one. An external bridge keeps the
-// current region's fill direction (turn 0) and reports a warning through warn.
+// current region's fill direction (turn 0), silently as in legacy SuperSlicer.
 // Missing flow, failed detection without fallback or an invalid resulting angle throws.
 double direction(orchestrator_handle *orch, const Config &print_config, const LayerRegion &region,
     const ExPolygonCollection &core, const ExPolygonCollection &lower, uint32_t layer_idx, bool &from_user,
-    const Config *fallback=nullptr, uint32_t fallback_layer=0, double fallback_turn=90.,
-    const plugin_run_context *warn=nullptr);
+    const Config *fallback=nullptr, uint32_t fallback_layer=0, double fallback_turn=90.);
 // Copy the source surface's data onto the extended area, store its chosen angle
 // and mark it with BridgeSurfaceInfo. A failed angle write throws before replacement.
 void append_prepared(const run_ctx_surface_generation &ctx, Destination &destination, const Piece &source,
@@ -361,7 +360,7 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         bool from_user=false;
         const Config region_config=piece.region.print_region().config();
         const double angle=direction(orch,print_config,piece.region,piece.area.readonly(),lower.readonly(),layer_idx,from_user,
-            &region_config,layer_idx,0.,run_ctx);
+            &region_config,layer_idx,0.);
         const ExpansionMargins margins=expansion_margins(piece.region.handle());
         const extruder_index_t tool=layer_region_get_role_extruder(piece.region.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
         if (tool==EXTRUDER_ID_UNKNOWN) throw std::runtime_error("A prepared bridge has no resolved solid-infill tool.");
@@ -565,7 +564,7 @@ std::vector<std::vector<size_t>> make_groups(storage_handle *storage,const std::
 
 double direction(orchestrator_handle *orch, const Config &print_config, const LayerRegion &region,
     const ExPolygonCollection &core, const ExPolygonCollection &lower, uint32_t layer_idx, bool &from_user,
-    const Config *fallback,uint32_t fallback_layer,double fallback_turn,const plugin_run_context *warn)
+    const Config *fallback,uint32_t fallback_layer,double fallback_turn)
 {
     const Config config=region.print_region().config();
     const ConfigOption override_angle=config.get("bridge_angle");
@@ -588,9 +587,6 @@ double direction(orchestrator_handle *orch, const Config &print_config, const La
             const double cross=fallback->get("fill_angle_cross").get_bool() && (fallback_layer&1u)!=0 ? 90. : 0.;
             angle=(base+fallback->get("fill_angle_increment").get_float()*fallback_layer+cross+fallback_turn)*PI/180.;
             angle=std::fmod(angle,PI);if (angle<0.) angle+=PI;
-            if (warn!=nullptr)
-                report_warning(warn,("Layer "+std::to_string(layer_idx)+": no bridge direction could be detected; "
-                    "the bridge follows the fill direction of its layer.").c_str());
         } else throw std::runtime_error("No bridge direction could be detected; specify bridge_angle or disable bridge preparation.");
     }
     if (!std::isfinite(angle) || angle<0.) internal_error("Invalid canonical bridge direction.");
