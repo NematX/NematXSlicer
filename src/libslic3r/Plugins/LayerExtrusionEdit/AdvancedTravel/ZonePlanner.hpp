@@ -12,35 +12,39 @@ travels whose two endpoints have no valid object instance, such as skirt and bri
 Config borrows its referenced
 configuration; that configuration must outlive the planner.
 Call static eligible(compatibility, config, auxiliary_avoidance, source, target)
-for summarize(), then build TravelZoneView and ZonePlanner, then call path(T, travel)
+for the eligibility guard, then build TravelZoneView and ZonePlanner, then call path(T, travel)
 in nondecreasing T order. Instance eligible(source, target) uses the same test
 with the planner's settings. Dependencies and context storage must outlive this object.
-Attractors form a routing domain after expanded forbidden material is removed.
+Attractors publish original slices. The planner first subtracts expanded forbidden
+material to form M, then withdraws each M component into one non-empty W used only
+for ring routing. A component keeps the indexes of every source slice that
+contributes filled area to it; endpoint provenance must match one of those sources.
+An endpoint in M has physical membership in that component; a link is the
+connector from that endpoint to its selected W point, built inside M.
 The planner borrows the print and worker layer-input cache to resolve spacing and
-island-jump settings. It owns geometry cached by active set, tool, ignored zones
+island-jump settings. It owns M/W geometry cached by active set, tool, ignored zones
 and spacing. Outside-part and mixed travels also use slices of the plan's objects
 at the group Z or below, from groups up to the current one; the synthetic wipe
 tower is not a blocker. Their containing endpoint components
 are ignored before expansion; the cache additionally keys group, Z and ignored
 platter components. The plan catalog and object slices remain immutable during use.
-A normal object-layer endpoint offers its containing component (or nearest within
-1.5 spacings) and an option without a domain. An endpoint outside its chosen component
-attaches at the nearest ring point; contained endpoints remain unchanged. Regionless
-or auxiliary-layer endpoints (support, raft, skirt, brim, tower) are outside the part
-and offer only the option without a domain. Candidate pairs are
+A normal object-layer endpoint offers its containing M component only when its
+instance, source layer and original slice all match; otherwise it offers only the
+option without a domain. An endpoint in M but outside W is connected to the nearest
+W ring through the M rings. Regionless or auxiliary-layer endpoints (support, raft,
+skirt, brim, tower) are outside the part and offer only the option without a domain.
+Candidate pairs are
 ranked by estimated outside length plus weighted inside length, with stable ties.
-Inside estimates use weighted chord length wholly inside their component;
-endpoint attachments within 1.5 spacings are likewise priced as inside material;
-other connectors use clipped inside and outside portions across all components.
-An outside-part endpoint's connector counts its full length without a domain penalty
-or an inside weight in the estimate.
+Inside estimates use weighted length within one component; other connectors use
+clipped inside and outside portions across all M components. Every outside segment
+uses the same outside-plus-weighted-inside formula, including an outside-part endpoint.
 Same-component paths use that component alone. Paths between distinct components
 reach selected bridge points within each one and detour around forbidden rings on the bridge.
 Mixed choices use the nearest ring exit/entry to the free endpoint and detour around
 rings on the remaining connector. Estimates and routes share selected points. The
 option without domains follows expanded obstacle rings, including holes.
-For in-part travels whose endpoints have the same domain candidate, that option requires its chord to stay
-within components grown by 1.5 spacings, with a SCALED_EPSILON outside-length allowance.
+For in-part travels whose endpoints have the same M component, that option requires
+its chord to stay in that component, with a SCALED_EPSILON outside-length allowance.
 Every route is checked against original forbidden material, exact endpoints and
 the complete-path detour budget. Its actual outside-domain length cannot exceed
 the obstacle-only reference detour's outside length by more than SCALED_EPSILON;
@@ -113,9 +117,11 @@ private:
         polygon_work::ExPolygons expanded;
         // Unioned attractor components after subtracting expanded forbidden material.
         polygon_work::ExPolygons components;
-        // Components grown by 1.5 perimeter spacings, used to reject chords that leave the near-domain material proxy.
-        polygon_work::ExPolygons material_proxy;
-        // Independently indexed rings for each component, in components order.
+        // One W component per M component, used only for ring routing.
+        polygon_work::ExPolygons withdrawn_components;
+        // Every active raw attractor index contributing filled area to each M component.
+        std::vector<std::vector<size_t>> component_sources;
+        // Independently indexed W rings for each component, in components order.
         std::vector<std::unique_ptr<AvoidCrossing::Boundary>> component_boundaries;
         // First ring index of each component in the combined domain boundary.
         std::vector<size_t> component_rings;

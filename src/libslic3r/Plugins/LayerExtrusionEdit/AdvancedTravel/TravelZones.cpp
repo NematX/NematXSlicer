@@ -10,29 +10,25 @@
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
 /*
-TravelZones converts ordered pair owners into travel dates and collects owned
-zone geometry before any travel is applied. A pair is two adjacent scope roots,
-indexed by pair_index; its target owner is a PrintingExtrusion (PE).
-Contributors borrow the print, plan, run context and worker-local layer-input
-cache only during collection. The view
-keeps the run context for cancellation and storage-backed polygon operations.
+TravelZones collects contributor-owned geometry and keeps its published dates
+while travels are applied. A pair is two adjacent scope roots, indexed by
+pair_index; its target owner is a PrintingExtrusion (PE). Contributors borrow
+the print, plan, run context and worker-local layer-input cache only during
+collection. The view keeps the run context for cancellation and storage-backed
+polygon operations.
 
 Dates and scope are separate: crossing an event changes the dated active set,
 while tool, instance and support filtering can change the applicable set even
-without an event. Sorted applicable indexes key stable cached unions and ids.
-Only a completed union is published, so cancellation cannot cache partial areas.
+without an event. Sorted applicable indexes key stable cached unions of attractors
+and ids; forbidden indexes remain available for the planner's later selection.
+Only a completed attractor union is published, so cancellation cannot cache partial areas.
 
-    summarize: map pair runs to travel bounds and evaluate caller eligibility
     TravelZoneView: collect zones, validate dates and sort start/end events
-    query: advance events, filter scopes, reuse or build the two role unions
+    query: advance events, filter scopes, reuse or build the union of attractors
         applies: match tool, either instance and either support endpoint
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
-
-// Convert consecutive pair runs to half-open travel dates, retaining empty intervals and borrowed owner views; predicate failures propagate.
-ChronologySummary summarize(const TravelConnection::LayerTravelChronology &chronology,
-    const std::function<bool(const PendingTravel &)> &avoidance_enabled);
 
 namespace {
 
@@ -56,42 +52,6 @@ bool applies(const ZoneScope &scope, const PendingTravel &travel)
 }
 
 } // namespace
-
-ChronologySummary summarize(const TravelConnection::LayerTravelChronology &chronology,
-    const std::function<bool(const PendingTravel &)> &avoidance_enabled)
-{
-    ChronologySummary result;
-    result.travel_count = chronology.travels.size();
-    // A pair can print without generating a travel; lower_bound retains its empty T interval.
-    const auto date = [&chronology](size_t pair) -> size_t {
-        return size_t(std::lower_bound(chronology.travels.begin(), chronology.travels.end(), pair,
-            [](const PendingTravel &travel, size_t index) { return travel.pair_index < index; }) -
-            chronology.travels.begin());
-    };
-    const std::vector<TravelConnection::LayerTravelChronology::PairExtrusion> &pairs =
-        chronology.pair_extrusions;
-    for (size_t begin = 0; begin < pairs.size();) {
-        size_t end = begin + 1;
-        while (end < pairs.size() && pairs[end].target.handle() == pairs[begin].target.handle())
-            ++end;
-        result.extrusions.push_back({pairs[begin].target, pairs[begin].extruder_id,
-                                     {date(begin), date(end)}});
-        begin = end;
-    }
-    for (size_t begin = 0; begin < pairs.size();) {
-        size_t end = begin + 1;
-        while (end < pairs.size() && pairs[end].extruder_id == pairs[begin].extruder_id)
-            ++end;
-        result.tools.push_back({pairs[begin].extruder_id, {date(begin), date(end)}});
-        begin = end;
-    }
-    for (const PendingTravel &travel : chronology.travels) {
-        const bool enabled = avoidance_enabled(travel);
-        result.avoidance_active.push_back(enabled);
-        result.any_avoidance_active = result.any_avoidance_active || enabled;
-    }
-    return result;
-}
 
 TravelZoneView::TravelZoneView(
     const std::vector<std::reference_wrapper<const ZoneContributor>> &contributors,
@@ -148,20 +108,16 @@ const ActiveZones &TravelZoneView::query(const size_t t, const PendingTravel &tr
     active.id = m_cache.size();
     for (size_t index : indexes) {
         throw_if_cancelled(&m_context);
-        polygon_work::ExPolygons &area = m_zones[index].role == ZoneRole::Attractor ?
-            active.attractors : active.forbidden;
-        area.insert(area.end(), m_zones[index].area.begin(), m_zones[index].area.end());
-        if (m_zones[index].role == ZoneRole::Forbidden)
+        if (m_zones[index].role == ZoneRole::Attractor) {
+            active.attractor_indexes.push_back(index);
+            active.attractors.insert(active.attractors.end(), m_zones[index].area.begin(), m_zones[index].area.end());
+        } else {
             active.forbidden_indexes.push_back(index);
+        }
     }
     throw_if_cancelled(&m_context);
     if (!active.attractors.empty()) {
         active.attractors = PluginCommon::clipper::union_ex(m_context.plugin_storage, active.attractors);
-        ++m_union_builds;
-    }
-    throw_if_cancelled(&m_context);
-    if (!active.forbidden.empty()) {
-        active.forbidden = PluginCommon::clipper::union_ex(m_context.plugin_storage, active.forbidden);
         ++m_union_builds;
     }
     throw_if_cancelled(&m_context);

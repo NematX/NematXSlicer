@@ -772,9 +772,8 @@ snaps nearby seams, without inserting travels. `apply` requests one route per
 recorded gap in order, inserts travels, interpolates Z and updates flags.
 `T` is the zero-based index in `LayerTravelChronology::travels`, not a scope
 index. The chronology also retains the target extrusion owner and tool for
-every traversed pair, including pairs without a new gap. Its summary maps
-consecutive runs of the same target owner and, separately, consecutive runs of
-the same tool to half-open T intervals, including empty ones.
+every traversed pair, including pairs without a new gap. Advanced travel uses
+the chronology directly; it does not keep a second chronology map.
 
 The exclusive group `layer_extrusion_edit.travel.advanced.planner` selects
 `.legacy` (Legacy, priority -1, the default) or `.advanced` (Advanced, 0), using those suffixes
@@ -789,28 +788,35 @@ A dated zone has an attractor or forbidden role, polygon geometry in platter XY
 coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
 means an open end for the rest of the layer. Scope can restrict the tool, require
 either endpoint to match an instance in the plan catalog, or require either
-endpoint extrusion to be support. Attractors form a routing domain; endpoint
-attachments and inter-island jumps may leave it.
+endpoint extrusion to be support. An attractor is an original source slice;
+the planner later builds M from the active attractor union and selected
+expanded blockers, then builds one withdrawn W component for each M component.
+M controls endpoint admission and validation, while W supplies the rings used for
+routing.
 
 `TravelZoneView` collects contributor geometry once per worker, rejects reversed
 dates and drops empty areas and intervals. Queries advance through dated events
-in nondecreasing T order, filter by scope and cache unions by role for each
-applicable set. Zone construction is skipped if there is no eligible gap after
-layer entry.
+in nondecreasing T order, filter by scope and cache the attractor union by its
+applicable zone-index set. The individual attractor and forbidden indexes stay
+available to the planner; no forbidden union is built by the view. Zone
+construction is skipped if there is no eligible gap after layer entry.
 
 Contributors are independently activated plugins under
 `layer_extrusion_edit.travel.advanced.zones.`:
 
-- `island_attractors` is active by default. It withdraws each perimeter slice by
-  1.5 perimeter spacings with `elephant_foot_compensation`
-  (`Plugins/ElephantFootCompensation.hpp`), shared with first-layer XY
-  compensation. It withdraws material while keeping thin walls, limiting
-  withdrawal near a minimum width of external perimeter width plus
-  perimeter spacing. Support also includes slices from the last object layer
-  below the support target's Z plus `SCALED_EPSILON`. Withdrawn parts are shifted
-  per instance and dated by consecutive travels whose source
-  or target belongs to the original slice on that layer and instance, including
-  its border, not by membership in the withdrawn parts.
+- `island_attractors` is active by default. It publishes each original perimeter
+  slice without withdrawal, shifted per instance and dated by consecutive
+  travels whose source or target belongs to that source slice on the same layer
+  and instance, including its border. Support also includes slices from the last
+  object layer below the support target's Z plus `SCALED_EPSILON`. The zone keeps
+  the source-layer handle and instance scope. Endpoint admission additionally
+  requires that the endpoint's own layer, instance and point membership match
+  this source slice; an active zone for the other endpoint is not a substitute.
+  The planner performs the late withdrawal after forbidden material is removed:
+  each M component is passed separately to `elephant_foot_compensation` with a
+  minimum width of `min(0.01 mm, nozzle_diameter / 10)` and a requested
+  withdrawal of `1.5 * perimeter_spacing`. The resulting W components are used
+  only for ring routing and retain one non-empty result per valid M component.
 - `forbidden_tops` is active by default. It copies the boundary's excluded top
   components as separate forbidden zones for the whole layer, scoped per instance.
 - `printed_tops` is opt-in and replaces `forbidden_tops` when active. It uses the
@@ -850,30 +856,33 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
    object slices too, then union and expand all remaining forbidden material by the
    tool's nozzle radius. This leaves the in-part endpoint's own component reachable
    on a mixed travel. Subtract the expanded
-   obstacles from active attractors to form domain components.
-2. **Rank hypotheses.** An in-part endpoint offers its containing domain, otherwise
-   the nearest component within 1.5 perimeter spacings, plus the option without a
-   domain (`D∅`). Outside-part endpoints offer only `D∅`, even near a domain.
-   Contained points stay unchanged; other attachments use the nearest ring point.
-   At most four pairs are ranked stably, domain choices first on equal costs.
-   Same-component and attachment estimates cost `w * length`; bridges and other
-   in-part connectors cost outside-domain length plus `w * inside-domain length`,
-   measured across all components. An outside-part endpoint's leg counts its full
-   length without a domain penalty or inside weight. Here `w` is
-   `avoid_travel_island_weight` when island avoidance is active, otherwise zero.
-   For an in-part travel whose endpoint candidates share one component, admit
-   `D∅/D∅` only when its chord stays inside the components grown by 1.5 spacings
-   (allowing `SCALED_EPSILON` outside). Between different components, or without
-   an endpoint candidate, this material-proxy restriction does not apply.
+    obstacles from active attractors to form M components. Each M component keeps
+    every active raw slice that contributes filled area to it; W is then built
+    separately from each component for ring routing.
+2. **Rank hypotheses.** An in-part endpoint offers only the M component that
+   contains it when its source layer, instance and original attractor slice all
+   match; otherwise it offers no attractor candidate. There is no nearest-domain
+   fallback. Outside-part endpoints offer only the option without a domain, even near a domain. An
+   endpoint in M but outside W is connected to its nearest W ring point by a
+   connector that must remain in M. At most four pairs are ranked stably, domain
+   choices first on equal costs. Same-component ring and connector estimates
+   cost `w * length`; bridges and other connectors cost outside-domain length plus
+   `w * inside-domain length`, measured across all M components. Every outside
+   segment uses that same formula, including a segment adjacent to an
+   outside-part endpoint. Here `w` is `avoid_travel_island_weight` when island
+   avoidance is active, otherwise zero. For an in-part travel whose candidates
+   share one M component, admit the option without a domain at both ends only when its chord stays in that M
+   component, allowing `SCALED_EPSILON` outside. This is an M-membership rule,
+   not a withdrawn-material or nearest-domain proxy.
 3. **Construct the candidate.** Within one component, join the attachments by a
-   chord that follows the component's rings only where it crosses them. Between
-   components, select bridge points with the legacy weighted jump search, route
-   within each component to those points and contour expanded
-   obstacles along the bridge. A mixed domain/`D∅` choice uses the domain ring
-   point nearest the free endpoint, then contours obstacles to that endpoint.
-   A `D∅/D∅` candidate contours obstacles on the original chord. Estimates and
-   construction share all selected bridge/entry/exit points. ZonePlanner never
-   delegates to Legacy.
+   chord that follows W's rings only where it crosses them. Between components,
+   select bridge points with the legacy weighted jump search on the combined W
+   boundary, route within each component to those points and contour expanded
+   obstacles along the bridge. A mixed domain/option-without-a-domain choice uses the M component's
+   nearest W ring exit or entry, then contours expanded obstacles to the free
+   endpoint. A candidate with the option without a domain at both ends contours obstacles on the original chord.
+   Estimates and construction share all selected bridge/entry/exit points.
+   ZonePlanner never delegates to Legacy.
 4. **Validate, then retry.** Require exact endpoints, no segment crossing original
    forbidden material and the complete-path detour budget. Actual outside-domain
    length must not exceed that of one obstacle-only reference detour by more than
@@ -884,8 +893,8 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
    next hypothesis. After exhaustion, only if no
    hypothesis passed forbidden-material validation, disable the remaining original
    forbidden component first crossed along the straight chord
-   or, if that chord is clear, along the initial best-ranked estimate polyline (including
-   attachments and bridge), and rebuild obstacles, domains and hypotheses.
+    or, if that chord is clear, along the initial best-ranked estimate polyline (including
+    attachments and bridge), and rebuild obstacles, M, W and hypotheses.
    Budget-only or outside-length rejection keeps the counted straight fallback
    without deactivation. This includes zone components
    and slices of the plan's objects. Equal crossing positions prefer zone order,
@@ -895,18 +904,19 @@ Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
    or initial best estimate (counting each component once) caps
    deactivations. No crossed component, or reaching that cap without acceptance,
    returns one counted straight fallback. `disabled_blockers` counts explicit
-   deactivations across calls, not endpoint exclusions. An accepted `D∅` route is not a fallback. `domain_routes`
-   counts accepted domain paths, `bridges` accepted inter-component bridges, and
-   `detours` accepted paths longer than the chord by more than `SCALED_EPSILON`.
+    deactivations across calls, not endpoint exclusions. An accepted route using the option without a domain is not a fallback. `domain_routes`
+    counts accepted domain paths, `bridges` accepted inter-component bridges, and
+    `detours` accepted paths longer than the chord by more than `SCALED_EPSILON`.
 
 Spacing and island settings come from the target layer input, then the source
 when the target has no region, with nozzle diameter as the spacing fallback.
-The worker caches areas and component rings by active zones, tool, ignored zones
+The worker caches M, W and component rings by active zones, tool, ignored zones
 and spacing. Travels using platter blockers additionally key group, Z and ignored
 platter components; the plan catalog and object slices remain unchanged during use.
-Obstacle-only references and connectors use the public Clipper detour operation in
-Shortest mode. ZonePlanner extends each chord by `SCALED_EPSILON` so an endpoint
-contact can be seen as a crossing; holes are followed like other rings.
+Obstacle-only references and external connectors use the public Clipper detour
+operation in Shortest mode. ZonePlanner extends only those external connector
+chords by `SCALED_EPSILON` so an endpoint contact can be seen as a crossing; the
+M-to-W link is not extended. Holes are followed like other rings.
 `avoid_crossing_perimeters_max_detour` limits extra length in
 millimetres or as a percentage of chord length; zero is unlimited. Routing is
 heuristic, not shortest-path search; validation checks original material, not the
@@ -916,8 +926,8 @@ nozzle margin, and the final fallback remains straight.
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- ScopeTravelConnector::prepare: record chronology and snap seams
 |-- orchestrator_select_plugin: choose Legacy or Advanced
-|-- summarize: evaluate eligibility and date owner/tool runs
-|-- TravelZoneView: collect active contributors and cache dated role unions
+|-- eligibility guard: test whether at least one gap can use Advanced
+|-- TravelZoneView: collect active contributors and cache dated unions of attractors
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
     |-- CompatibilityPlanner::path: use perimeter routing
     `-- ZonePlanner::path: classify endpoints, cache geometry and rank hypotheses
@@ -925,7 +935,8 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
         |-- build_boundary / endpoint_candidates: index components and choose attachments
         |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
         |-- append_component_path / route_on_boundary: follow each chosen component
-        |-- detour: extend chords and call the public Clipper ring-detour operation
+        |-- detour: extend connectors and call the public Clipper ring-detour operation
+        |-- detour_in_component: build an unextended M-to-W link
         `-- validate all segments: accept, retry hypotheses or remove a crossed blocker within the component bound, then fall back
 ```
 

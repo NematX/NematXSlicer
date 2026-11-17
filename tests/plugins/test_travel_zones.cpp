@@ -1,8 +1,11 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
+
 #include "avoid_crossing_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "libslic3r/Plugins/Common/ClipperHelpers.hpp"
+#include "libslic3r/Plugins/ElephantFootCompensation.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/TravelZones.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/LayerInputCache.hpp"
@@ -16,20 +19,21 @@ Travel-zone tests give contributors small owned rectangles and query their
 dated, scoped unions without a production consumer. A direct connector check
 uses the shared transition helpers to publish real scopes and entry state, then
 checks pair owners before apply. All views borrow locally owned prints or PEs.
-Sliced frames and separate islands compare withdrawn domains with per-slice
-withdrawal and excluded tops with the core boundary cache, including shifted
-instances and source-or-target dates on the original slices.
+Sliced frames and separate islands compare raw published slices with the shared
+late withdrawal utility and excluded tops with the core boundary cache, including
+shifted instances and source-or-target dates on the original slices.
 Printed tops are compared with that same core geometry and dated by the last
 arrival in each containing original island; removing all such arrivals omits it.
 The tools are simulated by alternating tool ids on a single-extruder slice;
 the support target is simulated by marking a sliced top layer as support.
-Attractor-domain checks slice a dumbbell, a square and disjoint squares, compare uniform withdrawal,
-and reuse copied slices as a support target's lower object layer.
+Late-withdrawal checks slice a dumbbell, a square and disjoint squares, compare
+their boxes and surfaces with independent references, and retain a traversable
+bridge through the result.
 
     rectangle: build a counter-clockwise work area
     ZoneTestInput: keep borrowed contributor input and polygon storage alive
     FixedContributor::contribute: append synthetic areas and count calls
-    tests: collect eagerly, query lazy unions, and summarize real ordered pairs
+    tests: collect eagerly, query lazy attractor unions, and retain real ordered pairs
     sliced default-zone test: slice frames, populate core caches, compare copied zones
         `-- check_shifted_area: compare contour and hole vertices in original order
 */
@@ -45,6 +49,8 @@ namespace ac = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
 work::ExPolygons rectangle(coord_t x, coord_t width);
 // Compare every contour and hole vertex with the core area after the target instance shift.
 void check_shifted_area(const work::ExPolygons &actual, const Slic3r::ExPolygons &expected, c_point shift);
+// Compare every contour and hole vertex with an owned raw source slice after the instance shift.
+void check_shifted_work_area(const work::ExPolygons &actual, const work::ExPolygon &expected, c_point shift);
 
 struct ZoneTestInput
 {
@@ -55,7 +61,6 @@ struct ZoneTestInput
     slic3r_api::PrintingPlan plan_view;
     slic3r_api::LayerExtrusionEdit::AvoidCrossing::LayerInputCache cache;
     travel::LayerTravelChronology chronology;
-    zones::ChronologySummary summary;
     size_t checks = 0;
     size_t cancel_at = 0;
 
@@ -78,7 +83,7 @@ struct ZoneTestInput
     zones::ZoneContributorInput input()
     {
         return {print_view, plan_view, context, Slic3r::scale_i(0.2), cache,
-                chronology.travels, summary};
+                chronology.travels};
     }
 };
 
@@ -122,8 +127,24 @@ void check_shifted_area(const work::ExPolygons &actual, const Slic3r::ExPolygons
     }
 }
 
-// Slice a square, a dumbbell and two disjoint squares; check thin-wall withdrawal, component splitting, support lower slices and empty input.
-TEST_CASE("Attractor domain keeps a one-perimeter bridge and withdraws wide areas", "[plugins][attractor-domain]")
+void check_shifted_work_area(const work::ExPolygons &actual, const work::ExPolygon &expected, const c_point shift)
+{
+    REQUIRE(actual.size() == 1);
+    REQUIRE(actual.front().holes.size() == expected.holes.size());
+    const auto check_ring = [shift](const work::Polygon &actual_ring, const work::Polygon &expected_ring) {
+        REQUIRE(actual_ring.size() == expected_ring.size());
+        for (size_t point = 0; point < actual_ring.size(); ++point) {
+            CHECK(actual_ring[point].x() == expected_ring[point].x() + shift.x);
+            CHECK(actual_ring[point].y() == expected_ring[point].y() + shift.y);
+        }
+    };
+    check_ring(actual.front().contour, expected.contour);
+    for (size_t hole = 0; hole < expected.holes.size(); ++hole)
+        check_ring(actual.front().holes[hole], expected.holes[hole]);
+}
+
+// Publish raw source slices and check the shared late withdrawal keeps one usable result per slice.
+TEST_CASE("Attractor zones publish raw slices and late withdrawal keeps thin bridges", "[plugins][travel-zones]")
 {
     namespace clipper = slic3r_api::PluginCommon::clipper;
     namespace ac = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
@@ -147,66 +168,110 @@ TEST_CASE("Attractor domain keeps a one-perimeter bridge and withdraws wide area
     const ac::Input input = ac::build_input(owner.context.plugin_storage, owner.print_view, {0, 0, false});
     const ac::LayerInput &layer = *input.target;
     REQUIRE(layer.perimeter_slices.size() == (scene == 2 ? 2 : 1));
-    const work::ExPolygons uniform = clipper::offset_ex(owner.context.plugin_storage, layer.perimeter_slices,
-                                                      -1.5 * layer.perimeter_spacing);
-    const work::ExPolygons domain = zones::attractor_domain(owner.context.plugin_storage, input);
+    const work::ExPolygons &raw = layer.perimeter_slices;
+    work::ExPolygons withdrawn;
+    const double minimum_width = 0.01;
+    const coord_t withdrawal = coord_t(1.5 * double(layer.perimeter_spacing));
+    for (const work::ExPolygon &slice : raw) {
+        const slic3r_api::StoredExPolygonCollection stored = clipper::to_stored_expolygons(
+            owner.context.plugin_storage, {slice});
+        const slic3r_api::ExPolygon source = stored.readonly().at(0);
+        const slic3r_api::StoredExPolygonCollection result =
+            slic3r_api::XYSizeCompensationPlugin::detail::elephant_foot_compensation(
+            owner.context.plugin_storage, source, minimum_width, withdrawal);
+        const work::ExPolygons copied = clipper::from_expolygon_collection_view(result.readonly());
+        REQUIRE(copied.size() == 1);
+        REQUIRE_FALSE(copied.front().contour.points.empty());
+        withdrawn.push_back(copied.front());
+    }
+    const work::ExPolygons domain = clipper::union_ex(owner.context.plugin_storage, withdrawn);
     REQUIRE(domain.size() == (scene == 2 ? 2 : 1));
     const double mm2 = double(Slic3r::scale_i(1.)) * Slic3r::scale_i(1.);
-    double uniform_area = 0.;
-    for (const work::ExPolygon &part : uniform) uniform_area += part.area();
     double original_area_mm2 = 0.;
-    for (const work::ExPolygon &part : layer.perimeter_slices) original_area_mm2 += part.area() / mm2;
-    const double uniform_area_mm2 = uniform_area / mm2;
+    for (const work::ExPolygon &part : raw) original_area_mm2 += part.area() / mm2;
     double domain_area_mm2 = 0.;
     for (const work::ExPolygon &part : domain) domain_area_mm2 += part.area() / mm2;
-    CAPTURE(scene, original_area_mm2, uniform_area_mm2, domain_area_mm2);
+    CAPTURE(scene, original_area_mm2, domain_area_mm2);
     if (bridge) {
-        REQUIRE(uniform.size() == 2);
         const Slic3r::Point minimum = Slic3r::get_extents(owner.print.object(0).layers().front().lslices()).min;
         const work::Point middle{minimum.x() + Slic3r::scale_i(12.5), minimum.y() + Slic3r::scale_i(5.)};
         CHECK(domain.front().contains(middle));
         CHECK(domain_area_mm2 < original_area_mm2);
-        CHECK(domain.front().contains({middle.x(), middle.y() + Slic3r::scale_i(0.1)}, false));
+        // The 0.4 mm neck is narrowed to the 0.01 mm minimum-width guard, not removed.
+        const coord_t inside_half_width = Slic3r::scale_i(0.004);
+        const coord_t outside_half_width = Slic3r::scale_i(0.006);
+        CHECK(domain.front().contains({middle.x(), middle.y() - inside_half_width}, true));
+        CHECK(domain.front().contains({middle.x(), middle.y() + inside_half_width}, true));
+        CHECK_FALSE(domain.front().contains({middle.x(), middle.y() - outside_half_width}, true));
+        CHECK_FALSE(domain.front().contains({middle.x(), middle.y() + outside_half_width}, true));
         work::Polyline through_bridge;
         through_bridge.points = {{minimum.x() + Slic3r::scale_i(5.), middle.y()},
                                  {minimum.x() + Slic3r::scale_i(20.), middle.y()}};
         CHECK(clipper::diff_pl(owner.context.plugin_storage, {through_bridge}, domain).empty());
-    } else if (scene == 0) {
-        REQUIRE(uniform.size() == 1);
-        // Rounded local withdrawal can differ by 0.02 mm at square corners; allow 1 mm2 overall.
-        CHECK(domain.front().area() / mm2 == Approx(uniform_area / mm2).margin(1.));
-        const work::BoundingBox actual = domain.front().contour.bounding_box();
-        const work::BoundingBox expected = uniform.front().contour.bounding_box();
-        CHECK(actual.min.x() == Approx(expected.min.x()).margin(Slic3r::scale_i(0.02)));
-        CHECK(actual.max.x() == Approx(expected.max.x()).margin(Slic3r::scale_i(0.02)));
-        CHECK(actual.min.y() == Approx(expected.min.y()).margin(Slic3r::scale_i(0.02)));
-        CHECK(actual.max.y() == Approx(expected.max.y()).margin(Slic3r::scale_i(0.02)));
     } else {
-        CHECK(uniform.size() == 2);
-        CHECK(domain_area_mm2 == Approx(uniform_area_mm2).margin(2.));
+        double expected_area_mm2 = 0.;
+        for (const work::ExPolygon &slice : raw) {
+            const auto box = slice.contour.bounding_box();
+            const double width = Slic3r::unscaled(box.max.x() - box.min.x()) - 2. * Slic3r::unscaled(withdrawal);
+            const double height = Slic3r::unscaled(box.max.y() - box.min.y()) - 2. * Slic3r::unscaled(withdrawal);
+            REQUIRE(width > 0.);
+            REQUIRE(height > 0.);
+            expected_area_mm2 += width * height;
+        }
+        // Four integer-grid edge roundings and the resampled contour stay below this 0.05 mm² margin.
+        CHECK(domain_area_mm2 == Approx(expected_area_mm2).margin(0.05));
+        if (scene == 0) {
+            const auto box = raw.front().contour.bounding_box();
+            const auto actual = domain.front().contour.bounding_box();
+            CHECK(actual.min.x() == Approx(box.min.x() + withdrawal).margin(2.));
+            CHECK(actual.min.y() == Approx(box.min.y() + withdrawal).margin(2.));
+            CHECK(actual.max.x() == Approx(box.max.x() - withdrawal).margin(2.));
+            CHECK(actual.max.y() == Approx(box.max.y() - withdrawal).margin(2.));
+        }
     }
-    ac::LayerInput support_layer = layer;
-    support_layer.support = true;
-    support_layer.perimeter_slices.clear();
-    ac::Input support;
-    support.target = std::make_unique<const ac::LayerInput>(support_layer);
-    CHECK(zones::attractor_domain(owner.context.plugin_storage, support).empty());
-    support.lower_perimeter_slices = layer.perimeter_slices;
-    const work::ExPolygons lower = zones::attractor_domain(owner.context.plugin_storage, support);
-    REQUIRE(lower.size() == domain.size());
-    CHECK(lower.front().area() == domain.front().area());
-    CHECK(clipper::diff_ex(owner.context.plugin_storage, lower, domain).empty());
-    CHECK(clipper::diff_ex(owner.context.plugin_storage, domain, lower).empty());
-    // A normal target ignores lower slices and empty geometry needs no width settings.
-    ac::Input empty;
-    CHECK(zones::attractor_domain(owner.context.plugin_storage, empty).empty());
-    empty.target = std::make_unique<const ac::LayerInput>();
-    empty.lower_perimeter_slices = layer.perimeter_slices;
-    CHECK(zones::attractor_domain(owner.context.plugin_storage, empty).empty());
+    REQUIRE(domain.size() == withdrawn.size());
+    for (size_t component = 0; component < domain.size(); ++component) {
+        CHECK(clipper::diff_ex(owner.context.plugin_storage, {domain[component]}, {withdrawn[component]}).empty());
+        CHECK(clipper::diff_ex(owner.context.plugin_storage, {withdrawn[component]}, {domain[component]}).empty());
+        CHECK(domain[component].area() == Approx(withdrawn[component].area()));
+    }
+
+    Slic3r::Layer &source_layer = owner.print.object(0).layers().front();
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&source_layer));
+    owner.chronology.travels.clear();
+    for (size_t instance = 0; instance < 1; ++instance) {
+        const uint32_t catalog = owner.print.mutable_printing_plan().find_or_add_object_instance(owner.print.object(0), instance);
+        const c_point shift = owner.print_view.object(0).instance_shift(instance);
+        for (size_t slice = 0; slice < raw.size(); ++slice) {
+            travel::PendingTravel pending;
+            pending.target.printing_catalog_id = catalog;
+            pending.target.region_island = layer_view.island(slice).get_or_create_full_region_island(0);
+            pending.target.position = {raw[slice].contour.points.front().x() + shift.x,
+                                       raw[slice].contour.points.front().y() + shift.y, layer_view.print_z()};
+            owner.chronology.travels.push_back(pending);
+        }
+    }
+    owner.plan_view = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+        &owner.print.mutable_printing_plan()));
+    zones::DefaultAttractorContributor attractors;
+    std::vector<zones::TravelZone> published;
+    attractors.contribute(owner.input(), published);
+    REQUIRE(published.size() == raw.size());
+    for (size_t instance = 0; instance < 1; ++instance) {
+        const uint32_t catalog = owner.chronology.travels[instance * raw.size()].target.printing_catalog_id;
+        const c_point shift = owner.print_view.object(0).instance_shift(instance);
+        for (size_t slice = 0; slice < raw.size(); ++slice) {
+            const zones::TravelZone &zone = published[instance * raw.size() + slice];
+            CHECK(zone.scope.printing_catalog_id == catalog);
+            CHECK(zone.source_layer == reinterpret_cast<const layer_handle *>(&source_layer));
+            CHECK(zone.begin <= zone.end);
+            check_shifted_work_area(zone.area, raw[slice], shift);
+        }
+    }
 }
 
-// Slice two islands and two instances, then compare source-or-target domain dates and unchanged core top geometry.
-TEST_CASE("Default travel zones publish withdrawn slices and excluded tops", "[plugins][travel-zones]")
+// Slice two islands and two instances, then compare source-or-target dates and unchanged core top geometry.
+TEST_CASE("Default travel zones publish raw slices and excluded tops", "[plugins][travel-zones]")
 {
     const bool tops = GENERATE(false, true);
     const bool support = GENERATE(false, true);
@@ -337,12 +402,7 @@ TEST_CASE("Default travel zones publish withdrawn slices and excluded tops", "[p
                                                       first_target.position.y - shifts[instance].y});
             CHECK(zone.begin == instance * 5 + (first ? 0 : 2));
             CHECK(zone.end == instance * 5 + 4);
-            ac::LayerInput single = *copied.target;
-            single.support = false;
-            single.perimeter_slices = {slices[slice]};
-            ac::Input one;
-            one.target = std::make_unique<const ac::LayerInput>(std::move(single));
-            work::ExPolygons domain = zones::attractor_domain(owner.context.plugin_storage, one);
+            work::ExPolygons domain{slices[slice]};
             work::ExPolygons local = zone.area;
             for (work::ExPolygon &area : local) {
                 for (work::Point &point : area.contour.points) point -= work::Point(shifts[instance]);
@@ -369,14 +429,21 @@ TEST_CASE("Default travel zones publish withdrawn slices and excluded tops", "[p
         const zones::ActiveZones &active = view.query(t, pending);
         if (t % 5 == 4) { CHECK(active.attractors.empty()); continue; }
         REQUIRE(active.attractors.size() == (t % 5 < 2 ? 1 : 2));
-        // Dates use original slice borders even though the withdrawn routing domain excludes those endpoints.
-        for (const work::ExPolygon &domain : active.attractors)
-            CHECK_FALSE(domain.contains({pending.target.position.x, pending.target.position.y}));
+        // Dates use the original slice borders, and every active index remains available to the planner.
+        REQUIRE_FALSE(active.attractor_indexes.empty());
+        for (const size_t index : active.attractor_indexes)
+            CHECK_FALSE(view.zone_area(index).empty());
+        const work::Point endpoint(pending.target.position.x, pending.target.position.y);
+        CHECK(std::any_of(active.attractor_indexes.begin(), active.attractor_indexes.end(),
+            [&view, &endpoint](const size_t index) {
+                return std::any_of(view.zone_area(index).begin(), view.zone_area(index).end(),
+                    [&endpoint](const work::ExPolygon &area) { return area.contains(endpoint, true); });
+            }));
     }
     owner.cancel_at = owner.checks + 1;
     CHECK_THROWS_AS(attractors.contribute(owner.input(), masks), slic3r_api::PluginCancelled);
     CHECK_THROWS_AS(forbidden.contribute(owner.input(), excluded), slic3r_api::PluginCancelled);
-    // The input is already cached: slice withdrawal follows the cache lookup, then cancellation checks resume during dating.
+    // Collection remains cancellable before dating, and the raw-slice copy has no hidden withdrawal phase.
     for (size_t delay : {size_t(2), size_t(3)}) {
         owner.cancel_at = owner.checks + delay;
         CHECK_THROWS_AS(attractors.contribute(owner.input(), masks), slic3r_api::PluginCancelled);
@@ -405,22 +472,21 @@ TEST_CASE("Travel zones collect eagerly and cache dated applicable sets", "[plug
     const zones::ActiveZones &attracted = view.query(1, pending);
     REQUIRE(attracted.attractors.size() == 1);
     CHECK(attracted.attractors.front().area() == Approx(15000. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
-    CHECK(attracted.forbidden.empty());
+    CHECK(attracted.forbidden_indexes.empty());
     CHECK(attracted.id != empty.id);
     CHECK(&view.query(1, pending) == &attracted);
     CHECK(view.union_builds() == 1);
     const zones::ActiveZones &overlap = view.query(2, pending);
     CHECK(overlap.id != attracted.id);
     CHECK(overlap.attractors.front().area() == Approx(15000. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
-    CHECK(overlap.forbidden.front().area() == Approx(2500. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
     REQUIRE(overlap.forbidden_indexes.size() == 1);
     CHECK(view.zone_area(overlap.forbidden_indexes.front()).front().area() ==
           Approx(2500. * Slic3r::scale_i(1.) * Slic3r::scale_i(1.)));
     const zones::ActiveZones &ended = view.query(3, pending);
     CHECK(ended.attractors.empty());
-    CHECK_FALSE(ended.forbidden.empty());
+    CHECK_FALSE(ended.forbidden_indexes.empty());
     CHECK(&view.query(4, pending) == &empty);
-    CHECK(view.union_builds() == 4);
+    CHECK(view.union_builds() == 2);
     CHECK_THROWS_AS(view.query(3, pending), std::logic_error);
     CHECK(first.calls == 1);
     CHECK(second.calls == 1);
@@ -493,7 +559,7 @@ TEST_CASE("Travel zones propagate collection and union cancellation", "[plugins]
                         slic3r_api::PluginCancelled);
         CHECK(contributor.calls == 1);
     }
-    SECTION("Between role unions without publishing a partial cache") {
+    SECTION("During attractor union without publishing a partial cache") {
         zones::TravelZoneView view({std::cref(contributor)}, owner.input());
         owner.cancel_at = owner.checks + 5;
         travel::PendingTravel pending;
@@ -502,14 +568,14 @@ TEST_CASE("Travel zones propagate collection and union cancellation", "[plugins]
         owner.cancel_at = 0;
         const zones::ActiveZones &active = view.query(0, pending);
         CHECK_FALSE(active.attractors.empty());
-        CHECK_FALSE(active.forbidden.empty());
-        CHECK(view.union_builds() == 3);
+        CHECK_FALSE(active.forbidden_indexes.empty());
+        CHECK(view.union_builds() == 2);
         owner.cancel_at = owner.checks + 1;
         CHECK_THROWS_AS(view.query(0, pending), slic3r_api::PluginCancelled);
     }
 }
 
-TEST_CASE("Travel summary includes continuous and materialized printing owners and tools",
+TEST_CASE("Travel chronology retains continuous and materialized printing owners and tools",
           "[plugins][travel-zones]")
 {
     ZoneTestInput owner;
@@ -559,28 +625,15 @@ TEST_CASE("Travel summary includes continuous and materialized printing owners a
         CHECK(chronology.pair_extrusions[index].target.handle() == expected_owners[expected_pair_owners[index]]);
         CHECK(chronology.pair_extrusions[index].extruder_id == (index < 4 ? 0 : 1));
     }
-    const zones::ChronologySummary summary = zones::summarize(chronology,
-        [](const travel::PendingTravel &pending) { return pending.extruder_id == 1; });
-    CHECK(summary.travel_count == 3);
-    REQUIRE(summary.extrusions.size() == 5);
-    const std::vector<zones::TravelInterval> expected{{0, 0}, {0, 1}, {1, 1}, {1, 1}, {1, 3}};
-    for (size_t index = 0; index < expected.size(); ++index) {
-        CHECK(summary.extrusions[index].extrusion.handle() == expected_owners[index]);
-        CHECK(summary.extrusions[index].interval.begin == expected[index].begin);
-        CHECK(summary.extrusions[index].interval.end == expected[index].end);
-    }
-    REQUIRE(summary.tools.size() == 2);
-    CHECK(summary.tools[0].extruder == 0);
-    CHECK(summary.tools[0].interval.begin == 0);
-    CHECK(summary.tools[0].interval.end == 1);
-    CHECK(summary.tools[1].extruder == 1);
-    CHECK(summary.tools[1].interval.begin == 1);
-    CHECK(summary.tools[1].interval.end == 3);
-    CHECK(summary.avoidance_active == std::vector<bool>{false, true, true});
-    CHECK(summary.any_avoidance_active);
-    CHECK_FALSE(zones::summarize(chronology, [](const travel::PendingTravel &) { return false; }).any_avoidance_active);
-    const travel::LayerTravelChronology empty;
-    CHECK(zones::summarize(empty, [](const travel::PendingTravel &) { return true; }).extrusions.empty());
+    CHECK(chronology.travels[0].source_extrusion.handle() == expected_owners[0]);
+    CHECK(chronology.travels[0].target_extrusion.handle() == expected_owners[1]);
+    CHECK(chronology.travels[1].source_extrusion.handle() == expected_owners[3]);
+    CHECK(chronology.travels[1].target_extrusion.handle() == expected_owners[4]);
+    CHECK(chronology.travels[2].source_extrusion.handle() == expected_owners[4]);
+    CHECK(chronology.travels[2].target_extrusion.handle() == expected_owners[4]);
+    CHECK(chronology.travels[0].extruder_id == 0);
+    CHECK(chronology.travels[1].extruder_id == 1);
+    CHECK(chronology.travels[2].extruder_id == 1);
 }
 
 } // namespace

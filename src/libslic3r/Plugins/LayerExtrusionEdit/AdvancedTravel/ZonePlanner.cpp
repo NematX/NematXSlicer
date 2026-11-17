@@ -8,24 +8,25 @@
 #include <limits>
 
 #include "../../Common/ClipperHelpers.hpp"
+#include "../../ElephantFootCompensation.hpp"
 #include "../AvoidCrossing/LayerInputCache.hpp"
 
 /*
-ZonePlanner supplies ranked XY routes on active attractors minus expanded forbidden
-material. A normal object-layer endpoint chooses its containing component, or the
-nearest within 1.5 perimeter spacings, and also offers an option without a domain.
+ZonePlanner supplies ranked XY routes on M, the union of active raw attractors
+minus expanded forbidden material. It also builds W by withdrawing each M
+component with the shared thin-wall helper. A normal object-layer endpoint chooses
+the M component containing it only when its source layer, instance and raw source
+slice all match, and also offers an option without a domain.
 Regionless endpoints and endpoints on auxiliary layers (support, raft, skirt, brim
-and tower) are outside the part and offer only the option without a domain. An attachment
-is the endpoint itself when contained, otherwise the nearest ring point. Stable
-ranking compares estimated outside length plus weighted inside length. The layer's
+and tower) are outside the part and offer only the option without a domain. An endpoint
+in M is itself for membership; when it is outside W, a separate link reaches the
+nearest W ring through the M rings. Stable ranking compares estimated outside length
+plus weighted inside length. The layer's
 island-travel weight applies only when island avoidance is active; otherwise it is zero.
-An inside estimate represents a route within one component, so its chord
-length is weighted as wholly inside even when that chord spans a void. Other
-estimate connectors use their actual clipped inside and outside portions.
-Endpoint attachments within 1.5 spacings are also estimated as inside material;
-bridges and mixed entry/exit legs retain clipped pricing.
-Legs adjacent to an outside-part endpoint retain their geometric length without
-the inside weight or an outside-domain penalty in the estimate.
+An inside estimate represents a route within one component, so its length is
+weighted as wholly inside. Other estimate connectors use their actual clipped
+inside and outside portions. Every outside segment, including one adjacent to an
+outside-part endpoint, uses that same outside-plus-weighted-inside formula.
 Same-component paths use only that component: the chord between its attachments
 follows the component's rings only where it crosses them.
 Different-component paths join each component's route at bridge points selected
@@ -34,9 +35,8 @@ bridge. A mixed choice routes within its component to the ring point nearest the
 endpoint, then detours around rings to that endpoint. Selected connector points are
 retained with the hypothesis so estimates and constructed routes use the same points.
 The option without either domain follows the chord around expanded forbidden rings.
-For an in-part travel whose endpoints have the same domain candidate, this option is admitted only if its
-chord stays within the material proxy: components grown by 1.5 perimeter spacings,
-cached once with the components. Outside length up to SCALED_EPSILON is allowed.
+For an in-part travel whose endpoints have the same M component, this option is
+admitted only if its chord stays in that component, allowing SCALED_EPSILON outside.
 Each constructed hypothesis must retain exact endpoints, avoid original forbidden
 material and respect the total detour budget. When the obstacle-only reference
 avoids original material, a candidate's outside-domain length may exceed the
@@ -58,7 +58,7 @@ a straight fallback; accepted choices using a domain count once as domain routes
 accepted choices connecting distinct components count as bridges, and accepted
 paths longer than the chord by SCALED_EPSILON count as detours.
 Endpoint membership removes individual unexpanded zones before union and nozzle
-expansion, so overlapping margins do not erase unrelated obstacles. Cached areas
+expansion, so overlapping margins do not erase unrelated obstacles. Cached M/W areas
 also include platter blockers for travels touching outside-part endpoints: translated
 normal slices of the plan's objects at the layer-group Z or below, from printing
 groups up to this group. The synthetic wipe tower is not collected as a blocker.
@@ -73,31 +73,34 @@ the auxiliary avoidance flag is resolved from the default region configuration
 and governs travels whose two endpoints have no valid object instance (skirt and brim).
 The other inputs are borrowed too; all borrowed data must outlive the planner.
 
-Obstacle-only references and connectors use the public
+Obstacle-only references and external connectors use the public
 `clipper_detour_polyline_expolygons` operation in Shortest mode; its crossing,
 ring-following and rounding rules are defined in `slic3r_clipper.h`. ZonePlanner
-extends each chord before the call so a crossing at an endpoint is visible when
-the chord leaves a ring into its interior or arrives from its interior; tangencies
-and travel along a ring remain contacts, not crossings. Only leading or trailing
-result points near an endpoint are replaced by that exact endpoint. The
+extends only those external connector chords before the call so a crossing at an
+endpoint is visible when the chord leaves a ring into its interior or arrives from
+its interior. The M-to-W link uses the same operation without that extension.
+Tangencies and travel along a ring remain contacts, not crossings. Only leading or
+trailing result points near an endpoint are replaced by that exact endpoint. The
 original-area check and total detour budget still reject unsafe hypotheses, and
 exhaustion produces the counted straight fallback. Cancellation propagates.
 
     path: filter zones, cache domains and retry ranked hypotheses after bounded blocker removal
     |-- LayerInputCache::get: resolve spacing and island-jump settings
-    |-- build_boundary: index the combined domain and each component separately
+    |-- build_boundary: index W for each component and, when needed, its combined boundary
     |-- append_component_path: route within one component between selected points
     |   `-- route_on_boundary: follow crossed rings, else keep the chord; no placement or island jumps
     |-- eligible: resolve regional and auxiliary activation
     |-- outside_part / is_off_object_layer: classify normal versus auxiliary provenance
     |-- platter_blockers: collect translated slices for outside-part and mixed travels
     |-- contains: test filled material, including its border
-    |-- endpoint_candidates: choose a component and the option without a domain
-    |   `-- nearest_point: find a deterministic ring attachment
+    |-- endpoint_candidates: match source provenance and choose the option without a domain
+    |   |-- nearest_point: find a deterministic W attachment
+    |   `-- detour_in_component: build a link from the endpoint to W inside M
     |-- select_island_bridge: estimate weighted approaches between components
     |-- estimate_cost: weight inside ring estimates and clip the other connectors
     |   `-- outside_length: measure outside connectors against the complete domain
-    |-- detour: extend a chord and call the public Clipper ring-detour operation
+    |-- detour: extend a connector chord and call the public Clipper ring-detour operation
+    |-- detour_in_component: call the same operation without extending the M-to-W link
     |-- blocked: validate candidate segments against filled material
     |   `-- crossing: return the first material-entry parameter
     `-- outside_length: clip each route against the cached domain for the reference bound
@@ -108,30 +111,39 @@ namespace clipper = PluginCommon::clipper;
 namespace travel = TravelConnection;
 
 namespace {
-// SIZE_MAX denotes the option without a domain; its attachment is the endpoint itself.
-struct Attachment { size_t component; work::Point point; };
-// Connector endpoints are shared by estimation and construction; estimate holds the endpoint/attachment/bridge polyline.
+// SIZE_MAX denotes the option without a domain. For an M component, point is the
+// exact endpoint, ring_point is on W, and link joins the two through M.
+struct Attachment {
+    size_t component = SIZE_MAX;
+    work::Point point;
+    work::Point ring_point;
+    work::Points link;
+    bool usable = true;
+};
+// Connector endpoints are shared by estimation and construction; estimate holds the endpoint/ring/bridge polyline.
 // The initial best hypothesis's estimate also drives blocker selection and the fixed deactivation cap.
 struct Hypothesis { Attachment source, target; work::Point exit, entry; double cost; work::Points estimate; };
 // Append a component's route between already attached points (crossed rings, else a direct chord), retaining exact endpoints and borrowing its cached boundary.
 // Epsilon-near points connect directly; no placement or nearby-ring search occurs. Update routing counts; cancellation propagates.
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
     const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts);
-// Inside estimates stand for a route within a component; Outside retains geometric domain intersections; OutsidePart counts length without a domain penalty or weight.
-enum class EstimateKind { Inside, Outside, OutsidePart };
+// Inside estimates stand for a route within a component; Outside retains geometric domain intersections.
+enum class EstimateKind { Inside, Outside };
 struct EstimateSegment { work::Point from, to; EstimateKind kind; };
 // Classify regionless endpoints and endpoints on auxiliary layers as outside the part; normal object layers remain inside.
 bool outside_part(const travel::TravelEndpoint &endpoint);
 // Find the nearest point on any component ring, retaining ring/edge order on equal distances.
 work::Point nearest_point(const work::ExPolygon &component, const work::Point &point);
-// Return the containing component, else the nearest within 1.5 spacings, followed by the option without a domain.
-// Interior points attach to themselves; outside points attach to the nearest ring. Cancellation propagates per component.
-std::vector<Attachment> endpoint_candidates(const work::ExPolygons &components, const work::Point &point,
-    coord_t spacing, const plugin_run_context *context);
+// Return the M component whose source layer, instance and raw slice contain the endpoint, plus the option without a domain.
+// Keep the component candidate when its M-to-W link is unusable so admission of the option without a domain still sees physical M membership.
+std::vector<Attachment> endpoint_candidates(const work::ExPolygons &components,
+    const work::ExPolygons &withdrawn_components, const std::vector<std::vector<size_t>> &component_sources,
+    const TravelZoneView &zones, const travel::TravelEndpoint &endpoint, const work::Point &point,
+    const plugin_run_context *context);
 // Sum segment lengths after clipping to the complement of the domain; an empty domain leaves the whole path outside.
 double outside_length(const work::Points &points, const work::ExPolygons &domain, const plugin_run_context *context);
 // Score inside estimates as weighted inside length; clip other connectors against all domains before weighting their inside portions.
-// Outside-part legs count their full length without domain penalties; zero-length segments cost nothing. Cancellation propagates per segment.
+// Zero-length segments cost nothing. Cancellation propagates per segment.
 double estimate_cost(const std::vector<EstimateSegment> &segments, const work::ExPolygons &domain, double weight, const plugin_run_context *context);
 // Test filled areas without changing them; holes exclude their interior and borders follow the supplied flag.
 bool contains(const work::ExPolygons &areas, const work::Point &point, bool border = true);
@@ -142,6 +154,10 @@ int ring_location(const work::Polygon &ring, const work::Vec2d &point);
 // A reference endpoint inside or on expanded material can pair an exit with a later entry; original material still validates it. Cancellation and API errors propagate.
 work::Points detour(const work::Point &from, const work::Point &to, const work::ExPolygons &expanded,
                     const plugin_run_context *context);
+// Call the Clipper detour operation on one M component without extending its endpoints; return its owned points.
+// The exact endpoint contact is intentionally ignored by the API, then checked by the caller as a complete link.
+work::Points detour_in_component(const work::Point &from, const work::Point &to, const work::ExPolygon &component,
+                                 const plugin_run_context *context);
 // Find the first material interval and return its entry parameter; tangencies, contacts and holes do not count.
 // Stable ties follow insertion order after endpoint seeds, and cancellation propagates.
 std::optional<double> crossing(const work::ExPolygon &area, const work::Point &from, const work::Point &to,
@@ -183,21 +199,40 @@ work::Point nearest_point(const work::ExPolygon &component, const work::Point &p
     return nearest;
 }
 
-std::vector<Attachment> endpoint_candidates(const work::ExPolygons &components, const work::Point &point,
-    const coord_t spacing, const plugin_run_context *context)
+std::vector<Attachment> endpoint_candidates(const work::ExPolygons &components,
+    const work::ExPolygons &withdrawn_components, const std::vector<std::vector<size_t>> &component_sources,
+    const TravelZoneView &zones, const travel::TravelEndpoint &endpoint, const work::Point &point,
+    const plugin_run_context *context)
 {
-    Attachment selected{SIZE_MAX, point};
-    double best = std::pow(1.5 * double(spacing), 2);
+    std::vector<Attachment> candidates;
+    const layer_handle *layer = endpoint.region_island.valid() && endpoint.region_island.region_count() != 0 ?
+        endpoint.region_island.region(0).layer().handle() : nullptr;
     for (size_t component = 0; component < components.size(); ++component) {
         throw_if_cancelled(context);
-        if (components[component].contains(point)) { selected = {component, point}; break; }
-        const work::Point nearest = nearest_point(components[component], point);
-        const double distance = work::to_vec2d(nearest - point).squaredNorm();
-        if (distance < best) { best = distance; selected = {component, nearest}; }
+        if (!components[component].contains(point, true)) continue;
+        bool source_matches = false;
+        for (const size_t index : component_sources[component]) {
+            const TravelZone &zone = zones.zone(index);
+            if (zone.source_layer != layer || zone.scope.printing_catalog_id != endpoint.printing_catalog_id)
+                continue;
+            if (contains(zones.zone_area(index), point, true)) {
+                source_matches = true;
+                break;
+            }
+        }
+        if (!source_matches) continue;
+        Attachment selected{component, point, point, {}, true};
+        if (!withdrawn_components[component].contains(point, true)) {
+            selected.ring_point = nearest_point(withdrawn_components[component], point);
+            selected.link = detour_in_component(point, selected.ring_point, components[component], context);
+            selected.usable = selected.link.size() >= 2 && selected.link.front() == point &&
+                selected.link.back() == selected.ring_point &&
+                outside_length(selected.link, {components[component]}, context) <= SCALED_EPSILON;
+        }
+        candidates.push_back(std::move(selected));
+        break;
     }
-    std::vector<Attachment> candidates;
-    if (selected.component != SIZE_MAX) candidates.push_back(selected);
-    candidates.push_back({SIZE_MAX, point});
+    candidates.push_back({SIZE_MAX, point, point, {}, true});
     return candidates;
 }
 
@@ -220,7 +255,6 @@ double estimate_cost(const std::vector<EstimateSegment> &segments, const work::E
         throw_if_cancelled(context);
         if (segment.from == segment.to) continue;
         const double length = segment.from.distance_to(segment.to);
-        if (segment.kind == EstimateKind::OutsidePart) { cost += length; continue; }
         const double outside = segment.kind == EstimateKind::Inside ? 0. :
             outside_length({segment.from, segment.to}, domain, context);
         cost += outside + weight * (length - outside);
@@ -282,6 +316,26 @@ work::Points detour(const work::Point &from, const work::Point &to, const work::
     work::Points points{from};
     for (size_t index = first; index < last; ++index) points.emplace_back(result.at(index));
     points.push_back(to);
+    return points;
+}
+
+work::Points detour_in_component(const work::Point &from, const work::Point &to,
+                                 const work::ExPolygon &component, const plugin_run_context *context)
+{
+    if (from == to) return {from, to};
+    throw_if_cancelled(context);
+    slic3r_api::StoredPolyline subject(context->plugin_storage);
+    subject.push_back({from.x(), from.y()});
+    subject.push_back({to.x(), to.y()});
+    slic3r_api::StoredExPolygonCollection rings = clipper::to_stored_expolygons(
+        context->plugin_storage, {component});
+    slic3r_api::ClipperOperand operand(context->plugin_storage, rings.readonly());
+    const slic3r_api::StoredPolyline result = slic3r_api::clipper_detour_polyline_expolygons(
+        context->plugin_storage, subject, operand, CLIPPER_DETOUR_SHORTEST);
+    throw_if_cancelled(context);
+    work::Points points;
+    for (uint32_t index = 0; index < result.size(); ++index)
+        points.emplace_back(result.at(index));
     return points;
 }
 
@@ -382,7 +436,8 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     if (source.coincides_with_epsilon(target)) return direct;
     const bool source_outside = outside_part(pending.source), target_outside = outside_part(pending.target);
     const bool use_platter = source_outside || target_outside;
-    coord_t spacing = scale_i(m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4));
+    const double nozzle_diameter = m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4);
+    coord_t spacing = scale_i(nozzle_diameter);
     double jump_weight = 0.;
     for (const travel::TravelEndpoint *endpoint : {&pending.target, &pending.source}) {
         if (!endpoint->region_island.valid() || endpoint->region_island.region_count() == 0) continue;
@@ -423,226 +478,298 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
     size_t deactivation_cap = 0;
     work::Points initial_best_estimate;
     for (size_t attempt = 0;; ++attempt) {
-    throw_if_cancelled(m_context);
-    if (use_platter) platter_key = PlatterKey(m_group_idx, m_print_z, ignored_platter);
-    const CacheKey key(active.id, pending.extruder_id, ignored, spacing, platter_key, disabled_zones);
-    std::map<CacheKey, Obstacles>::iterator cached = m_obstacles.find(key);
-    if (cached == m_obstacles.end()) {
-        Obstacles obstacles;
-        for (size_t index : active.forbidden_indexes) {
-            throw_if_cancelled(m_context);
-            if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
-            const work::ExPolygons &area = m_zones.zone_area(index);
-            for (size_t component = 0; component < area.size(); ++component)
-                if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), std::make_pair(index, component)))
-                    obstacles.original.push_back(area[component]);
-        }
-        if (use_platter)
-            for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
-                throw_if_cancelled(m_context);
-                if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component))
-                    obstacles.original.push_back(m_platter_blockers[component]);
-            }
-        if (!obstacles.original.empty()) {
-            obstacles.original = clipper::union_ex(m_context->plugin_storage, obstacles.original);
-            const coord_t radius = std::max<coord_t>(1, scale_i(m_config.vector_float_or_default(
-                "nozzle_diameter", pending.extruder_id, 0.4) * 0.5));
-            obstacles.expanded = clipper::offset_ex(m_context->plugin_storage, obstacles.original, double(radius));
-        }
-        // Keep components intact for containment, nearest attachments and ring routing.
-        work::ExPolygons domain = obstacles.expanded.empty() ? active.attractors :
-            clipper::diff_ex(m_context->plugin_storage, active.attractors, obstacles.expanded);
-        if (!domain.empty()) {
-            obstacles.domain = std::make_unique<AvoidCrossing::Boundary>();
-            AvoidCrossing::build_boundary(m_context->plugin_storage, work::ExPolygons(domain), 2 * spacing, *obstacles.domain);
-            size_t ring = 0;
-            for (const work::ExPolygon &component : domain) {
-                throw_if_cancelled(m_context);
-                obstacles.component_rings.push_back(ring);
-                ring += 1 + component.holes.size();
-                std::unique_ptr<AvoidCrossing::Boundary> boundary = std::make_unique<AvoidCrossing::Boundary>();
-                AvoidCrossing::build_boundary(m_context->plugin_storage, {component}, 2 * spacing, *boundary);
-                obstacles.component_boundaries.push_back(std::move(boundary));
-            }
-            obstacles.components = std::move(domain);
-            obstacles.material_proxy = clipper::offset_ex(m_context->plugin_storage, obstacles.components, 1.5 * double(spacing));
-        }
         throw_if_cancelled(m_context);
-        cached = m_obstacles.emplace(key, std::move(obstacles)).first;
-    }
-    const Obstacles &obstacles = cached->second;
-    const std::vector<Attachment> sources = source_outside ? std::vector<Attachment>{{SIZE_MAX, source}} :
-        endpoint_candidates(obstacles.components, source, spacing, m_context);
-    const std::vector<Attachment> targets = target_outside ? std::vector<Attachment>{{SIZE_MAX, target}} :
-        endpoint_candidates(obstacles.components, target, spacing, m_context);
-    std::vector<Hypothesis> hypotheses;
-    for (const Attachment &from : sources)
-        for (const Attachment &to : targets) {
+        if (use_platter) platter_key = PlatterKey(m_group_idx, m_print_z, ignored_platter);
+        const CacheKey key(active.id, pending.extruder_id, ignored, spacing, platter_key, disabled_zones);
+        std::map<CacheKey, Obstacles>::iterator cached = m_obstacles.find(key);
+        if (cached == m_obstacles.end()) {
+            Obstacles obstacles;
+            for (size_t index : active.forbidden_indexes) {
+                throw_if_cancelled(m_context);
+                if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
+                const work::ExPolygons &area = m_zones.zone_area(index);
+                for (size_t component = 0; component < area.size(); ++component)
+                    if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), std::make_pair(index, component)))
+                        obstacles.original.push_back(area[component]);
+            }
+            if (use_platter)
+                for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+                    throw_if_cancelled(m_context);
+                    if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component))
+                        obstacles.original.push_back(m_platter_blockers[component]);
+                }
+            if (!obstacles.original.empty()) {
+                obstacles.original = clipper::union_ex(m_context->plugin_storage, obstacles.original);
+                const coord_t radius = std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5));
+                obstacles.expanded = clipper::offset_ex(m_context->plugin_storage, obstacles.original, double(radius));
+            }
+            work::ExPolygons domain = active.attractors;
+            if (!obstacles.expanded.empty())
+                domain = clipper::diff_ex(m_context->plugin_storage, domain, obstacles.expanded);
+            if (!domain.empty()) {
+                obstacles.components = domain;
+                obstacles.component_sources.resize(domain.size());
+                for (size_t component = 0; component < domain.size(); ++component) {
+                    throw_if_cancelled(m_context);
+                    for (const size_t source_index : active.attractor_indexes) {
+                        throw_if_cancelled(m_context);
+                        if (!clipper::intersection_ex(m_context->plugin_storage, m_zones.zone_area(source_index),
+                                                      {domain[component]}).empty())
+                            obstacles.component_sources[component].push_back(source_index);
+                    }
+                }
+                // W uses min(0.01 mm, nozzle/10) and withdraws 1.5 perimeter spacings from each M component.
+                const double minimum_width = std::min(0.01, nozzle_diameter / 10.);
+                const coord_t withdrawal = coord_t(1.5 * double(spacing));
+                for (const work::ExPolygon &component : domain) {
+                    throw_if_cancelled(m_context);
+                    const StoredExPolygonCollection stored_component = clipper::to_stored_expolygons(
+                        m_context->plugin_storage, {component});
+                    const slic3r_api::ExPolygon source = stored_component.readonly().at(0);
+                    const StoredExPolygonCollection withdrawn =
+                        XYSizeCompensationPlugin::detail::elephant_foot_compensation(
+                            m_context->plugin_storage, source, minimum_width, withdrawal);
+                    const work::ExPolygons copied = clipper::from_expolygon_collection_view(withdrawn.readonly());
+                    obstacles.withdrawn_components.push_back(copied.front());
+                }
+                size_t ring = 0;
+                for (const work::ExPolygon &component : obstacles.withdrawn_components) {
+                    throw_if_cancelled(m_context);
+                    obstacles.component_rings.push_back(ring);
+                    ring += 1 + component.holes.size();
+                    std::unique_ptr<AvoidCrossing::Boundary> boundary = std::make_unique<AvoidCrossing::Boundary>();
+                    AvoidCrossing::build_boundary(m_context->plugin_storage, {component}, 2 * spacing, *boundary);
+                    obstacles.component_boundaries.push_back(std::move(boundary));
+                }
+                if (obstacles.components.size() >= 2) {
+                    obstacles.domain = std::make_unique<AvoidCrossing::Boundary>();
+                    work::ExPolygons combined = obstacles.withdrawn_components;
+                    AvoidCrossing::build_boundary(m_context->plugin_storage, std::move(combined),
+                                                  2 * spacing, *obstacles.domain);
+                }
+            }
             throw_if_cancelled(m_context);
-            // Within one component, the option without a domain may cut only within the grown material proxy.
-            if (from.component == SIZE_MAX && to.component == SIZE_MAX &&
-                !source_outside && !target_outside &&
-                sources.front().component != SIZE_MAX && sources.front().component == targets.front().component &&
-                outside_length({source, target}, obstacles.material_proxy, m_context) > SCALED_EPSILON) continue;
-            // Endpoint attachments within the selection tolerance cross perimeter material, so estimate them as inside legs.
-            const EstimateKind source_kind = from.component != SIZE_MAX ? EstimateKind::Inside : EstimateKind::Outside;
-            const EstimateKind target_kind = to.component != SIZE_MAX ? EstimateKind::Inside : EstimateKind::Outside;
-            std::vector<EstimateSegment> estimate{{source, from.point, source_kind}};
-            work::Point exit = from.point, entry = to.point;
-            if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) {
-                work::Point start = from.point, end = to.point;
-                AvoidCrossing::RouterCounts estimate_counts;
-                const std::optional<AvoidCrossing::IslandBridge> bridge = AvoidCrossing::select_island_bridge(
-                    *obstacles.domain, obstacles.component_rings[from.component], obstacles.component_rings[to.component],
-                    start, end, jump_weight, estimate_counts, [this]() { throw_if_cancelled(m_context); });
-                if (!bridge) continue;
-                exit = bridge->from;
-                entry = bridge->to;
-                estimate.push_back({from.point, bridge->from, EstimateKind::Inside});
-                estimate.push_back({bridge->from, bridge->to, EstimateKind::Outside});
-                estimate.push_back({bridge->to, to.point, EstimateKind::Inside});
-            } else if (from.component != SIZE_MAX && to.component == SIZE_MAX) {
-                exit = nearest_point(obstacles.components[from.component], target);
-                estimate.push_back({from.point, exit, EstimateKind::Inside});
-                estimate.push_back({exit, target, target_outside ? EstimateKind::OutsidePart : EstimateKind::Outside});
-            } else if (from.component == SIZE_MAX && to.component != SIZE_MAX) {
-                entry = nearest_point(obstacles.components[to.component], source);
-                estimate.push_back({source, entry, source_outside ? EstimateKind::OutsidePart : EstimateKind::Outside});
-                estimate.push_back({entry, to.point, EstimateKind::Inside});
-            } else estimate.push_back({from.point, to.point,
-                from.component != SIZE_MAX ? EstimateKind::Inside :
-                    use_platter ? EstimateKind::OutsidePart : EstimateKind::Outside});
-            estimate.push_back({to.point, target, target_kind});
-            work::Points estimate_points{source};
-            for (const EstimateSegment &segment : estimate) estimate_points.push_back(segment.to);
-            hypotheses.push_back({from, to, exit, entry, estimate_cost(estimate, obstacles.components, jump_weight, m_context), std::move(estimate_points)});
+            cached = m_obstacles.emplace(key, std::move(obstacles)).first;
         }
-    // Domain choices precede the option without a domain on equal estimates.
-    std::stable_sort(hypotheses.begin(), hypotheses.end(), [](const Hypothesis &a, const Hypothesis &b) { return a.cost < b.cost; });
-    if (attempt == 0) {
-        // Freeze the finite retry budget before removals can change attachments or the ranking.
-        // Retain this polyline even if removals change the best hypothesis: selection and its fixed cap must use the same crossings.
-        initial_best_estimate = hypotheses.empty() ? work::Points{} : hypotheses.front().estimate;
-        for (size_t index : active.forbidden_indexes) {
-            if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
-            for (const work::ExPolygon &component : m_zones.zone_area(index))
-                if (blocked({source, target}, {component}, m_context) || blocked(initial_best_estimate, {component}, m_context)) ++deactivation_cap;
+        const Obstacles &obstacles = cached->second;
+        const auto free_attachment = [](const work::Point &point) {
+            return Attachment{SIZE_MAX, point, point, {}, true};
+        };
+        const std::vector<Attachment> sources = source_outside ?
+            std::vector<Attachment>{free_attachment(source)} :
+            endpoint_candidates(obstacles.components, obstacles.withdrawn_components, obstacles.component_sources,
+                                m_zones, pending.source, source, m_context);
+        const std::vector<Attachment> targets = target_outside ?
+            std::vector<Attachment>{free_attachment(target)} :
+            endpoint_candidates(obstacles.components, obstacles.withdrawn_components, obstacles.component_sources,
+                                m_zones, pending.target, target, m_context);
+        std::vector<Hypothesis> hypotheses;
+        for (const Attachment &from : sources)
+            for (const Attachment &to : targets) {
+                throw_if_cancelled(m_context);
+                if ((from.component != SIZE_MAX && !from.usable) || (to.component != SIZE_MAX && !to.usable)) continue;
+                // The no-domain option for one M component is admitted only when its chord remains in that component.
+                if (from.component == SIZE_MAX && to.component == SIZE_MAX &&
+                    !source_outside && !target_outside && sources.front().component != SIZE_MAX &&
+                    sources.front().component == targets.front().component &&
+                    outside_length({source, target}, {obstacles.components[sources.front().component]}, m_context) > SCALED_EPSILON)
+                    continue;
+                std::vector<EstimateSegment> estimate;
+                const auto append_estimate = [&estimate](const work::Points &path, const EstimateKind kind,
+                                                          const bool reverse = false) {
+                    if (!reverse) {
+                        for (size_t i = 1; i < path.size(); ++i)
+                            estimate.push_back({path[i - 1], path[i], kind});
+                    } else {
+                        for (size_t i = path.size(); i > 1; --i)
+                            estimate.push_back({path[i - 1], path[i - 2], kind});
+                    }
+                };
+                work::Point exit = from.component != SIZE_MAX ? from.ring_point : source;
+                work::Point entry = to.component != SIZE_MAX ? to.ring_point : target;
+                if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component == to.component) {
+                    append_estimate(from.link, EstimateKind::Inside);
+                    estimate.push_back({from.ring_point, to.ring_point, EstimateKind::Inside});
+                    append_estimate(to.link, EstimateKind::Inside, true);
+                } else if (from.component != SIZE_MAX && to.component != SIZE_MAX) {
+                    AvoidCrossing::RouterCounts estimate_counts;
+                    work::Point start = from.ring_point, end = to.ring_point;
+                    const std::optional<AvoidCrossing::IslandBridge> bridge = AvoidCrossing::select_island_bridge(
+                        *obstacles.domain, obstacles.component_rings[from.component], obstacles.component_rings[to.component],
+                        start, end, jump_weight, estimate_counts,
+                        [this]() { throw_if_cancelled(m_context); });
+                    if (!bridge) continue;
+                    exit = bridge->from;
+                    entry = bridge->to;
+                    append_estimate(from.link, EstimateKind::Inside);
+                    estimate.push_back({from.ring_point, exit, EstimateKind::Inside});
+                    estimate.push_back({exit, entry, EstimateKind::Outside});
+                    estimate.push_back({entry, to.ring_point, EstimateKind::Inside});
+                    append_estimate(to.link, EstimateKind::Inside, true);
+                } else if (from.component != SIZE_MAX) {
+                    exit = nearest_point(obstacles.withdrawn_components[from.component], target);
+                    append_estimate(from.link, EstimateKind::Inside);
+                    estimate.push_back({from.ring_point, exit, EstimateKind::Inside});
+                    estimate.push_back({exit, target, EstimateKind::Outside});
+                } else if (to.component != SIZE_MAX) {
+                    entry = nearest_point(obstacles.withdrawn_components[to.component], source);
+                    estimate.push_back({source, entry, EstimateKind::Outside});
+                    estimate.push_back({entry, to.ring_point, EstimateKind::Inside});
+                    append_estimate(to.link, EstimateKind::Inside, true);
+                } else {
+                    estimate.push_back({source, target, EstimateKind::Outside});
+                }
+                work::Points estimate_points{source};
+                for (const EstimateSegment &segment : estimate) estimate_points.push_back(segment.to);
+                hypotheses.push_back({from, to, exit, entry,
+                                      estimate_cost(estimate, obstacles.components, jump_weight, m_context),
+                                      std::move(estimate_points)});
+            }
+        // Domain choices precede the option without a domain on equal estimates.
+        std::stable_sort(hypotheses.begin(), hypotheses.end(),
+                         [](const Hypothesis &a, const Hypothesis &b) { return a.cost < b.cost; });
+        if (attempt == 0) {
+            // Freeze the finite retry budget before removals can change attachments or the ranking.
+            initial_best_estimate = hypotheses.empty() ? work::Points{} : hypotheses.front().estimate;
+            for (size_t index : active.forbidden_indexes) {
+                if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
+                for (const work::ExPolygon &component : m_zones.zone_area(index))
+                    if (blocked({source, target}, {component}, m_context) || blocked(initial_best_estimate, {component}, m_context))
+                        ++deactivation_cap;
+            }
+            if (use_platter)
+                for (size_t component = 0; component < m_platter_blockers.size(); ++component)
+                    if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component) &&
+                        (blocked({source, target}, {m_platter_blockers[component]}, m_context) ||
+                         blocked(initial_best_estimate, {m_platter_blockers[component]}, m_context)))
+                        ++deactivation_cap;
         }
-        if (use_platter)
-            for (size_t component = 0; component < m_platter_blockers.size(); ++component)
-                if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component) &&
-                    (blocked({source, target}, {m_platter_blockers[component]}, m_context) ||
-                     blocked(initial_best_estimate, {m_platter_blockers[component]}, m_context))) ++deactivation_cap;
-    }
 
-    // Build the obstacle-only reference once, even if several domain hypotheses need its outside-length bound.
-    bool reference_ready = false, reference_failed = false;
-    work::Points reference;
-    double reference_outside = 0.;
-    const auto prepare_reference = [&]() {
-        if (reference_ready) return;
-        reference = detour(source, target, obstacles.expanded, m_context);
-        reference_failed = blocked(reference, obstacles.original, m_context);
-        if (!reference_failed) {
-            reference_outside = outside_length(reference, obstacles.components, m_context);
-            if (contains(obstacles.expanded, source, false) || contains(obstacles.expanded, target, false))
-                reference_outside *= 3.;
-        }
-        reference_ready = true;
-    };
-    const c_float_or_percent budget = m_config.float_or_percent_or_default(
-        "avoid_crossing_perimeters_max_detour", c_float_or_percent{0., 0});
-    const double direct_length = work::Line(source, target).length();
-    bool geometrically_valid = false;
-    for (const Hypothesis &hypothesis : hypotheses) {
-        throw_if_cancelled(m_context);
-        const Attachment &from = hypothesis.source, &to = hypothesis.target;
-        const bool domain_route = from.component != SIZE_MAX || to.component != SIZE_MAX;
-        work::Points points;
-        if (!domain_route) {
-            prepare_reference();
-            if (reference_failed) continue;
-            points = reference;
-        } else if (from.component == to.component) {
-            points.push_back(source);
-            append_component_path(points, *obstacles.component_boundaries[from.component], from.point, to.point, m_context, m_router_counts);
-            points.push_back(target);
-        } else {
-            points.push_back(source);
-            if (from.component != SIZE_MAX)
-                append_component_path(points, *obstacles.component_boundaries[from.component], from.point, hypothesis.exit, m_context, m_router_counts);
-            const work::Points connector = detour(hypothesis.exit, hypothesis.entry, obstacles.expanded, m_context);
-            points.insert(points.end(), connector.begin(), connector.end());
-            if (to.component != SIZE_MAX)
-                append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry, to.point, m_context, m_router_counts);
-            points.push_back(target);
-        }
-        points.erase(std::unique(points.begin(), points.end()), points.end());
-        if (points.size() < 2 || points.front() != source || points.back() != target ||
-            blocked(points, obstacles.original, m_context)) continue;
-        geometrically_valid = true;
-        double length = 0.;
-        for (size_t i = 1; i < points.size(); ++i) length += work::Line(points[i - 1], points[i]).length();
-        if (budget.value > 0.) {
-            const double limit = budget.percent ? direct_length * 0.01 * budget.value : scale_d(budget.value);
-            if (length - direct_length > limit) continue;
-        }
-        prepare_reference();
-        // Clipping rounds intersection points: allow one SCALED_EPSILON over the complete path.
-        if (!reference_failed && outside_length(points, obstacles.components, m_context) > reference_outside + SCALED_EPSILON) continue;
-        std::vector<c_point> result;
-        for (const work::Point &point : points) result.push_back({point.x(), point.y()});
-        if (domain_route) ++m_domain_routes;
-        if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) ++m_bridges;
-        if (length > direct_length + SCALED_EPSILON) ++m_detours;
-        return result;
-    }
-    if (geometrically_valid || attempt >= deactivation_cap) break;
-    // Only geometric failure authorizes removal; prefer chord crossings, then the initial best estimate's attachments and bridge.
-    double first_parameter = std::numeric_limits<double>::max();
-    std::pair<size_t, size_t> first_zone(SIZE_MAX, SIZE_MAX);
-    size_t first_platter = SIZE_MAX;
-    for (size_t candidate = 0; candidate < 2; ++candidate) {
-    const work::Points selection = candidate == 0 ? work::Points{source, target} :
-        initial_best_estimate;
-    for (size_t index : active.forbidden_indexes) {
-        throw_if_cancelled(m_context);
-        if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
-        const work::ExPolygons &area = m_zones.zone_area(index);
-        for (size_t component = 0; component < area.size(); ++component) {
-            const std::pair<size_t, size_t> identity(index, component);
-            for (size_t segment = 1; segment < selection.size(); ++segment) {
-            if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), identity)) {
-                const std::optional<double> entry = crossing(area[component], selection[segment - 1], selection[segment], m_context);
-                if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
-                    first_parameter = double(segment - 1) + *entry;
-                    first_zone = identity;
-                }
+        // Build the obstacle-only reference once, even if several domain hypotheses need its outside-length bound.
+        bool reference_ready = false, reference_failed = false;
+        work::Points reference;
+        double reference_outside = 0.;
+        const auto prepare_reference = [&]() {
+            if (reference_ready) return;
+            reference = detour(source, target, obstacles.expanded, m_context);
+            reference_failed = blocked(reference, obstacles.original, m_context);
+            if (!reference_failed) {
+                reference_outside = outside_length(reference, obstacles.components, m_context);
+                if (contains(obstacles.expanded, source, false) || contains(obstacles.expanded, target, false))
+                    reference_outside *= 3.;
             }
-            }
-        }
-    }
-    if (use_platter)
-        for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+            reference_ready = true;
+        };
+        const c_float_or_percent budget = m_config.float_or_percent_or_default(
+            "avoid_crossing_perimeters_max_detour", c_float_or_percent{0., 0});
+        const double direct_length = work::Line(source, target).length();
+        bool geometrically_valid = false;
+        for (const Hypothesis &hypothesis : hypotheses) {
             throw_if_cancelled(m_context);
-            for (size_t segment = 1; segment < selection.size(); ++segment) {
-            if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component)) {
-                const std::optional<double> entry = crossing(m_platter_blockers[component], selection[segment - 1], selection[segment], m_context);
-                if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
-                    first_parameter = double(segment - 1) + *entry;
-                    first_platter = component;
+            const Attachment &from = hypothesis.source, &to = hypothesis.target;
+            const bool domain_route = from.component != SIZE_MAX || to.component != SIZE_MAX;
+            work::Points points;
+            const auto append_route = [&points](const work::Points &path, const bool reverse = false) {
+                if (!reverse)
+                    points.insert(points.end(), path.begin(), path.end());
+                else
+                    for (work::Points::const_reverse_iterator point = path.rbegin(); point != path.rend(); ++point)
+                        points.push_back(*point);
+            };
+            if (!domain_route) {
+                prepare_reference();
+                if (reference_failed) continue;
+                points = reference;
+            } else if (from.component == to.component) {
+                points.push_back(source);
+                append_route(from.link);
+                append_component_path(points, *obstacles.component_boundaries[from.component], from.ring_point, to.ring_point,
+                                      m_context, m_router_counts);
+                append_route(to.link, true);
+                points.push_back(target);
+            } else {
+                points.push_back(source);
+                if (from.component != SIZE_MAX) {
+                    append_route(from.link);
+                    append_component_path(points, *obstacles.component_boundaries[from.component], from.ring_point,
+                                          hypothesis.exit, m_context, m_router_counts);
+                }
+                const work::Point connector_from = from.component != SIZE_MAX ? hypothesis.exit : source;
+                const work::Point connector_to = to.component != SIZE_MAX ? hypothesis.entry : target;
+                const work::Points connector = detour(connector_from, connector_to, obstacles.expanded, m_context);
+                points.insert(points.end(), connector.begin(), connector.end());
+                if (to.component != SIZE_MAX) {
+                    append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry,
+                                          to.ring_point, m_context, m_router_counts);
+                    append_route(to.link, true);
+                }
+                points.push_back(target);
+            }
+            points.erase(std::unique(points.begin(), points.end()), points.end());
+            if (points.size() < 2 || points.front() != source || points.back() != target ||
+                blocked(points, obstacles.original, m_context)) continue;
+            geometrically_valid = true;
+            double length = 0.;
+            for (size_t i = 1; i < points.size(); ++i) length += work::Line(points[i - 1], points[i]).length();
+            if (budget.value > 0.) {
+                const double limit = budget.percent ? direct_length * 0.01 * budget.value : scale_d(budget.value);
+                if (length - direct_length > limit) continue;
+            }
+            prepare_reference();
+            // Clipping rounds intersection points: allow one SCALED_EPSILON over the complete path.
+            if (!reference_failed && outside_length(points, obstacles.components, m_context) > reference_outside + SCALED_EPSILON)
+                continue;
+            std::vector<c_point> result;
+            for (const work::Point &point : points) result.push_back({point.x(), point.y()});
+            if (domain_route) ++m_domain_routes;
+            if (from.component != SIZE_MAX && to.component != SIZE_MAX && from.component != to.component) ++m_bridges;
+            if (length > direct_length + SCALED_EPSILON) ++m_detours;
+            return result;
+        }
+        if (geometrically_valid || attempt >= deactivation_cap) break;
+        // Only geometric failure authorizes removal; prefer chord crossings, then the initial best estimate's attachments and bridge.
+        double first_parameter = std::numeric_limits<double>::max();
+        std::pair<size_t, size_t> first_zone(SIZE_MAX, SIZE_MAX);
+        size_t first_platter = SIZE_MAX;
+        for (size_t candidate = 0; candidate < 2; ++candidate) {
+            const work::Points selection = candidate == 0 ? work::Points{source, target} : initial_best_estimate;
+            for (size_t index : active.forbidden_indexes) {
+                throw_if_cancelled(m_context);
+                if (std::binary_search(ignored.begin(), ignored.end(), index)) continue;
+                const work::ExPolygons &area = m_zones.zone_area(index);
+                for (size_t component = 0; component < area.size(); ++component) {
+                    const std::pair<size_t, size_t> identity(index, component);
+                    for (size_t segment = 1; segment < selection.size(); ++segment)
+                        if (!std::binary_search(disabled_zones.begin(), disabled_zones.end(), identity)) {
+                            const std::optional<double> entry = crossing(area[component], selection[segment - 1], selection[segment], m_context);
+                            if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
+                                first_parameter = double(segment - 1) + *entry;
+                                first_zone = identity;
+                            }
+                        }
                 }
             }
-            }
+            if (use_platter)
+                for (size_t component = 0; component < m_platter_blockers.size(); ++component) {
+                    throw_if_cancelled(m_context);
+                    for (size_t segment = 1; segment < selection.size(); ++segment)
+                        if (!std::binary_search(ignored_platter.begin(), ignored_platter.end(), component)) {
+                            const std::optional<double> entry = crossing(
+                                m_platter_blockers[component], selection[segment - 1], selection[segment], m_context);
+                            if (entry.has_value() && double(segment - 1) + *entry < first_parameter) {
+                                first_parameter = double(segment - 1) + *entry;
+                                first_platter = component;
+                            }
+                        }
+                }
+            if (first_zone.first != SIZE_MAX || first_platter != SIZE_MAX) break;
         }
-    if (first_zone.first != SIZE_MAX || first_platter != SIZE_MAX) break;
-    }
-    if (first_platter != SIZE_MAX)
-        ignored_platter.insert(std::lower_bound(ignored_platter.begin(), ignored_platter.end(), first_platter), first_platter);
-    else if (first_zone.first != SIZE_MAX)
-        disabled_zones.insert(std::lower_bound(disabled_zones.begin(), disabled_zones.end(), first_zone), first_zone);
-    else break;
-    ++m_disabled_blockers;
+        if (first_platter != SIZE_MAX)
+            ignored_platter.insert(std::lower_bound(ignored_platter.begin(), ignored_platter.end(), first_platter), first_platter);
+        else if (first_zone.first != SIZE_MAX)
+            disabled_zones.insert(std::lower_bound(disabled_zones.begin(), disabled_zones.end(), first_zone), first_zone);
+        else break;
+        ++m_disabled_blockers;
     }
     ++m_fallbacks;
     return direct;

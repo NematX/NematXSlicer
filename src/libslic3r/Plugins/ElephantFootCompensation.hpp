@@ -18,8 +18,9 @@ caller storage and the input remains borrowed and unchanged. For example:
 
     auto result = elephant_foot_compensation(storage, island, width_mm, scale_d(0.1));
 
-The width combines external-perimeter width and spacing; the compensation is a
-positive scaled distance. See the implementation for its native-parity rules.
+The caller supplies the minimum contour width; XY compensation callers pass
+external-perimeter width plus spacing. The compensation is a positive scaled
+distance. See the implementation for its native-parity rules.
 */
 
 namespace slic3r_api { namespace XYSizeCompensationPlugin { namespace detail {

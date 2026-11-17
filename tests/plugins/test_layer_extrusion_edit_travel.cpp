@@ -49,12 +49,12 @@ Direct connector checks stop after scope and entry publication, then inspect
 prepare's ordered gaps and seam edits before apply writes paths and flags.
 All borrowed views remain within the lifetime of their unchanged plan structure.
 Eligibility checks slice a cube and attach controlled paths to its real region
-island, then summarize prepared gaps with the compatibility planner's predicate.
+island, then evaluate prepared gaps with the compatibility planner's predicate.
 The controlled three-island scene toggles contributor activation with either
-advanced or straight travel selected. Only advanced travel with forbidden tops
-active may detour its inter-island gap; layer entry stays straight in every case.
-With both endpoints on one island and forbidden tops disabled, the attractor
-member alone enables delegation to the compatibility top detour.
+advanced or straight travel selected. Advanced travel may detour its inter-island
+gap because of attractors or forbidden tops; layer entry stays straight in every case.
+The same-attractor case keeps its direct travel; only inter-component gaps or a
+forbidden-top contributor can add a detour.
 The dated-top scene crosses a third island between two distinct attractors
 before and after that island's last arrival, in two shifted instances. Every
 segment of the later detour is checked against the third island's core top.
@@ -975,10 +975,8 @@ NarrowBridgeResult narrow_bridge_scene()
     REQUIRE(pending.source.position.y == result.source.y());
     REQUIRE(pending.target.position.x == result.target.x());
     REQUIRE(pending.target.position.y == result.target.y());
-    const zones::ChronologySummary summary = zones::summarize(chronology,
-        [&eligibility](const travel::PendingTravel &gap) { return eligibility.avoidance_enabled(gap.source, gap.target); });
     avoidance::LayerInputCache cache;
-    const zones::ZoneContributorInput input{print_view, plan_view, context, current.print_z, cache, chronology.travels, summary};
+    const zones::ZoneContributorInput input{print_view, plan_view, context, current.print_z, cache, chronology.travels};
     zones::DefaultAttractorContributor attractors;
     zones::DefaultForbiddenTopsContributor tops;
     zones::TravelZoneView zone_view({std::cref(attractors), std::cref(tops)}, input);
@@ -1030,7 +1028,7 @@ TEST_CASE("Advanced travel follows the connected attractor through a one-perimet
     CHECK(through_bridge);
 }
 
-// Keep layer entry straight; domain attachments may add collinear points, while forbidden tops require a detour.
+// Keep layer entry straight; for same-attractor endpoints the option without a domain is admitted in M and cheaper than weighted links, while a later cross-component or top route detours.
 TEST_CASE("Advanced zones keep layer entry straight while later travels avoid tops", "[plugins][travel][travel-zones]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1111,9 +1109,12 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     REQUIRE(first.travel().point_count() == 2);
     CHECK(first.travel().point(0).x == entry.x());
     CHECK(first.travel().point(1).x == target.x());
-    if (following_gap)
+    if (following_gap) {
+        const bool expected_detour = advanced && !same_attractor &&
+            ((contributors & 1) != 0 || (contributors & 2) != 0);
         CHECK((ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2) ==
-            (advanced && ((contributors & 1) != 0 || (!same_attractor && (contributors & 2) != 0))));
+            expected_detour);
+    }
 }
 
 // Compare inter-island crossings before and after the middle island's arrival, with both static-top activation states.
@@ -1387,12 +1388,11 @@ TEST_CASE("Compatibility eligibility supplies dated travel activation",
     TravelEndpoint invalid_instance = chronology.travels[0].target;
     invalid_instance.printing_catalog_id = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
     CHECK_FALSE(planner.avoidance_enabled(chronology.travels[0].source, invalid_instance));
-    const AdvancedTravel::ChronologySummary summary = AdvancedTravel::summarize(chronology,
-        [&planner](const PendingTravel &travel) {
-            return planner.avoidance_enabled(travel.source, travel.target);
-        });
-    CHECK(summary.avoidance_active == std::vector<bool>{expected, false});
-    CHECK(summary.any_avoidance_active == expected);
+    bool any_eligible = false;
+    for (const PendingTravel &travel : chronology.travels)
+        any_eligible = any_eligible || (travel.source_extrusion.handle() != nullptr &&
+            planner.avoidance_enabled(travel.source, travel.target));
+    CHECK(any_eligible == expected);
 }
 
 TEST_CASE("Connector preparation snaps a stationary deposit",

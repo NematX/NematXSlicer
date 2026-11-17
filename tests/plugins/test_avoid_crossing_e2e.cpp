@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -64,9 +63,9 @@ that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change both planners' routes while keeping their
 endpoints. A separate dumbbell scene checks real travels through its thin bridge, segment
 containment in sliced material, and publication of those detours in G-code.
-The one-perimeter advanced variation also replays published XY gaps with their
-scope provenance to check reachable domain attachments, accepted domain routes
-and zero planner fallbacks. This replay is restricted to the ring scene with top
+The one-perimeter advanced variation also replays published XY gaps and checks
+source-layer, instance and raw-slice provenance, accepted domain routes and zero
+planner fallbacks. This replay is restricted to the ring scene with top
 avoidance and support disabled; no forbidden-top or support contributors can apply.
 Outside-part support avoidance also runs with the optional support contributor
 disabled: both activations must retain the same platter detours and publish them.
@@ -208,7 +207,7 @@ struct TravelActivation {
 // and return copied routes, support/tower crossing-wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
-// Require the one-perimeter ring scene with top avoidance and support disabled; replay without writing travels and compare XY paths, domain reachability and fallback counts.
+// Require the one-perimeter ring scene with top avoidance and support disabled; replay without writing travels and compare XY paths, source provenance and fallback counts.
 void check_one_perimeter_routes(Print &print, const Result &result, const DynamicPrintConfig &config, Scene scene);
 // Copy reserved travel phases and their source provenance without changing the plan; skip routes below two vertices and count those above two.
 void collect_travels(const ExtrusionEntity &entity, const std::set<const extrusion_entity_handle *> &scopes_with_source, Result &result);
@@ -1116,9 +1115,8 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
     PluginStorage storage;
     plugin_run_context context{};
     context.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
-    size_t checked = 0, fallbacks = 0, domains = 0, candidates = 0, chords_outside_material = 0;
-    size_t attachments_off_chord = 0;
-    double minimum_ratio = std::numeric_limits<double>::max(), maximum_ratio = 0.;
+    size_t checked = 0, fallbacks = 0, domains = 0, provenance_matches = 0, provenance_mismatches = 0,
+        chords_outside_material = 0;
     for (uint32_t group = 0; group < plan.groups.size(); ++group)
         for (uint32_t layer = 0; layer < plan.groups[group].layers.size(); ++layer) {
             slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&plan.groups[group].layers[layer]));
@@ -1147,13 +1145,8 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
                 }, slic3r_api::MatchingEntityDescendants::Skip);
             traversal.process(view);
             ac::CompatibilityPlanner compatibility(print_view, plan_view, &context, group, view.print_z());
-            const zones::ChronologySummary summary = zones::summarize(chronology,
-                [&compatibility, &print_view](const travel::PendingTravel &gap) {
-                    return gap.source_extrusion.handle() != nullptr && zones::ZonePlanner::eligible(
-                        compatibility, print_view.config(), true, gap.source, gap.target);
-                });
             ac::LayerInputCache cache;
-            const zones::ZoneContributorInput input{print_view, plan_view, context, view.print_z(), cache, chronology.travels, summary};
+            const zones::ZoneContributorInput input{print_view, plan_view, context, view.print_z(), cache, chronology.travels};
             zones::DefaultAttractorContributor attractors;
             zones::DefaultForbiddenTopsContributor tops;
             zones::PrintedTopsContributor printed_tops;
@@ -1178,35 +1171,26 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
                 ++checked;
                 const zones::ActiveZones &active = zone_view.query(t, gap);
                 CHECK(active.forbidden_indexes.empty());
-                const work::ExPolygons &areas = active.attractors;
                 const slic3r_api::Layer endpoint_layer = gap.target.region_island.region(0).layer();
                 const ac::LayerInput &layer_input = *cache.get(print_view, endpoint_layer, &context).target;
-                const coord_t spacing = layer_input.perimeter_spacing;
                 REQUIRE_FALSE(layer_input.regions.empty());
                 CHECK(layer_input.regions.front().avoid_travel_island);
                 CHECK(layer_input.regions.front().avoid_travel_island_weight == Approx(1.));
                 for (const travel::TravelEndpoint *endpoint : {&gap.source, &gap.target}) {
                     const work::Point point(endpoint->position.x, endpoint->position.y);
-                    work::Point attachment = point;
-                    double distance = std::numeric_limits<double>::max();
-                    for (const work::ExPolygon &area : areas) {
-                        if (area.contains(point)) { distance = 0.; attachment = point; break; }
-                        for (size_t index = 0; index <= area.holes.size(); ++index) {
-                            const work::Polygon &ring = index == 0 ? area.contour : area.holes[index - 1];
-                            for (size_t edge = 0; edge < ring.size(); ++edge) {
-                                work::Point nearest;
-                                const double squared = work::Line(ring.points[edge], ring.points[(edge + 1) % ring.size()]).distance_to_squared(point, &nearest);
-                                if (std::sqrt(squared) < distance) { distance = std::sqrt(squared); attachment = nearest; }
-                            }
+                    bool provenance_match = false;
+                    for (const size_t index : active.attractor_indexes) {
+                        const zones::TravelZone &zone = zone_view.zone(index);
+                        if (zone.source_layer == endpoint->region_island.region(0).layer().handle() &&
+                            zone.scope.printing_catalog_id == endpoint->printing_catalog_id &&
+                            zone_view.zone_area(index).front().contains(point, true)) {
+                            provenance_match = true;
+                            break;
                         }
                     }
-                    if (distance < 1.5 * spacing) ++candidates;
-                    minimum_ratio = std::min(minimum_ratio, distance / spacing);
-                    maximum_ratio = std::max(maximum_ratio, distance / spacing);
-                    const work::Point from(route.front()), to(route.back());
-                    if (from.distance_to(attachment) + attachment.distance_to(to) > from.distance_to(to) + SCALED_EPSILON) {
-                        ++attachments_off_chord;
-                    }
+                    CHECK(provenance_match);
+                    if (provenance_match) ++provenance_matches;
+                    else ++provenance_mismatches;
                 }
                 const Layer &material_layer = *reinterpret_cast<const Layer *>(endpoint_layer.handle());
                 ExPolygons material = material_layer.lslices();
@@ -1222,13 +1206,12 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
     CHECK(checked > 0);
     CHECK(fallbacks == 0);
     CHECK(domains > 0);
-    CHECK(attachments_off_chord > 0);
-    CHECK(candidates == 2 * checked);
-    CHECK(maximum_ratio < 1.5);
+    CHECK(provenance_mismatches == 0);
+    CHECK(provenance_matches == 2 * checked);
     CHECK(chords_outside_material > 0);
     std::cout << "one-perimeter replay: checked=" << checked << " fallbacks=" << fallbacks << " domain_routes=" << domains
-        << " endpoint_candidates=" << candidates << " attachment/spacing=" << minimum_ratio << ".." << maximum_ratio
-        << " attachments_off_chord=" << attachments_off_chord << " chords_outside_material=" << chords_outside_material << '\n';
+        << " provenance_matches=" << provenance_matches << " provenance_mismatches=" << provenance_mismatches
+        << " chords_outside_material=" << chords_outside_material << '\n';
 }
 
 size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role)

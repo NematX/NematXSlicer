@@ -22,12 +22,13 @@ layer group before the host's worker barrier. Each run first prepares a chronolo
 an ordered record of borrowed extrusion gaps with their seams already snapped.
 It selects a planner through the advanced planner group, falling back to
 legacy for absent or unknown selections. Legacy preserves perimeter
-routing. The opt-in advanced planner summarizes eligible gaps, collects active
-attractors and forbidden tops, and routes in chronology order. Printed tops are
-opt-in and replace static forbidden tops when active; their dates start after
-the last arrival in each original island. Attractors are withdrawn perimeter slices
-dated by source-or-target membership. The advanced planner routes on their union
-minus expanded forbidden zones and validates against the original forbidden zones.
+routing. The opt-in advanced planner checks whether any gap is eligible, then
+collects active attractors and forbidden tops and routes in chronology order.
+Printed tops are opt-in and replace static forbidden tops when active; their dates
+start after the last arrival in each original island. Attractors publish raw
+perimeter slices dated by source-or-target membership. The planner subtracts
+expanded forbidden zones to form M, withdraws each M component into W, and
+validates against the original forbidden zones.
 Domain and obstacle-only hypotheses are ranked by estimated outside length plus
 weighted inside length. Validation checks forbidden material, endpoints, the budget
 and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
@@ -65,7 +66,7 @@ planner survives the callback. Cancellation and routing errors propagate.
     run_impl: own the chronology and planner for one worker callback
         |-- ScopeTravelConnector::prepare: record ordered gaps and snap seams
         |-- orchestrator_select_plugin: resolve the selected planner
-        |-- summarize: evaluate ZonePlanner::eligible without building zones
+        |-- eligibility guard: evaluate ZonePlanner::eligible without building zones
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
@@ -314,19 +315,21 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     }
     const Config region_defaults(print_get_default_region_config(ctx->print));
     const bool auxiliary_avoidance = region_defaults.bool_or_default("avoid_crossing_perimeters", false);
-    const zones::ChronologySummary summary = zones::summarize(chronology,
-        [&planner, &config, auxiliary_avoidance](const PendingTravel &travel) {
-            return travel.source_extrusion.handle() != nullptr &&
-                zones::ZonePlanner::eligible(planner, config, auxiliary_avoidance, travel.source, travel.target);
-        });
-    if (!summary.any_avoidance_active) {
+    bool any_avoidance_active = false;
+    for (const PendingTravel &travel : chronology.travels)
+        if (travel.source_extrusion.handle() != nullptr &&
+            zones::ZonePlanner::eligible(planner, config, auxiliary_avoidance, travel.source, travel.target)) {
+            any_avoidance_active = true;
+            break;
+        }
+    if (!any_avoidance_active) {
         m_connector.apply(chronology, route, progress());
         return;
     }
     // The contributors share this cache; the legacy planner owns its separate cache.
     AvoidCrossing::LayerInputCache inputs;
     const zones::ZoneContributorInput input{print, plan, *run_ctx, layer_group.print_z(),
-                                          inputs, chronology.travels, summary};
+                                          inputs, chronology.travels};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
     const zones::PrintedTopsContributor printed_tops;

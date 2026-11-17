@@ -5,8 +5,8 @@
 Default contributors supply instance-scoped routing domains and excluded tops
 to TravelZoneView. Pass the selected contributors in the view's contributor list.
 Each forbidden top component is a separate zone, so ignoring an endpoint's top
-does not ignore disjoint tops. Attractors withdraw each perimeter slice without
-losing thin passages, publishing one zone per source slice. They are active during
+does not ignore disjoint tops. Attractors publish each original perimeter slice
+as one zone, retaining its source layer and instance provenance. They are active during
 consecutive travels whose source or target belongs to that original slice on the
 same layer and instance. Static forbidden tops last for the layer.
 PrintedTopsContributor instead starts each top after the last arrival in its
@@ -20,12 +20,8 @@ An original island is a layer perimeter slice before inset. Support domains incl
 the last object layer strictly below the support target's Z + SCALED_EPSILON;
 support targets have no forbidden tops. DefaultAttractorContributor appends
 Attractor zones to out; both top contributors append Forbidden zones.
-No contributor replaces existing output.
-The attractor_domain helper unions the same withdrawn object-local slices for geometry consumers.
-Pass the AvoidCrossing::Input returned by LayerInputCache::get; it also holds
-the lower object slices needed for support:
-    const AvoidCrossing::Input &input = cache.get(print, layer, &context);
-    auto domain = attractor_domain(storage, input);
+No contributor replaces existing output. The planner later withdraws each M
+component with the shared thin-wall helper, after forbidden material is removed.
 SupportObstacleContributor copies object slices at or below the group's Z for
 only the instances in the plan catalog. Each connected component is a separate
 whole-layer forbidden zone for travels touching support, with no tool or instance
@@ -42,14 +38,10 @@ restriction. It reads slices directly, without the boundary cache.
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
 
-// Return the union of owned withdrawn object-local slices; a null target returns empty. Include lower slices for support.
-// Withdraw 1.5 * LayerInput::perimeter_spacing, limited near LayerInput::external_perimeter_width + perimeter_spacing; thinner walls remain unchanged.
-polygon_work::ExPolygons attractor_domain(storage_handle *storage, const AvoidCrossing::Input &input);
-
 class DefaultAttractorContributor : public ZoneContributor
 {
 public:
-    // Append one withdrawn zone per source slice and instance, dated by source-or-target membership; failures propagate.
+    // Append one raw zone per source slice and instance, dated by source-or-target membership; failures propagate.
     void contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const override;
 };
 
