@@ -123,6 +123,7 @@ TYPE_ALIASES = {
     "c_extrusion_heater_kind": "int",
     "c_extrusion_special_command": "int",
     "clipper_end_type_t": "int",
+    "clipper_detour_direction_t": "int",
     "clipper_fill_rule_t": "int",
     "clipper_join_type_t": "int",
     "clipper_operation_t": "int",

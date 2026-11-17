@@ -208,6 +208,11 @@ int test_plugin_api_headers_c(void)
     expolygon_collection_handle *(*variable_offset_fn)(storage_handle *, const expolygon_handle *,
         const float *, uint32_t) = clipper_variable_offset_inner_ex;
     polygon_collection_handle *(*expand_fn)(storage_handle *, const polygon_collection_handle *, double) = clipper_expand;
+    polyline_handle *(*detour_fn)(storage_handle *, const polyline_handle *,
+        const clipper_shapes_handle *, clipper_detour_direction_t) = clipper_detour_polyline_expolygons;
+    clipper_detour_direction_t directions[6] = {CLIPPER_DETOUR_CW, CLIPPER_DETOUR_CCW,
+        CLIPPER_DETOUR_POLYGON, CLIPPER_DETOUR_REVERSE, CLIPPER_DETOUR_SHORTEST, CLIPPER_DETOUR_LONGEST};
+    (void)detour_fn; (void)directions;
     int32_t (*slice_fn)(const triangle_mesh_handle *, const c_mesh_slicing_params *, const float *,
                         polygon_collection_handle **, uint32_t, const plugin_run_context *) =
         triangle_mesh_slice_to_polygons;

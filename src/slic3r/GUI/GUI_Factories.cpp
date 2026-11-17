@@ -188,7 +188,7 @@ wxBitmapBundle* SettingsFactory::get_category_bitmap(const Slic3r::OptionCategor
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 14> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 15> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
     {L("Add part"),              "add_part" },           // ~ModelVolumeType::MODEL_PART
     {L("Add negative volume"),   "add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
@@ -204,8 +204,9 @@ static const constexpr std::array<std::pair<const char *, const char *>, 14> ADD
     {L("Add support column"),    "support_column"},      // ~ModelVolumeType::SUPPORT_COLUMN
     {L("Add no support zone"),   "no_support_zone"},     // ~ModelVolumeType::NO_SUPPORT_ZONE
     {L("Add support interface column"), "support_interface_column"}, // ~ModelVolumeType::SUPPORT_INTERFACE_COLUMN
+    {L("Add no-travel modifier (routing pending)"), "add_modifier"}, // ~ModelVolumeType::NO_TRAVEL
 }};
-static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) + 1,
+static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::NO_TRAVEL) + 1,
               "ADD_VOLUME_MENU_ITEMS has one entry per volume type, in enum order");
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
@@ -746,6 +747,12 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
             ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::BRIM_NEGATIVE)].second, nullptr,
             [this]() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
 
+        if (menu_type != mtObjectSLA)
+            append_menu_item(menu, wxID_ANY, _(ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::NO_TRAVEL)].first),
+                _L("Stores a non-printing avoidance volume. Travel routing is not implemented in this build."),
+                [](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Box"), ModelVolumeType::NO_TRAVEL); },
+                "add_modifier", nullptr, []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+
         return;
     }
     {
@@ -763,6 +770,14 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
             []() { return !obj_list()->is_selected_object_cut() && obj_list()->is_instance_or_object_selected(); }, m_parent);
     }
     auto selected_func = []() { return obj_list()->is_instance_or_object_selected(); };
+    if (menu_type != mtObjectSLA) {
+        wxMenu *sub_menu_no_travel = new wxMenu;
+        append_submenu_add_generic(menu, sub_menu_no_travel, ModelVolumeType::NO_TRAVEL);
+        append_submenu(menu, sub_menu_no_travel, wxID_ANY,
+            _(ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::NO_TRAVEL)].first),
+            _L("Stores a non-printing avoidance volume. Travel routing is not implemented in this build."),
+            "add_modifier", selected_func, m_parent);
+    }
     if (menu_type != mtObjectSLA) {
         // modifer & height modifier
         auto& item_modifier = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::PARAMETER_MODIFIER)];

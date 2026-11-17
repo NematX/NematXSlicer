@@ -6,7 +6,7 @@
 #define slic3r_volume_h_
 
 #define SLIC3R_PLUGIN_API_VOLUME_MAJOR 2u
-#define SLIC3R_PLUGIN_API_VOLUME_MINOR 1u
+#define SLIC3R_PLUGIN_API_VOLUME_MINOR 2u
 
 #include <stdint.h>
 
@@ -97,7 +97,9 @@ typedef enum raw_volume_type {
     /* Since 2.1: non-printing mesh that forbids support inside it. */
     RAW_VOLUME_TYPE_NO_SUPPORT_ZONE             = 12,
     /* Since 2.1: non-printing mesh that asks for dense interface support inside it. */
-    RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN    = 13
+    RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN    = 13,
+    /* Non-printing travel-avoidance geometry; existing values remain unchanged. */
+    RAW_VOLUME_TYPE_NO_TRAVEL                   = 14
 } raw_volume_type;
 
 /* ========================= FACET PAINTING ========================= */

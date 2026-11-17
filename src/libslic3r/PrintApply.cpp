@@ -58,7 +58,7 @@ Representative direct calls (branches are not a timeline):
 
 namespace Slic3r {
 
-// Match support, seam and brim helper volumes to model_object_new, in its exact order and with the same IDs.
+// Match non-printing helper volumes to model_object_new, in its exact order and with the same IDs.
 // The destination already contains the printable parts and parameter modifiers in the correct order.
 // Friend to ModelVolume to allow copying.
 // static is not accepted by gcc if declared as a friend of ModelObject.
@@ -86,10 +86,14 @@ namespace Slic3r {
             // without rebuilding the model part.
             assert((model_volume_dst->is_support_volume() && model_volume_src->is_support_volume()) ||
                    (model_volume_dst->is_seam_position() && model_volume_src->is_seam_position()) ||
+                   (model_volume_dst->is_no_travel() && (model_volume_src->is_support_volume() ||
+                       model_volume_src->is_seam_position() || model_volume_src->is_brim())) ||
+                   (model_volume_src->is_no_travel() && (model_volume_dst->is_support_volume() ||
+                       model_volume_dst->is_seam_position() || model_volume_dst->is_brim())) ||
                    model_volume_dst->type() == model_volume_src->type());
             model_object_dst.volumes.emplace_back(model_volume_dst);
             if (model_volume_dst->is_support_volume() || model_volume_dst->is_seam_position() ||
-                model_volume_dst->is_brim()) {
+                model_volume_dst->is_brim() || model_volume_dst->is_no_travel()) {
                 // Copy the kind and transform without replacing printable geometry: the engine ID stays
                 // the same when a helper volume changes kind.
                 model_volume_dst->set_type(model_volume_src->type());
@@ -99,7 +103,7 @@ namespace Slic3r {
         } else {
             // The volume was not found in the old list. Create a new copy.
             assert(model_volume_src->is_support_volume() || model_volume_src->is_seam_position() ||
-                   model_volume_src->is_brim());
+                   model_volume_src->is_brim() || model_volume_src->is_no_travel());
             model_object_dst.volumes.emplace_back(new ModelVolume(*model_volume_src));
             model_object_dst.volumes.back()->set_model_object(&model_object_dst);
         }
@@ -1346,6 +1350,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INSIDE);
         bool brim_patch_differ          = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_PATCH) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_NEGATIVE);
+        const bool no_travel_differ = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::NO_TRAVEL);
         // The list actually can be empty if all instances are out of the print bed.
         //assert(print_objects_range.begin() != print_objects_range.end());
         // All PrintObjects in print_objects_range shall point to the same prints_objects_regions
@@ -1374,7 +1379,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             model_object.assign_copy(model_object_new);
         } else {
             model_object_status.print_object_regions_status = ModelObjectStatus::PrintObjectRegionsStatus::Valid;
-            if (supports_differ || seam_position_differ || brim_patch_differ || model_custom_supports_data_changed(model_object, model_object_new)) {
+            if (supports_differ || seam_position_differ || brim_patch_differ || no_travel_differ || model_custom_supports_data_changed(model_object, model_object_new)) {
                 // First stop background processing before shuffling or deleting the ModelVolumes in the ModelObject's list.
                 if (supports_differ) {
                     this->call_cancel_callback();
@@ -1394,6 +1399,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     // Seam volumes are read while ordering rotates the plan loops.
                     update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_ORDERING)));
                     // Copy just the seam volumes.
+                    model_volume_list_update_supports_seams(model_object, model_object_new);
+                } else if (no_travel_differ) {
+                    // Keep helper geometry current and rebuild the export-side plan.
+                    // Routing consumers can then borrow the updated volume snapshots.
+                    this->call_cancel_callback();
+                    update_apply_status(false);
+                    update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_ORDERING)));
                     model_volume_list_update_supports_seams(model_object, model_object_new);
                 } else if (brim_patch_differ) {
                     this->call_cancel_callback();

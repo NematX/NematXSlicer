@@ -1783,6 +1783,7 @@ void ObjectList::load_generic_subobject(const std::string& type_name, const Mode
     std::string base_name = "Generic";
     if (new_volume->is_seam_position()) base_name = "Seam";
     if (new_volume->is_brim())          base_name = "Brim";
+    if (new_volume->is_no_travel())     base_name = "NoTravel";
     if (type == ModelVolumeType::SUPPORT_ENFORCER) base_name = "Support";
     if (type == ModelVolumeType::SUPPORT_BLOCKER) base_name = "Blocker";
     if (type == ModelVolumeType::SUPPORT_COLUMN) base_name = "Column";
@@ -4380,6 +4381,8 @@ void ObjectList::change_part_type()
         types.emplace_back(ModelVolumeType::BRIM_PATCH);
         names.Add(_L("Brim Blocker"));
         types.emplace_back(ModelVolumeType::BRIM_NEGATIVE);
+        names.Add(_L("NoTravel (routing pending)"));
+        types.emplace_back(ModelVolumeType::NO_TRAVEL);
     }
     int selection = 0;
     if (auto it = std::find(types.begin(), types.end(), type); it != types.end())

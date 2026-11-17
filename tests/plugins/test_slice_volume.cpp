@@ -546,6 +546,96 @@ TEST_CASE("Support volume kind changes and moves synchronize the applied Print",
     CHECK(print.object(0).model_object()->volumes.front()->is_model_part());
 }
 
+// Preserve non-printing travel helpers without renumbering the support volume kinds.
+TEST_CASE("NoTravel volumes retain their identity and transformed geometry in 3MF", "[volume][no-travel]")
+{
+    using namespace Slic3r;
+    static_assert(int(ModelVolumeType::NO_TRAVEL) == 14);
+    static_assert(RAW_VOLUME_TYPE_NO_TRAVEL == 14);
+    CHECK(ModelVolume::type_from_string("NoTravel") == ModelVolumeType::NO_TRAVEL);
+    CHECK(ModelVolume::type_from_string("NO_TRAVEL") == ModelVolumeType::NO_TRAVEL);
+    CHECK(ModelVolume::type_to_string(ModelVolumeType::NO_TRAVEL) == "NoTravel");
+    Model model;
+    ModelObject *object = model.add_object("part", "part.stl", make_cube(4, 4, 1.5));
+    object->add_instance()->set_offset(Vec3d(10, 12, 0));
+    object->add_instance()->set_offset(Vec3d(30, 12, 0));
+    ModelVolume *helper = object->add_volume(make_cube(1, 2, 0.6), ModelVolumeType::NO_TRAVEL, false);
+    helper->set_offset(Vec3d(8, 2, 0.35));
+    helper->set_rotation(Vec3d(0, 0, 0.4));
+    helper->set_scaling_factor(Vec3d(2, 1, 1));
+    const slic3r_api::Volume view(reinterpret_cast<const volume_handle *>(helper));
+    CHECK(view.is_no_travel());
+    CHECK_FALSE(view.is_model_part());
+    CHECK_FALSE(view.is_modifier());
+    CHECK_FALSE(helper->is_model_part());
+    CHECK_FALSE(helper->is_negative_volume());
+    const BoundingBoxf3 expected = helper->mesh().transformed_bounding_box(helper->get_matrix());
+    const BoundingBoxf3 printable = object->instance_bounding_box(0);
+    CHECK(printable.size().x() == Approx(4));
+    CHECK(printable.size().y() == Approx(4));
+    const std::filesystem::path path = std::filesystem::temp_directory_path() /
+        ("no-travel-" + std::to_string(helper->id().id) + ".3mf");
+    struct ArchiveOwner {
+        std::filesystem::path path;
+        // Remove only the archive created by this case.
+        ~ArchiveOwner() { std::error_code error; std::filesystem::remove(path, error); }
+    } archive{path};
+    const DynamicPrintConfig saved_config;
+    REQUIRE(store_3mf(path.u8string().c_str(), &model, &saved_config));
+    Model loaded;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::Disable};
+    REQUIRE(load_3mf(path.u8string().c_str(), config, substitutions, &loaded, false, false));
+    REQUIRE(loaded.objects().size() == 1);
+    const ModelObject &restored = loaded.objects().front();
+    REQUIRE(restored.volumes.size() == 2);
+    REQUIRE(restored.instances.size() == 2);
+    const ModelVolume &restored_helper = *restored.volumes.back();
+    CHECK(restored_helper.is_no_travel());
+    const BoundingBoxf3 actual = restored_helper.mesh().transformed_bounding_box(restored_helper.get_matrix());
+    CHECK(actual.min.isApprox(expected.min, 1e-5));
+    CHECK(actual.max.isApprox(expected.max, 1e-5));
+    CHECK(restored.instances[0]->get_offset().isApprox(object->instances[0]->get_offset()));
+    CHECK(restored.instances[1]->get_offset().isApprox(object->instances[1]->get_offset()));
+}
+
+// Check helper synchronization without depending on a travel router.
+TEST_CASE("NoTravel edits synchronize non-printing helpers in the applied Print", "[volume][no-travel][replay]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    ModelObject *object = model.add_object("part", "part.stl", make_cube(4, 4, 1.5));
+    object->add_instance();
+    Print print;
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    print.apply(model, config);
+    const ObjectID part_id = object->volumes.front()->id();
+    ModelVolume *helper = object->add_volume(make_cube(1, 1, 1), ModelVolumeType::NO_TRAVEL, false);
+    const ObjectID helper_id = helper->id();
+    for (const ModelVolumeType type : {ModelVolumeType::NO_TRAVEL, ModelVolumeType::SUPPORT_BLOCKER,
+             ModelVolumeType::NO_TRAVEL, ModelVolumeType::SEAM_POSITION_CENTER_Z,
+             ModelVolumeType::NO_TRAVEL, ModelVolumeType::BRIM_PATCH, ModelVolumeType::NO_TRAVEL,
+             ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::NO_TRAVEL}) {
+        helper->set_type(type);
+        helper->set_offset(helper->get_offset() + Vec3d(0.25, 0.5, 0));
+        print.apply(model, config);
+        REQUIRE(print.objects().size() == 1);
+        const ModelObject &applied = *print.object(0).model_object();
+        REQUIRE(applied.volumes.size() == 2);
+        CHECK(applied.volumes.front()->id() == part_id);
+        CHECK(applied.volumes.back()->id() == helper_id);
+        CHECK(applied.volumes.back()->type() == type);
+        CHECK(applied.volumes.back()->get_matrix().isApprox(helper->get_matrix()));
+    }
+    object->delete_volume(1);
+    CHECK(object->volumes.front()->id() != part_id);
+    print.apply(model, config);
+    REQUIRE(print.object(0).model_object()->volumes.size() == 1);
+    CHECK(print.object(0).model_object()->volumes.front()->id() == object->volumes.front()->id());
+    CHECK(print.object(0).model_object()->volumes.front()->get_matrix().isApprox(object->volumes.front()->get_matrix()));
+}
+
 namespace {
 
 using namespace Slic3r;

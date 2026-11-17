@@ -115,6 +115,8 @@ the subject, including a closed polyline whose repeated start is its departure a
 A subject passing within a few units of itself may place a point on the wrong pass.
 Use clipper_diff_polylines_expolygons() or clipper_intersection_polylines_expolygons()
 for a whole PolylineCollection in one batch; output collection order is unspecified.
+clipper_detour_polyline_expolygons() replaces the stretches of a polyline that cross
+the rings of an operand by arcs along those rings (rules in slic3r_clipper.h).
 */
 
 /* ========================= generic read-only / stored views ========================= */
@@ -842,6 +844,21 @@ clipper_split_polyline_expolygons(storage_handle *storage, const Polyline &subje
     assert(split == 1);
     (void)split;
     return std::make_tuple(StoredPolylineCollection::adopt(storage, inside), StoredPolylineCollection::adopt(storage, outside));
+}
+
+// Replace the stretches of subject that cross the rings of the operand by arcs along those
+// rings (rules in slic3r_clipper.h). Throws std::invalid_argument for a NULL storage, an
+// invalid view or an unknown direction, and std::runtime_error when the host call fails.
+inline StoredPolyline clipper_detour_polyline_expolygons(storage_handle *storage,
+    const Polyline &subject, const ClipperOperand &rings, clipper_detour_direction_t direction)
+{
+    if (storage == nullptr || !subject.valid() || !rings.valid() ||
+        direction < CLIPPER_DETOUR_CW || direction > CLIPPER_DETOUR_LONGEST)
+        throw std::invalid_argument("Invalid polyline detour arguments.");
+    polyline_handle *result = ::clipper_detour_polyline_expolygons(storage, subject.handle(), rings.handle(), direction);
+    if (result == nullptr)
+        throw std::runtime_error("Polyline detour failed.");
+    return StoredPolyline::adopt(storage, result);
 }
 
 inline StoredExPolygonCollection clipper_clip_expolygons_with_subject_bbox(storage_handle *storage,

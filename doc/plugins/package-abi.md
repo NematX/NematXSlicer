@@ -136,6 +136,14 @@ source-compatible alias. Projects write `SeamPositionInternalCenterZ` and also
 read the old `SeamPositionInsideCenter` spelling. This is an additive name, not
 a change to the numeric volume layout.
 
+Volume API 2.2 appends `RAW_VOLUME_TYPE_NO_TRAVEL` at value 14 without changing
+any existing value. Projects write `NoTravel` and also read `NO_TRAVEL`.
+C++ and Python volume views expose `is_no_travel()`. This identifies a
+non-printing helper mesh, not a material modifier or a negative volume.
+The preparatory host stores and edits these volumes, but does not yet route
+travels around them. A future routing consumer must declare Volume 2.2 in its
+entry translation unit; earlier 2.0 and 2.1 packages remain host-compatible.
+
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the
 DLL export. Packaging extracts it without loading the library and fails if it

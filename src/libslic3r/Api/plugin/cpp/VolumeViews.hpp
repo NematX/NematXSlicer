@@ -398,6 +398,8 @@ public:
                value == RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE;
     }
     bool is_brim() const { return type() == RAW_VOLUME_TYPE_BRIM_PATCH || type() == RAW_VOLUME_TYPE_BRIM_NEGATIVE; }
+    // Identify travel-avoidance geometry without implying that a router is active.
+    bool is_no_travel() const { return type() == RAW_VOLUME_TYPE_NO_TRAVEL; }
 
     bool has_painting(const char *paint_key) const { return volume_has_painting(handle(), paint_key) != 0; }
     bool is_fdm_support_painted() const { return has_painting(RAW_FACET_PAINTING_FDM_SUPPORT); }

@@ -882,6 +882,19 @@ class Slic3rAPI:
         return clipper_split_polyline_expolygons(storage_address, subject, clip)
 
     @abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+    def clipper_detour_polyline_expolygons(
+        self,
+        storage_address: int,
+        subject: Polyline,
+        rings: ClipperOperand,
+        direction: int,
+    ) -> StoredPolyline:
+        """Replace the stretches of subject that cross the rings with arcs along them; see clipper_detour_polyline_expolygons()."""
+        if subject.api is not self or rings.api is not self:
+            raise ValueError("subject and rings must use this API instance")
+        return clipper_detour_polyline_expolygons(storage_address, subject, rings, direction)
+
+    @abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
     def clipper_clip_expolygons_with_subject_bbox(
         self,
         storage_address: int,

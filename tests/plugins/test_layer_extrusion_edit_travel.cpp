@@ -293,6 +293,200 @@ TEST_CASE("Avoid-crossing travel keeps the straight fallback without regional co
 
 } // namespace
 
+namespace {
+// Copied travel routes and host warnings from one controlled run.
+struct NoTravelResult { std::vector<Polyline> routes; std::vector<std::string> warnings; };
+
+// Run the real layer-edit host on controlled platter-space gaps. The model is
+// applied normally, so NoTravel reads the same transformed helper volumes as a
+// sliced print. Multiple layers exercise the worker-local sections and summary.
+NoTravelResult controlled_no_travel(Print &print, const Points &endpoints,
+                                   const char *provider = TRAVEL_PLUGIN);
+// Add one NoTravel box of the given XY size and offset to an object.
+ModelVolume *no_travel_box(ModelObject &object, double x, double y, double width, double depth, double z = 0.);
+// Return the axis-aligned rectangle (x, y, width, depth) in scaled coordinates.
+Polygon rectangle(double x, double y, double width, double depth);
+// Closed square frame [0, size]^2 whose walls are width thick, with a free hole inside.
+TriangleMesh no_travel_frame(double size, double width, double height);
+
+NoTravelResult controlled_no_travel(Print &print, const Points &endpoints,
+                                   const char *provider)
+{
+    REQUIRE(endpoints.size() % 2 == 0);
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan = PrintingPlan{};
+    for (size_t o = 0; o < print.objects().size(); ++o)
+        for (size_t i = 0; i < print.object(o).instances().size(); ++i)
+            plan.find_or_add_object_instance(print.object(o), i);
+    plan.groups.resize(1);
+    plan.groups[0].layers.resize(endpoints.size() / 2);
+    for (size_t i = 0; i < endpoints.size() / 2; ++i) {
+        auto &layer = plan.groups[0].layers[i];
+        layer.print_z = scale_i(0.2 + 0.2 * i);
+        layer.tool_groups.resize(1);
+        auto &tool = layer.tool_groups[0];
+        tool.extruder_id = 0;
+        append_extrusion(tool, make_path(endpoints[2*i] - Point(scale_i(1.), 0), endpoints[2*i]));
+        append_extrusion(tool, make_path(endpoints[2*i+1], endpoints[2*i+1] + Point(scale_i(1.), 0)));
+    }
+    Orchestrator::instance().consume_plugin_messages();
+    print.pipeline_progress().reset();
+    run_travel_plugins(print, provider);
+    NoTravelResult result;
+    for (auto &layer : plan.groups[0].layers) {
+        const auto path = ordered_scope(*layer.tool_groups[0].extrusions[1].root).travel();
+        Polyline route;
+        for (uint32_t i = 0; i < path.point_count(); ++i)
+            route.points.emplace_back(path.point(i).x, path.point(i).y);
+        result.routes.push_back(std::move(route));
+    }
+    for (const auto &message : Orchestrator::instance().consume_plugin_messages())
+        if (message.plugin_id == TRAVEL_PLUGIN) result.warnings.push_back(message.message);
+    return result;
+}
+
+ModelVolume *no_travel_box(ModelObject &object, double x, double y, double width, double depth, double z)
+{
+    auto *volume = object.add_volume(make_cube(width, depth, 1.), ModelVolumeType::NO_TRAVEL, false);
+    volume->set_offset(Vec3d(x, y, z));
+    return volume;
+}
+
+Polygon rectangle(double x, double y, double width, double depth)
+{
+    return Polygon(Points{Point::new_scale(x, y), Point::new_scale(x+width, y),
+        Point::new_scale(x+width, y+depth), Point::new_scale(x, y+depth)});
+}
+
+TriangleMesh no_travel_frame(double size, double width, double height)
+{
+    TriangleMesh frame = make_cube(size, width, height);
+    TriangleMesh top = make_cube(size, width, height);
+    top.translate(0.f, float(size - width), 0.f);
+    TriangleMesh left = make_cube(width, size - 2*width, height);
+    left.translate(0.f, float(width), 0.f);
+    TriangleMesh right = make_cube(width, size - 2*width, height);
+    right.translate(float(size - width), float(width), 0.f);
+    frame.merge(top);
+    frame.merge(left);
+    frame.merge(right);
+    return frame;
+}
+} // namespace
+
+TEST_CASE("Simple travel avoids NoTravel sections without perimeter settings", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool avoid_perimeters = GENERATE(false, true);
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    object->add_instance();
+    no_travel_box(*object, 10., 4., 4., 12.);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("avoid_crossing_perimeters", avoid_perimeters ? "1" : "0");
+    Print print;
+    print.apply(model, config);
+    const Points endpoints{Point::new_scale(2., 10.), Point::new_scale(22., 10.)};
+    const auto result = controlled_no_travel(print, endpoints);
+    REQUIRE(result.routes.size() == 1);
+    const auto &path = result.routes.front();
+    REQUIRE(path.size() > 2);
+    CHECK(path.first_point() == endpoints.front());
+    CHECK(path.last_point() == endpoints.back());
+    CHECK(intersection_pl(path, ExPolygon(rectangle(10.001, 4.001, 3.998, 11.998))).empty());
+    CHECK(result.warnings.empty());
+
+    // A different explicitly chosen provider is not wrapped or replaced.
+    const auto other = controlled_no_travel(print, endpoints, AVOID_CROSSING_TRAVEL_PLUGIN);
+    CHECK(other.routes.front().points == endpoints);
+}
+
+TEST_CASE("Simple travel keeps direct paths without an applicable section", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    object->add_instance();
+    SECTION("No helper") {}
+    SECTION("Helper above the layer") { no_travel_box(*object, 10., 4., 4., 12., 2.); }
+    SECTION("Helper beside the path") { no_travel_box(*object, 10., 14., 4., 2.); }
+    SECTION("Path in a hole") {
+        object->add_volume(no_travel_frame(20., 2., 1.), ModelVolumeType::NO_TRAVEL, false);
+    }
+    Print print;
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    const Points endpoints{Point::new_scale(3., 10.), Point::new_scale(17., 10.)};
+    const auto result = controlled_no_travel(print, endpoints);
+    CHECK(result.routes.front().points == endpoints);
+    CHECK(result.warnings.empty());
+}
+
+TEST_CASE("Simple travel exempts endpoint components but still avoids other components", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    object->add_instance();
+    no_travel_box(*object, 0., 8., 4., 4.);
+    no_travel_box(*object, 3., 8., 3., 4.); // Union makes the exempt component extend to X=6.
+    no_travel_box(*object, 10., 4., 4., 12.);
+    Print print;
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    const Points endpoints{Point::new_scale(2., 10.), Point::new_scale(22., 10.),
+                          Point::new_scale(2., 10.), Point::new_scale(22., 10.)};
+    const auto result = controlled_no_travel(print, endpoints);
+    REQUIRE(result.warnings.size() == 1); // One summary for both parallel layer runs.
+    CHECK(result.warnings.front().find("2 travels exempted") != std::string::npos);
+    for (const auto &path : result.routes) {
+        REQUIRE(path.size() > 2);
+        CHECK(intersection_pl(path, ExPolygon(rectangle(10.001, 4.001, 3.998, 11.998))).empty());
+    }
+}
+
+TEST_CASE("Simple travel uses transformed volumes and every real instance", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    // Volume rotation makes its XY section [10,14] x [4,16].
+    auto *helper = no_travel_box(*object, 14., 4., 12., 4.);
+    helper->set_rotation(Vec3d(0., 0., PI/2));
+    object->add_instance()->set_rotation(Vec3d(0., 0., PI/2));
+    object->instances.front()->set_offset(Vec3d(40., 30., 0.));
+    auto *copy = object->add_instance(*object->instances.front());
+    copy->set_offset(Vec3d(90., 60., 0.));
+    Print print;
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    const auto result = controlled_no_travel(print, {Point::new_scale(30., 32.), Point::new_scale(30., 52.),
+                                                    Point::new_scale(80., 62.), Point::new_scale(80., 82.)});
+    REQUIRE(result.routes.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        const auto &path = result.routes[i];
+        REQUIRE(path.size() > 2);
+        const double dx = i == 0 ? 0. : 50., dy = i == 0 ? 0. : 30.;
+        CHECK(intersection_pl(path, ExPolygon(rectangle(24.001+dx, 40.001+dy, 11.998, 3.998))).empty());
+    }
+    CHECK(result.warnings.empty());
+}
+
+TEST_CASE("Simple travel reports an inadmissible single detour and retains its direct path", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    object->add_instance();
+    // A closed frame: following the inner hole cannot get outside its outer
+    // contour. Both endpoints are free, so no component is exempt.
+    object->add_volume(no_travel_frame(20., 2., 1.), ModelVolumeType::NO_TRAVEL, false);
+    Print print;
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    const Points endpoints{Point::new_scale(10., 10.), Point::new_scale(22., 10.)};
+    const auto result = controlled_no_travel(print, endpoints);
+    CHECK(result.routes.front().points == endpoints);
+    REQUIRE(result.warnings.size() == 1);
+    CHECK(result.warnings.front().find("1 inadmissible detours") != std::string::npos);
+}
+
 TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
           "[plugins][layer-extrusion-edit][travel]")
 {

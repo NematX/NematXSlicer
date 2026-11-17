@@ -142,15 +142,15 @@ TEST_CASE("Package ABI rejects missing invalid and conflicting requirements", "[
     CHECK_FALSE(metadata.compatibility.message().empty());
 }
 
-TEST_CASE("Clipper 2.2 rejects 1.x packages and accepts earlier 2.x minors", "[plugins][abi][clipper]")
+TEST_CASE("Clipper 2.3 rejects 1.x packages and accepts earlier 2.x minors", "[plugins][abi][clipper]")
 {
-    // The 2.x union takes a fill-rule argument; 2.1 adds configurable inward offsets and 2.2 adds native polygon operations.
+    // The 2.x union takes a fill rule; minors add inward offsets, native polygon operations and ring detours.
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     const std::vector<PluginApiRequirement>::const_iterator clipper = std::find_if(host.begin(), host.end(),
         [](const PluginApiRequirement &contract) { return contract.header == "slic3r_clipper.h"; });
     REQUIRE(clipper != host.end());
     CHECK(clipper->version.major == 2);
-    CHECK(clipper->version.minor == 2);
+    CHECK(clipper->version.minor == 3);
 
     for (const char *version : {"1.0", "1.3", "1.65535"}) {
         PluginPackageMetadata metadata;
@@ -161,25 +161,24 @@ TEST_CASE("Clipper 2.2 rejects 1.x packages and accepts earlier 2.x minors", "[p
         CHECK(metadata.compatibility.message().find("slic3r_clipper.h") != std::string::npos);
     }
     // Both the existing layout and the additive function extension are compatible.
-    for (const char *version : {"2.0", "2.1", "2.2", "2.3"}) {
+    for (const char *version : {"2.0", "2.1", "2.2", "2.3", "2.4"}) {
         PluginPackageMetadata current;
         std::string error;
         REQUIRE(parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
             "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_clipper.h=") + version + "\n", current, error));
-        CHECK(current.compatibility.compatible() == (std::string(version) != "2.3"));
+        CHECK(current.compatibility.compatible() == (std::string(version) != "2.4"));
     }
 }
 
-TEST_CASE("Volume API 2.1 rejects 1.x packages and keeps 2.0 packages compatible", "[plugins][abi][volume]")
+TEST_CASE("Volume API keeps older minor packages compatible with NoTravel at 2.2", "[plugins][abi][volume]")
 {
-    // The host exposes slic3r_volume.h 2.1: the 2.0 slicing function plus the internal attractor name
-    // and the support-geometry volume types.
+    // NoTravel adds a volume kind without changing the existing layout or support kinds.
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     const std::vector<PluginApiRequirement>::const_iterator volume = std::find_if(host.begin(), host.end(),
         [](const PluginApiRequirement &contract) { return contract.header == "slic3r_volume.h"; });
     REQUIRE(volume != host.end());
     CHECK(volume->version.major == 2);
-    CHECK(volume->version.minor == 1);
+    CHECK(volume->version.minor == 2);
 
     for (const char *version : {"1.0", "1.2", "1.65535"}) {
         PluginPackageMetadata metadata;
@@ -189,13 +188,12 @@ TEST_CASE("Volume API 2.1 rejects 1.x packages and keeps 2.0 packages compatible
         CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
         CHECK(metadata.compatibility.message().find("slic3r_volume.h") != std::string::npos);
     }
-    // A 2.0 package and a package requiring the new types are accepted; a later minor is not.
-    for (const char *version : {"2.0", "2.1", "2.2"}) {
+    for (const char *version : {"2.0", "2.1", "2.2", "2.3"}) {
         PluginPackageMetadata current;
         std::string error;
         REQUIRE(parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
             "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_volume.h=") + version + "\n", current, error));
-        CHECK(current.compatibility.compatible() == (std::string(version) != "2.2"));
+        CHECK(current.compatibility.compatible() == (std::string(version) != "2.3"));
     }
 }
 

@@ -97,6 +97,7 @@ from slic3r_api_generated import (
     SLIC3R_CONFIG_OPTION_POINT,
     SLIC3R_CONFIG_OPTION_POINTS,
     RAW_VOLUME_TYPE_BRIM_NEGATIVE,
+    RAW_VOLUME_TYPE_NO_TRAVEL,
     RAW_VOLUME_TYPE_BRIM_PATCH,
     RAW_VOLUME_TYPE_MODEL_PART,
     RAW_VOLUME_TYPE_NEGATIVE_VOLUME,
@@ -1518,6 +1519,10 @@ class Volume(DataTreeView):
     def is_brim(self) -> bool:
         """Return whether this is a positive or negative brim-control volume."""
         return self.type() in {RAW_VOLUME_TYPE_BRIM_PATCH, RAW_VOLUME_TYPE_BRIM_NEGATIVE}
+
+    def is_no_travel(self) -> bool:
+        """Identify travel-avoidance geometry, not whether a router is active."""
+        return self.type() == RAW_VOLUME_TYPE_NO_TRAVEL
 
     def id(self) -> int:
         return int(self.api.host.volume_get_id(self.c_handle()))

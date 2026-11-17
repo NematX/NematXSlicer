@@ -17,6 +17,7 @@ Polyline comparisons preserve every bend and each path's direction. They may
 ignore the order of separate paths, but tests of collection indices or result
 ordering check that order explicitly. Other cases verify geometry cleanup,
 unchanged inputs, independent results and error reporting through C and C++.
+The [clipper-detour] cases at the end of the file check polyline detours around rings.
 
 LineDistancer finds distances and nearby line segments. Its tests compare
 indexed queries with an exhaustive scan, then check copied geometry, index
@@ -35,6 +36,9 @@ Representative calls in the boolean-conversion tests:
             |-- island_signatures()
             |-- check_union_island_order()
             `-- Slic3r::union_ex() [union case only]
+
+    TEST_CASE [clipper-detour]
+        `-- run_detour() / check_detour_paths(): call the detour twice and compare all points
 
 Input geometry belongs to local test values; views borrow it during calls.
 PluginStorage owns results created through the C API and remains alive while
@@ -2088,4 +2092,491 @@ TEST_CASE("Public LineDistancer dense boundary benchmark", "[.][plugins][line-di
                   << " indexed_ms=" << std::chrono::duration<double,std::milli>(queried-built).count()
                   << " exhaustive_ms=" << std::chrono::duration<double,std::milli>(done-queried).count() << '\n';
     }
+}
+
+/*
+Polyline detour tests ([clipper-detour]). Each case gives a polyline, the rings to go
+around and a direction, then compares the whole result with points written by hand:
+in millimeters through detour_points(), or in raw scaled units when the case is about
+precision at large coordinates. The rules being tested are described above
+clipper_detour_polyline_expolygons() in slic3r_clipper.h.
+*/
+namespace {
+// Convert small XY examples from millimeters into scaled points, keeping order and repeats.
+Points detour_points(std::initializer_list<std::pair<double, double>> coordinates);
+// Call the C++ detour twice with rings given as Polygons and return the result points;
+// also check that both calls agree and that the input polyline is not modified.
+Points run_detour(const Points &points, const Polygons &rings, clipper_detour_direction_t direction);
+// Same as run_detour() for rings given as raw Clipper paths, which may contain repeated
+// points that a Polygon does not allow, and compare the result with expected.
+void check_detour_paths(const Points &points, const ClipperLib::Paths &paths,
+    clipper_detour_direction_t direction, const Points &expected);
+
+// A shapes adapter whose conversion to paths always throws, to check that the C
+// function then returns NULL and stores nothing.
+class FailingDetourShapes : public ApiClipper::ClipperShapes {
+public:
+    // No clipping is performed by this adapter; conversion is its failure site.
+    void add_to_clipper(ClipperLib::Clipper &, ClipperLib::PolyType, bool) const override {}
+    // Reject raw-path conversion so no completed result can be stored.
+    ClipperLib::Paths to_paths() const override { throw std::runtime_error("Path conversion failed"); }
+    // No polygon materialization is needed by the detour operation.
+    Polygons to_polygons() const override { return {}; }
+    // No grouped materialization is needed by the detour operation.
+    ExPolygons to_expolygons() const override { return {}; }
+    // Report a present source; conversion, not emptiness, is the failure.
+    bool empty() const override { return false; }
+    // Describe one source path without materializing it.
+    uint32_t path_count() const override { return 1; }
+    // No extent query is needed by the detour operation.
+    BoundingBox bounding_box() const override { return {}; }
+};
+
+Points detour_points(std::initializer_list<std::pair<double, double>> coordinates)
+{
+    Points points;
+    for (const std::pair<double, double> &xy : coordinates)
+        points.push_back(point_mm(xy.first, xy.second));
+    return points;
+}
+
+Points run_detour(const Points &points, const Polygons &rings, clipper_detour_direction_t direction)
+{
+    PluginStorage owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&owner);
+    const Polyline input(points);
+    const slic3r_api::Polyline subject(reinterpret_cast<const polyline_handle *>(&input));
+    const slic3r_api::PolygonCollection mask(reinterpret_cast<const polygon_collection_handle *>(&rings));
+    slic3r_api::ClipperOperand operand(storage, mask);
+    Points output;
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const slic3r_api::StoredPolyline result = slic3r_api::clipper_detour_polyline_expolygons(storage, subject, operand, direction);
+        Points current;
+        for (uint32_t i = 0; i < result.size(); ++i) {
+            const c_point p = result.at(i);
+            current.emplace_back(p.x, p.y);
+        }
+        if (repeat == 0) output = current;
+        else CHECK(current == output);
+        CHECK(input.points == points);
+        CHECK(result.handle() != subject.handle());
+    }
+    return output;
+}
+
+void check_detour_paths(const Points &points, const ClipperLib::Paths &paths,
+    clipper_detour_direction_t direction, const Points &expected)
+{
+    PluginStorage owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&owner);
+    ApiClipper::ClipperShapes *source = owner.store(ApiClipper::make_path_list_shapes(paths));
+    slic3r_api::ClipperOperand operand = slic3r_api::ClipperOperand::adopt(storage,
+        reinterpret_cast<clipper_shapes_handle *>(source));
+    const Polyline subject(points);
+    const slic3r_api::Polyline subject_view(reinterpret_cast<const polyline_handle *>(&subject));
+    Points previous;
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const slic3r_api::StoredPolyline result = slic3r_api::clipper_detour_polyline_expolygons(
+            storage, subject_view, operand, direction);
+        Points actual;
+        for (uint32_t i = 0; i < result.size(); ++i) {
+            const c_point point = result.at(i);
+            actual.emplace_back(point.x, point.y);
+        }
+        CHECK(actual == expected);
+        if (repeat != 0) CHECK(actual == previous);
+        previous = actual;
+        CHECK(subject.points == points);
+        CHECK(source->to_paths() == paths);
+        CHECK(result.handle() != subject_view.handle());
+    }
+}
+} // namespace
+
+TEST_CASE("Ring detours implement six directions independently of hole orientation", "[plugins][clipper][clipper-detour]")
+{
+    for (bool concave : {false, true}) {
+        Polygon ring = concave ? Polygon(detour_points({{0,0},{10,0},{10,4},{4,4},{4,10},{0,10}})) : rectangle_mm(0,0,10,10);
+        const Points subject = detour_points({{-2,2},{12,2}});
+        const Points lower = detour_points({{-2,2},{0,2},{0,0},{10,0},{10,2},{12,2}});
+        const Points upper = concave ? detour_points({{-2,2},{0,2},{0,10},{4,10},{4,4},{10,4},{10,2},{12,2}}) :
+            detour_points({{-2,2},{0,2},{0,10},{10,10},{10,2},{12,2}});
+        for (bool reversed : {false, true}) {
+            if (reversed)
+                ring.reverse();
+            for (int value = 0; value < 6; ++value) {
+                const clipper_detour_direction_t direction = static_cast<clipper_detour_direction_t>(value);
+                CAPTURE(concave, reversed, value);
+                const bool bottom = direction == CLIPPER_DETOUR_CCW ||
+                    (direction == CLIPPER_DETOUR_POLYGON && !reversed) ||
+                    (direction == CLIPPER_DETOUR_REVERSE && reversed) ||
+                    (direction == CLIPPER_DETOUR_SHORTEST);
+                CHECK(run_detour(subject, {ring}, direction) == (bottom ? lower : upper));
+
+                // The same ring used as the hole of a larger ExPolygon gives the same
+                // result: holes are followed like any other ring.
+                PluginStorage owner;
+                storage_handle *storage = reinterpret_cast<storage_handle *>(&owner);
+                ExPolygon area(rectangle_mm(-20,-20,20,20));
+                area.holes.push_back(ring);
+                const Polyline input(subject);
+                slic3r_api::ClipperOperand operand(storage, view(area));
+                const slic3r_api::StoredPolyline result = slic3r_api::clipper_detour_polyline_expolygons(storage,
+                    slic3r_api::Polyline(reinterpret_cast<const polyline_handle *>(&input)), operand, direction);
+                const Points &expected = bottom ? lower : upper;
+                REQUIRE(result.size() == expected.size());
+                for (uint32_t i = 0; i < result.size(); ++i) {
+                    CHECK(result.at(i).x == expected[i].x());
+                    CHECK(result.at(i).y == expected[i].y());
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("Ring detours select the first future crossing along the chosen arc", "[plugins][clipper][clipper-detour]")
+{
+    // Along the polyline the rings are crossed in the order A B C C B D D (one letter
+    // per crossing). A is crossed once and ignored, the detour around B skips both
+    // crossings of C, and D gets its own detour.
+    const Polygons abcd{rectangle_mm(-4,-1,-3,1), rectangle_mm(0,-2,8,2),
+        rectangle_mm(2,-1,4,1), rectangle_mm(10,-2,12,2)};
+    CHECK(run_detour(detour_points({{-3.5,0},{-3,0},{-2,0},{14,0}}), abcd, CLIPPER_DETOUR_POLYGON) ==
+        detour_points({{-3.5,0},{-3,0},{-2,0},{0,0},{0,-2},{8,-2},{8,0},{10,0},{10,-2},{12,-2},{12,0},{14,0}}));
+
+    // The polyline crosses the ring four times, B1 to B4. Walking forward from B1 meets
+    // B2 first; walking backward meets B4 first, so B2 and B3 are skipped.
+    const Polygon tall_square = rectangle_mm(0,0,10,20);
+    const Points four = detour_points({{-2,2},{12,2},{12,18},{-2,18}});
+    const Points shortest = detour_points({{-2,2},{0,2},{0,0},{10,0},{10,2},{12,2},
+        {12,18},{10,18},{10,20},{0,20},{0,18},{-2,18}});
+    const Points reverse = detour_points({{-2,2},{0,2},{0,18},{-2,18}});
+    CHECK(run_detour(four, {tall_square}, CLIPPER_DETOUR_SHORTEST) == shortest);
+    CHECK(run_detour(four, {tall_square}, CLIPPER_DETOUR_LONGEST) == reverse);
+    CHECK(run_detour(four, {tall_square}, CLIPPER_DETOUR_POLYGON) == shortest);
+    CHECK(run_detour(four, {tall_square}, CLIPPER_DETOUR_REVERSE) == reverse);
+
+    // Shortest goes up because that is the shorter way to B2, the next crossing; going
+    // up from B1 meets B4 before B2, so B4 is the exit.
+    const Points shortest_direction = detour_points({{-2,8},{12,8},{12,9},{-2,9}});
+    CHECK(run_detour(shortest_direction, {rectangle_mm(0,0,10,10)}, CLIPPER_DETOUR_SHORTEST) ==
+        detour_points({{-2,8},{0,8},{0,9},{-2,9}}));
+
+    // Oblique crossings: the shorter and longer arcs differ, and the crossing points
+    // are rounded to integers.
+    const Polygon square = rectangle_mm(0,0,10,10);
+    const Points same_edge = detour_points({{-2,2},{5,5},{-2,8}});
+    const Points same_edge_short{{-2000000,2000000},{0,2857143},{0,7142857},{-2000000,8000000}};
+    const Points same_edge_long{{-2000000,2000000},{0,2857143},{0,0},{10000000,0},{10000000,10000000},
+        {0,10000000},{0,7142857},{-2000000,8000000}};
+    CHECK(run_detour(same_edge, {square}, CLIPPER_DETOUR_SHORTEST) == same_edge_short);
+    CHECK(run_detour(same_edge, {square}, CLIPPER_DETOUR_LONGEST) == same_edge_long);
+
+    // The polyline leaves the L-shaped ring across its inside corner and comes back;
+    // the short arc goes around that corner.
+    const Polygon l_ring(detour_points({{0,0},{10,0},{10,4},{4,4},{4,10},{0,10}}));
+    CHECK(run_detour(detour_points({{2,8},{8,2}}), {l_ring}, CLIPPER_DETOUR_SHORTEST) ==
+        detour_points({{2,8},{4,6},{4,4},{6,4},{8,2}}));
+}
+
+TEST_CASE("Ring contacts count only side changes and place overlap exits at Q", "[plugins][clipper][clipper-detour]")
+{
+    const Polygon square = rectangle_mm(0,0,10,10);
+
+    SECTION("Tangencies on an edge and a vertex stay unchanged") {
+        const Points input = detour_points({{-2,2},{0,2},{0,0},{-2,-2},{-4,-2}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == input);
+    }
+
+    SECTION("An isolated vertex tangency stays unchanged") {
+        const Points input = detour_points({{-2,1},{0,0},{1,-2}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == input);
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_LONGEST) == input);
+    }
+
+    SECTION("An isolated edge tangency stays unchanged") {
+        const Points input = detour_points({{-2,3},{0,5},{-2,7}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == input);
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_LONGEST) == input);
+    }
+
+    SECTION("A path touching two corners keeps its outside vertex") {
+        const Points input = detour_points({{-3,1},{0,0},{5,-3},{10,0},{13,1}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == input);
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_LONGEST) == input);
+    }
+
+    SECTION("An overlap with the same side on both ends stays unchanged") {
+        const Points input = detour_points({{-2,0},{12,0}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == input);
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_LONGEST) == input);
+    }
+
+    SECTION("An overlap crossing at the closing vertex emits one event at Q") {
+        const Polygon ring(detour_points({{7,0},{20,10},{20,-10},{6,0}}));
+        const Points input = detour_points({{0,0},{25,0}});
+        const Points upper = detour_points({{0,0},{7,0},{20,10},{20,0},{25,0}});
+        const Points lower = detour_points({{0,0},{7,0},{6,0},{20,-10},{20,0},{25,0}});
+        CHECK(run_detour(input, {ring}, CLIPPER_DETOUR_SHORTEST) == upper);
+        CHECK(run_detour(input, {ring}, CLIPPER_DETOUR_LONGEST) == lower);
+        CHECK(run_detour(input, {ring}, CLIPPER_DETOUR_POLYGON) == upper);
+        CHECK(run_detour(input, {ring}, CLIPPER_DETOUR_REVERSE) == lower);
+    }
+
+    SECTION("A true crossing through a vertex starts the ring arc there") {
+        const Points input = detour_points({{-2,-2},{5,5},{12,12}});
+        CHECK(run_detour(input, {square}, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{-2,-2},{0,0},{10,0},{10,10},{12,12}}));
+    }
+}
+
+TEST_CASE("Ring detours use exact absolute orientation at large coordinates", "[plugins][clipper][clipper-detour]")
+{
+    const coord_t n = 100000000;
+    const ClipperLib::Path ccw{{n,n},{n + 1,n},{n + 1,n + 1},{n,n + 1}};
+    ClipperLib::Path cw = ccw;
+    std::reverse(cw.begin(), cw.end());
+    const Points subject{{n - 1,n},{n + 2,n + 1}};
+    const Points ccw_expected{{n - 1,n},{n,n},{n + 1,n},{n + 1,n + 1},{n + 2,n + 1}};
+    const Points cw_expected{{n - 1,n},{n,n},{n,n + 1},{n + 1,n + 1},{n + 2,n + 1}};
+
+    check_detour_paths(subject, {ccw}, CLIPPER_DETOUR_CCW, ccw_expected);
+    check_detour_paths(subject, {ccw}, CLIPPER_DETOUR_CW, cw_expected);
+    check_detour_paths(subject, {cw}, CLIPPER_DETOUR_CCW, ccw_expected);
+    check_detour_paths(subject, {cw}, CLIPPER_DETOUR_CW, cw_expected);
+}
+
+TEST_CASE("Ring detours use wide products for slicer coordinates", "[plugins][clipper][clipper-detour]")
+{
+    const coord_t base = 100000000000LL;
+    const coord_t width = 4000000000LL;
+    const ClipperLib::Path ring{{base,base},{base + width,base},
+        {base + width,base + width},{base,base + width}};
+    const Points subject{{base - 3000000000LL,base + 1000000000LL},
+        {base + 7000000000LL,base + 1000000000LL}};
+    const Points expected{{base - 3000000000LL,base + 1000000000LL},
+        {base,base + 1000000000LL},{base,base},{base + width,base},
+        {base + width,base + 1000000000LL},{base + 7000000000LL,base + 1000000000LL}};
+
+    check_detour_paths(subject, {ring}, CLIPPER_DETOUR_SHORTEST, expected);
+}
+
+TEST_CASE("Ring detours round contacts from the local segment parameter", "[plugins][clipper][clipper-detour]")
+{
+    const coord_t segments = 65536;
+    Points subject;
+    Points expected;
+    subject.reserve(segments + 2);
+    expected.reserve(segments + 6);
+    for (coord_t i = 0; i <= segments; ++i) {
+        const Point point(-270000000000LL - 1000LL * (segments - i), 0);
+        subject.push_back(point);
+        expected.push_back(point);
+    }
+    const Point end(270000000000LL, 0);
+    subject.push_back(end);
+    expected.emplace_back(-90000000000LL, 0);
+    expected.emplace_back(-90000000000LL, -1000000000LL);
+    expected.emplace_back(90000000000LL, -1000000000LL);
+    expected.emplace_back(90000000000LL, 0);
+    expected.push_back(end);
+
+    const ClipperLib::Path ring{{-90000000000LL, -1000000000LL},
+        {90000000000LL, -1000000000LL}, {90000000000LL, 1000000000LL},
+        {-90000000000LL, 1000000000LL}};
+    check_detour_paths(subject, {ring}, CLIPPER_DETOUR_POLYGON, expected);
+}
+
+TEST_CASE("Ring contacts at polyline endpoints do not create crossings", "[plugins][clipper][clipper-detour]")
+{
+    const Polygon square = rectangle_mm(0,0,10,10);
+    const Points initial = detour_points({{0,5},{-2,5},{-2,6}});
+    const Points final = detour_points({{-2,4},{-2,5},{0,5}});
+    const Points one_crossing = detour_points({{0,5},{-2,6},{5,6}});
+    CHECK(run_detour(initial, {square}, CLIPPER_DETOUR_SHORTEST) == initial);
+    CHECK(run_detour(final, {square}, CLIPPER_DETOUR_SHORTEST) == final);
+    CHECK(run_detour(one_crossing, {square}, CLIPPER_DETOUR_SHORTEST) == one_crossing);
+    CHECK(run_detour(one_crossing, {square}, CLIPPER_DETOUR_LONGEST) == one_crossing);
+}
+
+TEST_CASE("Ring detours preserve exact equal arcs and simultaneous ring order", "[plugins][clipper][clipper-detour]")
+{
+    // Axis-aligned intersections and side lengths make both arcs exactly 20 mm.
+    const Polygon square = rectangle_mm(0,0,10,10);
+    const Points input = detour_points({{-2,5},{12,5}});
+    const Points supplied = detour_points({{-2,5},{0,5},{0,0},{10,0},{10,5},{12,5}});
+    CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) == supplied);
+    CHECK(run_detour(input, {square}, CLIPPER_DETOUR_LONGEST) == supplied);
+
+    // The two rings overlap and are not merged, and both are crossed at the same
+    // polyline positions: the first ring of the list is followed and the crossings of
+    // the other one are skipped.
+    const Polygon low = rectangle_mm(0,0,10,10);
+    const Polygon high = rectangle_mm(0,-2,10,8);
+    CHECK(run_detour(input, {low, high}, CLIPPER_DETOUR_POLYGON) == supplied);
+    CHECK(run_detour(input, {high, low}, CLIPPER_DETOUR_POLYGON) ==
+        detour_points({{-2,5},{0,5},{0,-2},{10,-2},{10,5},{12,5}}));
+
+    // The two rings share an edge, so leaving one is entering the other at the same
+    // position. The first detour resumes after that position; it does not start a
+    // second detour there.
+    const Polygon lower_touch = rectangle_mm(0,0,10,10);
+    const Polygon upper_touch = rectangle_mm(0,10,10,20);
+    const Points vertical = detour_points({{5,-2},{5,22}});
+    const Points touch_expected = detour_points({{5,-2},{5,0},{10,0},{10,10},{5,10},{5,22}});
+    CHECK(run_detour(vertical, {lower_touch, upper_touch}, CLIPPER_DETOUR_POLYGON) == touch_expected);
+    CHECK(run_detour(vertical, {upper_touch, lower_touch}, CLIPPER_DETOUR_POLYGON) == touch_expected);
+}
+
+TEST_CASE("Ring detours preserve bends across a multi-segment polyline", "[plugins][clipper][clipper-detour]")
+{
+    const Polygon square = rectangle_mm(0,0,10,10);
+    const Points input = detour_points({{-4,2},{-2,2},{0,2},{5,2},{10,2},{12,2},{14,2}});
+    CHECK(run_detour(input, {square}, CLIPPER_DETOUR_SHORTEST) ==
+        detour_points({{-4,2},{-2,2},{0,2},{0,0},{10,0},{10,2},{12,2},{14,2}}));
+}
+
+TEST_CASE("Ring detours cover the zone planner boundary shapes", "[plugins][clipper][clipper-detour]")
+{
+    const Points straight = detour_points({{0,0},{10,0}});
+    const Points single_expected = detour_points({{0,0},{4,0},{4,-2},{6,-2},{6,0},{10,0}});
+
+    SECTION("Single ring") {
+        CHECK(run_detour(straight, {rectangle_mm(4,-2,6,2)}, CLIPPER_DETOUR_POLYGON) == single_expected);
+    }
+
+    SECTION("Touching rings do not chain at the shared exit") {
+        CHECK(run_detour(straight, {rectangle_mm(4,-2,6,2), rectangle_mm(6,-1,8,1)}, CLIPPER_DETOUR_POLYGON) == single_expected);
+    }
+
+    SECTION("Nested rings are passed over after the first exit") {
+        CHECK(run_detour(straight, {rectangle_mm(4,-2,6,2), rectangle_mm(4.5,-1,5.5,1)}, CLIPPER_DETOUR_POLYGON) == single_expected);
+    }
+
+    SECTION("A ring inside another ring's hole remains an independent path") {
+        const Polygon outer = rectangle_mm(0,0,20,20);
+        Polygon hole = rectangle_mm(2,2,18,18);
+        hole.reverse();
+        const Polygon island = rectangle_mm(8,8,12,12);
+        const Points input = detour_points({{6,10},{14,10}});
+        CHECK(run_detour(input, {outer, hole, island}, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{6,10},{8,10},{8,8},{12,8},{12,10},{14,10}}));
+    }
+
+    SECTION("A separate ring beyond the first exit is still visited") {
+        CHECK(run_detour(straight, {rectangle_mm(4,-2,6,2), rectangle_mm(7,-1,8,1)}, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{0,0},{4,0},{4,-2},{6,-2},{6,0},{7,0},{7,-1},{8,-1},{8,0},{10,0}}));
+    }
+
+    SECTION("Diamond") {
+        const Polygon diamond(detour_points({{3,5},{5,3},{7,5},{5,7}}));
+        CHECK(run_detour(detour_points({{0,5},{10,5}}), {diamond}, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{0,5},{3,5},{5,3},{7,5},{10,5}}));
+    }
+
+    SECTION("Rotated square") {
+        const Polygon rotated(detour_points({{3,-1},{6,-2},{7,1},{4,2}}));
+        CHECK(run_detour(straight, {rotated}, CLIPPER_DETOUR_POLYGON) ==
+            Points{{0,0},{3333333,0},{3000000,-1000000},{6000000,-2000000},{6666667,0},{10000000,0}});
+    }
+
+    SECTION("Curved polygonal ring") {
+        const Polygon curved(detour_points({{3,0},{3,-1},{4,-2},{5,-3},{6,-2},{7,-1},{7,0},
+            {7,1},{6,2},{5,3},{4,2},{3,1}}));
+        CHECK(run_detour(straight, {curved}, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{0,0},{3,0},{3,-1},{4,-2},{5,-3},{6,-2},{7,-1},{7,0},{10,0}}));
+    }
+
+    SECTION("A closed margin leaves a boundary contact unchanged") {
+        const Polygons margin{rectangle_mm(4,-3,6,0), rectangle_mm(4,0,6,3)};
+        CHECK(run_detour(straight, margin, CLIPPER_DETOUR_POLYGON) == straight);
+    }
+
+    SECTION("A narrow passage remains open without an offset") {
+        const Polygons margin{rectangle_mm(4,-3,6,-0.1), rectangle_mm(4,0.1,6,3)};
+        CHECK(run_detour(straight, margin, CLIPPER_DETOUR_POLYGON) == straight);
+    }
+
+    SECTION("Multi-lobe component follows each supplied lobe") {
+        const Polygons lobes{rectangle_mm(3,-2,4,2), rectangle_mm(6,-2,7,2), rectangle_mm(3,1,7,2)};
+        CHECK(run_detour(straight, lobes, CLIPPER_DETOUR_POLYGON) ==
+            detour_points({{0,0},{3,0},{3,-2},{4,-2},{4,0},{6,0},{6,-2},{7,-2},{7,0},{10,0}}));
+    }
+}
+
+TEST_CASE("Ring detours ignore consecutive repeated ring points", "[plugins][clipper][clipper-detour]")
+{
+    const Points input = detour_points({{-2,2},{12,2}});
+    const ClipperLib::Path clean = detour_points({{0,0},{10,0},{10,10},{0,10}});
+    const ClipperLib::Path repeated = detour_points({{0,0},{0,0},{10,0},{10,0},{10,10},{0,10},{0,0},{0,0}});
+    const Points expected = detour_points({{-2,2},{0,2},{0,0},{10,0},{10,2},{12,2}});
+    check_detour_paths(input, {clean}, CLIPPER_DETOUR_POLYGON, expected);
+    check_detour_paths(input, {repeated}, CLIPPER_DETOUR_POLYGON, expected);
+}
+
+TEST_CASE("Ring detours accept mask representations and own results", "[plugins][clipper][clipper-detour]")
+{
+    PluginStorage owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&owner);
+    Polygon polygon = rectangle_mm(0,0,10,10);
+    Polygons polygons{polygon};
+    ExPolygon expolygon(polygon);
+    ExPolygons expolygons{expolygon};
+    Polyline input(detour_points({{-2,2},{12,2}}));
+    const slic3r_api::Polyline subject(reinterpret_cast<const polyline_handle *>(&input));
+    std::vector<slic3r_api::ClipperOperand> masks;
+    masks.emplace_back(storage, view(polygon));
+    masks.emplace_back(storage, slic3r_api::PolygonCollection(reinterpret_cast<const polygon_collection_handle *>(&polygons)));
+    masks.emplace_back(storage, view(expolygon));
+    masks.emplace_back(storage, slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&expolygons)));
+    std::vector<slic3r_api::StoredPolyline> results;
+    for (const slic3r_api::ClipperOperand &mask : masks)
+        results.push_back(slic3r_api::clipper_detour_polyline_expolygons(storage, subject, mask, CLIPPER_DETOUR_SHORTEST));
+    const Points expected = detour_points({{-2,2},{0,2},{0,0},{10,0},{10,2},{12,2}});
+    CHECK(input.points == detour_points({{-2,2},{12,2}}));
+    CHECK(polygon.points == rectangle_mm(0,0,10,10).points);
+    masks.clear();
+    polygon.points.clear();
+    polygons.clear();
+    expolygon.contour.points.clear();
+    expolygons.clear();
+    input.points.clear();
+    for (const slic3r_api::StoredPolyline &result : results) {
+        REQUIRE(result.size() == expected.size());
+        for (uint32_t i = 0; i < result.size(); ++i) {
+            CHECK(result.at(i).x == expected[i].x());
+            CHECK(result.at(i).y == expected[i].y());
+        }
+    }
+
+    CHECK(run_detour({}, {}, CLIPPER_DETOUR_LONGEST) == Points{});
+    const Points one_point = detour_points({{1,2}});
+    CHECK(run_detour(one_point, {}, CLIPPER_DETOUR_LONGEST) == one_point);
+    CHECK(run_detour(expected, {}, CLIPPER_DETOUR_SHORTEST) == expected);
+
+    Polyline error_input(detour_points({{-2,2},{12,2}}));
+    const slic3r_api::Polyline error_subject(reinterpret_cast<const polyline_handle *>(&error_input));
+    const Polygon error_ring = rectangle_mm(0,0,10,10);
+    slic3r_api::ClipperOperand mask(storage, view(error_ring));
+    const size_t stored_before_invalid = owner.size();
+    CHECK(::clipper_detour_polyline_expolygons(nullptr, error_subject.handle(), mask.handle(), CLIPPER_DETOUR_CW) == nullptr);
+    CHECK(::clipper_detour_polyline_expolygons(storage, nullptr, mask.handle(), CLIPPER_DETOUR_CW) == nullptr);
+    CHECK(::clipper_detour_polyline_expolygons(storage, error_subject.handle(), nullptr, CLIPPER_DETOUR_CW) == nullptr);
+    CHECK(::clipper_detour_polyline_expolygons(storage, error_subject.handle(), mask.handle(), static_cast<clipper_detour_direction_t>(6)) == nullptr);
+    CHECK(owner.size() == stored_before_invalid);
+    CHECK_THROWS_AS(slic3r_api::clipper_detour_polyline_expolygons(nullptr, error_subject, mask, CLIPPER_DETOUR_CW), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_detour_polyline_expolygons(storage, error_subject,
+        slic3r_api::ClipperOperand::null(storage), CLIPPER_DETOUR_CW), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_detour_polyline_expolygons(storage, error_subject, mask,
+        static_cast<clipper_detour_direction_t>(6)), std::invalid_argument);
+    CHECK(owner.size() == stored_before_invalid);
+
+    std::unique_ptr<ApiClipper::ClipperShapes> failing = std::make_unique<FailingDetourShapes>();
+    clipper_shapes_handle *failure_handle = reinterpret_cast<clipper_shapes_handle *>(owner.store(std::move(failing)));
+    slic3r_api::ClipperOperand failure = slic3r_api::ClipperOperand::adopt(storage, failure_handle);
+    const size_t stored_before_failure = owner.size();
+    CHECK(::clipper_detour_polyline_expolygons(storage, error_subject.handle(), failure.handle(), CLIPPER_DETOUR_CW) == nullptr);
+    CHECK(owner.size() == stored_before_failure);
+    CHECK_THROWS_AS(slic3r_api::clipper_detour_polyline_expolygons(storage, error_subject, failure, CLIPPER_DETOUR_CW), std::runtime_error);
+    CHECK(owner.size() == stored_before_failure);
 }

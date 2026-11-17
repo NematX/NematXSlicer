@@ -42,9 +42,11 @@ storage-owned collection. Prefer them when parity with the native code matters.
 They raise ``ValueError`` for an unknown enum value, a non-finite number, or
 ``delta2 == 0`` in ``clipper_offset2_ex()``. A NULL result from the host after the
 arguments were accepted is an internal error and raises ``RuntimeError``.
-The generated low-level bindings also expose native ``clipper_diff_ex``,
-``clipper_intersection_ex``, ``clipper_variable_offset_inner_ex`` (ExPolygons),
-and ``clipper_expand`` (Polygons). They have no high-level helpers here.
+``clipper_diff_ex()`` and ``clipper_intersection_ex()`` run the native operations
+on ExPolygon collections without safety offset. ``clipper_expand()`` grows polygons
+by a positive delta. ``clipper_variable_offset_inner_ex()`` and
+``clipper_variable_offset_inner()`` shrink one ExPolygon by a distance per vertex,
+given as one flat list or as one list per ring. All return storage-owned results.
 
 Lifetime model
 --------------
@@ -67,6 +69,12 @@ from typing import Callable
 
 from slic3r_api_generated import (
     CBoundingBox,
+    CLIPPER_DETOUR_CCW,
+    CLIPPER_DETOUR_CW,
+    CLIPPER_DETOUR_LONGEST,
+    CLIPPER_DETOUR_POLYGON,
+    CLIPPER_DETOUR_REVERSE,
+    CLIPPER_DETOUR_SHORTEST,
     CLIPPER_END_CLOSED_LINE,
     CLIPPER_END_CLOSED_POLYGON,
     CLIPPER_END_OPEN_BUTT,
@@ -93,6 +101,7 @@ from slic3r_geometry_views import (
     PolylineCollection,
     StoredExPolygonCollection,
     StoredPolygonCollection,
+    StoredPolyline,
     StoredPolylineCollection,
     _UniqueOwnerMixin,
 )
@@ -548,6 +557,118 @@ def clipper_offset2_ex(storage,
     )
 
 
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_diff_ex(
+    storage, subject: ExPolygonCollection, clip: ExPolygonCollection
+) -> StoredExPolygonCollection:
+    """
+    Subtract ``clip`` from ``subject`` with the native ``diff_ex``, without safety offset.
+
+    The native code removes tiny or narrow rings, then rebuilds contours and holes,
+    so even an empty clip can remove small parts of the subject. Empty collections
+    are accepted. A null storage, a released collection or a collection from another
+    API raises ``ValueError``; a host failure raises ``RuntimeError``. The result is
+    owned by ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    if subject.api is not clip.api:
+        raise ValueError("subject and clip must use the same API instance")
+    subject_address = _require_handle(subject.handle(), "subject")
+    clip_address = _require_handle(clip.handle(), "clip")
+    handle = subject.api.host.clipper_diff_ex(
+        _void_p(storage_address), _void_p(subject_address), _void_p(clip_address)
+    )
+    return StoredExPolygonCollection.adopt_owned(
+        subject.api, storage_address, _require_host_result(handle, "clipper_diff_ex")
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_intersection_ex(
+    storage, subject: ExPolygonCollection, clip: ExPolygonCollection
+) -> StoredExPolygonCollection:
+    """
+    Intersect ``subject`` and ``clip`` with the native ``intersection_ex``, without
+    safety offset.
+
+    The native code removes tiny or narrow rings, then rebuilds contours and holes.
+    Empty collections are accepted; an empty clip gives an empty result. A null
+    storage, a released collection or a collection from another API raises
+    ``ValueError``; a host failure raises ``RuntimeError``. The result is owned by
+    ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    if subject.api is not clip.api:
+        raise ValueError("subject and clip must use the same API instance")
+    subject_address = _require_handle(subject.handle(), "subject")
+    clip_address = _require_handle(clip.handle(), "clip")
+    handle = subject.api.host.clipper_intersection_ex(
+        _void_p(storage_address), _void_p(subject_address), _void_p(clip_address)
+    )
+    return StoredExPolygonCollection.adopt_owned(
+        subject.api, storage_address, _require_host_result(handle, "clipper_intersection_ex")
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_variable_offset_inner_ex(
+    storage, expolygon: ExPolygon, deltas
+) -> StoredExPolygonCollection:
+    """
+    Shrink one ExPolygon by a distance given for each of its vertices, with miter
+    joins limited to 2.0.
+
+    ``deltas`` is one flat list: one distance per contour vertex, then one per vertex
+    of each hole in order. Distances are in scaled units, finite and not positive.
+    The contour must run counter-clockwise and the holes clockwise. A null or
+    released argument raises ``ValueError``; when the host rejects the geometry or
+    the distances, ``RuntimeError`` is raised. The result is owned by ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    expolygon_address = _require_handle(expolygon.handle(), "expolygon")
+    values = tuple(float(value) for value in deltas)
+    if len(values) > 0xFFFFFFFF:
+        raise ValueError("clipper_variable_offset_inner_ex: too many deltas")
+    delta_array = (ctypes.c_float * len(values))(*values)
+    handle = expolygon.api.host.clipper_variable_offset_inner_ex(
+        _void_p(storage_address),
+        _void_p(expolygon_address),
+        delta_array,
+        len(values),
+    )
+    return StoredExPolygonCollection.adopt_owned(
+        expolygon.api,
+        storage_address,
+        _require_host_result(handle, "clipper_variable_offset_inner_ex"),
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_expand(
+    storage, polygons: PolygonCollection, delta: float
+) -> StoredPolygonCollection:
+    """
+    Grow polygons with the native ``expand``: ``delta`` is in scaled units, finite and
+    positive.
+
+    Counter-clockwise rings grow and clockwise rings shrink, with miter joins limited
+    to 3.0, then the rings are united. Invalid arguments raise ``ValueError``; a host
+    failure raises ``RuntimeError``. The result is a polygon collection owned by
+    ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    (delta,) = _checked_finite(delta)
+    if delta <= 0.0:
+        raise ValueError("clipper_expand: delta must be positive")
+    polygons_address = _require_handle(polygons.handle(), "polygons")
+    handle = polygons.api.host.clipper_expand(
+        _void_p(storage_address), _void_p(polygons_address), delta
+    )
+    return StoredPolygonCollection.adopt_owned(
+        polygons.api, storage_address, _require_host_result(handle, "clipper_expand")
+    )
+
+
 def clipper_union_with_safety_offset(storage_or_subject, subject=None) -> ClipperOperand:
     api, storage, operand = _unary_args(storage_or_subject, subject)
     handle = api.host.clipper_union_with_safety_offset(_void_p(storage), operand.c_handle())
@@ -733,6 +854,51 @@ def clipper_offset_polylines(storage,
 
 
 @abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_variable_offset_inner(
+    storage, source: ExPolygon, deltas, miter_limit: float = 2.0
+) -> StoredExPolygonCollection:
+    """
+    Shrink one ExPolygon by a distance given for each of its vertices, like
+    ``clipper_variable_offset_inner_ex()`` but with one list per ring.
+
+    ``deltas`` holds the list of the contour, then one list per hole; each list has
+    one distance per vertex of its ring, checked before the host is called.
+    ``miter_limit`` must be at least 1.0. The host checks the distances and the miter
+    limit; a wrong list count or length, or a rejection by the host, raises
+    ``ValueError``, as the C++ wrapper does. The result is owned by ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    source_address = _require_handle(source.handle(), "source")
+    rings = list(deltas)
+    expected_ring_count = source.hole_size() + 1
+    if len(rings) != expected_ring_count:
+        raise ValueError("clipper_variable_offset_inner: one delta vector is required per ring")
+
+    expected_sizes = [source.contour().size()]
+    expected_sizes.extend(source.hole(index).size() for index in range(source.hole_size()))
+    flattened = []
+    for ring, expected_size in zip(rings, expected_sizes):
+        if len(ring) != expected_size:
+            raise ValueError("clipper_variable_offset_inner: delta count does not match source vertices")
+        values = [float(value) for value in ring]
+        flattened.extend(values)
+
+    if len(flattened) > 0xFFFFFFFF:
+        raise ValueError("clipper_variable_offset_inner: too many deltas")
+    delta_array = (ctypes.c_float * len(flattened))(*flattened)
+    handle = source.api.host.clipper_variable_offset_inner(
+        _void_p(storage_address),
+        _void_p(source_address),
+        delta_array,
+        len(flattened),
+        float(miter_limit),
+    )
+    if not _address(handle):
+        raise ValueError("clipper_variable_offset_inner: invalid arguments")
+    return StoredExPolygonCollection.adopt_owned(source.api, storage_address, handle)
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
 def clipper_diff_polylines_expolygons(
     storage, subject: PolylineCollection, clip: ExPolygonCollection
 ) -> StoredPolylineCollection:
@@ -810,6 +976,36 @@ def clipper_split_polyline_expolygons(
         StoredPolylineCollection.adopt_owned(
             subject.api, storage_address, _require_handle(outside.value, "outside polyline collection result")
         ),
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_detour_polyline_expolygons(
+    storage, subject: Polyline, rings: ClipperOperand, direction: int
+) -> StoredPolyline:
+    """
+    Replace subject stretches that cross ``rings`` with arcs along those rings.
+
+    The crossing and direction rules are defined in ``slic3r_clipper.h``. Invalid
+    storage or inputs raise ``ValueError`` before the host is called; a NULL
+    host result raises ``RuntimeError``. The returned polyline is owned by
+    ``storage``. Empty subjects are still passed to the host.
+    """
+    storage_address = _require_handle(storage, "storage")
+    if subject.api is not rings.api:
+        raise ValueError("subject and rings must use the same API instance")
+    _require_handle(subject.handle(), "subject")
+    _require_handle(rings.handle(), "rings")
+    direction = int(direction)
+    if direction < CLIPPER_DETOUR_CW or direction > CLIPPER_DETOUR_LONGEST:
+        raise ValueError(f"unknown Clipper detour direction: {direction}")
+    result = subject.api.host.clipper_detour_polyline_expolygons(
+        _void_p(storage_address), subject.c_handle(), rings.c_handle(), direction
+    )
+    return StoredPolyline.adopt_owned(
+        subject.api,
+        storage_address,
+        _require_host_result(result, "polyline detour result"),
     )
 
 
@@ -903,6 +1099,26 @@ class ClipperContext:
         """Native offset2_ex(src, ...), owned by this context's storage."""
         return clipper_offset2_ex(self.storage(), src, delta1, delta2, join_type, miter_limit)
 
+    def diff_ex(self, subject: ExPolygonCollection, clip: ExPolygonCollection) -> StoredExPolygonCollection:
+        """Native diff_ex(subject, clip), owned by this context's storage."""
+        return clipper_diff_ex(self.storage(), subject, clip)
+
+    def intersection_ex(self, subject: ExPolygonCollection, clip: ExPolygonCollection) -> StoredExPolygonCollection:
+        """Native intersection_ex(subject, clip), owned by this context's storage."""
+        return clipper_intersection_ex(self.storage(), subject, clip)
+
+    def variable_offset_inner_ex(self, expolygon: ExPolygon, deltas) -> StoredExPolygonCollection:
+        """Native variable_offset_inner_ex(expolygon, deltas), owned by this context's storage."""
+        return clipper_variable_offset_inner_ex(self.storage(), expolygon, deltas)
+
+    def expand(self, polygons: PolygonCollection, delta: float) -> StoredPolygonCollection:
+        """Native expand(polygons, delta), owned by this context's storage."""
+        return clipper_expand(self.storage(), polygons, delta)
+
+    def variable_offset_inner(self, source: ExPolygon, deltas, miter_limit: float = 2.0) -> StoredExPolygonCollection:
+        """Native variable_offset_inner(source, deltas, ...), owned by this context's storage."""
+        return clipper_variable_offset_inner(self.storage(), source, deltas, miter_limit)
+
     def union_with_safety_offset(self, subject: ClipperOperand) -> ClipperOperand:
         return clipper_union_with_safety_offset(self.storage(), subject)
 
@@ -985,6 +1201,14 @@ class ClipperContext:
             raise ValueError("subject and clip must use this context's API instance")
         return clipper_split_polyline_expolygons(self.storage(), subject, clip)
 
+    def detour_polyline_expolygons(
+        self, subject: Polyline, rings: ClipperOperand, direction: int
+    ) -> StoredPolyline:
+        """Replace the stretches of subject that cross the rings with arcs along them; see clipper_detour_polyline_expolygons()."""
+        if subject.api is not self.api or rings.api is not self.api:
+            raise ValueError("subject and rings must use this context's API instance")
+        return clipper_detour_polyline_expolygons(self.storage(), subject, rings, direction)
+
     def clip_expolygons_with_subject_bbox(
         self, src: ExPolygonCollection, bbox: CBoundingBox
     ) -> StoredExPolygonCollection:
@@ -995,6 +1219,12 @@ class ClipperContext:
 
 
 __all__ = [
+    "CLIPPER_DETOUR_CCW",
+    "CLIPPER_DETOUR_CW",
+    "CLIPPER_DETOUR_LONGEST",
+    "CLIPPER_DETOUR_POLYGON",
+    "CLIPPER_DETOUR_REVERSE",
+    "CLIPPER_DETOUR_SHORTEST",
     "CLIPPER_END_CLOSED_POLYGON",
     "CLIPPER_END_CLOSED_LINE",
     "CLIPPER_END_OPEN_BUTT",
@@ -1015,12 +1245,16 @@ __all__ = [
     "clipper_concat",
     "clipper_clip_expolygons_with_subject_bbox",
     "clipper_clip_shapes_with_subject_bbox",
+    "clipper_detour_polyline_expolygons",
     "clipper_diff",
+    "clipper_diff_ex",
     "clipper_diff_polyline_expolygons",
     "clipper_diff_polylines_expolygons",
     "clipper_diff_with_safety_offset",
     "clipper_execute",
+    "clipper_expand",
     "clipper_intersection",
+    "clipper_intersection_ex",
     "clipper_intersection_polyline_expolygons",
     "clipper_intersection_polylines_expolygons",
     "clipper_intersection_with_safety_offset",
@@ -1036,4 +1270,6 @@ __all__ = [
     "clipper_union_ex",
     "clipper_union_with_fill_rule",
     "clipper_union_with_safety_offset",
+    "clipper_variable_offset_inner",
+    "clipper_variable_offset_inner_ex",
 ]
