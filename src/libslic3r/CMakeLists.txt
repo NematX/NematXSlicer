@@ -584,6 +584,8 @@ set(SLIC3R_SOURCES
 	Plugins/Surface/BridgeGeometry.hpp
 	Plugins/Surface/BridgePreparation.cpp
 	Plugins/Surface/BridgePreparation.hpp
+	Plugins/Surface/BridgeRows.cpp
+	Plugins/Surface/BridgeRows.hpp
 	Plugins/Surface/CleanInfillSurfaces.cpp
 	Plugins/Surface/CleanInfillSurfaces.hpp
 	Plugins/Surface/InitialTypedSurfaceBuilder.cpp

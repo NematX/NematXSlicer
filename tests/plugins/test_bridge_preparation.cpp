@@ -84,6 +84,7 @@
 #include "libslic3r/Plugins/Infill/BridgeSurfaceVolume.hpp"
 #include "libslic3r/Plugins/Surface/BridgeGeometry.hpp"
 #include "libslic3r/Plugins/Surface/BridgePreparation.hpp"
+#include "libslic3r/Plugins/Surface/BridgeRows.hpp"
 #include "libslic3r/Steps/StepFinalizeSlicing.hpp"
 #include "libslic3r/Steps/StepGenerateInfill.hpp"
 #include "libslic3r/Steps/StepPostInfillGeneration.hpp"
@@ -97,6 +98,7 @@ using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
 namespace Clearance=slic3r_api::BridgeClearance;
 namespace BridgeGeometry=slic3r_api::BridgeGeometry;
+namespace BridgeRows=slic3r_api::BridgeRows;
 
 // Return an immutable C API view without transferring ownership. The caller's
 // polygon vector must outlive every use of the returned view; no allocation occurs.
@@ -661,6 +663,33 @@ TEST_CASE("Bridge axial expansion preserves rows and stops before holes","[plugi
     const ExPolygons clipped_expected{ExPolygon(Polygon(Points{Point(0,0),Point(scale_i(2.),0),Point(scale_i(2.),scale_i(1.5)),Point(scale_i(1.),scale_i(2.)),Point(0,scale_i(2.))}))};
     slic3r_api::StoredExPolygonCollection clipped=BridgeGeometry::axial_expand(handle,view(wedge_core),view(wedge),0.,scale_i(1.));
     same_area(clipped.readonly(),clipped_expected);
+}
+
+// A 3 mm wide bridge holds exactly six rows of the 0.5 mm sparsest pitch, which the fit must find; a triangle has no
+// whole number of rows, but searching the pitch range must still cover it at least as well as the densest pitch alone.
+// Every fit stays in its pitch range.
+TEST_CASE("Bridge rows fit their pitch and phase to the bridge area","[plugins][bridge-preparation][bridge-rows]")
+{
+    PluginStorage storage;storage_handle *handle=reinterpret_cast<storage_handle *>(&storage);
+    const BridgeRows::PitchRange range{.4/.9,.4/.8};
+    const ExPolygon rectangle=rectangle_expolygon(0,0,10,3);
+    // Rows along X (angle 0) are spaced along Y.
+    const BridgeRows::Fit fit=BridgeRows::fit(handle,slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&rectangle)),0.,.4,range);
+    REQUIRE(fit.found());
+    CHECK(fit.pitch==Approx(.5).margin(1e-3));
+    CHECK(fit.coverage>.98);
+    CHECK(fit.overflow<.02);
+    const ExPolygon triangle(Polygon(Points{Point(0,0),Point(scale_i(6.),0),Point(scale_i(1.6),scale_i(4.8))}));
+    for (const double angle : {0.,PI/5.,PI/2.}) {
+        INFO("angle "<<angle);
+        const slic3r_api::ExPolygon view_triangle(reinterpret_cast<const expolygon_handle *>(&triangle));
+        const BridgeRows::Fit best=BridgeRows::fit(handle,view_triangle,angle,.4,range);
+        const BridgeRows::Fit densest=BridgeRows::fit(handle,view_triangle,angle,.4,BridgeRows::PitchRange{.4/.9,.4/.9});
+        REQUIRE(best.found());REQUIRE(densest.found());
+        CHECK(best.pitch>=range.minimum-1e-9);CHECK(best.pitch<=range.maximum+1e-9);
+        INFO("best "<<best.coverage<<" at "<<best.pitch<<", densest "<<densest.coverage);
+        CHECK(best.coverage>=densest.coverage-1e-9);
+    }
 }
 
 // Core and allowed domain of a sliced part's bridge printed along Y. A core edge ends at
