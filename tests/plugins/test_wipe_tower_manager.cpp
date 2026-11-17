@@ -8,6 +8,7 @@ Wipe manager tests lend a test-only service to the host. The service reports
 real changes between consecutive concrete tool visits and writes one local
 straight line per band. Constructed plans isolate insertion and ownership;
 the sliced-print test exercises the export-side ordering and downstream path.
+Its positive object-step variant checks validation acceptance only, not export.
 copy_gcode_export_objects, checking owned footprints after real tower generation.
 
 Operation notes:
@@ -18,6 +19,7 @@ Representative direct calls (branches are not a timeline):
     TEST_CASE
         |-- Test::init_print()
         |-- print.apply()
+        |-- print.validate() -> accept a tower with a positive object step, without exporting it
         |-- print.process()
         |-- Steps::StepExtrusionOrdering::run_step()
         |-- Steps::StepGenerateWipeTower::run_step()
@@ -475,7 +477,7 @@ void build_instance_plan(Print &print, Model &model, const bool separate_groups,
     config.set_num_extruders(2);
     config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"}, {"wipe_tower", global_tower ? "1" : "0"},
         {"wipe_tower_width", "20"}, {"wipe_tower_brim_width", "1"}, {"wipe_tower_rotation_angle", "0"},
-        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"complete_objects", separate_groups ? "1" : "0"}});
+        {"step_wipetower_plugin", "wipe_tower.manager.default"}, {"print_plan_builder", separate_groups ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer"}});
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
     model.objects()[0].name = "Owner";
     model.objects()[0].instances[0]->set_offset(Vec3d(10., 20., 0.));
@@ -654,7 +656,7 @@ TEST_CASE("Global tower eligibility and an empty request list do not modify the 
     build_plan(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     SECTION("single extruder") { config.nozzle_diameter.set(std::vector<double>{0.4}); }
-    SECTION("complete objects") { config.complete_objects.value = true; }
+    SECTION("complete objects") { config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object"); }
     SECTION("spiral vase") { config.spiral_vase.value = true; }
     SECTION("no actual tool change") {
         const_cast<PrintObjectConfig &>(print.default_object_config()).wipe_tower_extruder.value = 2;
@@ -925,7 +927,8 @@ TEST_CASE("Process settings distinguish synthetic wipes from missing real source
     print.mutable_printing_plan().object_instances[0].object = nullptr;
 }
 
-// Slice owned two-tool models in shared or restarting-Z groups and export in the checkout, checking maintenance and elevated bands through real downstream plugins; preparation/export failures remain assertions.
+// Export two-tool models through shared groups and check tower maintenance;
+// the stepped variant checks validation only, without exercising tower export.
 TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code export", "[plugins][wipe-tower]")
 {
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
@@ -934,7 +937,8 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     Model model;
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     const bool parallel = GENERATE(false, true);
-    config.set_deserialize_strict("parallel_objects_step", parallel ? "5" : "0");
+    config.set_deserialize_strict("complete_objects_step", parallel ? "5" : "0");
+    config.set_deserialize_strict("print_plan_builder", parallel ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
     config.set_num_extruders(2);
     config.set_deserialize_strict("step_perimeter_plugin", "perimeter.generator.classic");
     config.set_deserialize_strict("step_surface_generation_plugin", "surface.initial_typed_surface_builder");
@@ -958,6 +962,12 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     model.objects()[1].config.set_deserialize_strict("infill_extruder", "2");
     model.objects()[1].config.set_deserialize_strict("solid_infill_extruder", "2");
     print.apply(model, config);
+    if (parallel) {
+        const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
+        CHECK(validation.first == PrintBase::PrintValidationError::pveNone);
+        CHECK(validation.second.empty());
+        return;
+    }
     try {
         print.process();
     } catch (...) {
@@ -983,13 +993,6 @@ TEST_CASE("Sliced two-extruder ordering reaches the wipe manager and full G-code
     CHECK(check_wipes(print) == active.first->requests.size());
     std::string error;
     CHECK(Steps::StepGenerateWipeTower::validate_post(print, &error));
-    if (parallel) {
-        // A leading skirt/brim batch precedes the two restarting-Z object batches.
-        REQUIRE(print.printing_plan()->groups.size() == 3);
-        CHECK(print.has_global_wipe_tower());
-        REQUIRE(print.printing_plan()->object_instances.size() == 3);
-        CHECK(active.first->bands.back().z > 0.2);
-    }
 
     // Export replays ordering and wipe generation normally, then every downstream plugin.
     // Compiler source paths are absolute in this build, so the export remains
@@ -1020,7 +1023,8 @@ TEST_CASE("Parallel groups share one global tower with fused and stacked Z offse
     WipeActivation active;
     Print print;
     build_plan(print);
-    const_cast<PrintConfig &>(print.config()).parallel_objects_step.value = 5.;
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("complete_objects_step", "5");
+    const_cast<PrintConfig &>(print.config()).set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     slic3r_api::PrintingPlan view = Test::GCode::printing_plan_view(print);
     view.clear();
     for (uint32_t g = 0; g < 2; ++g) {

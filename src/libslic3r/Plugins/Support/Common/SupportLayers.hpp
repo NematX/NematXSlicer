@@ -4,6 +4,8 @@
    A support family fills a GeneratedSupport: its slabs are owned by one deque
    and listed by role (top contacts, bottom contacts, base slabs, interfaces).
    SupportPublication.hpp then turns the slabs into auxiliary layers of the object.
+   It also carries the object's no-support zones, sliced once per run, to the
+   family and to the publication.
    Generator layers are temporary slabs: print_z is their top, bottom_z their
    geometric bottom, and height their printable thickness. Contacts meet the
    object, interfaces extend contacts, base slabs form sparse columns, and
@@ -74,6 +76,9 @@ struct GeneratedSupport {
     storage_handle *storage;
     LayerStorage slabs;
     GeneratorLayers top, bottom, base, interfaces;
+    // Run input, not output: the united no-support zones of the object at the slice Z of every object layer, in storage, or an
+    // empty vector when the object has none. The families avoid them like the object, and publication removes them from every slab.
+    std::vector<StoredExPolygonCollection> no_support_zones;
 };
 } // namespace slic3r_api::Support::Common
 #endif

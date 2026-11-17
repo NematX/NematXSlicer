@@ -3806,18 +3806,18 @@ TEST_CASE("Bambu firmware writes nothing for M1003 and M976 without the variable
     }
 }
 
-TEST_CASE("Bambu firmware switches power loss recovery on the second layer of every group",
+TEST_CASE("Bambu firmware switches power loss recovery per copy across groups",
           "[plugins][gcode][firmware][bambu][scan]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
-    SECTION("enable: S1 at the second layer, S0 at the end of each group") {
+    SECTION("enable: overlapping second-layer copies share one start and close after both finish") {
         SecondLayerRun run;
         run.variables = "enable_power_loss_recovery = enable";
         run.groups = 2;
         const std::vector<std::string> lines = split_lines(run_bambu_second_layer(run));
-        CHECK(std::count(lines.begin(), lines.end(), "M1003 S1") == 2);
-        CHECK(std::count(lines.begin(), lines.end(), "M1003 S0") == 2);
+        CHECK(std::count(lines.begin(), lines.end(), "M1003 S1") == 1);
+        CHECK(std::count(lines.begin(), lines.end(), "M1003 S0") == 1);
         size_t next_group = find_line(lines, ";GROUP 1");
         for (size_t group_begin : {find_line(lines, ";GROUP 0"), next_group}) {
             const size_t group_end = group_begin == next_group ? lines.size() : next_group;
@@ -3826,22 +3826,27 @@ TEST_CASE("Bambu firmware switches power loss recovery on the second layer of ev
             const size_t enable = find_line(lines, "M1003 S1", group_begin);
             const size_t disable = find_line(lines, "M1003 S0", group_begin);
             REQUIRE(layer_one < group_end);
-            CHECK(layer_one < enable);
-            CHECK(enable < first_move_after(lines, layer_one));
-            CHECK(enable < layer_two);
-            // S0 follows the last move of the group and precedes the next group.
+            if (group_begin != next_group) {
+                CHECK(layer_one < enable);
+                CHECK(enable < first_move_after(lines, layer_one));
+                CHECK(enable < layer_two);
+            } else {
+                CHECK(enable == lines.size());
+            }
+            // S0 is deferred until the active copies finish, not each group boundary.
             size_t last_move = group_begin;
             for (size_t idx = group_begin; idx < group_end; ++idx)
                 if (lines[idx].rfind("G1 ", 0) == 0 && lines[idx].find(" X") != std::string::npos)
                     last_move = idx;
             CHECK(disable > last_move);
-            CHECK(disable < group_end);
+            if (group_begin == next_group) CHECK(disable < group_end);
+            else CHECK(disable > group_end);
             CHECK_FALSE(inside_block(lines, enable));
             CHECK_FALSE(inside_block(lines, disable));
         }
         CHECK(find_line(lines, "M1003 S0", find_line(lines, ";GROUP 1")) < find_line(lines, "M981 S0 P20000 ; close spaghetti detector"));
     }
-    SECTION("disable: a single S0 at the second layer") {
+    SECTION("disable: one S0 for the shared second-layer pass") {
         SecondLayerRun run;
         run.variables = "enable_power_loss_recovery = disable";
         const std::vector<std::string> lines = split_lines(run_bambu_second_layer(run));
@@ -3903,7 +3908,7 @@ TEST_CASE("Bambu firmware scans the second layer between a retraction pair",
         for (size_t idx = scan + 2; idx < find_line(lines, "M624 AQAAAAAAAAA=", scan); ++idx)
             CHECK(lines[idx].rfind("G1 E", 0) != 0);
     }
-    SECTION("a repaid tool is retracted before the scan and repaid after it, only once") {
+    SECTION("a repaid tool is retracted and repaid once for the shared scan") {
         SecondLayerRun run;
         run.variables = "scan_first_layer = 1";
         run.relative_e = true;
@@ -3915,7 +3920,8 @@ TEST_CASE("Bambu firmware scans the second layer between a retraction pair",
         CHECK(lines[scan - 1].rfind("G1 E-2", 0) == 0);
         CHECK(lines[scan + 1] == "M400 P100");
         CHECK(lines[scan + 2].rfind("G1 E2", 0) == 0);
-        // No second unretraction between the scan and the next block opening.
+        // Both copies share this framed scan, with no second retraction pair.
+        CHECK(find_line(lines, k_scan_line, scan + 1) == lines.size());
         for (size_t idx = scan + 3; idx < find_line(lines, "M624 AQAAAAAAAAA=", scan); ++idx)
             if (lines[idx].rfind("G1 E", 0) == 0 && lines[idx].find(" X") == std::string::npos)
                 CHECK(lines[idx].rfind("G1 E-", 0) == 0);
@@ -3946,7 +3952,7 @@ TEST_CASE("Bambu firmware scans the second layer between a retraction pair",
         for (size_t idx = scan + 2; idx < find_line(lines, "M624 AQAAAAAAAAA=", scan); ++idx)
             CHECK(lines[idx].rfind("G1 E", 0) != 0);
     }
-    SECTION("two tool groups on the second layer share one set of commands") {
+    SECTION("two tool groups do not duplicate the per-copy commands") {
         SecondLayerRun run;
         run.variables = "enable_power_loss_recovery = enable\nscan_first_layer = 1";
         run.lengths = {2., 2.};
@@ -3994,16 +4000,16 @@ TEST_CASE("Bambu firmware scans the second layer between a retraction pair",
             CHECK_FALSE(inside_block(lines, scan + 2));
         }
     }
-    SECTION("every group scans its own second layer") {
+    SECTION("repeated groups do not scan the same copies again") {
         SecondLayerRun run;
         run.variables = "scan_first_layer = 1";
         run.groups = 2;
         const std::vector<std::string> lines = split_lines(run_bambu_second_layer(run));
-        CHECK(std::count(lines.begin(), lines.end(), k_scan_line) == 2);
+        CHECK(std::count(lines.begin(), lines.end(), k_scan_line) == 1);
         const size_t second_group = find_line(lines, ";GROUP 1");
         CHECK(find_line(lines, "; LAYER_GCODE 1") < find_line(lines, k_scan_line));
         CHECK(find_line(lines, k_scan_line) < second_group);
-        CHECK(find_line(lines, "; LAYER_GCODE 1", second_group) < find_line(lines, k_scan_line, second_group));
+        CHECK(find_line(lines, k_scan_line, second_group) == lines.size());
     }
     SECTION("the commands survive the cancellation of the first object of the layer") {
         SecondLayerRun run;
@@ -4013,9 +4019,9 @@ TEST_CASE("Bambu firmware scans the second layer between a retraction pair",
         const std::string output = run_bambu_second_layer(run);
         for (const int cancelled_object : {0, 1}) {
             const std::string kept = cancel_object(output, cancelled_object);
-            CHECK(count_occurrences(kept, "M1003 S1\n") == 2);
-            CHECK(count_occurrences(kept, "M1003 S0\n") == 2);
-            CHECK(count_occurrences(kept, k_scan_line + "\nM400 P100\n") == 2);
+            CHECK(count_occurrences(kept, "M1003 S1\n") == 1);
+            CHECK(count_occurrences(kept, "M1003 S0\n") == 1);
+            CHECK(count_occurrences(kept, k_scan_line + "\nM400 P100\n") == 1);
             CHECK(kept.size() < output.size());
         }
         CHECK(count_occurrences(output, "M624 ") == 12);

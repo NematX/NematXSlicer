@@ -529,8 +529,8 @@ TEST_CASE("Group preference defaults to 100 when the optional ABI callback is om
 {
     static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 2u,
                   "The combined provider and fan timing API uses plugin_types 4.2.");
-    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 6u,
-                  "Group declarations and file paths use config_def 1.6.");
+    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 7u,
+                  "Group declarations, file paths and selector visibility use config_def 1.7.");
     static_assert(SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR == 3u && SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR == 5u,
                   "Registration queries and application logging require orchestrator 3.5.");
     static_assert(std::is_same<plugin_initialize_fn, int32_t (*)(void *, storage_handle *)>::value,
@@ -541,6 +541,10 @@ TEST_CASE("Group preference defaults to 100 when the optional ABI callback is om
                   "Group preference is an independent optional tail.");
     static_assert(offsetof(raw_exclusive_group_def, declaring_plugin_id) > offsetof(raw_exclusive_group_def, exclusive_group),
                   "The complete descriptor names its registered declaring member.");
+    static_assert(offsetof(raw_exclusive_group_def, has_mode) > offsetof(raw_exclusive_group_def, value_when_absent),
+                  "Optional selector visibility follows the complete required prefix.");
+    static_assert(offsetof(raw_exclusive_group_def, mode) > offsetof(raw_exclusive_group_def, has_mode),
+                  "Selector visibility follows its presence flag.");
     ServicePluginState state;
     state.id = "slic3r.test.sized_metadata";
     state.step = STEP_POST_INFILL;

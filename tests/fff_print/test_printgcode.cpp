@@ -91,7 +91,7 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
                 { "layer_height",                   0.2 },
                 { "support_material",               false },
                 { "raft_layers",                    0 },
-                { "complete_objects",               true },
+                { "print_plan_builder", "ordering.plan_builder.by_object" },
                 { "gcode_comments",                 true },
                 { "between_objects_gcode",          "; between-object-gcode" }
                 });
@@ -241,7 +241,7 @@ SCENARIO( "PrintGCode basic functionality", "[PrintGCode]") {
 
         WHEN("layer_num represents the layer's index from z=0") {
 			std::string gcode = ::Test::slice({ TestMesh::cube_20x20x20, TestMesh::cube_20x20x20 }, {
-				{ "complete_objects",               true },
+				{ "print_plan_builder", "ordering.plan_builder.by_object" },
                 { "gcode_comments",                 true },
                 { "layer_gcode",                    ";Layer:[layer_num] ([layer_z] mm)" },
                 { "layer_height",                   0.1 },

@@ -23,6 +23,12 @@
 #include "Tab.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "wxExtensions.hpp"
+/*
+Provides temperature calibration samples to the plater. Geometry creation assigns
+the temperature settings and explicitly selects layer-by-layer printing.
+    CalibrationTempDialog::create_geometry() -> prepare samples and settings
+        set_deserialize_strict() -> select By layer explicitly
+*/
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
 {
@@ -68,6 +74,8 @@ void CalibrationTempDialog::create_buttons(wxStdDialogButtonSizer* buttons){
 }
 
 void CalibrationTempDialog::create_geometry(wxCommandEvent& event_args) {
+    if (!require_plan_builder(false))
+        return;
     Plater* plat = this->main_frame->plater();
     Model& model = plat->model();
     if (!plat->new_project(L("Temperature calibration")))
@@ -166,7 +174,7 @@ void CalibrationTempDialog::create_geometry(wxCommandEvent& event_args) {
 
     /// --- main config, please modify object config when possible ---
     DynamicPrintConfig new_print_config = *print_config; //make a copy
-    new_print_config.set_key_value("complete_objects", new ConfigOptionBool(false));
+    new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_layer");
     
     // the object temperature is the first floor's
     model.objects()[objs_idx[0]].config.set_key_value("print_temperature", new ConfigOptionInt(temperature));

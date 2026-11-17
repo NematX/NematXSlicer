@@ -41,6 +41,12 @@ tool ordering for preview ticks and legacy export. Statistics use measured
 export totals and the wipe-tower share for sidebar and placeholders.
 Validation checks print-level active settings against their selected plugin
 group providers; object/region overrides are not inspected by that guard.
+By object clearance checks fill warning contours without rejecting close or tall
+copies. The warnings vector carries close-copy notices to GUI notifications.
+It also warns when lift_min exceeds the printer ceiling; motion generation clamps
+that floor without making the print invalid. Its warning token has an independent
+GUI notification so other warnings and their action links remain visible.
+Zero scaled height lead remains invalid, with or without a height step.
 Adhesion winding normalization reads stored contours before ordering. It preserves
 entries, properties and ordering permissions, and reports fragmented event phases
 that cannot be reversed under the generation contract.
@@ -56,7 +62,6 @@ Representative direct calls (branches are not a timeline):
     Print::validate()
         |-- Steps::unsupported_active_setting()
         |-- sequential_print_horizontal_clearance_valid()
-        |-- sequential_print_vertical_clearance_valid()
         |-- PrintObject::update_layer_height_profile()
         |-- generate_object_layers()
         `-- PrintRegion::collect_object_printing_extruders()
@@ -118,6 +123,9 @@ Representative direct calls (branches are not a timeline):
 #include "Utils.hpp"
 
 namespace Slic3r {
+
+// Read the optional object step from borrowed configuration; absent settings mean zero.
+static double object_step_height(const Print &print);
 
 Print::Print() : m_pipeline_progress(this->status())
 {
@@ -1013,20 +1021,22 @@ const std::optional<ExtrusionEntityCollection> &Print::skirt_first_layer() const
 // Borrow the Print and compare clearance-expanded instance hulls plus their tower envelopes; optionally copy colliding polygons, preserve ownership, and propagate geometry/allocation failures.
 bool Print::sequential_print_horizontal_clearance_valid(const Print &print, Polygons* polygons)
 {
+    if (polygons != nullptr)
+        polygons->clear();
     if (print.config().extruder_clearance_radius == 0) {
         return true;
     }
     Polygons convex_hulls_other;
     const std::vector<WipeTowerFootprint> towers = wipe_tower_footprints(print);
-    if (polygons != nullptr) {
-        polygons->clear();
-    }
     std::vector<size_t> intersecting_idxs;
 
 	std::map<ObjectID, Polygon> map_model_object_to_convex_hull;
-    const double dist_grow = min_object_distance(static_cast<const ConfigBase*>(&print.full_print_config()), 0);
+    const double object_step = object_step_height(print);
+    const double clearance_height = object_step > 0. ?
+        std::min(object_step, print.config().extruder_clearance_height.value) : 0.;
+    const double dist_grow = min_object_distance(static_cast<const ConfigBase*>(&print.full_print_config()), clearance_height);
 	for (const PrintObject &print_object : print.objects()) {
-        const double object_grow = (print.config().complete_objects && !print_object.config().brim_per_object) ? dist_grow : std::max(dist_grow, print_object.config().brim_width.value);
+        const double object_grow = (print_complete_objects(print.config()) && !print_object.config().brim_per_object) ? dist_grow : std::max(dist_grow, print_object.config().brim_width.value);
 	    assert(! print_object.model_object()->instances.empty());
 	    assert(! print_object.instances().empty());
 	    ObjectID model_object_id = print_object.model_object()->id();
@@ -1100,16 +1110,10 @@ bool Print::sequential_print_horizontal_clearance_valid(const Print &print, Poly
     return true;
 }
 
-static inline bool sequential_print_vertical_clearance_valid(const Print &print)
+static double object_step_height(const Print &print)
 {
-	std::vector<const PrintInstance*> print_instances_ordered = print.sort_object_instances_by_model_order();
-	// Ignore the last instance printed.
-	print_instances_ordered.pop_back();
-	// Find the other highest instance.
-	auto it = std::max_element(print_instances_ordered.begin(), print_instances_ordered.end(), [](auto l, auto r) {
-		return l->print_object->height() < r->print_object->height();
-	});
-    return it == print_instances_ordered.end() || (*it)->print_object->height() <= scale_i(print.config().extruder_clearance_height.value);
+    const ConfigOption *step_option = print.full_print_config().option("complete_objects_step");
+    return step_option == nullptr ? 0. : step_option->get_float();
 }
 
 coord_t Print::get_object_first_layer_height(const PrintObject& object) const {
@@ -1151,9 +1155,13 @@ boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.
 
 std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vector<std::string>* warnings) const
 {
+    // Every result owns a fresh contour snapshot, including early validation errors.
+    const_cast<Polygons*>(&m_sequential_print_clearance_contours)->clear();
     std::set<extruder_index_t> extruders = this->extruders();
 
     if (warnings) {
+        if (m_config.max_print_height.value > 0.0 && m_config.lift_min.value > m_config.max_print_height.value)
+            warnings->emplace_back("_LIFT_MIN_CLAMPED");
         for (auto it_a = extruders.begin(); it_a != extruders.end() ;++it_a)
             for (auto it_b = std::next(it_a); it_b != extruders.end() ;++it_b)
                 if (std::abs(m_config.bed_temperature.get_at(*it_a) - m_config.bed_temperature.get_at(*it_b)) > 15
@@ -1187,11 +1195,16 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     if (unsupported_setting)
         return { PrintBase::PrintValidationError::pveWrongSettings, *unsupported_setting };
 
-    if (m_config.complete_objects /*|| m_config.parallel_objects_step > 0*/) {
-    	if (! sequential_print_horizontal_clearance_valid(*this, const_cast<Polygons*>(&m_sequential_print_clearance_contours)))
-            return { PrintBase::PrintValidationError::pveWrongPosition, _u8L("Some objects are too close; your extruder will collide with them.") };
-        if (m_config.complete_objects && ! sequential_print_vertical_clearance_valid(*this))
-            return { PrintBase::PrintValidationError::pveWrongPosition,_u8L("Some objects are too tall and cannot be printed without extruder collisions.") };
+    const double object_step = object_step_height(*this);
+    if (print_by_object(m_config) && scale_to_layer_coord(object_step > 0. ? std::min(
+        object_step, m_config.extruder_clearance_height.value) : m_config.extruder_clearance_height.value) == 0)
+        return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The By object height lead must be greater than zero at layer precision: the height step capped by the extruder clearance height, or the extruder clearance height when the step is zero.") };
+    if (print_by_object(m_config)) {
+        // Clearance affects stack grouping, not whether the plate may be sliced.
+        const bool clear = sequential_print_horizontal_clearance_valid(*this,
+            const_cast<Polygons*>(&m_sequential_print_clearance_contours));
+        if (!clear && warnings != nullptr)
+            warnings->emplace_back("_COPIES_TOO_CLOSE");
     }
     else
         const_cast<Polygons*>(&m_sequential_print_clearance_contours)->clear();
@@ -1213,10 +1226,10 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
         for (const PrintObjectUPtr &object : m_objects)
             total_copies_count += object->instances().size();
         // #4043
-        if (total_copies_count > 1 && ! m_config.complete_objects.value)
+        if (total_copies_count > 1 && !print_complete_objects(m_config))
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Only a single object may be printed at a time in Spiral Vase mode. "
-                     "Either remove all but the last object, or enable sequential mode by \"complete_objects\".") };
-        assert(m_objects.size() == 1 || config().complete_objects.value);
+                     "Either remove all but the last object, or select By object with a zero height step.") };
+        assert(m_objects.size() == 1 || print_complete_objects(config()));
         if (m_objects.front()->all_regions().size() > 1)
             return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("The Spiral Vase option can only be used when printing single material objects, and without any modifiers that may break the vase.") };
     }
@@ -1394,7 +1407,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
             // Notify the user in that case.
             if (! object->has_support() && warnings) {
                 for (const ModelVolume* mv : object->model_object()->volumes) {
-                    bool has_enforcers = mv->is_support_enforcer() ||
+                    bool has_enforcers = mv->is_support_enforcer() || mv->is_support_column() ||
                         (mv->is_model_part() && mv->supported_facets.has_facets(*mv, EnforcerBlockerType::ENFORCER));
                     if (has_enforcers) {
                         warnings->emplace_back("_SUPPORTS_OFF");
@@ -1676,23 +1689,25 @@ void Print::process() {
     // Preview ticks and the legacy exporter consume this ordering cache.
     if (this->should_execute_step(STEP_WIPETOWER)) {
         m_tool_orderings.clear();
-        bool is_separate_objects = this->config().complete_objects.value || config().parallel_objects_step.value > 0;
-        if (config().parallel_objects_step.value > 0 && config().parallel_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
+        bool is_separate_objects = print_by_object(config());
+        const ConfigOption *object_step = config().option("complete_objects_step");
+        const ConfigOption *islands = config().option("complete_islands");
+        if (object_step != nullptr && object_step->get_float() > 0 && islands != nullptr && islands->get_bool() && m_default_object_config.wipe_tower && m_objects.size() == 1) {
             is_separate_objects = false;
         }
         if (is_separate_objects) {
             //throw new std::exception();
-            // FIXME: parallel_objects_step: end extruder on each pass isn't computed correctly.
+            // FIXME: complete_objects_step: end extruder on each pass isn't computed correctly.
             // TODO: add extruder-switch minimizing option.
             // Order object instances for sequential print.
             std::vector<const PrintInstance *> instances_ordering;
-            if (config().complete_objects_sort.value == cosObject)
+            if (complete_objects_sort(config()) == cosObject)
                 instances_ordering = this->sort_object_instances_by_model_order();
-            else if (config().complete_objects_sort.value == cosZ)
+            else if (complete_objects_sort(config()) == cosZ)
                 instances_ordering = this->sort_object_instances_by_max_z();
-            else if (config().complete_objects_sort.value == cosY)
+            else if (complete_objects_sort(config()) == cosY)
                 instances_ordering = this->sort_object_instances_by_max_y();
-            else if (config().complete_objects_sort.value == cosNearest)
+            else if (complete_objects_sort(config()) == cosNearest)
                 instances_ordering = chain_print_object_instances(*this);
             // Find the 1st printing object, find its tool ordering and the initial extruder ID.
             extruder_index_t previous_final_extruder = EXTRUDER_ID_UNKNOWN;
@@ -1897,14 +1912,14 @@ bool Print::has_wipe_tower() const
     if (config().nozzle_diameter.size() <= 1 || config().spiral_vase.value)
         return false;
     for (const PrintObject &object : objects())
-        if (!object.instances().empty() && ((config().complete_objects.value && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value))
+        if (!object.instances().empty() && ((print_complete_objects(config()) && object.config().wipe_tower.value) || object.config().wipe_tower_per_object.value))
             return true;
     return false;
 }
 
 // Inspect borrowed settings outside complete-object/vase modes; return global eligibility independent of parallel scheduling without changing geometry, ownership or pipeline state.
 bool Print::has_global_wipe_tower() const {
-    if (config().nozzle_diameter.size() <= 1 || !m_default_object_config.wipe_tower || config().complete_objects ||
+    if (config().nozzle_diameter.size() <= 1 || !m_default_object_config.wipe_tower || print_complete_objects(config()) ||
         config().spiral_vase.value) {
         return false;
     }

@@ -61,9 +61,6 @@ bool effective_gcode_empty(const DynamicPrintConfig &session, const char *key);
 // Return true when the session string option is missing or empty.
 bool printer_gcode_empty(const DynamicPrintConfig &session, const char *key);
 
-// Return true when the session enables sequential printing.
-bool sequential_printing(const DynamicPrintConfig &session);
-
 std::optional<double> scene_height(const Model &scene)
 {
     std::optional<double> height;
@@ -194,12 +191,6 @@ bool printer_gcode_empty(const DynamicPrintConfig &session, const char *key)
     return option == nullptr || option->value.empty();
 }
 
-bool sequential_printing(const DynamicPrintConfig &session)
-{
-    const ConfigOptionBool *option = session.option<ConfigOptionBool>("complete_objects");
-    return option != nullptr && option->value;
-}
-
 } // namespace
 
 // Store a 422 element error with its zero-based index and reason.
@@ -257,9 +248,6 @@ CustomGCode::Info make_custom_gcodes(const std::vector<CustomGCodeEntry> &entrie
     const Model &scene, const DynamicPrintConfig &session)
 {
     CustomGCode::Info result;
-    if (sequential_printing(session) && !entries.empty())
-        throw SceneEditError(422, "invalid_custom_gcode",
-            "Custom G-codes cannot be used with sequential printing.");
     const CustomGCodeMode mode = current_custom_gcode_mode(scene, session);
     result.mode = mode.mode;
     if (entries.empty())
@@ -326,8 +314,6 @@ nlohmann::json custom_gcodes_json(const CustomGCode::Info &info, const Model &sc
         if (above_scene(item.print_z_, height))
             warn(index, "above_objects");
     }
-    if (sequential_printing(session) && !info.gcodes.empty())
-        warnings.push_back({{"reason", "sequential_print"}});
     if (has_colors && (info.mode == CustomGCode::MultiExtruder) != (current == CustomGCode::MultiExtruder))
         warnings.push_back({{"reason", "mode_mismatch"}});
     return {{"mode", mode_name(info.mode)}, {"current_mode", mode_name(current)}, {"items", std::move(items)},

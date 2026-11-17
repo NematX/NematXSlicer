@@ -5,6 +5,13 @@
  * then applies only the engine's placement transforms. Orientation likewise
  * works on per-instance meshes and publishes no state until the caller commits
  * the changed candidate.
+ * Preferred spacing comes from the configuration; explicit non-negative gaps
+ * may be smaller than the nozzle clearance because By object can group copies.
+ *
+ *     arrange_instances()
+ *         |-- default_arrange_distance() -> choose a preference only when omitted
+ *         |-- validate_arrange_request() -> check non-negative engine-safe ranges
+ *         `-- ArrangeTask::process_native() -> place the selected instances
  */
 #include "placement.hpp"
 
@@ -60,15 +67,6 @@ public:
 private:
     std::vector<std::vector<bool>> selected_;
 };
-
-// Determine whether sequential printing adds a physical nozzle-clearance constraint.
-bool sequential_printing(const DynamicPrintConfig &config)
-{
-    const ConfigOptionBool *complete_objects = config.option<ConfigOptionBool>("complete_objects");
-    const ConfigOption *parallel_step = config.option("parallel_objects_step");
-    return (complete_objects != nullptr && complete_objects->value) ||
-        (parallel_step != nullptr && parallel_step->get_float() > 0.);
-}
 
 // Compare every transform coefficient exactly, as placement no-op detection requires.
 bool same_transform(const Transform3d &left, const Transform3d &right)
@@ -154,12 +152,11 @@ orientation::OrientParams area_orientation_params(const orientation::OrientParam
 // Reject parameters that cannot be represented by the arrangement engine's float settings.
 void validate_arrange_request(
     const ArrangeRequest &request,
-    double distance,
-    double minimum_distance)
+    double distance)
 {
-    if (!std::isfinite(distance) || distance < minimum_distance ||
+    if (!std::isfinite(distance) || distance < 0. ||
         distance > maximum_arrange_distance_mm())
-        throw SceneEditError(422, "invalid_arrange", "distance must meet the minimum clearance and fit the engine coordinate range.");
+        throw SceneEditError(422, "invalid_arrange", "distance must be non-negative and fit the engine coordinate range.");
     if (!std::isfinite(request.distance_from_bed) || request.distance_from_bed < 0. ||
         request.distance_from_bed > maximum_arrange_distance_mm())
         throw SceneEditError(422, "invalid_arrange", "distance_from_bed must be non-negative and fit the engine coordinate range.");
@@ -173,13 +170,6 @@ void validate_orient_request(const OrientRequest &request)
 }
 
 } // namespace
-
-double minimum_arrange_distance(const DynamicPrintConfig &config)
-{
-    if (!sequential_printing(config))
-        return 0.;
-    return min_object_distance(&config, 0.);
-}
 
 double default_arrange_distance(const DynamicPrintConfig &config)
 {
@@ -210,9 +200,8 @@ ArrangeOutcome arrange_instances(
     if (scene.objects().empty())
         return outcome;
 
-    const double minimum_distance = minimum_arrange_distance(config);
     const double distance = request.distance.value_or(default_arrange_distance(config));
-    validate_arrange_request(request, distance, minimum_distance);
+    validate_arrange_request(request, distance);
     const std::vector<ModelInstance *> selected = target_instances(scene, targets, false);
     std::set<std::uint64_t> selected_ids;
     for (const ModelInstance *instance : selected) {

@@ -13,6 +13,7 @@
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 
 /* Filled support projects final demand downward, subtracting each layer's XY-grown object slices cumulatively.
+   The no-support zones are subtracted with the slices, so no filled support is printed in a zone or below it.
    generate_support calls project_layer and add_layer_slabs separately; Common::expand_first_layer_foot leaves an expansion ring.
    Splitting at the upper object's slices separates contact from intermediate interface. Common publication assigns
    contact marking and interface ids. Demand is final after post-infill bridge removal. Run storage owns all results;
@@ -21,10 +22,11 @@
 namespace slic3r_api::Support::Filled {
 namespace {
 using ExPolys = StoredExPolygonCollection;
-// Combine carried support and upper-layer demand, subtract XY-grown slices and return storage-owned polygons.
+// Combine carried support and upper-layer demand, subtract the XY-grown slices and no-support zones of layer (object layer
+// layer_idx; zones holds one collection per object layer, or nothing) and return storage-owned polygons.
 // Borrowed inputs stay unchanged; geometry and allocation failures propagate.
-ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Layer &upper,
-                      const Layer &layer, const Common::SupportParams &params);
+ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Layer &upper, const Layer &layer, size_t layer_idx,
+                      const std::vector<ExPolys> &zones, const Common::SupportParams &params);
 // Split support at layers[id] and append nonempty slabs at layers[id-1]; id must be in [1,layers.size()).
 // Out owns the slabs in run storage; borrowed layers stay unchanged and geometry/allocation failures propagate.
 void add_layer_slabs(storage_handle *storage, const std::vector<Layer> &layers, size_t id,
@@ -42,7 +44,7 @@ void generate_support(const plugin_run_context *context, const Print &, const Ob
     ExPolys carried(out.storage);
     for (size_t id = layers.size(); id-- > 1;) {
         throw_if_cancelled(context);
-        ExPolys support = project_layer(out.storage, carried, layers[id], layers[id - 1], params);
+        ExPolys support = project_layer(out.storage, carried, layers[id], layers[id - 1], id - 1, out.no_support_zones, params);
         if (!support.empty()) add_layer_slabs(out.storage, layers, id, support, out);
         carried = std::move(support);
     }
@@ -59,8 +61,8 @@ void generate_support(const plugin_run_context *context, const Print &, const Ob
 }
 
 namespace {
-ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Layer &upper, const Layer &layer,
-                      const Common::SupportParams &params)
+ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Layer &upper, const Layer &layer, size_t layer_idx,
+                      const std::vector<ExPolys> &zones, const Common::SupportParams &params)
 {
     const ClipperContext clipper(storage);
     ClipperOperand projected = clipper(carried);
@@ -68,7 +70,8 @@ ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Lay
         projected += clipper(upper.island(island).support_demand());
     if (projected.empty())
         return ExPolys(storage);
-    const ClipperOperand mask = clipper_offset(clipper(layer.slices()), double(params.gap_xy), CLIPPER_JOIN_SQUARE, 0.);
+    const ClipperOperand mask = clipper_offset(Common::support_obstacle(clipper, layer, layer_idx, zones), double(params.gap_xy),
+                                               CLIPPER_JOIN_SQUARE, 0.);
     ExPolys support = Common::native_expolygons(clipper_diff(projected, mask));
     support.ensure_valid(params.resolution);
     return support;

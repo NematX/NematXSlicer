@@ -97,7 +97,6 @@ enum DrawMode
 {
     dmRegular,
     dmSlaPrint,
-    dmSequentialFffPrint,
     dmSequentialGCodeView,
 };
 
@@ -263,7 +262,8 @@ public:
     // Store one supplied display height per slider layer; an empty vector keeps the existing Z-gap labels.
     void    SetLayersMaxHeights(const std::vector<double>& layers_max_heights);
 
-    void    SetDrawMode(bool is_sla_print, bool is_sequential_print);
+    // Select SLA display or regular FFF display without restricting height events.
+    void    SetDrawMode(bool is_sla_print);
     void    SetDrawMode(DrawMode mode) { m_draw_mode = mode; }
 
     void    SetManipulationMode(Mode mode)  { m_mode = mode; }
@@ -325,6 +325,7 @@ protected:
 
     void    render();
     void    draw_focus_rect(wxDC& dc);
+    // Draw the current add/delete action and record its clickable rectangle.
     void    draw_action_icon(wxDC& dc, const wxPoint pt_beg, const wxPoint pt_end);
     void    draw_scroll_line(wxDC& dc, const int lower_pos, const int higher_pos);
     void    draw_thumb(wxDC& dc, const wxCoord& pos_coord, const SelectedSlider& selection);
@@ -337,6 +338,7 @@ protected:
     void    draw_revert_icon(wxDC& dc);
     void    draw_cog_icon(wxDC &dc);
     void    draw_thumb_item(wxDC& dc, const wxPoint& pos, const SelectedSlider& selection);
+    // Draw the selected thumb's info line and its FFF height-event action.
     void    draw_info_line_with_icon(wxDC& dc, const wxPoint& pos, SelectedSlider selection);
     void    draw_tick_on_mouse_position(wxDC &dc);
     void    draw_tick_text(wxDC& dc, const wxPoint& pos, int tick, LabelType label_type = ltHeight, bool right_side = true) const;
@@ -367,6 +369,7 @@ private:
     void        get_size(int* w, int* h) const;
     double      get_double_value(const SelectedSlider& selection);
     int         get_tick_from_value(double value, bool force_lower_bound = false) const;
+    // Describe the selected marker or available actions; SLA has no marker tooltip.
     wxString    get_tooltip(int tick = -1);
     int         get_edited_tick_for_position(wxPoint pos, Type type = ColorChange);
 

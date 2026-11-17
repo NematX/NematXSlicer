@@ -87,40 +87,52 @@ coord_t slab_step(const c_float_or_percent &setting, double nozzle_mm, double ma
 // first-layer Z and strictly below the normal contact; a detected bridge then adds a slab owned by out. Inputs belong to the
 // same object, id is above zero, and configuration/view/geometry/allocation failures propagate with any already-added
 // contact intact.
-TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config &print_config, const SupportParams &p, size_t id,
-                                 GeneratedSupport &out)
+std::optional<TopContactZ> top_contact_z(const std::vector<Layer> &layers, const Config &print_config, const SupportParams &p, size_t id,
+                                         storage_handle *storage)
 {
     const coord_t first_z = scale_to_layer_coord(p.first_layer_height);
     const Layer &layer = layers[id];
-    coord_t z = layer.bottom_z() - scale_to_layer_coord(p.gap_above);
-    coord_t bottom = z, height = 0;
+    TopContactZ result;
+    result.z = layer.bottom_z() - scale_to_layer_coord(p.gap_above);
+    result.bottom = result.z;
     if (p.soluble) {
-        height = layers[id - 1].height();
-        bottom = id == 1 ? 0 : layers[id - 2].print_z();
-    } else {
-        if (z < first_z) return {};
-        if (z < first_z + p.min_height) { z = first_z; bottom = 0; height = first_z; }
+        result.height = layers[id - 1].height();
+        result.bottom = id == 1 ? 0 : layers[id - 2].print_z();
+        return result;
     }
+    if (result.z < first_z) return std::nullopt;
+    if (result.z < first_z + p.min_height) { result.z = first_z; result.bottom = 0; result.height = first_z; }
+    coord_t bridge_height = layer.height();
+    if (p.distance_type == ContactDistanceType::Filament) {
+        double total = 0;
+        for (uint32_t region = 0; region < layer.region_count(); ++region)
+            total += bridging_height_avg_mm(print_config, layer, layer.region(region));
+        bridge_height = scale_to_layer_coord(total / layer.region_count());
+    }
+    coord_t bridge_z = layer.print_z() - bridge_height - scale_to_layer_coord(p.gap_above);
+    if (bridge_z >= first_z && bridge_z < result.z && has_bridges(storage, layer)) {
+        if (bridge_z < first_z + p.min_height) bridge_z = first_z;
+        result.bridge_z = bridge_z;
+    }
+    return result;
+}
+
+TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config &print_config, const SupportParams &p, size_t id,
+                                 GeneratedSupport &out)
+{
+    const std::optional<TopContactZ> z = top_contact_z(layers, print_config, p, id, out.storage);
+    if (!z) return {};
     TopContactSlabs slabs;
-    slabs.contact = &add_layer(out, LayerType::TopContact, z, bottom, height);
+    slabs.contact = &add_layer(out, LayerType::TopContact, z->z, z->bottom, z->height);
     slabs.contact->object_above = id;
     out.top.push_back(slabs.contact);
-    if (!p.soluble) {
-        coord_t bridge_height = layer.height();
-        if (p.distance_type == ContactDistanceType::Filament) {
-            double total = 0;
-            for (uint32_t region = 0; region < layer.region_count(); ++region)
-                total += bridging_height_avg_mm(print_config, layer, layer.region(region));
-            bridge_height = scale_to_layer_coord(total / layer.region_count());
-        }
-        coord_t bridge_z = layer.print_z() - bridge_height - scale_to_layer_coord(p.gap_above);
-        if (bridge_z >= first_z && bridge_z < z && has_bridges(out.storage, layer)) {
-            if (bridge_z < first_z + p.min_height) bridge_z = first_z;
-            slabs.bridge = &add_layer(out, LayerType::TopContact, bridge_z, bridge_z == first_z ? 0 : bridge_z,
-                                      bridge_z == first_z ? first_z : 0);
-            slabs.bridge->object_above = id;
-            out.top.push_back(slabs.bridge);
-        }
+    if (z->bridge_z) {
+        const coord_t first_z = scale_to_layer_coord(p.first_layer_height);
+        const coord_t bridge_z = *z->bridge_z;
+        slabs.bridge = &add_layer(out, LayerType::TopContact, bridge_z, bridge_z == first_z ? 0 : bridge_z,
+                                  bridge_z == first_z ? first_z : 0);
+        slabs.bridge->object_above = id;
+        out.top.push_back(slabs.bridge);
     }
     return slabs;
 }

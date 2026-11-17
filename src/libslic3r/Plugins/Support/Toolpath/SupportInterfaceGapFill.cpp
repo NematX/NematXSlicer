@@ -5,7 +5,6 @@
 #include "SupportInterfaceGapFill.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -20,8 +19,11 @@
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/LegacySupportPaths.hpp"
 
-/* Complete dense support interfaces after their selected providers publish paths.
+/* Complete every dense contact/interface pass regardless of its selected provider.
    Published surfaces bound additions; same-Z toolpaths describe occupied space.
+   Areas a provider leaves empty are also filled unless it publishes them as
+   non-dense surfaces. The pass eligibility rules still exclude spaced interfaces,
+   base-setting passes, partial density and top contacts with removable loops.
    All additions are staged before publication so insertion invalidates no reads.
    Object callbacks share no mutable calculation state. Storage is borrowed from
    the host and encloses all returned geometry and snapshots.
@@ -33,24 +35,20 @@
            overlaps -> Internal::modulate: only new paths
            stage -> GapFill::ordered_boundary / append_additions: publish last
 
-   PluginBase contains exceptions and propagates cancellation at the C ABI.
-   Unknown providers are left intact because they may reserve unpublished masks. */
+   PluginBase contains exceptions and propagates cancellation at the C ABI. */
 namespace slic3r_api::Support::Toolpath {
 namespace {
 constexpr const char *k_option = "support_material_interface_gap_fill";
 constexpr raw_extrusion_role k_bucket = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-// Each dense pass accepts its ordinary provider or the matching interface-perimeter provider.
-struct Role { const char *group; const char *legacy; const char *perimeters; bool top; bool contact; };
+// Surface classification identifies bottom contact, bottom interface, top contact and top interface.
+struct Role { bool top; bool contact; };
 const Role roles[] = {
-    {"support_toolpath_bottom_contact", "support.toolpath.legacy_bottom_contact", "nematx.support.bottom_contact", false, true},
-    {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom", "nematx.support.bottom_interface", false, false},
-    {"support_toolpath_top_contact", "support.toolpath.legacy_top_contact", "nematx.support.top_contact", true, true},
-    {"support_toolpath_top_interface", "support.toolpath.legacy_top", "nematx.support.top_interface", true, false}
+    {false, true}, {false, false}, {true, true}, {true, false}
 };
 // Owned staged paths grouped by borrowed destination layer, island and tool.
 struct Addition { layer_handle *layer; uint32_t island; extruder_index_t tool; StoredExtrusionEntity paths; };
 // Resolve dense passes, generate nominal paths, modulate new paths, then stage and publish them; failures propagate.
-void process(const plugin_run_context *, orchestrator_handle *);
+void process(const plugin_run_context *);
 // Copy pass surfaces into borrowed storage; bridge -1 includes both bridge classifications.
 StoredPolygonCollection surfaces(storage_handle *, const layer_handle *, const Role &, int bridge = -1);
 // Offset same-Z buckets; only related non-bridged pieces inside the domain use spacing.
@@ -124,12 +122,12 @@ void SupportInterfaceGapFill::inilialize_impl(storage_handle *) const
 
 void SupportInterfaceGapFill::run_impl(const plugin_run_context *context) const
 {
-    process(context, m_orchestrator);
+    process(context);
     progress().finish_run();
 }
 
 namespace {
-void process(const plugin_run_context *context, orchestrator_handle *host)
+void process(const plugin_run_context *context)
 {
     throw_if_cancelled(context);
     const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
@@ -151,20 +149,12 @@ void process(const plugin_run_context *context, orchestrator_handle *host)
     std::vector<Addition> additions;
     // Later passes at the same Z must account for paths already staged there.
     std::map<coord_t, std::vector<GapFill::Path>> added;
-    bool supported[4] = {};
-    for (size_t r = 0; r < 4; ++r) {
-        const orchestrator_plugin_handle *selected = orchestrator_select_plugin(host, config.handle(), STEP_SUPPORT_TOOLPATH, roles[r].group);
-        const char *id = orchestrator_plugin_id(selected);
-        supported[r] = id && (std::strcmp(id, roles[r].legacy) == 0 || std::strcmp(id, roles[r].perimeters) == 0);
-        if (id && !supported[r]) orchestrator_plugin_report_warning(context->host_context,
-            "Support interface gap fill left an unknown toolpath provider unchanged.");
-    }
     const extruder_index_t tool = geometry.interface_tool > 0 ? geometry.interface_tool - 1 : EXTRUDER_ID_UNKNOWN;
     for (layer_handle *layer : layers) for (size_t r = 0; r < 4; ++r) {
         throw_if_cancelled(context);
         const Role &role = roles[r];
         // Base-setting passes and removable top-contact loops reserve unprinted corridors.
-        if (!supported[r] || !(role.top ? geometry.top_published_interfaces_enabled : geometry.bottom_published_interfaces_enabled) ||
+        if (!(role.top ? geometry.top_published_interfaces_enabled : geometry.bottom_published_interfaces_enabled) ||
             (role.top && role.contact && geometry.interface_contact_loops)) continue;
         const bool first = layer_get_print_z(layer) - layer_get_height(layer) <= 0;
         const float density = float(first ? geometry.raft_first_layer_density : geometry.interface_density);

@@ -188,20 +188,25 @@ wxBitmapBundle* SettingsFactory::get_category_bitmap(const Slic3r::OptionCategor
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 14> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
     {L("Add part"),              "add_part" },           // ~ModelVolumeType::MODEL_PART
     {L("Add negative volume"),   "add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
     {L("Add modifier"),          "add_modifier"},        // ~ModelVolumeType::PARAMETER_MODIFIER
-    {L("Add support blocker"),   "support_blocker"},     // ~ModelVolumeType::SUPPORT_BLOCKER
-    {L("Add support enforcer"),  "support_enforcer"},    // ~ModelVolumeType::SUPPORT_ENFORCER
+    {L("Add support demand blocker"),  "support_blocker"},  // ~ModelVolumeType::SUPPORT_BLOCKER
+    {L("Add support demand enforcer"), "support_enforcer"}, // ~ModelVolumeType::SUPPORT_ENFORCER
     {L("Add seam attractor (sphere)"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_CENTER
     {L("Add seam attractor (cylinder)"),   "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_CENTER_Z
     {L("Add internal seam attractor (cylinder)"), "add_seam"},    // ~ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z
     {L("Enforce seam position"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_INSIDE
     {L("Add brim patch"),        "add_brim_patch"},      // ~ModelVolumeType::BRIM_PATCH
     {L("Add brim negative"),     "add_brim_negative"},   // ~ModelVolumeType::BRIM_NEGATIVE
+    {L("Add support column"),    "support_column"},      // ~ModelVolumeType::SUPPORT_COLUMN
+    {L("Add no support zone"),   "no_support_zone"},     // ~ModelVolumeType::NO_SUPPORT_ZONE
+    {L("Add support interface column"), "support_interface_column"}, // ~ModelVolumeType::SUPPORT_INTERFACE_COLUMN
 }};
+static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) + 1,
+              "ADD_VOLUME_MENU_ITEMS has one entry per volume type, in enum order");
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
 static const constexpr std::array<std::pair<const char *, const char *>, 3> TEXT_VOLUME_ICONS {{
@@ -602,6 +607,8 @@ void MenuFactory::append_submenu_add_generic(wxMenu* menu_parent, wxMenu* sub_me
     }
 
     std::vector<std::string> items = { L("Box"), L("Cylinder"), L("Sphere"), L("Slab") };
+    // A sphere is no useful support column: its sections shrink to nothing at both ends.
+    if (type == ModelVolumeType::SUPPORT_COLUMN || type == ModelVolumeType::SUPPORT_INTERFACE_COLUMN) items = { L("Box"), L("Cylinder"), L("Slab") };
     if (type == ModelVolumeType::BRIM_PATCH) items = {"Square", "Circle" };
     if (type == ModelVolumeType::BRIM_NEGATIVE) items = {"Square", "Circle" };
     for (auto& item : items)
@@ -698,7 +705,7 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
     }
 
     //also destroy combined menus & the ones taht aren't in ADD_VOLUME_MENU_ITEMS
-    wxString combined_support_str = _L("Add support blocker/enforcer");
+    wxString combined_support_str = _L("Add support volume");
     wxString combined_brim_str = _L("Add Brim patch/blocker");
     wxString combined_seam_str  =_L("Add seam position");
     for (const wxString &item_name : {combined_support_str, combined_brim_str, combined_seam_str}) {
@@ -719,6 +726,13 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
             [](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Box"), ModelVolumeType::SUPPORT_BLOCKER); },
             ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SUPPORT_BLOCKER)].second, nullptr,
             []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+        if (menu_type != mtObjectSLA)
+            for (const ModelVolumeType type : {ModelVolumeType::SUPPORT_COLUMN, ModelVolumeType::SUPPORT_INTERFACE_COLUMN,
+                     ModelVolumeType::NO_SUPPORT_ZONE})
+                append_menu_item(menu, wxID_ANY, _(ADD_VOLUME_MENU_ITEMS[int(type)].first), "",
+                    [type](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Box"), type); },
+                    ADD_VOLUME_MENU_ITEMS[int(type)].second, nullptr,
+                    []() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
         append_menu_item(menu, wxID_ANY, _(ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SEAM_POSITION_CENTER)].first), "",
             [this](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Sphere"), ModelVolumeType::SEAM_POSITION_CENTER); },
             ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SEAM_POSITION_CENTER)].second, nullptr,
@@ -760,17 +774,29 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
         append_submenu(menu, sub_menu_modifier, wxID_ANY, _(item_modifier.first), "", item_modifier.second, selected_func, m_parent);
     }
     {
-        // SUPPORT enforcer & blocker
+        // Support volumes: the demand enforcer and blocker change which object surfaces ask for support; below them, the
+        // support columns (sparse or interface) and the no-support zone add support or forbid it themselves (FFF only).
         wxMenu* sub_menu_both = new wxMenu;
-        auto& item_block = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SUPPORT_BLOCKER)];
-        auto& item_enforce = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SUPPORT_ENFORCER)];
-        wxMenu* sub_menu_block = new wxMenu;
-        append_submenu_add_generic(sub_menu_both, sub_menu_block, ModelVolumeType::SUPPORT_BLOCKER);
-        append_submenu(sub_menu_both, sub_menu_block, wxID_ANY, _L("Blocker"), "", item_block.second, selected_func, m_parent);
-        wxMenu* sub_menu_enforce = new wxMenu;
-        append_submenu_add_generic(sub_menu_both, sub_menu_enforce, ModelVolumeType::SUPPORT_ENFORCER);
-        append_submenu(sub_menu_both, sub_menu_enforce, wxID_ANY, _L("Enforcer"), "", item_enforce.second, selected_func, m_parent);
-        append_submenu(menu, sub_menu_both, wxID_ANY, combined_support_str, "", item_enforce.second, selected_func, m_parent);
+        const std::pair<ModelVolumeType, wxString> support_types[] = {
+            {ModelVolumeType::SUPPORT_ENFORCER, _L("Support demand enforcer")},
+            {ModelVolumeType::SUPPORT_BLOCKER, _L("Support demand blocker")},
+            {ModelVolumeType::SUPPORT_COLUMN, _L("Support column")},
+            {ModelVolumeType::SUPPORT_INTERFACE_COLUMN, _L("Support interface column")},
+            {ModelVolumeType::NO_SUPPORT_ZONE, _L("No support zone")}};
+        for (const std::pair<ModelVolumeType, wxString> &support_type : support_types) {
+            const bool geometry = support_type.first == ModelVolumeType::SUPPORT_COLUMN ||
+                support_type.first == ModelVolumeType::SUPPORT_INTERFACE_COLUMN || support_type.first == ModelVolumeType::NO_SUPPORT_ZONE;
+            if (geometry && menu_type == mtObjectSLA)
+                continue;
+            if (support_type.first == ModelVolumeType::SUPPORT_COLUMN)
+                sub_menu_both->AppendSeparator();
+            wxMenu* sub_menu_type = new wxMenu;
+            append_submenu_add_generic(sub_menu_both, sub_menu_type, support_type.first);
+            append_submenu(sub_menu_both, sub_menu_type, wxID_ANY, support_type.second, "",
+                ADD_VOLUME_MENU_ITEMS[int(support_type.first)].second, selected_func, m_parent);
+        }
+        append_submenu(menu, sub_menu_both, wxID_ANY, combined_support_str, "",
+            ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::SUPPORT_ENFORCER)].second, selected_func, m_parent);
     }
     if (menu_type != mtObjectSLA) {
         // SEAM

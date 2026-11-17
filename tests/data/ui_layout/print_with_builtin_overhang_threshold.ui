@@ -628,15 +628,10 @@ page:Output options:output+page_white
 group:Platter
 	setting:duplicate_distance
 group:Sequential printing
-	setting:tags$Advanced$Expert$Prusa:complete_objects
-	line:Parallel printing step
-		setting:label$Step:parallel_objects_step
-		setting:label$Max z:parallel_objects_step_max_z
-	end_line
-	line:Island Parallel printing step
-		setting:label$:parallel_islands
-		setting:label$Minimum island distance:parallel_islands_min_distance
-	end_line
+	setting:tags$Advanced$Expert$Prusa:print_plan_builder
+	setting:complete_objects_step
+	setting:complete_objects_step_max_z
+	setting:complete_islands
 	setting:complete_objects_one_skirt
 	setting:complete_objects_sort
 	line:Extruder clearance (mm)
@@ -680,4 +675,4 @@ group:Skirt & Brim
 	setting:tags$Simple:brim_width
 	setting:tags$Simple:sidetext_width$0:brim_ears
 group:Sequential printing
-	setting:tags$Simple:complete_objects
+	setting:tags$Simple:print_plan_builder

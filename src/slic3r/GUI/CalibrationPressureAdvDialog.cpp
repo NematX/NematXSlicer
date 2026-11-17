@@ -30,6 +30,12 @@
 
 #undef NDEBUG
 #include <cassert>
+/*
+Provides pressure advance calibration samples to the plater. Geometry creation
+configures the generated print to visit all objects layer by layer.
+    CalibrationPressureAdvDialog::create_geometry() -> prepare samples and settings
+        set_deserialize_strict() -> select By layer explicitly
+*/
 
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
@@ -123,6 +129,8 @@ ExtrusionRole string_to_er_role(const std::string& role_str) {
 
 
 void CalibrationPressureAdvDialog::create_geometry(wxCommandEvent& event_args) {
+    if (!require_plan_builder(false))
+        return;
    
     std::string choice_extrusion_role[] = {
     "InternalInfill",
@@ -813,7 +821,7 @@ void CalibrationPressureAdvDialog::create_geometry(wxCommandEvent& event_args) {
     DynamicPrintConfig new_filament_config = *filament_config;
     //check if setting any config values to 45° breaks it. or it might be the default value for rotation adding part?
     new_print_config.set_key_value("avoid_crossing_perimeters", new ConfigOptionBool(false));
-    new_print_config.set_key_value("complete_objects", new ConfigOptionBool(false)); //true is required for multi tests on single plate?
+    new_print_config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_layer");
     new_print_config.set_key_value("first_layer_flow_ratio", new ConfigOptionPercent(100));
     new_print_config.set_key_value("first_layer_size_compensation", new ConfigOptionFloat(0));
     new_print_config.set_key_value("xy_inner_size_compensation", new ConfigOptionFloat(0));

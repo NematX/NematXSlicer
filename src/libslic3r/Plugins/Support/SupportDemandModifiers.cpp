@@ -5,6 +5,8 @@
 
 #include "SupportDemandModifiers.hpp"
 
+#include <optional>
+
 #include <algorithm>
 #include <cstdint>
 #include <utility>
@@ -34,12 +36,14 @@ The normal execution flow is:
     |-- collect the object's layer Z positions and slicing parameters
     |-- slice relevant modifier volumes in object-volume order
     `-- for every layer island:
-        |-- intersect enforcers with the island and union them with existing demand
+        |-- intersect enforcers with the island's overhang and union them with existing demand
         `-- subtract blockers from the resulting demand
 
 Each modifier volume is sliced once and its polygons are reused for all layer
 islands at the same Z. Enforcers can create demand where none existed, but only
-inside the object island. Blockers affect only existing demand. A small offset
+on the overhang of the object island (the part that the layer below does not
+cover, whatever its angle, as the native support enforcers), and only while the object prints support (support_material or forced
+support layers, Common::object_support_enabled()). Blockers affect only existing demand. A small offset
 is applied to blocker polygons before subtraction so boundary-touching areas
 are not left as support demand because of polygon-rounding differences.
 
@@ -57,8 +61,9 @@ namespace {
 const char *k_support_demand_modifiers_id = "support.demand.modifiers";
 const char *k_dependencies[] = { nullptr };
 
-// Clips layer enforcer slices to an island and adds them through the common demand publisher.
-void add_enforcers_to_island(const LayerIsland &island, const ClipperContext &clipper,
+// Clips layer enforcer slices to the overhang of an island, the part that lower (the layer below, null on the first layer) does not
+// cover, and adds them through the common demand publisher.
+void add_enforcers_to_island(const LayerIsland &island, const Layer *lower, const ClipperContext &clipper,
                              const std::vector<StoredExPolygonCollection> &enforcers, uint32_t layer_idx,
                              const plugin_run_context *run_ctx);
 // Removes layer blocker slices through the common enlarged subtraction.
@@ -137,16 +142,20 @@ ClipperOperand clip_layer_slices(const std::vector<StoredExPolygonCollection> &b
 
 // Intersects borrowed modifier slices with an island, then publishes their union with demand through Common; absent layer slices do nothing, context must allow demand mutation, and cancellation/geometry/allocation failures propagate.
 void add_enforcers_to_island(const LayerIsland &island,
+                             const Layer *lower,
                              const ClipperContext &clipper,
                              const std::vector<StoredExPolygonCollection> &enforcers,
                              uint32_t layer_idx,
                              const plugin_run_context *run_ctx)
 {
-    if (!has_layer_slices(enforcers, layer_idx))
+    // The first layer stands on the bed: nothing there asks for support.
+    if (lower == nullptr || !has_layer_slices(enforcers, layer_idx))
         return;
 
-    ClipperOperand enforced =
-        clipper_intersection(clipper(island.slice()), clip_layer_slices(enforcers, layer_idx, clipper));
+    // Only the overhang asks for support: the part of the island that the layer below does not cover, whatever its angle.
+    ClipperOperand enforced = clipper_diff(
+        clipper_intersection(clipper(island.slice()), clip_layer_slices(enforcers, layer_idx, clipper)),
+        Common::accumulate_lower_slices(clipper, clipper(), *lower));
     Common::add_to_demand(run_ctx, island, clipper, std::move(enforced));
 }
 
@@ -247,19 +256,22 @@ void SupportDemandModifiers::run_impl(const plugin_run_context *run_ctx) const
         return;
     }
 
+    // With support disabled the enforcers ask for nothing; the blockers still remove the forced layers' demand.
+    const bool enforce = Common::object_support_enabled(object);
     ClipperContext clipper(storage);
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
 
         const Layer layer = object.layer(layer_idx);
+        const std::optional<Layer> lower = layer_idx > 0 ? std::optional<Layer>(object.layer(layer_idx - 1)) : std::nullopt;
         for (uint32_t island_idx = 0; island_idx < layer.island_count(); ++island_idx) {
             throw_if_cancelled(run_ctx);
 
             const LayerIsland island = layer.island(island_idx);
             for (const SlicedSupportModifier &modifier : modifiers) {
                 throw_if_cancelled(run_ctx);
-                if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_ENFORCER)
-                    add_enforcers_to_island(island, clipper, modifier.slices, layer_idx, run_ctx);
+                if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_ENFORCER && enforce)
+                    add_enforcers_to_island(island, lower ? &*lower : nullptr, clipper, modifier.slices, layer_idx, run_ctx);
                 else if (modifier.type == RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
                     remove_blockers_from_island(island, clipper, modifier.slices, layer_idx, run_ctx);
             }

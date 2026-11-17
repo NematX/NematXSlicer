@@ -141,10 +141,12 @@ test_support_tree_family.cpp
     test_support_tree_legacy_compare.cpp
     test_support_publication.cpp
     test_support_slab_placement.cpp
+    test_support_volume_constraints.cpp
     test_flat_area_layer_height.cpp
     test_nozzle_cleaning.cpp
     test_ordering_advanced_extrusion_tree.cpp
     test_ordering_engine.cpp
+    test_ordering_object_instance_catalog.cpp
     test_ordering_printing_extrusion_presort.cpp
     test_ordering_wipe_into_first.cpp
     test_ordering_xy_serpentine.cpp
@@ -166,6 +168,7 @@ test_support_tree_family.cpp
     test_perimeter_only_one_perimeter_first_layer.cpp
     test_perimeter_only_one_perimeter_on_top.cpp
     test_perimeter_python_simple_generator.cpp
+    test_perimeter_region_groups.cpp
     test_perimeter_remove_gap_fill_on_overhangs.cpp
     test_perimeter_separate_hole_contour.cpp
     test_perimeter_simple_generator.cpp
@@ -175,6 +178,7 @@ test_support_tree_family.cpp
     test_polyholes.cpp
     test_output_filename.cpp
     test_printing_plan.cpp
+    test_print_plan_islands.cpp
     test_print_status_queue.cpp
     test_retraction_wipe_e2e.cpp
     test_skirt_brim_default_generator.cpp
@@ -499,6 +503,14 @@ set_tests_properties(plugins_tests_prepare_exports PROPERTIES
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "[plugins]~[.]" ${CATCH_EXTRA_ARGS})
 set_tests_properties(${_TEST_NAME}_tests PROPERTIES
     FIXTURES_REQUIRED plugins_exports_directory)
+add_test(NAME plugins_inactive_builder_import
+    COMMAND $<TARGET_FILE:${_TEST_NAME}_tests> "[.inactive-builder-import]" ${CATCH_EXTRA_ARGS})
+set_tests_properties(plugins_inactive_builder_import PROPERTIES
+    ENVIRONMENT "SLIC3R_TEST_WITHOUT_BY_OBJECT=1")
+add_test(NAME plugins_inactive_builder_settings
+    COMMAND $<TARGET_FILE:${_TEST_NAME}_tests> "[.inactive-builder-settings]" ${CATCH_EXTRA_ARGS})
+set_tests_properties(plugins_inactive_builder_settings PROPERTIES
+    ENVIRONMENT "SLIC3R_TEST_WITHOUT_BY_OBJECT=1")
 
 # Hidden probes intentionally stop their process, so a separate driver checks
 # the guard's status and diagnostic without aborting the ordinary plugin suite.

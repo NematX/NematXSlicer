@@ -4,6 +4,7 @@
 ///|/
 
 #include "CalibrationAbstractDialog.hpp"
+#include <algorithm>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/path.hpp>
@@ -13,6 +14,8 @@
 #include <wx/scrolwin.h>
 
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include "GUI.hpp"
@@ -20,6 +23,13 @@
 #include "I18N.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
+/*
+Provides the common calibration window, documentation page and model helpers.
+Generators selecting a mode check provider availability before modifying the plate.
+    require_plan_builder() -> inspect active provider and selector choices
+        show_error() -> explain an unavailable mode without changing print data
+    create() -> prepare the documentation page and derived dialog controls
+*/
 #if ENABLE_SCROLLABLE
 static wxSize get_screen_size(wxWindow* window)
 {
@@ -31,6 +41,23 @@ static wxSize get_screen_size(wxWindow* window)
 
 namespace Slic3r {
 namespace GUI {
+
+bool CalibrationAbstractDialog::require_plan_builder(bool by_object)
+{
+    Orchestrator &host = Orchestrator::instance();
+    const char *id = by_object ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer";
+    const Plugin *builder = host.get_plugin(id);
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get("print_plan_builder");
+    if (builder != nullptr && host.is_plugin_active(builder) && definition != nullptr && definition->enum_def) {
+        const std::vector<std::string> &choices = definition->enum_def->values();
+        if (std::find(choices.begin(), choices.end(), id) != choices.end())
+            return true;
+    }
+    show_error(this, by_object ?
+        _L("The By object print plan builder must be active to create this calibration.") :
+        _L("The By layer print plan builder must be active to create this calibration."));
+    return false;
+}
 
 CalibrationAbstractDialog::CalibrationAbstractDialog(GUI_App* app, MainFrame* mainframe, std::string name)
         : DPIDialog(NULL, wxID_ANY, wxString(SLIC3R_APP_NAME) + " - " + _(L(name)),

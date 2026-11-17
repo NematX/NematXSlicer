@@ -180,7 +180,7 @@ TEST_CASE("Custom height row tools validate before zero-based conversion",
     CHECK_THROWS_AS(custom_gcode_row_extruder_index(row, 32769), std::out_of_range);
 }
 
-TEST_CASE("Custom height rows map to the first matching layer in model order",
+TEST_CASE("Custom height rows map once to the first matching layer in plan order",
           "[plugins][gcode][custom-per-print-z][mapping]")
 {
     PrintingPlan native_plan;
@@ -189,25 +189,35 @@ TEST_CASE("Custom height rows map to the first matching layer in model order",
     native_plan.groups.front().layers.back().print_z = scale_i(0.2);
     native_plan.groups.front().layers.emplace_back();
     native_plan.groups.front().layers.back().print_z = scale_i(0.4);
+    native_plan.groups.emplace_back();
+    native_plan.groups.back().layers.emplace_back();
+    native_plan.groups.back().layers.back().print_z = scale_i(0.2);
+    native_plan.groups.back().layers.emplace_back();
+    native_plan.groups.back().layers.back().print_z = scale_i(0.6);
 
     CustomGCodeTable table;
     table.rows = {
         {0.1, CustomGCode::PausePrint, 1, "", "first", 0},
         {0.2, CustomGCode::Custom, 1, "", "second", 1},
         {0.21, CustomGCode::Template, 1, "", "third", 2},
-        {0.5, CustomGCode::PausePrint, 1, "", "above", 3}
+        {0.5, CustomGCode::PausePrint, 1, "", "later group", 3},
+        {0.7, CustomGCode::Custom, 1, "", "above", 4}
     };
 
     const slic3r_api::PrintingPlan plan(
         reinterpret_cast<printing_plan_handle *>(&native_plan));
-    const std::vector<std::vector<const CustomGCodeRow *>> mapped =
-        rows_by_layer(table, plan.group(0));
+    const CustomGCodePlanRows mapped = rows_by_plan(table, plan);
     REQUIRE(mapped.size() == 2);
     REQUIRE(mapped[0].size() == 2);
-    REQUIRE(mapped[1].size() == 1);
-    CHECK(mapped[0][0]->source_row == 0);
-    CHECK(mapped[0][1]->source_row == 1);
-    CHECK(mapped[1][0]->source_row == 2);
+    REQUIRE(mapped[1].size() == 2);
+    REQUIRE(mapped[0][0].size() == 2);
+    REQUIRE(mapped[0][1].size() == 1);
+    CHECK(mapped[0][0][0]->source_row == 0);
+    CHECK(mapped[0][0][1]->source_row == 1);
+    CHECK(mapped[0][1][0]->source_row == 2);
+    CHECK(mapped[1][0].empty());
+    REQUIRE(mapped[1][1].size() == 1);
+    CHECK(mapped[1][1][0]->source_row == 3);
 }
 
 TEST_CASE("Custom height markers become ordered typed plan events",

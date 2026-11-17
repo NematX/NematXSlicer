@@ -186,6 +186,15 @@ Model make_model(TriangleMesh &&model_part, std::initializer_list<ModifierBox> m
     return model;
 }
 
+// A ledge: a 4 mm wide wall at x = -10 to -6 carries a plate over the whole 20 x 20 mm footprint from z = 5 to 10. The plate's
+// underside, x = -6 to 10 at z = 5, is the only area that the layer below does not cover: the overhang a support enforcer can add.
+TriangleMesh make_ledge()
+{
+    TriangleMesh mesh = make_box({-10., -10., 0., -6., 10., 10.});
+    mesh.merge(make_box({-10., -10., 5., 10., 10., 10.}));
+    return mesh;
+}
+
 Model make_bridge_model()
 {
     // Two pillars carry a one-layer roof. The roof layer spans a central gap,
@@ -579,16 +588,34 @@ struct ScopedBridgeInfillRemovalOff {
 
 TEST_CASE("SupportDemandModifiers adds support enforcers", "[plugins][support-demand]")
 {
-    // The model part is a vertical cube, so SupportDemandOverhangs creates no
-    // demand. A support enforcer volume inside the cube should add island-keyed
-    // demand clipped to the cube footprint.
-    const Box model_box = {-10., -10., 0., 10., 10., 10.};
+    // Automatic support is off, so SupportDemandOverhangs creates no demand. A support enforcer volume around the ledge's
+    // overhang adds island-keyed demand on the plate's underside inside the volume: 12 x 12 mm at z = 5, and nothing where the
+    // layer below covers the plate.
     const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, {-6., -6., 0., 6., 6., 10.}};
 
     const DemandSummary summary = run_support_demand(
-        make_model(make_box(model_box), {enforcer}),
+        make_model(make_ledge(), {enforcer}),
         support_demand_config(true, false, 0, 0));
     REQUIRE(has_meaningful_demand(summary));
+}
+
+TEST_CASE("Support enforcers ask for nothing while the object prints no support", "[plugins][support-demand]")
+{
+    // The same enforcer volume and the same painted enforcer facets as above: with support_material off and no forced support
+    // layer they add no demand; one forced support layer counts as printing support, so they apply again.
+    const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, {-6., -6., 0., 6., 6., 10.}};
+    const auto painted = []() {
+        Model model = make_model(make_ledge(), {});
+        paint_support_facets(*model.objects().begin()->volumes.front(), EnforcerBlockerType::ENFORCER, {12, 13});
+        return model;
+    };
+    CHECK_FALSE(has_meaningful_demand(run_support_demand(make_model(make_ledge(), {enforcer}),
+        support_demand_config(false, false, 0, 0))));
+    CHECK_FALSE(has_meaningful_demand(run_support_demand(painted(), support_demand_config(false, false, 0, 0))));
+    const double forced_alone = run_support_demand(make_model(make_ledge(), {}), support_demand_config(false, false, 0, 1)).area_mm2;
+    CHECK(run_support_demand(make_model(make_ledge(), {enforcer}), support_demand_config(false, false, 0, 1)).area_mm2 >
+          forced_alone + 0.1);
+    CHECK(run_support_demand(painted(), support_demand_config(false, false, 0, 1)).area_mm2 > forced_alone + 0.1);
 }
 
 TEST_CASE("SupportDemandModifiers removes support with blockers", "[plugins][support-demand]")
@@ -596,13 +623,12 @@ TEST_CASE("SupportDemandModifiers removes support with blockers", "[plugins][sup
     // The enforcer and blocker use the same rectangular prism. The enforcer
     // creates demand first, then the blocker removes exactly that area, leaving
     // no support demand.
-    const Box model_box = {-10., -10., 0., 10., 10., 10.};
     const Box modifier_box = {-6., -6., 0., 6., 6., 10.};
     const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, modifier_box};
     const ModifierBox blocker = {ModelVolumeType::SUPPORT_BLOCKER, modifier_box};
 
     const DemandSummary summary = run_support_demand(
-        make_model(make_box(model_box), {enforcer, blocker}),
+        make_model(make_ledge(), {enforcer, blocker}),
         support_demand_config(true, false, 0, 0));
     REQUIRE_FALSE(has_meaningful_demand(summary));
 }
@@ -613,13 +639,12 @@ TEST_CASE("SupportDemandModifiers applies support volumes in model volume order"
     // and blockers applied later, the blocker would erase everything. The
     // expected behavior is sequential: enforcer adds, blocker removes, the
     // second enforcer adds the area again.
-    const Box model_box = {-10., -10., 0., 10., 10., 10.};
     const Box modifier_box = {-6., -6., 0., 6., 6., 10.};
     const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, modifier_box};
     const ModifierBox blocker = {ModelVolumeType::SUPPORT_BLOCKER, modifier_box};
 
     const DemandSummary summary = run_support_demand(
-        make_model(make_box(model_box), {enforcer, blocker, enforcer}),
+        make_model(make_ledge(), {enforcer, blocker, enforcer}),
         support_demand_config(true, false, 0, 0));
     REQUIRE(has_meaningful_demand(summary));
 }
@@ -629,15 +654,14 @@ TEST_CASE("SupportDemandModifiers can partially remove enforced support", "[plug
     // The blocker covers only the right half of the enforcer. The result should
     // still contain demand, but less than the enforcer-only baseline. This
     // catches accidental clear-all behavior in blocker handling.
-    const Box model_box = {-10., -10., 0., 10., 10., 10.};
     const ModifierBox enforcer = {ModelVolumeType::SUPPORT_ENFORCER, {-8., -8., 0., 8., 8., 10.}};
     const ModifierBox right_half_blocker = {ModelVolumeType::SUPPORT_BLOCKER, {0., -8., 0., 8., 8., 10.}};
     const DynamicPrintConfig config = support_demand_config(true, false, 0, 0);
 
     const DemandSummary baseline = run_support_demand(
-        make_model(make_box(model_box), {enforcer}), config);
+        make_model(make_ledge(), {enforcer}), config);
     const DemandSummary partially_blocked = run_support_demand(
-        make_model(make_box(model_box), {enforcer, right_half_blocker}), config);
+        make_model(make_ledge(), {enforcer, right_half_blocker}), config);
 
     REQUIRE(has_meaningful_demand(baseline));
     REQUIRE(has_meaningful_demand(partially_blocked));
@@ -662,11 +686,10 @@ TEST_CASE("SupportDemandModifiers clips enforcers to the layer island", "[plugin
     // The support enforcer is entirely outside the model part footprint. The
     // plugin intersects enforcer slices with the current island, so an outside
     // enforcer should have no effect.
-    const Box model_box = {-10., -10., 0., 10., 10., 10.};
     const ModifierBox outside_enforcer = {ModelVolumeType::SUPPORT_ENFORCER, {30., -6., 0., 40., 6., 10.}};
 
     const DemandSummary summary = run_support_demand(
-        make_model(make_box(model_box), {outside_enforcer}),
+        make_model(make_ledge(), {outside_enforcer}),
         support_demand_config(true, false, 0, 0));
     REQUIRE_FALSE(has_meaningful_demand(summary));
 }
@@ -691,12 +714,11 @@ TEST_CASE("SupportDemandModifiers runs after overhang demand and can reject it",
 
 TEST_CASE("SupportDemandPainting adds painted support enforcers", "[plugins][support-demand]")
 {
-    // A vertical cube has no automatic overhang demand. Painting the two bottom
-    // triangles as support enforcers should create demand from the projected
-    // custom facets alone.
-    Model model = make_model(make_box({-10., -10., 0., 10., 10., 10.}), {});
+    // Automatic support is off. Painting the two triangles of the ledge's plate underside (facets 12 and 13, after the wall's 12)
+    // as support enforcers creates demand from the projected custom facets alone, on the overhang beside the wall.
+    Model model = make_model(make_ledge(), {});
     ModelObject &object = *model.objects().begin();
-    paint_support_facets(*object.volumes.front(), EnforcerBlockerType::ENFORCER, {0, 1});
+    paint_support_facets(*object.volumes.front(), EnforcerBlockerType::ENFORCER, {12, 13});
 
     const DemandSummary summary = run_support_demand(
         std::move(model),
@@ -704,19 +726,44 @@ TEST_CASE("SupportDemandPainting adds painted support enforcers", "[plugins][sup
     REQUIRE(has_meaningful_demand(summary));
 }
 
+TEST_CASE("Painted enforcers on a sloped overhang ask for support outside the layer below only", "[plugins][support-demand]")
+{
+    // The sloped cube's +X face leans out 5 mm over 10 mm (facets 6 and 7). Painted as enforcers, it is projected into every layer
+    // it crosses; the demand must keep only the strip that the layer below does not cover, or each covered layer would still place
+    // a support contact under itself.
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model = make_model(make_sloped_cube(5.), {});
+    paint_support_facets(*model.objects().begin()->volumes.front(), EnforcerBlockerType::ENFORCER, {6, 7});
+    Print print;
+    init_print_from_model(model, print, support_demand_config(true, false, 0, 0));
+    Orchestrator &orchestrator = Orchestrator::instance();
+    run_until_support_demand_input(orchestrator, print);
+    Steps::StepSupportDemand::run_step(orchestrator, print);
+    const PrintObject &object = print.object(0);
+    REQUIRE(has_meaningful_demand(summarize_support_demand(object)));
+    for (size_t layer_idx = 1; layer_idx < object.layer_count(); ++layer_idx) {
+        // Shrunk by 0.02 mm so that the shared border with the lower layer does not count.
+        const ExPolygons covered = offset_ex(object.layer(layer_idx - 1).lslices(), -scale_d(0.02));
+        for (const LayerSliceIsland &island : object.layer(layer_idx).islands()) {
+            CAPTURE(layer_idx);
+            CHECK(unscaled(unscaled(area(intersection_ex(island.support_demand(), covered)))) < 1e-3);
+        }
+    }
+}
+
 TEST_CASE("SupportDemandPainting applies painted enforcers before painted blockers", "[plugins][support-demand]")
 {
-    // Two overlapping model volumes project the same bottom facets. The first
+    // Two overlapping model volumes project the same plate underside. The first
     // paints that area as an enforcer, the second paints it as a blocker. If the
     // plugin applies blockers before enforcers, demand would remain; the
     // expected fixed order is enforcer first, blocker second, leaving no demand.
     Model model;
     ModelObject *object = model.add_object();
     object->name = "support_painting_order_test.stl";
-    ModelVolume *enforcer_volume = add_volume(*object, make_box({-10., -10., 0., 10., 10., 10.}), ModelVolumeType::MODEL_PART);
-    ModelVolume *blocker_volume = add_volume(*object, make_box({-10., -10., 0., 10., 10., 10.}), ModelVolumeType::MODEL_PART);
-    paint_support_facets(*enforcer_volume, EnforcerBlockerType::ENFORCER, {0, 1});
-    paint_support_facets(*blocker_volume, EnforcerBlockerType::BLOCKER, {0, 1});
+    ModelVolume *enforcer_volume = add_volume(*object, make_ledge(), ModelVolumeType::MODEL_PART);
+    ModelVolume *blocker_volume = add_volume(*object, make_ledge(), ModelVolumeType::MODEL_PART);
+    paint_support_facets(*enforcer_volume, EnforcerBlockerType::ENFORCER, {12, 13});
+    paint_support_facets(*blocker_volume, EnforcerBlockerType::BLOCKER, {12, 13});
     object->add_instance();
 
     const DemandSummary summary = run_support_demand(

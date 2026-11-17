@@ -40,6 +40,8 @@ layers before seam tests attach their own loop extrusions.
     run_perimeter_case() / run_perimeter_and_post_case_with_lower_area()
     |-- create source layers and run the selected generator/modules
     `-- capture_perimeter_outputs(): copy trees, areas and external/internal flows
+    run_perimeter_region_islands_case()
+    `-- copy each published region island's extruder, region count and tree
     prepare_objects_print()
     |-- init_print(): apply distinct objects and settings
     `-- run_until_perimeter_input(): generate sliced layers for all objects
@@ -797,6 +799,36 @@ PerimeterRunCapture run_perimeter_and_post_case_with_regions(
     }
 
     return capture_perimeter_outputs(layer.island(0));
+}
+
+std::vector<PerimeterRegionIslandCapture> run_perimeter_region_islands_case(
+    const DynamicPrintConfig &config,
+    std::initializer_list<const char *> active_plugins,
+    const ExPolygon &area,
+    const size_t layer_idx,
+    const std::vector<PerimeterRegionOverride> &region_overrides)
+{
+    PreparedPerimeterPrint prepared;
+    prepare_cube_print(prepared, config);
+    PrintObject &object = prepared.print.object(0);
+    REQUIRE(layer_idx < object.layer_count());
+    Layer &layer = object.layer(layer_idx);
+    replace_layer_island(layer, area);
+    rebuild_island_overlap_graph(object);
+
+    for (const PerimeterRegionOverride &override_region : region_overrides)
+        add_partitioned_region(prepared, layer, override_region.area, override_region.settings);
+
+    ScopedActivePlugins active_scope(active_plugins);
+    Steps::StepGeneratePerimeter::clear(prepared.print);
+    Steps::StepGeneratePerimeter::run_step(Orchestrator::instance(), prepared.print);
+
+    std::vector<PerimeterRegionIslandCapture> out;
+    for (const LayerRegionIsland &region_island : layer.island(0).regions_islands())
+        if (region_island.has_extrusion(LayerRegionIsland::PERIMETERS))
+            out.push_back({region_island.extruder_id(), region_island.regions().size(),
+                           region_island.extrusion(LayerRegionIsland::PERIMETERS)});
+    return out;
 }
 
 PerimeterRunCapture run_perimeter_and_post_case_with_lower_area(

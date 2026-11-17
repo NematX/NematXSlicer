@@ -727,6 +727,9 @@ stable values:
 | `support_blocker` / `support_enforcer` | Support-demand blocker or enforcer |
 | `seam_position_center` / `seam_position_center_z` / `seam_position_inside` | Seam helper volume |
 | `brim_patch` / `brim_negative` | Brim enforcer or blocker |
+| `support_column` | Volume that asks for sparse support inside it |
+| `no_support_zone` | Volume that forbids support inside it |
+| `support_interface_column` | Volume that asks for dense interface support inside it |
 
 `painted` lists the painting channels present on the part. Stable channel names
 are `support` for support painting and `mmu` for multi-material painting,
@@ -1280,7 +1283,8 @@ name returns `200` without a commit. Object names affect slicing; part names do 
 - `set_part_type/{part_id}` accepts `{"type":"modifier"}`. Writable values are
   `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`,
   `seam_position_center`, `seam_position_center_z`, `seam_position_inside`,
-  `brim_patch`, and `brim_negative`. The last solid part cannot change type;
+  `brim_patch`, `brim_negative`, `support_column`, `no_support_zone`, and `support_interface_column`.
+  The last solid part cannot change type;
   cut and embossed-object restrictions apply. Response: `{"id":...,"type":...}`.
 - `rename/{id}` accepts `{"name":"Bracket"}` for an object or part. A name is
   1–255 UTF-8 bytes without control characters, as a session name (§5.3.1;
@@ -1292,7 +1296,8 @@ name returns `200` without a commit. Object names affect slicing; part names do 
   solid/negative parts require explicit cut invalidation. Response lists every
   removed ID in `deleted`; a retained sole part keeps its REST ID.
 - `add_part/{object_id}?type=...` uploads STL, OBJ, or 3MF. Loadable types are
-  solid, negative, modifier, support blocker/enforcer, and brim patch/negative.
+  solid, negative, modifier, support blocker/enforcer, brim patch/negative, support column,
+  no support zone, and support interface column.
   Response: `{"part_id":...,"type":...}`.
 - `add_shape/{object_id}` requires `type` and `shape`; optional `size`, `position`,
   and reference `instance` control dimensions and platter placement. Shapes are
@@ -1303,6 +1308,7 @@ name returns `200` without a commit. Object names affect slicing; part names do 
   |---|---|
   | `part`, `negative_volume`, `modifier`, `support_blocker`, `support_enforcer`, `seam_position_inside` | `box`, `cylinder`, `sphere`, `slab` |
   | `brim_patch`, `brim_negative` | `square`, `circle` |
+  | `support_column`, `no_support_zone`, `support_interface_column` | `box`, `cylinder` |
   | `seam_position_center` | `small_sphere`, `sphere` |
   | `seam_position_center_z` | `small_cylinder` |
 
@@ -1430,9 +1436,10 @@ IDs return `422 invalid_arrange` or `422 invalid_orient`.
 
 - `POST .../arrange` accepts optional `distance`, `distance_from_bed`,
   `rotations`, `alignment`, `geometry`, and `strategy`. The distance defaults to
-  `duplicate_distance` plus the sequential-printing nozzle clearance, or 6 mm
-  when `duplicate_distance` is zero. `distance` must be finite and at least the
-  clearance when sequential printing is enabled; otherwise its minimum is 0.
+  `duplicate_distance` plus the preferred object spacing, or 6 mm
+  when `duplicate_distance` is zero. In By object, the preferred spacing includes
+  nozzle clearance; it is not a mandatory minimum. An explicit `distance` may be
+  smaller and must be finite and non-negative.
   `distance_from_bed` must be finite and non-negative. Both distances must also
   fit safely in the engine's scaled-coordinate representation; a finite value
   outside that representable range returns `422 invalid_arrange`.
@@ -1778,9 +1785,10 @@ the API is always accepted again on the same scene), `mode_tool_change`,
 `extruder_range`, `invalid_color`, `empty_message`, `empty_gcode`, or
 `duplicate_z` (two items fall at the same rounded `z`; `item` is the later
 one). `z` is bounded by the scene height and must stay below 10000 mm once rounded; a scene
-top of 10000 mm or more refuses every item. With sequential printing (`complete_objects`) a
-non-empty list is refused with no `details`; an empty list is always accepted. The
-stored list is sorted by `z`.
+top of 10000 mm or more refuses every item. By object accepts height G-codes too:
+their heights split the plate's work into bands, and each eligible event is emitted once
+at the first printing-plan layer at or above its height. An empty list is always
+accepted. The stored list is sorted by `z`.
 
 **Warnings.** Accepted values that need attention are reported by both routes in
 `warnings`, each `{"item": i, "reason": r}` or a bare `{"reason": r}`:
@@ -1790,9 +1798,8 @@ legacy writer's default for `gcode_flavor`; for `template`, the raw `template_cu
 an empty value is accepted). This warning still uses the legacy writer's
 defaults, not the selected firmware's own fallback, so the two can disagree. It does not suppress an item or change the output.
 Other warnings are
-`above_objects` (the scene changed and now ends below the item),
-`sequential_print` (sequential printing was enabled after the list was set;
-the engine ignores it), and `mode_mismatch` (the list holds a color or tool change
+`above_objects` (the scene changed and now ends below the item), and
+`mode_mismatch` (the list holds a color or tool change
 and its stored mode and the current mode differ on whether the print is
 `multi_extruder`: this is exactly when the engine ignores the color and tool
 changes of the list).

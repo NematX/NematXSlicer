@@ -6,16 +6,24 @@
 #include <stdexcept>
 
 #include "FanTreeHelpers.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
 /*
 This layer editor applies an optional published first-layer program, falling back
-to the disabled-layer/full-speed-layer settings, and closes role fallbacks. It
-accepts TIME, or BASE as an identity time stage when optional cooling is absent.
-Published programs are validated before use; protected pairs remain unchanged.
+to the disabled-layer/full-speed-layer settings, and closes role fallbacks. In
+Api/plugin/cpp/FanPolicy.hpp, BASE is the initial reference table, TIME applies
+layer-duration limits, and CLOSED adds first-layer limits and final fallbacks. This
+editor accepts TIME, or BASE as an identity time stage when optional cooling is
+absent. Published programs are validated before use. Protected requests are those
+whose mode forbids this policy from modifying them; their speed and mode pair
+remains unchanged. The settings program counts first layers with cached source
+ranks: each copy merges its object and local auxiliary heights, and a shared pass
+takes the minimum rank of its actual sources.
 
+    setup_impl(): cache source ranks before parallel runs
     run_impl(): validate the preceding public context
     |-- read a published program, or derive one from the host's settings
     |-- close_first_layers(): compute CLOSED references and dynamic bounds
@@ -74,10 +82,18 @@ private:
     const char *progress_message_format_impl() const noexcept override { return "Applying first-layer fan program: %u / %u trees"; }
     // Count trees in the borrowed layer without editing them.
     void setup_run_impl(const plugin_run_context *run) const override;
-    // Transform modifiable requests and publish a complete CLOSED context.
+    // Cache owned source-layer ranks once before parallel fan runs.
+    void setup_impl(const plugin_run_context *run, uint32_t) const override {
+        m_indices.clear();
+        const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run);
+        if (ctx && ctx->print && ctx->plan)
+            m_indices = source_layer_indices(Print(ctx->print), ConstPrintingPlan(ctx->plan));
+    }
+    // Transform modifiable requests using cached source ranks and publish CLOSED context.
     void run_impl(const plugin_run_context *run) const override;
     PluginPropertyKey<FanPolicy::Context> m_context;
     PluginPropertyKey<FanPolicy::FirstLayerProgram> m_program;
+    mutable SourceLayerIndices m_indices;
 };
 
 void initialize_settings(orchestrator_handle *orch)
@@ -137,6 +153,7 @@ void FirstLayerFan::run_impl(const plugin_run_context *run) const
     if (!ctx || !ctx->print || !ctx->layer_group) return;
     const Config config = Print(ctx->print).config();
     PrintingLayerGroup layer(ctx->layer_group);
+    const uint32_t source_index = m_indices.at(ctx->group_idx).at(ctx->layer_group_idx).index;
     for (uint32_t idx = 0; idx < layer.tool_group_count(); ++idx) {
         throw_if_cancelled(run);
         PrintingToolGroup tool = layer.tool_group(idx);
@@ -152,7 +169,7 @@ void FirstLayerFan::run_impl(const plugin_run_context *run) const
             program = *published_program;
         } else {
             program = FanPolicy::first_layer_program(FanPolicy::read_first_layer_settings(config, tool.extruder_id()),
-                                                     ctx->layer_group_idx);
+                                                     source_index);
         }
         const FanPolicy::Context closed = FanPolicy::close_first_layers(time, program);
         for (uint32_t extrusion = 0; extrusion < tool.extrusion_count(); ++extrusion) {

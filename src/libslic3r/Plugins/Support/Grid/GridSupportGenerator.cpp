@@ -45,7 +45,10 @@
    strips. Typed fill surfaces live in island work regions and supply bridge
    footprints. height_block is the downward Z span used for object collisions,
    independently of printable height; the XY clearance of trim_by_object()
-   covers at least the printed height, so every slab keeps gap_xy.
+   covers at least the printed height, so every slab keeps gap_xy. The
+   no-support zones join the object outline only in that clearance: support
+   keeps clear of them like of the object, but never rests on them or gets
+   contacts from them.
 
    The object is read through the data-tree views and every polygon set is a
    StoredPolygonCollection in the run's storage. Clipper operations take
@@ -78,12 +81,14 @@ constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 struct Run {
     // Gathers borrowed settings and views and reserves lazy square-join outline slots in caller-owned storage.
     Run(const plugin_run_context *context, const Print &print, const Object &object, const Common::SupportParams &params,
-        storage_handle *storage);
+        const Common::GeneratedSupport &out);
     const plugin_run_context *context;
     const Config print_config;
     const Object &object;
     const Common::SupportParams &p;
     storage_handle *storage;
+    // The no-support zones of every object layer, owned by the run's GeneratedSupport; the clearance avoids them like the object.
+    const std::vector<ExPolys> &no_support_zones;
     ClipperContext clipper;
     // The object layers, bottom first.
     std::vector<Layer> layers;
@@ -159,7 +164,7 @@ void generate_support(const plugin_run_context *context, const Print &print, con
 {
     if (params.style == Common::SupportStyle::GridMerged && !params.soluble)
         throw std::runtime_error("Grid merged support needs support_material_contact_distance_type 'none'.");
-    const Run run(context, print, object, params, out.storage);
+    const Run run(context, print, object, params, out);
     const std::vector<Polys> covered = run.buildplate_only ? buildplate_covered(run) : std::vector<Polys>();
     top_contacts(run, covered, out);
     if (out.top.empty()) return;
@@ -192,8 +197,9 @@ void generate_support(const plugin_run_context *context, const Print &print, con
 namespace {
 // Borrows run inputs, stores ordered layer views/settings and reserves lazy clearance-offset slots without computing geometry; object/storage outlive the run, and allocation failures propagate.
 Run::Run(const plugin_run_context *context, const Print &print, const Object &object, const Common::SupportParams &params,
-         storage_handle *storage)
-    : context(context), print_config(print.config()), object(object), p(params), storage(storage), clipper(storage)
+         const Common::GeneratedSupport &out)
+    : context(context), print_config(print.config()), object(object), p(params), storage(out.storage),
+      no_support_zones(out.no_support_zones), clipper(out.storage)
 {
     layers = Common::object_layers(object);
     const Config config = object.config();
@@ -424,7 +430,8 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
             if (layer.bottom_z() >= upper) break;
             if (!run.grown_outlines[id]) {
                 throw_if_cancelled(run.context);
-                run.grown_outlines[id].emplace(clipper_offset(clipper(layer.slices()), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
+                run.grown_outlines[id].emplace(clipper_offset(Common::support_obstacle(clipper, layer, id, run.no_support_zones),
+                    double(p.gap_xy), join_type, 0.).to_expolygon_collection());
             }
             // Copy the reusable offset, then retain the move insertion's native ring handling and order.
             ExPolys grown = run.grown_outlines[id]->readonly().clone(run.storage);

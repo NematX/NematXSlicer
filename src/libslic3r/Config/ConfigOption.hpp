@@ -46,6 +46,9 @@
 #include "../Exception.hpp"
 #include "../Point.hpp"
 
+// Configuration option value types serve the core, GUI and plugin host. GraphData stores
+// points and an active half-open range; interpolate reads it, create_inverse copies it,
+// and serialization accepts only the public graph types below COUNT.
 namespace Slic3r {
     struct FloatOrPercent
     {
@@ -74,7 +77,9 @@ namespace Slic3r {
             SQUARE,
             LINEAR,
             SPLINE,
-            COUNT
+            COUNT,
+            // Internal next-point step; excluded from persisted and user-selectable types.
+            SQUARE_INVERSE
         };
     
         GraphData() {}
@@ -96,7 +101,14 @@ namespace Slic3r {
         Pointfs data() const;
         size_t data_size() const;
         
+        // Evaluate the active range, clamping outside its endpoints; an empty range returns 1.
+        // SQUARE_INVERSE compares thresholds exactly, without rounding a larger request down.
         double interpolate(double x_value) const;
+        // Copy all points with coordinates swapped, preserving the active range and adapting step direction.
+        // Increasing Y is required for a meaningful inverse; decreasing Y produces an invalid graph,
+        // and repeated Y has no unique inverse. SPLINE remains a swapped-point approximation.
+        GraphData create_inverse() const;
+        // Evaluate create_inverse(); invalid swapped ordering asserts in Debug, without sorting or repair.
         double inverse_interpolate(double y_value) const;
 
         //return false if data are not good
@@ -108,17 +120,21 @@ namespace Slic3r {
         size_t end_idx = 0; //excluded
         GraphType type = GraphType::LINEAR;
     
+        // Encode public graph types; internal types throw std::invalid_argument.
         std::string serialize() const;
+        // Read public graph types and points, returning false for internal types or invalid ordering.
         bool deserialize(const std::string &str);
 
     private:
         friend class cereal::access;
+        // Archive public graph data; reject internal types on both writing and reading.
         template<class Archive> void serialize(Archive &ar)
         {
             ar(this->begin_idx);
             ar(this->end_idx);
             ar(this->type);
-            // does this works?
+            if (this->type >= GraphType::COUNT)
+                throw std::invalid_argument("Cannot archive an internal graph type");
             ar(this->graph_points);
         }
     };
@@ -1631,6 +1647,8 @@ public:
 
     std::string serialize_at(int idx) const override;
 
+    // Parse all graphs into local vectors, then replace or append; a parse failure leaves values
+    // and enabled states unchanged and returns false. Empty replacement input clears the vectors.
     bool deserialize(const std::string &str, bool append = false) override;
 
 private:

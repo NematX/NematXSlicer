@@ -3510,7 +3510,7 @@ bool GUI_App::save_mode(const ConfigOptionMode mode)
         for (const ModelObject* model_object : model.object_ptrs())
             if (model_object->volumes.size() > 1) {
                 for (size_t i = 1; i < model_object->volumes.size(); ++i)
-                    if (!model_object->volumes[i]->is_support_modifier())
+                    if (!model_object->volumes[i]->is_support_volume())
                         return false;
             }
         return true;

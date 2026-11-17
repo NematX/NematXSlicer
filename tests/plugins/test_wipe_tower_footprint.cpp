@@ -117,7 +117,7 @@ TEST_CASE("Tower enumeration shares model origins and object settings", "[plugin
         CHECK(print.first_layer_convex_hull_with_wipe_towers().points == Geometry::convex_hull(expected).points);
     }
     SECTION("sequential instances") {
-        config.set_deserialize_strict("complete_objects", "1");
+        config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
         prepare_tower_print(print, model, config);
         model.objects()[0].instances[0]->set_rotation(Vec3d(0., 0., Geometry::deg2rad(90.)));
         model.objects()[0].config.set_deserialize_strict("wipe_tower_rotation_angle", "30");
@@ -183,8 +183,9 @@ TEST_CASE("Tower enumeration shares model origins and object settings", "[plugin
         CHECK_FALSE(print.has_wipe_tower());
     }
     SECTION("parallel objects keep the global tower without implicit instance towers") {
-        config.set_deserialize_strict("parallel_objects_step", "5");
-        config.set_deserialize_strict("parallel_islands", "0");
+        config.set_deserialize_strict("complete_objects_step", "5");
+        config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+        config.set_deserialize_strict("complete_islands", "0");
         prepare_tower_print(print, model, config);
         CHECK(print.has_global_wipe_tower());
         CHECK(print.has_wipe_tower());
@@ -194,7 +195,7 @@ TEST_CASE("Tower enumeration shares model origins and object settings", "[plugin
         REQUIRE(model_towers.size() == 1);
         CHECK(towers[0].instance == nullptr);
         CHECK(towers[0].polygon.points == model_towers[0].polygon.points);
-        config.set_deserialize_strict("parallel_islands", "1");
+        config.set_deserialize_strict("complete_islands", "1");
         print.apply(model, config);
         CHECK(print.has_global_wipe_tower());
         CHECK(wipe_tower_footprints(print).size() == 1);
@@ -207,7 +208,7 @@ TEST_CASE("Sequential clearance includes each instance tower with its owner", "[
     const tbb::global_control serial(tbb::global_control::max_allowed_parallelism, 1);
     using namespace Slic3r;
     DynamicPrintConfig config = tower_config();
-    config.set_deserialize_strict("complete_objects", "1");
+    config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     Print print;
     Model model;
     prepare_tower_print(print, model, config);
@@ -234,7 +235,7 @@ TEST_CASE("Legacy extruder list adds only the global tower contour tool", "[plug
     Model model;
     prepare_tower_print(print, model, config);
     CHECK(print.extruders() == std::set<extruder_index_t>{0, 1, 2});
-    config.set_deserialize_strict("complete_objects", "1");
+    config.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
     print.apply(model, config);
     CHECK(print.has_wipe_tower());
     CHECK_FALSE(print.has_global_wipe_tower());

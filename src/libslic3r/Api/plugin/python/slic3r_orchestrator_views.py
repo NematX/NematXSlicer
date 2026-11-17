@@ -167,8 +167,8 @@ class OrchestratorView:
                                  option_preset_type=RAW_PRESET_TYPE_FFF_PRINT, ui_target_file="print.ui",
                                  ui_page="", ui_group="", option_key="", invalidates_step=None,
                                  strict_selection=False, read_with_one_provider=False, show_with_one_provider=False,
-                                 provider_settings_rules=True, auto_value=False, value_when_absent=None):
-        """Copy a group description naming its registered member; return False for a duplicate and raise ValueError on rejection."""
+                                 provider_settings_rules=True, auto_value=False, value_when_absent=None, mode=None):
+        """Copy a group description with optional visibility flags; return False for a duplicate and raise ValueError on rejection."""
         definition = RawExclusiveGroupDef()
         definition.struct_size = ctypes.sizeof(RawExclusiveGroupDef)
         encoded = {key: value.encode("utf-8") for key, value in (
@@ -190,6 +190,8 @@ class OrchestratorView:
         absent = None if value_when_absent is None else value_when_absent.encode("utf-8")
         definition.has_value_when_absent = int(absent is not None)
         definition.value_when_absent = absent
+        definition.has_mode = int(mode is not None)
+        definition.mode = 0 if mode is None else int(mode)
         result = int(self.api.host.orchestrator_register_exclusive_group(self.c_handle(), int(step), ctypes.byref(definition)))
         if result < 0:
             raise ValueError("Cannot register step selector traits")

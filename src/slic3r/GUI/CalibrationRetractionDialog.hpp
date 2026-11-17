@@ -7,6 +7,8 @@
 #define slic3r_GUI_CalibrationRetractionDialog_hpp_
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// retraction calibration samples using whole-object printing.
 
 class ComboBox;
 
@@ -23,6 +25,7 @@ public:
 protected:
     void create_buttons(wxStdDialogButtonSizer* sizer) override;
     void remove_slowdown(wxCommandEvent& event_args);
+    // Replace the plate with retraction samples configured for whole-object printing.
     void create_geometry(wxCommandEvent& event_args);
 
     ComboBox* steps;

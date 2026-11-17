@@ -15,7 +15,10 @@
 #include "libslic3r/Config/ConfigOption.hpp"
 
 /* This file exposes typed configuration reads and changes to C plugins through handles to host-owned options.
-   Callers must keep the options alive; these functions do not take ownership.
+   Callers must keep the options alive; option reads do not take ownership.
+   Standalone graphs copy plugin points into host memory and are freed explicitly.
+   graph_data_create -> copy points, validate ordering and transfer ownership
+   graph_data_free -> destroy the standalone graph
 
    Serialization reads an option and copies its text into the caller's buffer.
    Call graph:
@@ -214,6 +217,18 @@ static bool vector_item_has_valid_syntax(
 
 extern "C" {
 
+// Read the public interpolation type from a borrowed graph; null and internal types return NONE.
+// No ownership changes or exceptions cross this C boundary.
+raw_graph_type graph_data_type(const graph_data_handle *me);
+
+// Copy finite unscaled points into a host allocation with the requested public mode.
+// Invalid input and allocation failures return null; ownership transfers only on success.
+// No exception crosses this C boundary.
+graph_data_handle *graph_data_create(const c_vec2d *points, uint32_t count, raw_graph_type type);
+
+// Destroy only an owned graph created above; null has no effect and no exception escapes.
+void graph_data_free(graph_data_handle *me);
+
 int32_t config_get_computed_value(const config_handle *me,
                                   const char *key,
                                   extruder_index_t extruder_id,
@@ -276,6 +291,34 @@ int32_t c_float_or_percent_less(const c_float_or_percent *lhs, const c_float_or_
     return lhs->value < rhs->value || (lhs->value == rhs->value && lhs->percent < rhs->percent);
 }
 
+graph_data_handle *graph_data_create(const c_vec2d *points, uint32_t count, raw_graph_type type)
+{
+    if ((count != 0 && points == nullptr) || type < RAW_GRAPH_TYPE_SQUARE || type > RAW_GRAPH_TYPE_SPLINE)
+        return nullptr;
+    for (uint32_t idx = 0; idx < count; ++idx)
+        if (!std::isfinite(points[idx].x) || !std::isfinite(points[idx].y))
+            return nullptr;
+    try {
+        std::unique_ptr<Slic3r::GraphData> graph = std::make_unique<Slic3r::GraphData>();
+        graph->type = type == RAW_GRAPH_TYPE_SQUARE ? Slic3r::GraphData::SQUARE :
+            type == RAW_GRAPH_TYPE_LINEAR ? Slic3r::GraphData::LINEAR : Slic3r::GraphData::SPLINE;
+        graph->graph_points.reserve(count);
+        for (uint32_t idx = 0; idx < count; ++idx)
+            graph->graph_points.emplace_back(points[idx].x, points[idx].y);
+        graph->end_idx = count;
+        if (!graph->validate())
+            return nullptr;
+        return reinterpret_cast<graph_data_handle *>(graph.release());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+void graph_data_free(graph_data_handle *me)
+{
+    delete reinterpret_cast<Slic3r::GraphData *>(me);
+}
+
 uint32_t graph_data_size(const graph_data_handle *me)
 {
     if (me == nullptr)
@@ -314,7 +357,8 @@ raw_graph_type graph_data_type(const graph_data_handle *me)
     case Slic3r::GraphData::GraphType::SQUARE: return RAW_GRAPH_TYPE_SQUARE;
     case Slic3r::GraphData::GraphType::LINEAR: return RAW_GRAPH_TYPE_LINEAR;
     case Slic3r::GraphData::GraphType::SPLINE: return RAW_GRAPH_TYPE_SPLINE;
-    case Slic3r::GraphData::GraphType::COUNT: break;
+    case Slic3r::GraphData::GraphType::COUNT:
+    case Slic3r::GraphData::GraphType::SQUARE_INVERSE: break;
     }
     return RAW_GRAPH_TYPE_NONE;
 }

@@ -128,6 +128,11 @@ static Transform3d to_transform3d(const c_matrix4d &matrix)
     return out;
 }
 
+static_assert(int(ModelVolumeType::BRIM_NEGATIVE) == RAW_VOLUME_TYPE_BRIM_NEGATIVE &&
+              int(ModelVolumeType::SUPPORT_COLUMN) == RAW_VOLUME_TYPE_SUPPORT_COLUMN &&
+              int(ModelVolumeType::NO_SUPPORT_ZONE) == RAW_VOLUME_TYPE_NO_SUPPORT_ZONE &&
+              int(ModelVolumeType::SUPPORT_INTERFACE_COLUMN) == RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN,
+              "raw_volume_type mirrors ModelVolumeType value by value");
 static raw_volume_type to_raw_volume_type(ModelVolumeType type)
 {
     return static_cast<raw_volume_type>(static_cast<int>(type));

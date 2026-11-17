@@ -16130,3 +16130,36 @@ msgstr ""
 
 msgid "°C"
 msgstr "°C"
+
+msgid "Add support volume"
+msgstr "Ajouter un volume de support"
+
+msgid "Add support demand enforcer"
+msgstr "Forcer des surfaces à supporter"
+
+msgid "Add support demand blocker"
+msgstr "Exclure des surfaces à supporter"
+
+msgid "Add support column"
+msgstr "Ajouter une colonne de support"
+
+msgid "Add no support zone"
+msgstr "Ajouter une zone sans support"
+
+msgid "Support demand enforcer"
+msgstr "Forcer des surfaces à supporter"
+
+msgid "Support demand blocker"
+msgstr "Exclure des surfaces à supporter"
+
+msgid "Support column"
+msgstr "Colonne de support"
+
+msgid "No support zone"
+msgstr "Zone sans support"
+
+msgid "Add support interface column"
+msgstr "Ajouter une colonne d'interface"
+
+msgid "Support interface column"
+msgstr "Colonne d'interface"

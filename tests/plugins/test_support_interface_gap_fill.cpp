@@ -15,6 +15,7 @@
 #include "plugin_e2e_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
@@ -25,15 +26,19 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 /* Exercise support gap fill through the shared production registry and normal
    Print invalidation. Identical local roofs make object scope measurable without
    comparing translated machine coordinates. Tree signatures include direct flow,
    geometry and ordering, so replay cannot silently keep stale additions.
+   An alternate selectable top provider publishes no paths; layers containing
+   only its dense interface surfaces isolate provider-independent completion.
 
        TEST_CASE -> scene / configuration -> process: normal slicing lifecycle
            signature -> write_tree: compare all support nodes or sparse buckets
            contact_trees -> write_tree: compare only excluded top-contact layers
+           interface_trees -> write_tree: isolate the alternate provider's pass
        E2E TEST_CASE -> linear_cases: require every declared key to vary
            STL round trip -> process -> export: measure actual deposition
 
@@ -55,6 +60,8 @@ void process(Print &, Model &, const DynamicPrintConfig &);
 std::string signature(const Print &, size_t, bool sparse = false);
 // Capture only layers whose dense surfaces are removable top contacts.
 std::map<std::pair<coord_t, coord_t>, std::string> contact_trees(const Print &);
+// Record interface buckets on layers with only non-contact top dense surfaces; require such layers.
+std::map<std::pair<coord_t, coord_t>, std::string> interface_trees(const Print &);
 // Serialize direct flow, order flags and points recursively into the supplied stream.
 void write_tree(std::ostream &, const api::ExtrusionEntity &);
 // Supply explicit independent or named coupled domains for every provider input.
@@ -104,6 +111,40 @@ TEST_CASE("Support gap fill replay equals fresh prints and preserves sparse path
             REQUIRE(signature(replayed, 0) != original);
     }
     REQUIRE(signature(replayed, 0) == original);
+}
+
+// Select an empty alternate top provider and verify completion of its published dense surfaces.
+TEST_CASE("Support gap fill completes dense interfaces from another selected provider", "[plugins][support][gap-fill][support-gap-fill]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const char *id = "test.support_toolpath.alternate";
+    REQUIRE(host.get_plugin(id) != nullptr);
+    const bool was_active = host.is_plugin_active(id);
+    struct RestoreActivation {
+        Orchestrator &host;
+        const char *id;
+        bool active;
+        // Restore the borrowed runtime's activation even if an assertion aborts the case.
+        ~RestoreActivation() { host.set_plugin_active(id, active); }
+    } restore{host, id, was_active};
+    REQUIRE(host.set_plugin_active(id, true));
+    const std::string selector = Steps::plugin_exclusive_group_option_key(host,
+        STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface");
+    DynamicPrintConfig off = configuration(false), on = configuration(true);
+    off.set_deserialize_strict(selector, id);
+    on.set_deserialize_strict(selector, id);
+    const Plugin *selected = Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH,
+        "support_toolpath_top_interface", &on);
+    REQUIRE(selected != nullptr);
+    REQUIRE(selected->get_id() == id);
+    Model model;
+    scene(model, 1);
+    Print old_print, new_print;
+    process(old_print, model, off);
+    process(new_print, model, on);
+    REQUIRE(interface_trees(old_print) != interface_trees(new_print));
+    REQUIRE(signature(old_print, 0, true) == signature(new_print, 0, true));
 }
 
 // Swap object overrides on the same Print and require their local outputs to swap exactly.
@@ -374,6 +415,39 @@ std::map<std::pair<coord_t, coord_t>, std::string> contact_trees(const Print &pr
                     }
         result[{layer.scaled_print_z(), layer.scaled_height()}] = tree.str();
     }
+    return result;
+}
+
+std::map<std::pair<coord_t, coord_t>, std::string> interface_trees(const Print &print)
+{
+    std::map<std::pair<coord_t, coord_t>, std::string> result;
+    for (const Layer &layer : print.object(0).auxiliary_layers()) {
+        bool top_interface = false, other_dense = false;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) {
+                const layer_region_island_handle *handle = reinterpret_cast<const layer_region_island_handle *>(&region);
+                for (uint32_t s = 0; s < layer_region_island_count_fill_surface(handle); ++s) {
+                    const raw_surface_type type = surface_get_type(layer_region_island_get_fill_surface(handle, s));
+                    const raw_surface_type mask = raw_surface_type(RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID);
+                    if ((type & mask) != mask) continue;
+                    const bool selected_pass = (type & RAW_SURFACE_TYPE_POS_TOP) && !api::surface_type_is_contact(type);
+                    top_interface = top_interface || selected_pass;
+                    other_dense = other_dense || !selected_pass;
+                }
+            }
+        if (!top_interface || other_dense) continue;
+        std::ostringstream tree;
+        tree << std::setprecision(17);
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                    tree << '#' << region.extruder_id();
+                    write_tree(tree, api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(
+                        &region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE))));
+                }
+        result[{layer.scaled_print_z(), layer.scaled_height()}] = tree.str();
+    }
+    REQUIRE(!result.empty());
     return result;
 }
 

@@ -5,6 +5,7 @@
 
 
 #include "DefaultTemperature.hpp"
+#include "libslic3r/Plugins/Common/SourceLayerIndices.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -56,6 +57,12 @@ instead of causing temperature oscillation.  The chamber is a startup-only
 event and is not tracked here.
 Regional and filament target selection uses the public TemperatureTargets
 helpers; heater tracking and all cached decisions remain private to this file.
+First-layer decisions use SourceLayerIndices.hpp: each copy's object and local
+auxiliary heights form one Z-ranked sequence, and shared passes use the minimum
+rank of their sources. Global-only passes use distinct plan-height ranks. At the
+first nonzero-rank pass, one plan-wide switch requests normal bed temperature
+and, without SEMM or ooze prevention, normal temperatures for idle used tools.
+Later copies do not repeat that switch.
 
     startup_heating() -> TemperatureTargets::filament_target(): select startup targets
     LayerTemperature::setup_impl(): walk visits and retain sequential decisions
@@ -662,19 +669,21 @@ void LayerTemperature::setup_impl(const plugin_run_context *run_ctx, const uint3
         throw std::runtime_error("Temperature run count does not match the PrintingPlan.");
 
     PreviousVisit previous;
-    uint32_t plan_layer_idx = 0;
+    const SourceLayerIndices source_indices = source_layer_indices(print, plan);
+    bool normal_temperatures_requested = false;
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
         throw_if_cancelled(run_ctx);
         PrintingGroup group = plan.group(group_idx);
-        for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx, ++plan_layer_idx) {
+        for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
             PrintingLayerGroup layer = group.layer_group(layer_idx);
             LayerTemperatureDecision &layer_decision = m_decisions[group_idx][layer_idx];
-            const bool first_layer = layer_idx == 0;
+            const bool first_layer = source_indices[group_idx][layer_idx].index == 0;
             const extruder_index_t layer_start_tool = previous.valid ? previous.tool : EXTRUDER_ID_UNKNOWN;
 
-            if (plan_layer_idx == 1) {
-                // At the second plan layer, request normal temperatures for idle physical tools.
+            if (!normal_temperatures_requested && !first_layer) {
+                normal_temperatures_requested = true;
+                // At the first non-first source pass, request normal idle-tool temperatures once.
                 if (!semm && !ooze_prevention) {
                     for (const extruder_index_t tool : startup.used_tools) {
                         if (tool == layer_start_tool)
@@ -691,7 +700,7 @@ void LayerTemperature::setup_impl(const plugin_run_context *run_ctx, const uint3
                         }
                     }
                 }
-                // The same second-layer pass also requests the configured bed target once.
+                // The same pass requests the configured normal bed target once across all copies.
                 int32_t bed_target = config.int_or_default("print_bed_temperature", -1);
                 if (bed_target < 0) {
                     bed_target = 0;
@@ -756,7 +765,7 @@ void LayerTemperature::setup_impl(const plugin_run_context *run_ctx, const uint3
                     // The tower owns the SEMM change; ordinary roots start with an unknown shared heater state.
                     tracked_tool(tools, tool, semm) = TrackedHeater{};
 
-                // Without a regional source, retain the group-layer fallback. Synthetic roots do not replace the last source-layer status.
+                // Without a regional source, retain the source-rank fallback. Synthetic roots do not replace the last source-layer status.
                 bool last_source_first_layer = first_layer;
                 // Synthetic roots and non-regional roots stay untouched because settings_context needs a region.
                 for (uint32_t extrusion_idx = 0;

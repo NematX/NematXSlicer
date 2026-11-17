@@ -1182,11 +1182,11 @@ static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelect
     return std::tie(lhs.exclusive_group, lhs.container_type, lhs.invalidates_step, lhs.category,
                     lhs.option_preset_type, lhs.ui_target_file, lhs.ui_page, lhs.ui_group, lhs.option_key,
                     lhs.strict_selection, lhs.read_with_one_provider, lhs.show_with_one_provider,
-                    lhs.value_when_absent, lhs.provider_settings_rules, lhs.auto_value) ==
+                    lhs.value_when_absent, lhs.provider_settings_rules, lhs.auto_value, lhs.mode) ==
            std::tie(rhs.exclusive_group, rhs.container_type, rhs.invalidates_step, rhs.category,
                     rhs.option_preset_type, rhs.ui_target_file, rhs.ui_page, rhs.ui_group, rhs.option_key,
                     rhs.strict_selection, rhs.read_with_one_provider, rhs.show_with_one_provider,
-                    rhs.value_when_absent, rhs.provider_settings_rules, rhs.auto_value);
+                    rhs.value_when_absent, rhs.provider_settings_rules, rhs.auto_value, rhs.mode);
 }
 
 static bool same_group_definition(const Orchestrator::ExclusiveGroupDefinition &lhs,

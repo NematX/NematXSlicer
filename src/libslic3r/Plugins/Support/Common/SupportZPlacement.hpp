@@ -83,6 +83,17 @@ struct TopContactSlabs {
     GeneratorLayer *bridge = nullptr;
 };
 
+// The Z of the top contacts under object layer id: the contact's print Z, bottom and height (zero: the slab placement gives it),
+// and the lower print Z of the bridge contact when the layer's bridge threads hang below it. The bridge contact's bottom is its
+// print Z, or 0 with the first layer height when it lies on the first layer.
+struct TopContactZ {
+    coord_t z = 0, bottom = 0, height = 0;
+    std::optional<coord_t> bridge_z;
+};
+// The Z of the contacts that add_top_contacts() creates under object layer id (id >= 1), without creating them: none when the
+// contact would lie below the first layer. storage holds the temporaries of the bridge detection.
+std::optional<TopContactZ> top_contact_z(const std::vector<Layer> &layers, const Config &print_config, const SupportParams &p, size_t id,
+                                         storage_handle *storage);
 // Create the top contact of object layer id (id >= 1, the layer below is needed) under that layer; the caller fills
 // the polygons of the returned slabs. The layers and the print configuration give the bridge heights, and p gives the
 // gaps, the first layer and the minimum height.

@@ -14,6 +14,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -157,7 +158,8 @@ namespace {
                        |   |   |-- finish started modules with end(), also on early exit
                        |   |   `-- publish_region_group(), only after successful traversal
                        |   |       |-- collect_extrusions() recursively preserves tree scopes
-                       |   |       |-- replace the region-island PERIMETERS bucket
+                       |   |       |-- replace the region-island PERIMETERS bucket on its first
+                       |   |       |   publication in this island run, append to it afterwards
                        |   |       `-- collect_leaf_areas() into the run's two fill domains
                        |   `-- set_region_island_extrusion_callback(), when requested
                        |       |-- stage source scopes for the selected generator-owned bucket
@@ -296,6 +298,13 @@ struct PerimeterRunContext
     // A perimeter generator is expected to call run_region_group(). If it does
     // not, there is nothing safe to publish for this island.
     bool used_region_group = false;
+
+    // Region islands that already received perimeters during this island run.
+    // A region group split into several connected pieces publishes each piece
+    // into the same region island, so only its first publication replaces the
+    // previous content. The pointers stay valid: region islands are owned by
+    // unique pointers for the whole run.
+    std::set<const LayerRegionIsland *> published_region_islands;
 
     // Native modules execute inside generator-owned C callbacks. The first
     // exception is retained until Python/ctypes has returned to the runner.
@@ -1029,7 +1038,8 @@ void publish_region_group(PerimeterRunContext &run,
     collect_extrusions(tree.root, perimeters);
 
     ExtrusionEntity &dst = region_island.mutable_extrusion(LayerRegionIsland::PERIMETERS);
-    dst.children().clear();
+    if (run.published_region_islands.insert(&region_island).second)
+        dst.children().clear();
     ExtrusionEntity::Children &dst_children = dst.children();
     ExtrusionEntity::Children &src_children = perimeters.children();
     dst_children.reserve(dst_children.size() + src_children.size());

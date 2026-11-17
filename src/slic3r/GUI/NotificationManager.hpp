@@ -75,6 +75,10 @@ enum class NotificationType
 	ValidateError,
 	// Notification emitted by Print::validate
 	ValidateWarning,
+	// Advisory By object clearance, independent of validation warnings with action links.
+	SequentialClearanceWarning,
+	// Clamped minimum travel height, independent of warnings with action links.
+	LiftMinClampedWarning,
 	// Slicing error produced by BackgroundSlicingProcess::validate() or by the BackgroundSlicingProcess background
 	// thread thowing a SlicingError exception.
 	SlicingError,

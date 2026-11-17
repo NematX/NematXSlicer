@@ -35,6 +35,10 @@ declares it: a negative E move retracts with the comment "; retraction" and a
 positive E move restores with "; unretraction", ignoring case and surrounding
 spaces. Every other E move is raw.
 
+Copy IDs and the finished-copy count come from the session's current group,
+independently of object-label activation. Previous/next arrays remain producer
+snapshots, while the current array is resized for each script's group.
+
 Representative direct calls (branches are not a timeline):
 
     GCodePreamble::begin()
@@ -451,6 +455,11 @@ std::string GCodePreamble::process_script(
         total_weight += weight;
     }
     config.set("current_object_idx", m_session.m_current_object_idx);
+    // Group arrays vary in length; fixed-size machine vectors keep their existing checks.
+    MutableConfigOption current_instances(config_get_mutable(config.handle(), "current_instances_id"));
+    current_instances.resize(uint32_t(m_session.m_current_instances.size()));
+    config.set("current_instances_id", m_session.m_current_instances);
+    config.set("current_instance_id", m_session.m_current_instances.size() == 1 ? m_session.m_current_instances.front() : -1);
     config.set("extruded_volume", volumes);
     config.set("extruded_weight", weights);
     config.set("extruded_volume_total", total_volume);

@@ -1037,7 +1037,7 @@ void publish_plan_facts(Print &print)
     statistics.printing_filament_types.clear();
     for (size_t index = 0; index < filament_types.size(); ++index)
         statistics.printing_filament_types += (index == 0 ? "" : ",") + filament_types[index];
-    statistics.object_layer_count = Printing::object_layer_count(print);
+    statistics.object_layer_count = facts.object_layer_count;
     statistics.total_layer_count = facts.layer_count;
     statistics.max_print_z = unscaled(facts.max_print_z);
 }

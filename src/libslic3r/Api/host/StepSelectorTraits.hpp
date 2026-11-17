@@ -43,6 +43,8 @@ struct StepSelectorTraits
     bool provider_settings_rules = true;
     // Allow an automatic choice resolved by SelectorAutoChoice conditions.
     bool auto_value = false;
+    // Override the generated selector's visibility flags when supplied.
+    std::optional<raw_config_option_mode> mode;
 };
 
 // A setting key/value condition names the member preferred during automatic selection.

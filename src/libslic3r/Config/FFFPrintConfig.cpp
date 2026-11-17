@@ -33,6 +33,7 @@
 #include <boost/nowide/iostream.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 #include "Flow.hpp"
 #include "PointUtils.hpp"
@@ -44,6 +45,12 @@ init_categories() assigns built-in settings to their profile types;
 init_fff_params() supplies their types, defaults, validation limits and GUI text.
 These definitions describe settings; they do not hold a user's chosen values or
 generate toolpaths. Consumers copy defaults into the appropriate config store.
+print_complete_objects() and print_by_object() read optional mode settings for
+native consumers using the effective active provider; an absent height step means zero.
+complete_objects_sort() maps a provider's serialized order name to the native
+enum, because provider enums assign integer values in their declaration order.
+min_object_distance() supplies preferred arrangement spacing, not a validation
+limit. Positive object steps use global skirts, so they add no per-copy skirt term.
 
 Built-in FFF option definitions and preset key lists. Tower options invalidate
 tower generation, and export merges their current envelopes with the cached
@@ -73,9 +80,22 @@ Representative direct calls (branches are not a timeline):
         |-- definition.add()
         |-- def->set_default_value()
         `-- def->set_enum_values()
+
+    min_object_distance()
+        `-- print_by_object()
+            `-- Steps::selected_active_plugin_from_group()
 */
 
 namespace Slic3r {
+
+// Resolve the active object builder and require a zero height step (missing means zero); borrowed config is unchanged.
+bool print_complete_objects(const ConfigBase &config);
+
+// Map the borrowed option's serialized name through the core enum table, returning model order for absent or unknown names.
+CompleteObjectSort complete_objects_sort(const ConfigBase &config);
+
+// Resolve the selected active ordering builder from the borrowed config; return false without an active object builder.
+bool print_by_object(const ConfigBase &config);
 
 // Populate borrowed preset/category key lists in the definition; copied lists remain definition-owned and allocation failures propagate.
 void init_categories(PrintConfigDef &definition);
@@ -322,6 +342,29 @@ double min_object_distance(const ConfigBase &cfg)
     return ret;
 }*/
 
+bool print_complete_objects(const ConfigBase &config)
+{
+    const ConfigOption *step = config.option("complete_objects_step");
+    return print_by_object(config) && (step == nullptr || step->get_float() == 0.);
+}
+
+CompleteObjectSort complete_objects_sort(const ConfigBase &config)
+{
+    const ConfigOption *option = config.option("complete_objects_sort");
+    if (option == nullptr)
+        return cosObject;
+    const t_config_enum_values &values = ConfigOptionEnum<CompleteObjectSort>::get_enum_values();
+    const auto found = values.find(option->serialize());
+    return found == values.end() ? cosObject : static_cast<CompleteObjectSort>(found->second);
+}
+
+bool print_by_object(const ConfigBase &config)
+{
+    const Plugin *builder = Steps::selected_active_plugin_from_group(
+        Orchestrator::instance(), STEP_ORDERING, "ordering.plan_builder", &config);
+    return builder != nullptr && builder->get_id() == "ordering.plan_builder.by_object";
+}
+
 double min_object_distance(const PrintConfig& config)
 {
     return min_object_distance(static_cast<const ConfigBase*>(&config));
@@ -337,9 +380,7 @@ double min_object_distance(const ConfigBase *config, double ref_height /* = 0*/)
 
     double base_dist = 0;
     //std::cout << "START min_object_distance =>" << base_dist << "\n";
-    const ConfigOptionBool* opt_complete_object = config->option<ConfigOptionBool>("complete_objects");
-    const ConfigOption* opt_parallel_objects_step = config->option("parallel_objects_step");
-    if ((opt_parallel_objects_step && opt_parallel_objects_step->get_float() > 0) || (opt_complete_object && opt_complete_object->value)) {
+    if (print_by_object(*config)) {
         double skirt_dist = 0;
         double brim_dist = 0;
         try {
@@ -368,7 +409,9 @@ double min_object_distance(const ConfigBase *config, double ref_height /* = 0*/)
             // plugin leaves the option absent, which reads as the default.
             const ConfigOption *one_skirt_option = config->option("complete_objects_one_skirt");
             const bool one_skirt = one_skirt_option != nullptr && one_skirt_option->get_bool();
-            if (skirts > 0 && config->option("skirt_height")->get_int() >= 1 && !one_skirt) {
+            const ConfigOption *step_option = config->option("complete_objects_step");
+            const bool with_step = step_option != nullptr && step_option->get_float() > 0.;
+            if (skirts > 0 && config->option("skirt_height")->get_int() >= 1 && !one_skirt && !with_step) {
                 float overlap_ratio = 1;
                 //can't know the extruder, so we settle on the worst: 100%
                 //if (config->option<ConfigOptionPercents>("filament_max_overlap")) overlap_ratio = config->get_computed_value("filament_max_overlap");
@@ -1004,11 +1047,6 @@ void init_categories(PrintConfigDef &definition)
         "notes", 
         "print_custom_setting",
         "print_custom_variables",
-        "complete_objects",
-        "parallel_islands",
-        "parallel_objects_step",
-        "parallel_objects_step_max_z",
-        "complete_objects_sort",
         "extruder_clearance_radius", 
         "extruder_clearance_height", "gcode_comments", "gcode_label_objects", "output_filename_format", "post_process", "perimeter_extruder",
         "gcode_substitutions",
@@ -1877,35 +1915,6 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionString());
     def->cli = ConfigOptionDef::nocli;
-
-    def = definition.add("complete_objects", coBool, ptFFF);
-    def->label = L("Complete individual objects");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_SKIRT_BRIM;
-    def->tooltip = L("When printing multiple objects or copies, this feature will complete "
-        "each object before moving onto next one (and starting it from its bottom layer). "
-        "This feature is useful to avoid the risk of ruined prints. "
-        "Slic3r should warn and prevent you from extruder collisions, but beware.");
-    def->mode = comSimpleAE | comPrusa;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = definition.add("complete_objects_sort", coEnum, ptFFF);
-    def->label = L("Object sort");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("When printing multiple objects or copies on after another, this will help you to choose how it's ordered."
-        "\nObject will sort them by the order of the right panel."
-        "\nLowest Y will sort them by their lowest Y point. Useful for printers with a X-bar."
-        "\nLowest Z will sort them by their height, useful for delta printers."
-        "\nNearest will try to jump to the nearest.");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_enum<CompleteObjectSort>({
-        { "object", L("Right panel") },
-        { "lowy", L("lowest Y") },
-        { "lowz", L("lowest Z") },
-        { "nearest", L("Nearest") },
-    });
-    def->set_default_value(new ConfigOptionEnum<CompleteObjectSort>(cosObject));
 
 #if 0
     //not used anymore, to remove !! @DEPRECATED
@@ -6173,39 +6182,6 @@ void init_fff_params(PrintConfigDef &definition)
                     "\nIf set to true, you have to write a good and complete start_gcode, as no checks are made anymore."
                     "\nExemple:\nG21 ; set units to millimeters\nG90 ; use absolute coordinates\n{if use_relative_e_distances}M83{else}M82{endif}\nG92 E0 ; reset extrusion distance");
     def->mode = comExpert | comSuSi;
-    def->set_default_value(new ConfigOptionBool(false));
-
-    def = definition.add("parallel_objects_step", coFloat, ptFFF);
-    def->label = L("Parallel printing step");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_SUPPORT;
-    def->tooltip = L("When multiple objects are present, instead of jumping from one to another at each layer"
-        " the printer will continue to print the current object layers up to this height before moving to the next object."
-        " (first layers will be still printed one by one)."
-        "\nThis feature also use the same extruder clearance radius field as 'complete individual objects' (complete_objects)"
-        ", but you can modify them to instead reflect the clerance of the nozzle, if this field reflect the z-clearance of it."
-        "\nThis field is exclusive with 'complete individual objects' (complete_objects). Set to 0 to deactivate.");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = definition.add("parallel_objects_step_max_z", coFloat, ptFFF);
-    def->label = L("Max height for parallel printing step");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("If the nozzle print higher than taht, the print is switched back to normal printing. Allow to quicly print the first layer per object if these need quick printing.");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = definition.add("parallel_islands", coBool, ptFFF);
-    def->label = L("Island Parallel printing step");
-    def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("When using 'parallel_objects_step', consider each object island as a separate object, if far enough."
-                    "\nTwo islands are considered separate if they are farther than the extruder clearance.");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 
     def = definition.add("single_extruder_multi_material", coBool, ptFFF);

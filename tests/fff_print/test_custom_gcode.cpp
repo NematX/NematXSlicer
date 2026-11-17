@@ -252,7 +252,7 @@ SCENARIO("Custom G-code", "[CustomGCode]")
     }
     GIVEN("sequential print with between_objects_gcode") {
         auto config = Slic3r::DynamicPrintConfig::full_print_config_with({
-            { "complete_objects",       1 },
+            { "print_plan_builder", "ordering.plan_builder.by_object" },
             { "between_objects_gcode",  "_MY_CUSTOM_GCODE_" }
         });
         std::string gcode = Slic3r::Test::slice(

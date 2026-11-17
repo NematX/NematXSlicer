@@ -11,6 +11,8 @@
 #include "libslic3r/Flow.hpp"
 
 #include "CalibrationAbstractDialog.hpp"
+// Construct this dialog with the application and main frame; its controls create
+// flow and speed calibration samples on the plater using whole-object printing.
 
 class ComboBox;
 
@@ -29,6 +31,7 @@ protected:
     void create_speed(wxCommandEvent& event_args);
     void create_flow(wxCommandEvent& event_args);
     void create_overlap(wxCommandEvent& event_args);
+    // Create whole-object samples covering the requested flow, speed and overlap ranges.
     void create_geometry(float min_flow, float max_flow, float min_speed, float max_speed, float min_overlap, float max_overlap);
     std::tuple<float,float, Flow> get_cube_size(float overlap);
     

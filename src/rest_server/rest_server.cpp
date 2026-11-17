@@ -3306,7 +3306,15 @@ nlohmann::json placement_matrix_json(const Transform3d &matrix)
     return result;
 }
 
-// Apply arrangement on the import pool and publish only an actually changed candidate.
+// Accept a finite non-negative gap within the engine range, then apply arrangement
+// on the import pool and publish only an actually changed candidate.
+std::optional<HttpResponse> handle_arrange(
+    HttpRequest &request,
+    const RouteServices &services,
+    const std::string &username,
+    const std::string &request_id,
+    const DeferredResponder &respond);
+
 std::optional<HttpResponse> handle_arrange(
     HttpRequest &request,
     const RouteServices &services,
@@ -3348,9 +3356,8 @@ std::optional<HttpResponse> handle_arrange(
     if (std::optional<HttpResponse> error = resolve_instance_targets(
             *session, *current->scene, *mutation, requested_ids, "invalid_arrange", request_id, targets, bindings))
         return error;
-    const double minimum_distance = minimum_arrange_distance(current->configuration);
     const double effective_distance = arrange.distance.value_or(default_arrange_distance(current->configuration));
-    if (!std::isfinite(effective_distance) || effective_distance < minimum_distance ||
+    if (!std::isfinite(effective_distance) || effective_distance < 0. ||
         effective_distance > maximum_arrange_distance_mm())
         return make_error_response(422, "invalid_arrange", "distance is outside the safe range for this configuration.", request_id);
     const std::optional<std::vector<std::string>> rest_ids = session->entity_ids(mutation.value(), bindings);

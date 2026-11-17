@@ -1071,7 +1071,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "dense_infill.surface_marker");
         activate_plugin_or_fail(orchestrator, "dense_infill.recipe_modifier");
         activate_plugin_or_fail(orchestrator, "dense_infill.post_infill_order");
-        activate_plugin_or_fail(orchestrator, "ordering.plan_builder.default");
+        activate_plugin_or_fail(orchestrator, "ordering.plan_builder.by_layer");
+        activate_plugin_or_fail(orchestrator, "ordering.plan_builder.by_object");
         activate_plugin_or_fail(orchestrator, "ordering.object_instance_catalog");
         activate_plugin_or_fail(orchestrator, "ordering.custom_gcode_tool_overrides");
         activate_plugin_or_fail(orchestrator, "ordering.tool_groups.default");
@@ -1185,6 +1186,9 @@ void ensure_plugin_test_runtime_initialized()
                 }
             }
         }
+        // An isolated import case needs the startup enum built without the object provider.
+        if (std::getenv("SLIC3R_TEST_WITHOUT_BY_OBJECT") != nullptr)
+            orchestrator.set_plugin_active("ordering.plan_builder.by_object", false);
         // External exclusive providers must be active when selectors collect their values.
         register_exclusive_step_group_options(orchestrator);
         // An isolated test run can prove that another encoder publishes every

@@ -119,6 +119,15 @@ struct PerimeterRegionOverride
     std::vector<std::pair<std::string, std::string>> settings;
 };
 
+/* One LayerRegionIsland published by a perimeter run: the extruder the host
+   gave it, the number of source regions it holds and a copy of its perimeters. */
+struct PerimeterRegionIslandCapture
+{
+    extruder_index_t extruder_id = EXTRUDER_ID_UNKNOWN;
+    size_t region_count = 0;
+    ExtrusionEntityCollection perimeters;
+};
+
 struct GenericFacetPaintingOverride
 {
     std::string key;
@@ -177,6 +186,16 @@ PerimeterRunCapture run_perimeter_and_post_case_with_regions(
     const DynamicPrintConfig &config,
     std::initializer_list<const char *> perimeter_plugins,
     std::initializer_list<const char *> post_plugins,
+    const ExPolygon &area,
+    size_t layer_idx,
+    const std::vector<PerimeterRegionOverride> &region_overrides);
+
+/* Generate perimeters for `area` on layer_idx, each override getting its own
+   region, and copy every region island that received perimeters, in the
+   island's order. */
+std::vector<PerimeterRegionIslandCapture> run_perimeter_region_islands_case(
+    const DynamicPrintConfig &config,
+    std::initializer_list<const char *> active_plugins,
     const ExPolygon &area,
     size_t layer_idx,
     const std::vector<PerimeterRegionOverride> &region_overrides);

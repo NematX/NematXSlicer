@@ -11,7 +11,7 @@ slicer_version = 2.7.63.0-alpha+UNKNOWN
 slic3r_plugin_types.h = 4.1
 slic3r_orchestrator.h = 3.5
 slic3r_slicing_step.h = 2.4
-slic3r_config_def.h = 1.6
+slic3r_config_def.h = 1.7
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
 steps/slic3r_step_gcode_export.h = 4.2
@@ -40,6 +40,15 @@ structure is a major version. The G-code thumbnail service
 (`slic3r_gcode_thumbnail.h`) is at 2.0 for this reason: its encoder table
 gained the optional `encode_image` callback.
 
+Config-def 1.7 appends optional selector visibility flags (`has_mode`, `mode`)
+to `raw_exclusive_group_def`. The host reads them only when `struct_size`
+includes both fields. Older descriptors and descriptors without `has_mode`
+keep the Advanced/Expert and SuperSlicer visibility flags.
+
+Config-option 3.1 adds `graph_data_create()` and `graph_data_free()` for standalone
+host graphs copied from plugin points. Borrowed configuration graphs remain read-only
+and must not be freed. Existing 3.0 packages remain compatible.
+
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming
 `steps/slic3r_step_support_toolpath.h`, and the exporter header identity
@@ -67,6 +76,17 @@ host resolver instead of duplicating that rule in each language.
 Clipper 2.1 adds `clipper_variable_offset_inner()` without changing the 2.0
 operand layout. Volume 2.0 retains `c_mesh_slicing_params.extra_offset`; moving
 FFF compensation to post-slicing does not remove the mesh API's offset field.
+
+Volume 2.1 appends three support-geometry volume types without changing any
+existing value: `RAW_VOLUME_TYPE_SUPPORT_COLUMN` (11), a mesh that asks for
+sparse support inside it, `RAW_VOLUME_TYPE_NO_SUPPORT_ZONE` (12), a mesh
+that forbids support inside it, and `RAW_VOLUME_TYPE_SUPPORT_INTERFACE_COLUMN` (13),
+a mesh that asks for dense interface support inside it. Projects write `SupportColumn`,
+`NoSupportZone` and `SupportInterfaceColumn`. The C++ and Python volume views add
+`is_support_column()`, `is_no_support_zone()`, `is_support_interface_column()` and
+`is_support_geometry_modifier()`; `is_support_modifier()` still means only the
+support-demand enforcer and blocker. Volume 2.0 packages remain compatible, but
+a package that switches over volume types must accept values it does not know.
 
 Extrusion property 4.0 removes `fan_speed_percent` from the Speed payload and
 adds a separate Fan request pair (`percent`, exclusive runtime `mode`). This

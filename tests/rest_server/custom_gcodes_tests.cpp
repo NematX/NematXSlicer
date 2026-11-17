@@ -163,7 +163,7 @@ TEST_CASE("Custom G-code mode follows the engine rule", "[custom_gcode]")
     }
 }
 
-// Verify sorting, layer rounding, duplicates, bounds, per-mode types, colors, texts and sequential printing.
+// Verify sorting, layer rounding, duplicates, bounds, per-mode types, colors, texts and By object acceptance.
 TEST_CASE("Custom G-code entries are validated and sorted", "[custom_gcode]")
 {
     ensure_engine_initialized();
@@ -306,19 +306,18 @@ TEST_CASE("Custom G-code entries are validated and sorted", "[custom_gcode]")
             .gcodes[0].extra == "Insert nuts");
     }
 
-    SECTION("sequential printing") {
+    SECTION("By object accepts validated height events") {
         DynamicPrintConfig sequential = make_session(1);
-        sequential.set_deserialize_strict("complete_objects", "1");
+        sequential.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
         CHECK(make_custom_gcodes({}, scene, sequential).gcodes.empty());
-        try {
-            make_custom_gcodes({make_entry(5., CustomGCode::Template)}, scene, sequential);
-            FAIL("Sequential printing accepted a non-empty list.");
-        } catch (const CustomGCodeItemError &) {
-            FAIL("The sequential refusal must not carry an item.");
-        } catch (const SceneEditError &error) {
-            CHECK(error.status() == 422);
-            CHECK(error.code() == "invalid_custom_gcode");
-        }
+        CHECK(make_custom_gcodes({make_entry(5., CustomGCode::Template)}, scene, sequential).gcodes.size() == 1);
+        CHECK(item_error({make_entry(0., CustomGCode::Template)}, scene, sequential).second == "invalid_z");
+        CHECK(item_error({make_entry(5., CustomGCode::ToolChange, 1)}, scene, sequential).second == "mode_tool_change");
+        CHECK(item_error({make_entry(5., CustomGCode::ColorChange, 2)}, scene, sequential).second == "extruder_range");
+        triple.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+        const CustomGCode::Info changed = make_custom_gcodes({make_entry(5., CustomGCode::ToolChange, 2)}, scene, triple);
+        CHECK(changed.mode == CustomGCode::MultiAsSingle);
+        CHECK(changed.gcodes.front().extruder == 2);
     }
 }
 
@@ -398,10 +397,10 @@ TEST_CASE("Custom G-code JSON reports modes and warnings", "[custom_gcode]")
         CHECK(has_warning(custom_gcodes_json(info, Model(), single), "above_objects", 0));
     }
 
-    SECTION("sequential printing") {
+    SECTION("By object does not warn about height events") {
         CHECK_FALSE(has_warning(custom_gcodes_json(info, scene, single), "sequential_print"));
-        single.set_deserialize_strict("complete_objects", "1");
-        CHECK(has_warning(custom_gcodes_json(info, scene, single), "sequential_print"));
+        single.set_deserialize_strict("print_plan_builder", "ordering.plan_builder.by_object");
+        CHECK_FALSE(has_warning(custom_gcodes_json(info, scene, single), "sequential_print"));
         CHECK_FALSE(has_warning(custom_gcodes_json(CustomGCode::Info(), scene, single), "sequential_print"));
     }
 

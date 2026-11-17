@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -16,6 +17,11 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_config.h"
 #include "libslic3r/Api/plugin/c/slic3r_config_option.h"
+
+/* C++ configuration views borrow host handles and copy requested scalar values.
+   GraphData reads a graph without owning it. OwnedGraphData copies points into a
+   standalone host allocation; acquire view() after construction and keep the owner
+   alive while using that view. Destruction releases the allocation through the host. */
 
 namespace slic3r_api {
 
@@ -54,11 +60,15 @@ protected:
 };
 
 /*
-GraphData is a borrowed read-only view over a graph stored by ConfigOption.
+GraphData is a borrowed read-only view over a graph stored by ConfigOption or OwnedGraphData.
 
-The parent option owns the graph. Replacing or resizing that option invalidates
-this view. point() and points() copy coordinates into plugin-owned values; the
-view itself must not be freed or retained across a parent configuration change.
+For a ConfigOption graph, the parent option owns the graph; replacing or resizing
+that option invalidates the view. For an OwnedGraphData graph, the owner keeps the
+allocation alive; destroying the owner invalidates the view, but moving it does not.
+point() and points() copy coordinates into plugin-owned values. The view itself
+must never be freed.
+OwnedGraphData creates a standalone host graph from copied points and releases it
+automatically; use view() for the same interpolation operations while its owner lives.
 */
 class GraphData : public ConstDataTreeHandleView<graph_data_handle>
 {
@@ -87,6 +97,26 @@ public:
     double interpolate(double x) const { return graph_interpolate(handle(), x); }
     double inverse_interpolate(double y) const { return graph_inverse_interpolate(handle(), y); }
     bool validate() const { return graph_validate(handle()) != 0; }
+};
+
+// Own a host graph copied from points; view() borrows it until this owner is destroyed.
+// Move the owner to transfer its allocation without invalidating existing views.
+class OwnedGraphData
+{
+public:
+    // Copy points through the host, throwing when construction fails.
+    OwnedGraphData(const std::vector<c_vec2d> &points, raw_graph_type type)
+        : m_graph(graph_data_create(points.data(), static_cast<uint32_t>(points.size()), type), graph_data_free)
+    {
+        if (!m_graph)
+            throw std::runtime_error("Cannot create graph from points.");
+    }
+
+    // Borrow a read-only view for this allocation's lifetime.
+    GraphData view() const { return GraphData(m_graph.get()); }
+
+private:
+    std::unique_ptr<graph_data_handle, decltype(&graph_data_free)> m_graph;
 };
 
 /*

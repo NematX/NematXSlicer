@@ -205,11 +205,13 @@ private:
     void on_size(wxSizeEvent& evt);
 
     // Create/Update/Reset double slider on 3dPreview
+    // Create and bind the owned layer slider with SLA or regular FFF presentation.
     wxBoxSizer* create_layers_slider_sizer();
     void check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_from_model,
         const std::vector<double>& layers_z);
     void reset_layers_slider();
     // Refresh the layer slider for the supplied Z sequence and its available G-code annotations.
+    // Refresh layer heights, marker data and technology mode, optionally retaining the Z range.
     void update_layers_slider(const std::vector<double>& layers_z, bool show_gcode_data = false, bool keep_z_range = false);
     void update_layers_slider_mode();
     // update vertical DoubleSlider after keyDown in canvas

@@ -170,9 +170,10 @@ TEST_CASE("Clipper 2.2 rejects 1.x packages and accepts earlier 2.x minors", "[p
     }
 }
 
-TEST_CASE("Volume API keeps 2.0 compatible and requires the internal attractor name at 2.1", "[plugins][abi][volume]")
+TEST_CASE("Volume API 2.1 rejects 1.x packages and keeps 2.0 packages compatible", "[plugins][abi][volume]")
 {
-    // The additive name keeps the existing major and accepts older minor packages.
+    // The host exposes slic3r_volume.h 2.1: the 2.0 slicing function plus the internal attractor name
+    // and the support-geometry volume types.
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     const std::vector<PluginApiRequirement>::const_iterator volume = std::find_if(host.begin(), host.end(),
         [](const PluginApiRequirement &contract) { return contract.header == "slic3r_volume.h"; });
@@ -188,6 +189,7 @@ TEST_CASE("Volume API keeps 2.0 compatible and requires the internal attractor n
         CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
         CHECK(metadata.compatibility.message().find("slic3r_volume.h") != std::string::npos);
     }
+    // A 2.0 package and a package requiring the new types are accepted; a later minor is not.
     for (const char *version : {"2.0", "2.1", "2.2"}) {
         PluginPackageMetadata current;
         std::string error;
