@@ -2505,7 +2505,7 @@ ThreadBand thread_band(const Print &print, const PrintObject &object, size_t bri
     Common::GeneratorLayer &slab = Common::add_layer(probe, Common::LayerType::TopContact, probe_z, probe_z - scale_to_layer_coord(0.2),
         scale_to_layer_coord(0.2));
     const slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(probe.storage, layers, SG::print_view(print).config(),
-        params, slab.print_z, slab);
+        params, slab.print_z, slab, params.gap_xy);
     band.footprint = union_ex(to_native(footprint));
     return band;
 }

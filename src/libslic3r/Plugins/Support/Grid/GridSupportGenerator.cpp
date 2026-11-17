@@ -45,7 +45,10 @@
    strips. Typed fill surfaces live in island work regions and supply bridge
    footprints. height_block is the downward Z span used for object collisions,
    independently of printable height; the XY clearance of trim_by_object()
-   covers at least the printed height, so every slab keeps gap_xy. The
+   covers at least the printed height, so every slab keeps gap_xy. In contact
+   mode (SupportParams::contact_mode) the contacts keep only gap_xy_contact, and
+   the cones of the contacts bring the slabs near them from gap_xy_contact back
+   to gap_xy (Common::contact_cones()). The
    no-support zones join the object outline only in that clearance: support
    keeps clear of them like of the object, but never rests on them or gets
    contacts from them.
@@ -73,6 +76,9 @@
         |-- validate contact print-Z order
         |-- select and trim each base slab
         `-- trim_by_object(): enforce the model clearance
+        add_contact_cones(): contact mode only, before carve_interfaces()
+        |-- Common::contact_cones(): shrink each contact slab by slab
+        `-- trim_by_object(): the cones keep gap_xy_contact
 */
 
 namespace slic3r_api::Support::Grid {
@@ -96,10 +102,11 @@ struct Run {
     ClipperContext clipper;
     // The object layers, bottom first.
     std::vector<Layer> layers;
-    // Filled at first trimming use per layer, then read-only; this run's trimming passes execute sequentially.
-    mutable std::vector<std::optional<ExPolys>> grown_outlines;
-    // Bridge pieces share run storage; trimming visits slabs sequentially, so initialization needs no lock.
-    mutable Common::BridgeFootprintCache bridge_cache;
+    // Filled at first trimming use per layer, then read-only; this run's trimming passes execute sequentially. The contact
+    // outlines are grown by p.gap_xy_contact and used only in contact mode.
+    mutable std::vector<std::optional<ExPolys>> grown_outlines, contact_outlines;
+    // Bridge pieces share run storage; trimming visits slabs sequentially, so initialization needs no lock. One cache per gap.
+    mutable Common::BridgeFootprintCache bridge_cache, contact_bridge_cache;
     int32_t threshold, enforce_layers;
     bool synchronize;
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
@@ -142,10 +149,16 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
 std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out);
 // Place intermediate slabs between contact extremes and assign missing top-contact heights.
 void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
-// Subtract object slices and bridge footprints from slabs with the configured clearance.
-void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
-// Fill intermediate slabs from projected columns and remove portions inside contacts.
-void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
+// Subtract object slices and bridge footprints grown by gap (p.gap_xy, or p.gap_xy_contact for the contacts) from slabs.
+void trim_by_object(const Run &run, Common::GeneratorLayers &layers, coord_t gap);
+// Fill intermediate slabs from projected columns and remove portions inside contacts; return the column of each base slab
+// before the object trimming, in the order of out.base.
+std::vector<Polys> base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
+// The contacts and interfaces of out that a slab must not overlap: those whose Z span holds the slab's.
+Polys contacts_beside(const Common::GeneratedSupport &out, const Common::GeneratorLayer &base);
+// Contact mode: unite each base slab with the cones of the contacts, less the contacts beside it and the object grown by
+// gap_xy_contact. columns comes from base_layers().
+void add_contact_cones(const Run &run, const std::vector<Polys> &columns, Common::GeneratedSupport &out);
 // Clip the sparse body to the dense contacts/interfaces that remain above it, projected down through the object.
 void clip_sparse_to_dense(const Run &run, Common::GeneratedSupport &out);
 // Merge consecutive sparse body slabs when the upper one covers the lower core within the overhang limit.
@@ -172,8 +185,8 @@ void generate_support(const plugin_run_context *context, const Print &print, con
     if (out.top.empty()) return;
     const std::vector<Polys> areas = project_columns(run, covered, out);
     intermediate_layers(run, out);
-    trim_by_object(run, out.top);
-    base_layers(run, areas, out);
+    trim_by_object(run, out.top, params.gap_xy_contact);
+    const std::vector<Polys> columns = base_layers(run, areas, out);
     for (Common::GeneratorLayer *top : out.top) {
         // Bottom contacts have print_z >= top->print_z, including equality, and bottom_print_z() <= top->bottom_z.
         assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
@@ -187,6 +200,9 @@ void generate_support(const plugin_run_context *context, const Print &print, con
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
         }
     }
+    // The cones join the base slabs before the carving, so their part in the interface window becomes interface.
+    if (params.contact_mode)
+        add_contact_cones(run, columns, out);
     Common::carve_interfaces(params, params.style == Common::SupportStyle::Snug, out);
     // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
@@ -218,6 +234,7 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     closing_radius = config.get("support_material_closing_radius").get_float();
     spacing = p.base_spacing_gap;
     grown_outlines.resize(layers.size());
+    contact_outlines.resize(layers.size());
 }
 
 Polys polygons(ClipperOperand &&result)
@@ -289,7 +306,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
             const coord_t lower_offset = id < size_t(run.enforce_layers) ? 0 :
                 Common::overhang_margin(run.threshold, lower.height(),
                     region.flow(raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER)).width, false);
-            const float offset = float(std::min(lower_offset, p.gap_xy));
+            const float offset = float(std::min(lower_offset, p.gap_xy_contact));
             if (offset != cached_offset) {
                 cached_offset = offset;
                 if (offset == 0)
@@ -388,7 +405,7 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
         }
     }
     std::reverse(out.bottom.begin(), out.bottom.end());
-    trim_by_object(run, out.bottom);
+    trim_by_object(run, out.bottom, p.gap_xy_contact);
     return areas;
 }
 
@@ -411,14 +428,17 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
 }
 
 // Finds the first layer strictly above the slab's lower gap bound, lazily caches ordered square-join offsets per used layer and copies them with bridge footprints into trimming; borrowed slabs are replaced in place, run storage owns geometry, and cancellation/geometry/allocation failures propagate.
-void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
+void trim_by_object(const Run &run, Common::GeneratorLayers &layers, coord_t gap)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
+    const bool contact_gap = gap != p.gap_xy;
+    std::vector<std::optional<ExPolys>> &outlines = contact_gap ? run.contact_outlines : run.grown_outlines;
+    Common::BridgeFootprintCache &bridge_cache = contact_gap ? run.contact_bridge_cache : run.bridge_cache;
     for (Common::GeneratorLayer *support : layers) {
         if (support->polygons.empty()) continue;
         ExPolys trimming(run.storage);
-        // gap_xy applies to every support slab: a top contact, whose collision span is zero, still keeps it from the object
+        // The gap applies to every slab it trims: a top contact, whose collision span is zero, still keeps it from the object
         // layers beside its own printed height.
         const coord_t span = std::max(support->height_block, support->height);
         const coord_t lower = support->print_z - span - scale_to_layer_coord(p.gap_below);
@@ -430,16 +450,17 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
         for (; id < run.layers.size(); ++id) {
             const Layer &layer = run.layers[id];
             if (layer.bottom_z() >= upper) break;
-            if (!run.grown_outlines[id]) {
+            if (!outlines[id]) {
                 throw_if_cancelled(run.context);
-                run.grown_outlines[id].emplace(clipper_offset(Common::support_obstacle(clipper, layer, id, run.no_support_zones),
-                    double(p.gap_xy), join_type, 0.).to_expolygon_collection());
+                outlines[id].emplace(clipper_offset(Common::support_obstacle(clipper, layer, id, run.no_support_zones),
+                    double(gap), join_type, 0.).to_expolygon_collection());
             }
             // Copy the reusable offset, then retain the move insertion's native ring handling and order.
-            ExPolys grown = run.grown_outlines[id]->readonly().clone(run.storage);
+            ExPolys grown = outlines[id]->readonly().clone(run.storage);
             trimming.append_move_from(grown);
         }
-        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, upper, *support, &run.bridge_cache));
+        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, upper, *support, gap,
+                                                           &bridge_cache));
         trimming.ensure_valid(p.resolution);
         const ExPolys united = Common::native_expolygons(clipper_union(clipper(trimming)));
         support->polygons = polygons(clipper_diff(clipper(support->polygons), clipper(united)));
@@ -468,7 +489,7 @@ bool border_is_clear(const Run &run, const Common::GeneratorLayer &border, const
     probe.height_block = upper.height;
     probe.polygons = border.polygons.readonly().clone(run.storage);
     Common::GeneratorLayers probe_layers{&probe};
-    trim_by_object(run, probe_layers);
+    trim_by_object(run, probe_layers, run.p.gap_xy);
     if (!same_area(run.clipper, border.polygons, probe.polygons))
         return false;
     for (const Common::GeneratorLayers *slabs : {&out.interfaces, &out.top, &out.bottom}) {
@@ -506,7 +527,8 @@ void clip_sparse_to_dense(const Run &run, Common::GeneratedSupport &out)
         throw_if_cancelled(run.context);
         if (size_t(index + 1) < dense.size())
             dense[size_t(index)] = polygons(clipper_union2(clipper(dense[size_t(index)]), clipper(dense[size_t(index + 1)])));
-        const Polys clearance = polygons(clipper_offset(clipper(run.layers[size_t(index)].slices()), double(run.p.gap_xy)));
+        // In contact mode the dense footprint keeps only the contact gap, so the cones of the contacts survive the clipping.
+        const Polys clearance = polygons(clipper_offset(clipper(run.layers[size_t(index)].slices()), double(run.p.gap_xy_contact)));
         dense[size_t(index)] = polygons(clipper_diff(clipper(dense[size_t(index)]), clipper(clearance)));
     }
     for (Common::GeneratorLayer *base : out.base) {
@@ -605,9 +627,11 @@ void merge_sparse_layers(const Run &run, Common::GeneratedSupport &out)
 
 // Searches print-Z-ordered layers/contacts, selects cached projections, subtracts enclosing contacts and trims against the object;
 // areas shares object-layer indices, out owns modified base slabs, and cancellation/geometry/allocation failures propagate.
-void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out)
+std::vector<Polys> base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out)
 {
     const ClipperContext &clipper = run.clipper;
+    std::vector<Polys> columns;
+    columns.reserve(out.base.size());
     // This loop changes polygons, not contact Z or list order.
     assert(out.base.empty() || std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
         return a->print_z < b->print_z;
@@ -626,7 +650,6 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, Common::Genera
                 const Common::GeneratorLayer *top = *it;
                 if (top->bottom_z >= base->print_z && top->print_z <= run.layers[0].print_z()) polys.append_copy_from(top->polygons);
             }
-        Polys trimming(run.storage);
         // Debug overlap checks cover every contact, including those outside the print-Z search range.
         assert(std::all_of(out.top.begin(), out.top.end(), [base](const Common::GeneratorLayer *top) {
             return !(base->print_z > top->bottom_z + SCALED_EPSILON && base->bottom_z < top->bottom_z - SCALED_EPSILON);
@@ -634,24 +657,64 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, Common::Genera
         assert(std::all_of(out.bottom.begin(), out.bottom.end(), [base](const Common::GeneratorLayer *bottom) {
             return !(base->print_z > bottom->print_z + SCALED_EPSILON && base->bottom_z < bottom->print_z - SCALED_EPSILON);
         }));
-        for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.top.cbegin(), out.top.cend(), base->bottom_z,
-                 [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.top.cend(); ++it) {
-            const Common::GeneratorLayer *top = *it;
-            if (top->bottom_z < base->print_z && top->print_z > base->bottom_z &&
-                base->print_z <= top->print_z && base->bottom_z >= top->bottom_z) trimming.append_copy_from(top->polygons);
-        }
-        for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.bottom.cbegin(), out.bottom.cend(), base->bottom_print_z(),
-                 [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.bottom.cend(); ++it) {
-            const Common::GeneratorLayer *bottom = *it;
-            if (bottom->bottom_print_z() < base->print_z && bottom->print_z > base->bottom_print_z() &&
-                base->print_z <= bottom->print_z && base->bottom_z >= bottom->bottom_print_z()) trimming.append_copy_from(bottom->polygons);
-        }
+        const Polys trimming = contacts_beside(out, *base);
+        if (run.p.contact_mode)
+            columns.push_back(polys.readonly().clone(run.storage));
+        else
+            columns.emplace_back(run.storage);
         base->polygons = trimming.empty() ? std::move(polys) :
             polygons(clipper_diff_with_safety_offset(clipper(polys), clipper(trimming)));
         base->polygons.ensure_valid(run.p.resolution);
         base->type = Common::LayerType::Base;
     }
-    trim_by_object(run, out.base);
+    trim_by_object(run, out.base, run.p.gap_xy);
+    return columns;
+}
+
+// Searches the print-Z-ordered contacts whose span holds the slab's span and copies their polygons into run storage.
+Polys contacts_beside(const Common::GeneratedSupport &out, const Common::GeneratorLayer &base)
+{
+    Polys trimming(out.storage);
+    for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.top.cbegin(), out.top.cend(), base.bottom_z,
+             [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.top.cend(); ++it) {
+        const Common::GeneratorLayer *top = *it;
+        if (top->bottom_z < base.print_z && top->print_z > base.bottom_z &&
+            base.print_z <= top->print_z && base.bottom_z >= top->bottom_z) trimming.append_copy_from(top->polygons);
+    }
+    for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.bottom.cbegin(), out.bottom.cend(), base.bottom_print_z(),
+             [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.bottom.cend(); ++it) {
+        const Common::GeneratorLayer *bottom = *it;
+        if (bottom->bottom_print_z() < base.print_z && bottom->print_z > base.bottom_print_z() &&
+            base.print_z <= bottom->print_z && base.bottom_z >= bottom->bottom_print_z()) trimming.append_copy_from(bottom->polygons);
+    }
+    return trimming;
+}
+
+// The cones are trimmed like a base slab, with gap_xy_contact for the object, through a probe slab at the base's Z; the base
+// keeps its own polygons, already trimmed with gap_xy, and gains the trimmed cone.
+void add_contact_cones(const Run &run, const std::vector<Polys> &columns, Common::GeneratedSupport &out)
+{
+    const ClipperContext &clipper = run.clipper;
+    const std::vector<Polys> cones = Common::contact_cones(run.p.contact_cone_step, run.p.contact_cone_layers, out, out.base, columns);
+    for (size_t i = 0; i < out.base.size(); ++i) {
+        if (cones[i].empty()) continue;
+        throw_if_cancelled(run.context);
+        Common::GeneratorLayer &base = *out.base[i];
+        Common::GeneratorLayer probe(run.storage);
+        probe.type = Common::LayerType::Base;
+        probe.print_z = base.print_z;
+        probe.bottom_z = base.bottom_z;
+        probe.height = base.height;
+        probe.height_block = base.height_block;
+        const Polys trimming = contacts_beside(out, base);
+        probe.polygons = trimming.empty() ? cones[i].readonly().clone(run.storage) :
+            polygons(clipper_diff_with_safety_offset(clipper(cones[i]), clipper(trimming)));
+        Common::GeneratorLayers probe_layers{&probe};
+        trim_by_object(run, probe_layers, run.p.gap_xy_contact);
+        if (probe.polygons.empty()) continue;
+        base.polygons = polygons(clipper_union2(clipper(base.polygons), clipper(probe.polygons)));
+        base.polygons.ensure_valid(run.p.resolution);
+    }
 }
 
 // Map scaled polygon coordinates to grayscale pixels; holes follow polygon winding and the returned vector owns the complete raster.

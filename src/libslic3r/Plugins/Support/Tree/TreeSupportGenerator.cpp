@@ -952,7 +952,7 @@ void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerLis
     for (Common::GeneratorLayer *slab : slabs) {
         if (slab->polygons.empty())
             continue;
-        slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(scratch, layers, print_config, params, slab->print_z, *slab, &bridge_cache);
+        slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(scratch, layers, print_config, params, slab->print_z, *slab, params.gap_xy, &bridge_cache);
         if (footprint.empty())
             continue;
         footprint.ensure_valid(params.resolution);
