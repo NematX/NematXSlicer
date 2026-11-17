@@ -397,6 +397,9 @@ std::string exclusive_group_ui_fragment(const std::string &key,
     // This is the neutral fallback for exclusive groups that do not provide
     // their own placement fragment. Feature plugins may register a fragment
     // with the same group id to put the selector next to their settings.
+    // Like plugin_group_ui_fragment(): without a line label, the setting gets its own row.
+    if (line_label.empty())
+        return std::string("page:Notes\ngroup:Exclusive step plugins\nsetting:") + key + "\n";
     return std::string("page:Notes\n") +
            "group:Exclusive step plugins\n" +
            "line:" + line_label + "\n" +
@@ -502,8 +505,12 @@ slicing_step_t selector_invalidation_step(const Orchestrator &orchestrator, slic
 std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std::string &line_label)
 {
     if (group.traits.ui_page.empty()) return exclusive_group_ui_fragment(group.option_key_storage, line_label);
-    return "page:" + group.traits.ui_page + "\n" + "group:" + group.traits.ui_group + "\n" +
-           "line:" + line_label + "\n" + "setting:" + group.option_key_storage + "\n" + "end_line\n";
+    const std::string placement = "page:" + group.traits.ui_page + "\n" + "group:" + group.traits.ui_group + "\n";
+    // Without a line label, the setting gets its own row, titled by its own label. The layout merger joins lines
+    // with the same name, so empty lines would put every unlabelled selector of the group on one row.
+    if (line_label.empty())
+        return placement + "setting:" + group.option_key_storage + "\n";
+    return placement + "line:" + line_label + "\n" + "setting:" + group.option_key_storage + "\n" + "end_line\n";
 }
 
 /*

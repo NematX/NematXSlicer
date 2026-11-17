@@ -218,7 +218,9 @@ TEST_CASE("Exclusive group definitions prefer active declarants then registered 
     local.refresh_storage_pointers();
     CHECK(std::string(local.option_def.label) == "Other label");
     CHECK(std::string(local.option_def.tooltip) == "Other tooltip");
-    CHECK(local.ui_fragment.find("line:\nsetting:") != std::string::npos);
+    // A member-declared selector has no host line: it gets its own row, titled by its own label.
+    CHECK(local.ui_fragment.find("line:") == std::string::npos);
+    CHECK(local.ui_fragment.find("setting:" + local.option_key_storage + "\n") != std::string::npos);
     REQUIRE(host.set_plugin_active(preferred.id(), true));
     CHECK(host.exclusive_group_definition_or_default(step, "fallback.Mixed-id").plugin_id == other.id());
     host.elect_exclusive_group_definition(step, "fallback.Mixed-id");
