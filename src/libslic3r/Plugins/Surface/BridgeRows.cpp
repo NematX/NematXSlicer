@@ -19,8 +19,9 @@
    Between parallel edges, several phases often cover the area equally well. The rows are then centered: the space
    between the extent of the area across the rows and the outer kept rows is split between both sides.
 
-   anchor() and anchored() carry a fit to another outline of the same bridge: the rows keep their absolute
-   positions, only the phase from the side of the new outline changes.
+   rows() draws the rows of a fit as the pattern does, with its integer line spacing and line count, for callers that
+   need the actual threads rather than a score. anchor() and anchored() carry a fit to another outline of the same
+   bridge: the rows keep their absolute positions, only the phase from the side of the new outline changes.
 
        fit()
        |-- frame()
@@ -30,9 +31,14 @@
            |-- intervals() [crossings of a vertical cut with rings, even-odd]
            `-- clipped_area() [exact area of the bridge inside one band]
 
+       rows()
+       |-- line_spacing() [the pattern's integer spacing of the rows]
+       |-- frame()
+       `-- intervals() [kept rows, rotated back to the area]
+
        anchor() and anchored()
        |-- frame_left() [side of the rotated bounding box]
-       `-- line_spacing() [the pattern's integer spacing of the rows]
+       `-- line_spacing()
 
    All work vectors are local to one call. */
 #include "BridgeRows.hpp"
@@ -306,6 +312,31 @@ Fit anchored(const ExPolygon &area, double angle, double spacing, double pitch, 
     if (phase < 0) phase += step;
     out.pitch = pitch;
     out.phase = phase;
+    return out;
+}
+
+std::vector<Row> rows(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const Fit &fit)
+{
+    std::vector<Row> out;
+    if (!fit.found()) return out;
+    const coord_t step = line_spacing(spacing, fit.pitch);
+    if (step <= 0) return out;
+    const Frame rows_frame = frame(storage, area, angle, spacing);
+    if (rows_frame.inner.empty()) return out;
+    // FillRectilinear: lines from the left of the rotated bounding box plus bridge_offset, 1 + (width - 10) / spacing of them.
+    const coord_t left = coord_t(rows_frame.left), width = coord_t(rows_frame.right) - left;
+    const coord_t count = 1 + (width - 10) / step;
+    const double c = std::cos(double(rows_frame.turn)), s = std::sin(double(rows_frame.turn));
+    const auto back = [c, s](double x, double y) {
+        return c_point{coord_t(std::llround(c * x - s * y)), coord_t(std::llround(c * y + s * x))};
+    };
+    for (coord_t idx = 0; idx < count; ++idx) {
+        const double x = double(left + fit.phase + idx * step);
+        const std::vector<std::pair<double, double>> reached = intervals(rows_frame.inner, x);
+        for (const std::pair<double, double> &row : intervals(rows_frame.outer, x))
+            if (std::any_of(reached.begin(), reached.end(), [&row](const std::pair<double, double> &r) { return r.second > row.first && r.first < row.second; }))
+                out.push_back({back(x, row.first), back(x, row.second)});
+    }
     return out;
 }
 }}

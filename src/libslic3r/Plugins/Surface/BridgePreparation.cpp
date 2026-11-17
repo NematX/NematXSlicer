@@ -13,7 +13,10 @@
    their actual lower contacts when selected. Preparation does not generate supports or change flow.
 
    The rows of each prepared bridge are fitted here, within bridge_overlap and bridge_overlap_min
-   (BridgeRows.hpp), and stored on its surfaces as PreparedRows with their direction.
+   (BridgeRows.hpp), and stored on its surfaces as PreparedRows with their direction. Clipped at the part outline, uniform
+   growth also leaves strips beside the unsupported area, outside its shadow along the rows, that no row
+   covers. BridgeRows predicts these rows exactly as the rectilinear patterns will draw them, so the bare
+   strips are given back to the infill they were taken from; the stored rows stay the same.
 
    The resulting surfaces carry BridgeSurfaceInfo and are called prepared bridges.
    The recipe pass tells infill generation to print them as separate parallel rows.
@@ -36,7 +39,9 @@
            |   |-- direction() [external bridges]
            |   |-- make_groups() [compatible external bridges]
            |   |-- expand_bridge() [uniform growth, then axial ends]
-           |   |-- fit_components() [rows of each component]
+           |   |-- reclaim_bare_sides() [with uniform growth: fit the rows, give back what they leave bare]
+           |   |   `-- fit_components() [rows of each component]
+           |   |-- fit_components() [without uniform growth]
            |   |-- append_prepared() [external geometry, metadata and rows]
            |   `-- prepare_internal()
            |       |-- direction() [detection, or perpendicular sparse fallback]
@@ -60,6 +65,7 @@
 #include "BridgeGeometry.hpp"
 #include "BridgeRows.hpp"
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -127,7 +133,8 @@ struct InternalCandidate { size_t piece; StoredExPolygonCollection core; };
 // The bridge flow spacing of a region and the pitch range of its rows, as the recipe pass gives them to the pattern.
 // A spacing that is not positive leaves the rows unfitted.
 struct RowsInputs { double spacing; BridgeRows::PitchRange range; };
-// One component of a prepared bridge and the rows fitted to it, if found.
+// One component of a prepared bridge and the rows fitted to it, if found. Cutting bare strips may split the area in
+// several parts; all keep the rows of the component they come from.
 struct PreparedComponent { StoredExPolygonCollection area; BridgeRows::Fit fit; PreparedRows rows; };
 // Stop debug builds on a broken invariant of this plugin, then refuse the island
 // like any other failed check so that it keeps its input surfaces.
@@ -170,6 +177,12 @@ RowsInputs rows_inputs(const LayerRegion &region);
 // storage.
 std::vector<PreparedComponent> fit_components(storage_handle *storage, const RowsInputs &inputs, const ExPolygonCollection &areas,
     double angle);
+// Fit the rows of each component of expanded, then remove from it the additions beside core, outside its shadow along
+// the rows, that none of these rows covers: the band of a row is one pitch, and at least one spacing, wide and reaches
+// half a spacing beyond its ends. Parts left with neither core nor row go too. The rows that BridgeRows::rows() predicts
+// on the result are the fitted ones, so the removed areas get no bridge thread. A component without rows stays whole.
+std::vector<PreparedComponent> reclaim_bare_sides(storage_handle *storage, const RowsInputs &inputs, const ExPolygonCollection &core,
+    const ExPolygonCollection &expanded, double angle, const plugin_run_context *run_ctx);
 // Find wide enough first solid covers before either bridge family claims anchors.
 // Their cores must not become receivers for neighboring external bridges.
 std::vector<InternalCandidate> internal_candidates(storage_handle *storage,const std::vector<Piece> &pieces,const ExPolygonCollection &sparse);
@@ -414,7 +427,13 @@ void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation 
         domain=unite(storage,domain.readonly());
         StoredExPolygonCollection expanded=expand_bridge(storage,core.readonly(),domain.readonly(),candidate.angle,
             candidate.margins.axial,candidate.margins.uniform,run_ctx);
-        const std::vector<PreparedComponent> components=fit_components(storage,rows_inputs(source.region),expanded.readonly(),candidate.angle);
+        // Only the uniform margin adds area beside the core; its bare parts go back to the receivers.
+        const RowsInputs inputs=rows_inputs(source.region);
+        const std::vector<PreparedComponent> components=candidate.margins.uniform>0 ?
+            reclaim_bare_sides(storage,inputs,core.readonly(),expanded.readonly(),candidate.angle,run_ctx) :
+            fit_components(storage,inputs,expanded.readonly(),candidate.angle);
+        expanded=StoredExPolygonCollection(storage);
+        for (const PreparedComponent &component : components) expanded.append_copy_from(component.area.readonly());
         StoredExPolygonCollection added=subtract(storage,expanded.readonly(),core.readonly());
         // Do not store a second polygon in the bridge property. Added anchors must
         // lie above lower slices, so subtracting those slices recovers the original area.
@@ -648,6 +667,80 @@ std::vector<PreparedComponent> fit_components(storage_handle *storage, const Row
         if (inputs.spacing>0.) component.fit=BridgeRows::fit(storage,area,angle,inputs.spacing,inputs.range);
         if (component.fit.found()) component.rows={angle,component.fit.pitch,int64_t(BridgeRows::anchor(area,angle,component.fit))};
         components.push_back(std::move(component));
+    }
+    return components;
+}
+
+std::vector<PreparedComponent> reclaim_bare_sides(storage_handle *storage, const RowsInputs &inputs, const ExPolygonCollection &core,
+    const ExPolygonCollection &expanded, double angle, const plugin_run_context *run_ctx)
+{
+    std::vector<PreparedComponent> components=fit_components(storage,inputs,expanded,angle);
+    if (core.empty()) return components;
+    // s runs along the rows and t across them.
+    const double c=std::cos(angle), s=std::sin(angle);
+    const auto point=[c,s](double along, double across) {
+        return c_point{coord_t(std::llround(c*along-s*across)),coord_t(std::llround(s*along+c*across))};
+    };
+    const auto append_quad=[storage](StoredExPolygonCollection &out, const std::array<c_point,4> &corners) {
+        StoredExPolygon quad(storage);
+        multipoint_handle *points=polygon_as_multipoint(expolygon_contour(quad.mutable_handle()));
+        for (const c_point corner : corners) multipoint_push_back(points,corner);
+        if (std::abs(quad.area())>0.) out.push_back_move(std::move(quad));
+    };
+    // The shadow of the core along the rows: the t spans of its parts, across the whole s extent of the bridge.
+    std::vector<std::pair<double,double>> spans;
+    double low=std::numeric_limits<double>::infinity(), high=-low;
+    for (const ExPolygon area : expanded)
+        for (const c_point p : area.contour().points()) {
+            low=std::min(low,c*double(p.x)+s*double(p.y));high=std::max(high,c*double(p.x)+s*double(p.y));
+        }
+    for (const ExPolygon area : core) {
+        double from=std::numeric_limits<double>::infinity(), to=-from;
+        for (const c_point p : area.contour().points()) {
+            from=std::min(from,-s*double(p.x)+c*double(p.y));to=std::max(to,-s*double(p.x)+c*double(p.y));
+        }
+        spans.emplace_back(from,to);
+    }
+    StoredExPolygonCollection shadow(storage);
+    for (const std::pair<double,double> &span : spans)
+        append_quad(shadow,{point(low-1.,span.first),point(high+1.,span.first),point(high+1.,span.second),point(low-1.,span.second)});
+    shadow=unite(storage,shadow.readonly());
+    StoredExPolygonCollection sides=subtract(storage,expanded,core);
+    sides=subtract(storage,sides.readonly(),shadow.readonly());
+    if (sides.empty()) return components;
+    ClipperContext clipper(storage);
+    const double spacing=scale_d(inputs.spacing);
+    for (PreparedComponent &component : components) {
+        throw_if_cancelled(run_ctx);
+        if (!component.fit.found()) continue;
+        // A thread is at least one spacing wide: the band of an outer row keeps all the area the pattern needs to keep it.
+        const double half=std::max(scale_d(component.fit.pitch),spacing)*.5, lengthen=spacing*.5;
+        // A spine lies inside the 0.05 spacing contour along each row, to recognise the parts that keep one.
+        const double spine=.04*spacing;
+        StoredExPolygonCollection bands(storage), spines(storage);
+        for (const ExPolygon area : component.area.readonly())
+            for (const BridgeRows::Row &row : BridgeRows::rows(storage,area,angle,inputs.spacing,component.fit)) {
+                const double from=c*double(row.from.x)+s*double(row.from.y), to=c*double(row.to.x)+s*double(row.to.y);
+                const double across=-s*double(row.from.x)+c*double(row.from.y);
+                const double first=std::min(from,to), last=std::max(from,to);
+                append_quad(bands,{point(first-lengthen,across-half),point(last+lengthen,across-half),
+                    point(last+lengthen,across+half),point(first-lengthen,across+half)});
+                append_quad(spines,{point(first,across-spine),point(last,across-spine),point(last,across+spine),point(first,across+spine)});
+            }
+        StoredExPolygonCollection bare=intersect(storage,sides.readonly(),component.area.readonly());
+        bare=subtract(storage,bare.readonly(),bands.readonly());
+        // Rounding between the bands and the outline only leaves slivers below the boolean precision.
+        if (clipper_offset2(clipper(bare.readonly()),-double(SCALED_EPSILON),double(SCALED_EPSILON)).to_expolygon_collection().empty()) continue;
+        const StoredExPolygonCollection cut=subtract(storage,component.area.readonly(),bare.readonly());
+        // A part cut off with neither core nor row would get no thread either.
+        StoredExPolygonCollection kept(storage);
+        for (const ExPolygon part : cut.readonly()) {
+            StoredExPolygonCollection single(storage);
+            single.push_back(part);
+            if (!intersect(storage,single.readonly(),core).empty() || !intersect(storage,single.readonly(),spines.readonly()).empty())
+                kept.push_back(part);
+        }
+        component.area=std::move(kept);
     }
     return components;
 }

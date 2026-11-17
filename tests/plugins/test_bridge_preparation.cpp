@@ -58,7 +58,10 @@
 #include <catch2/catch.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include "perimeter_test_helpers.hpp"
@@ -934,16 +937,19 @@ TEST_CASE("Uniform bridge expansion adds side area before axial anchors and clip
 
 TEST_CASE("Uniform bridge margins use external perimeter width and preserve the complete frame partition","[plugins][bridge-preparation][bridge-uniform]")
 {
-    for (const std::pair<const char *,double> setting : {std::pair<const char *,double>{"0",0.},{"25%",.2},{"0.3",.3},{"100%",.8}}) {
-        INFO(setting.first);
-        Fixture fixture({{"bridged_infill_uniform_margin",setting.first},{"external_perimeter_extrusion_width","0.8"}});
+    // Across the rows, the margin stops at the bands of the outer rows: with 0.3 mm, five centered 0.5 mm rows leave
+    // 0.05 mm on each side, which goes back to the frame.
+    struct Case { const char *setting; double uniform, across; };
+    for (const Case setting : {Case{"0",0.,0.},Case{"25%",.2,.2},Case{"0.3",.3,.25},Case{"100%",.8,.8}}) {
+        INFO(setting.setting);
+        Fixture fixture({{"bridged_infill_uniform_margin",setting.setting},{"external_perimeter_extrusion_width","0.8"}});
         fixture.frame();fixture.prepare();
         const Surface &bridge=fixture.bridge();
         const BoundingBox bounds=get_extents(bridge.expolygon);
-        CHECK(unscaled(bounds.min.x())==Approx(-3.-setting.second).margin(unscaled(SCALED_EPSILON)));
-        CHECK(unscaled(bounds.max.x())==Approx(3.+setting.second).margin(unscaled(SCALED_EPSILON)));
-        CHECK(unscaled(bounds.min.y())==Approx(-1.-setting.second).margin(unscaled(SCALED_EPSILON)));
-        CHECK(unscaled(bounds.max.y())==Approx(1.+setting.second).margin(unscaled(SCALED_EPSILON)));
+        CHECK(unscaled(bounds.min.x())==Approx(-3.-setting.uniform).margin(unscaled(SCALED_EPSILON)));
+        CHECK(unscaled(bounds.max.x())==Approx(3.+setting.uniform).margin(unscaled(SCALED_EPSILON)));
+        CHECK(unscaled(bounds.min.y())==Approx(-1.-setting.across).margin(unscaled(SCALED_EPSILON)));
+        CHECK(unscaled(bounds.max.y())==Approx(1.+setting.across).margin(unscaled(SCALED_EPSILON)));
         CHECK(bridge.priority==7);CHECK(bridge.thickness_layers==2);CHECK(bridge.extra_perimeters==3);CHECK(bridge.maxNbSolidLayersOnTop==9);
         const LayerSliceIsland &lower=fixture.prepared.print.object(0).layer(0).island(0);
         same_area(view(diff_ex(ExPolygons{bridge.expolygon},ExPolygons{lower.get_slice()})),ExPolygons{rectangle_expolygon(-2,-1,2,1)});
@@ -1478,6 +1484,255 @@ TEST_CASE("A real auxiliary support layer supplies its own actual Z to bridge cl
             REQUIRE(leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr);
             CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()->confidence==BRIDGE_CONFIDENCE_CERTIFIED);
         });
+}
+
+// Bridges grown by a uniform margin and clipped at the part outline, on varied contours. Preparation gives back the
+// additions beside the core that no row covers. These fixtures generate the actual bridge threads and check that
+// they are exactly the rows preparation stored, as BridgeRows predicts them, that no side addition stays outside the
+// bands of these rows, and that the given-back areas return to the ordinary infill (the island stays an exact partition).
+namespace {
+Polygon offset_case_polygon(std::initializer_list<Vec2d> vertices)
+{
+    Points points;
+    for (const Vec2d &p : vertices) points.emplace_back(scale_i(p.x()),scale_i(p.y()));
+    return Polygon(std::move(points));
+}
+
+// How the rows predicted by BridgeRows::rows() on the prepared bridges of an island match the generated bridge threads:
+// counts, threads without a predicted row (or the reverse), and the largest endpoint distance of a matched pair, in mm.
+struct RowFidelity { size_t predicted=0,generated=0,unmatched=0,unfitted=0;double deviation=0.;Polygons bands; };
+// Predict the rows of every prepared bridge of island from the rows preparation stored on it, carried to its outline
+// with the recipe pass's spacing, then pair each generated thread with the nearest predicted row in either direction.
+// Each predicted row pairs at most once, so a missing or duplicated thread counts as unmatched.
+RowFidelity compare_bridge_rows(storage_handle *handle,const Layer &layer,const LayerSliceIsland &island,const Polylines &generated)
+{
+    RowFidelity result;result.generated=generated.size();
+    std::vector<BridgeRows::Row> predicted;
+    namespace Preparation=slic3r_api::BridgePreparation;
+    const slic3r_api::PluginPropertyKey<Preparation::PreparedRows> rows_key=
+        Preparation::prepared_rows_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    for (const LayerRegionIsland &group : island.regions_islands()) {
+        if (group.regions().empty()) continue;
+        const LayerRegion &region=**group.regions().begin();
+        const Flow flow=infill_bridge_flow(layer,region,frSolidInfill);
+        for (const Surface &surface : group.fill_surfaces()) {
+            if (surface.get_property<slic3r_api::BridgeSurfaceInfo>()==nullptr) continue;
+            const slic3r_api::ExPolygon area(reinterpret_cast<const expolygon_handle *>(&surface.expolygon));
+            const Preparation::PreparedRows *stored=rows_key.get(slic3r_api::Surface(reinterpret_cast<const surface_handle *>(&surface)));
+            if (stored==nullptr) { ++result.unfitted;continue; }
+            const BridgeRows::Fit fit=BridgeRows::anchored(area,stored->angle,flow.spacing(),stored->pitch,stored->anchor);
+            for (const BridgeRows::Row &row : BridgeRows::rows(handle,area,stored->angle,flow.spacing(),fit)) {
+                predicted.push_back(row);
+                // The band a row covers: one pitch, and at least one spacing, wide and half a spacing beyond each end.
+                const Vec2d from(double(row.from.x),double(row.from.y)),to(double(row.to.x),double(row.to.y));
+                const Vec2d along=(to-from).normalized(),across(-along.y(),along.x());
+                const Vec2d a=from-along*scale_d(flow.spacing()*.5),b=to+along*scale_d(flow.spacing()*.5);
+                const double half=scale_d(std::max(fit.pitch,double(flow.spacing()))*.5);
+                Polygon band;
+                const Vec2d corners[]={Vec2d(a-across*half),Vec2d(b-across*half),Vec2d(b+across*half),Vec2d(a+across*half)};
+                for (const Vec2d &p : corners)
+                    band.points.emplace_back(coord_t(std::llround(p.x())),coord_t(std::llround(p.y())));
+                if (band.area()<0) band.reverse();
+                result.bands.push_back(std::move(band));
+            }
+        }
+    }
+    result.predicted=predicted.size();
+    std::vector<bool> used(predicted.size(),false);
+    const auto distance=[](const Point &a,const c_point &b) { return unscaled(std::hypot(double(a.x()-b.x),double(a.y()-b.y))); };
+    for (const Polyline &line : generated) {
+        size_t best=predicted.size();double best_deviation=0.;
+        for (size_t idx=0;idx<predicted.size();++idx) {
+            if (used[idx]) continue;
+            const double deviation=std::min(
+                std::max(distance(line.first_point(),predicted[idx].from),distance(line.last_point(),predicted[idx].to)),
+                std::max(distance(line.first_point(),predicted[idx].to),distance(line.last_point(),predicted[idx].from)));
+            if (best==predicted.size() || deviation<best_deviation) { best=idx;best_deviation=deviation; }
+        }
+        if (best==predicted.size()) { ++result.unmatched;continue; }
+        used[best]=true;result.deviation=std::max(result.deviation,best_deviation);
+    }
+    result.unmatched+=size_t(std::count(used.begin(),used.end(),false));
+    return result;
+}
+
+// margin_row: the uniform margin beside the core holds one of the rows fitted to the whole bridge, which the cut must keep.
+void reproduce_offset_anchor(const std::string &name,const std::string &shape,double uniform,
+    double depth=.1,double nozzle=.4,double rotation=0.,double axial=.8,const char *pattern="rectilinear",bool margin_row=false)
+{
+    INFO(name<<" uniform="<<uniform<<" depth="<<depth<<" nozzle="<<nozzle<<" angle="<<rotation<<" pattern="<<pattern);
+    Fixture fixture({{"bridged_infill_margin",std::to_string(axial)},{"bridged_infill_uniform_margin",std::to_string(uniform)},
+        {"nozzle_diameter",std::to_string(nozzle)},{"bridge_angle",std::to_string(rotation)},
+        {"bridge_fill_pattern",pattern},{"fill_pattern","rectilinear"},{"fill_density","20%"}});
+    ExPolygons core{rectangle_expolygon(-2,0,2,2)};
+    ExPolygons upper{rectangle_expolygon(-5,0,5,4)};
+    if (shape=="frame") upper=ExPolygons{rectangle_expolygon(-5,-2,5,4)};
+    else if (shape=="trapezoid") {
+        core=ExPolygons{ExPolygon(offset_case_polygon({{-1,0},{2,0},{2,2},{-2,2}}))};
+        upper=ExPolygons{rectangle_expolygon(-5,0,5,4)};
+    } else if (shape=="chamfer") {
+        upper=ExPolygons{ExPolygon(offset_case_polygon({{-5,0},{2,0},{2.3,-depth},{5,-depth},{5,4},{-5,4}}))};
+    } else if (shape=="round_corner") {
+        Points points{Point(scale_i(-5.),0),Point(scale_i(2.),0)};
+        for (int i=1;i<=24;++i) {
+            const double angle=PI+PI*.5*i/24.;
+            points.emplace_back(scale_i(2.+depth+depth*std::cos(angle)),scale_i(depth*std::sin(angle)));
+        }
+        points.emplace_back(scale_i(5.),-scale_i(depth));points.emplace_back(scale_i(5.),scale_i(4.));
+        points.emplace_back(-scale_i(5.),scale_i(4.));upper=ExPolygons{ExPolygon(Polygon(std::move(points)))};
+    } else {
+        const double end=shape=="thin_finger" ? 2.1 : 5.;
+        append(upper,ExPolygons{rectangle_expolygon(2,-depth,end,0)});upper=union_ex(upper);
+        if (shape=="hole") upper=diff_ex(upper,ExPolygons{rectangle_expolygon(2.3,-depth*.5,2.8,.3)});
+    }
+    // In these fixtures the original core spans y=0..2 and prints along X.
+    // The complement of this slab is only a diagnostic of rows not facing that
+    // core, not a proposed filter: some peripheral rows are perfectly printable.
+    ExPolygons facing{rectangle_expolygon(-20,0,20,2)};
+    for (ExPolygons *areas : {&core,&upper,&facing}) for (ExPolygon &area : *areas) {
+        area.rotate(rotation*PI/180.);area.translate(Point(scale_i(8.),scale_i(4.)));
+    }
+    REQUIRE(upper.size()==1);
+    const ExPolygons lower=diff_ex(upper,core);
+    PrintObject &object=fixture.prepared.print.object(0);
+    for (Layer &layer : object.layers()) for (LayerSliceIsland &island : layer.islands()) {
+        island.overlaps_above.clear();island.overlaps_below.clear();
+    }
+    for (size_t idx=0;idx<2;++idx) {
+        Layer &layer=object.layer(idx);
+        const ExPolygons &areas=idx==0 ? lower : upper;
+        ApiInternal::LayerRegionAccess::slices_mutable(layer.region(0))=areas;
+        ApiInternal::LayerAccess::set_islands(layer,ExPolygons(areas));
+        for (LayerSliceIsland &island : layer.islands()) {
+            island.fill_regions(layer);ApiInternal::LayerIslandAccess::set_infill_areas(island,ExPolygons{island.get_slice()});
+        }
+    }
+    Layer::build_up_down_graph(object.layer(0),object.layer(1));
+    SurfaceCollection &input=fixture.island().get_or_add_region_island(fixture.island().regions(),0).set_fill_surfaces();
+    input.append(core,stPosBottom|stDensSolid|stModBridge);
+    input.append(lower,stPosInternal|stDensSparse);
+    fixture.prepare();
+    ExPolygons bridges,ordinary,all;
+    for (const LayerRegionIsland &group : fixture.island().regions_islands()) for (const Surface &surface : group.fill_surfaces()) {
+        all.push_back(surface.expolygon);
+        if (surface.get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr) bridges.push_back(surface.expolygon);
+        else ordinary.push_back(surface.expolygon);
+    }
+    REQUIRE_FALSE(bridges.empty());
+    // Verify exact partition and multiplicity, rather than only the total area.
+    same_area(view(all),upper);
+    CHECK(intersection_ex(bridges,ordinary).empty());
+    double summed=0.;for (const ExPolygon &area : all) summed+=area.area();
+    CHECK(summed==Approx(area(upper)).margin(1e-6/(SCALING_FACTOR*SCALING_FACTOR)));
+    same_area(view(diff_ex(bridges,lower)),core);
+    const ExPolygons anchors=diff_ex(bridges,core),peripheral=diff_ex(bridges,facing);
+    same_area(view(diff_ex(peripheral,lower)),ExPolygons{});
+    if (uniform==0.) CHECK(area(peripheral)*SCALING_FACTOR*SCALING_FACTOR<1e-6);
+    Polylines rows;Polygons footprints;
+    std::vector<double> widths;
+    {
+        Active active({"surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells",
+            "infill.generator.default","rectilinear","monotonic","infill.post_process.full_fill_volume","infill.post_process.gap_fill"});
+        Steps::StepGenerateInfill::run_step(Orchestrator::instance(),fixture.prepared.print);
+        Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print);
+        for (const LayerRegionIsland &group : fixture.island().regions_islands()) if (group.has_extrusion(LayerRegionIsland::INFILLS))
+            visit_leaves(group.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attr) {
+                if (attr.role!=ExtrusionRole::BridgeInfill) return;
+                const Polyline line=leaf.polyline_ref().to_polyline();
+                REQUIRE(line.points.size()>=2);
+                rows.push_back(line);widths.push_back(attr.width);
+                append(footprints,offset(line,scale_d(attr.width*.5),ClipperLib::jtMiter,3.,ClipperLib::etOpenButt));
+            });
+    }
+    REQUIRE_FALSE(rows.empty());
+    {
+        // Every generated thread must be a predicted row: preparation cut the anchor additions along these rows.
+        PluginStorage storage;
+        const RowFidelity fidelity=compare_bridge_rows(reinterpret_cast<storage_handle *>(&storage),
+            fixture.prepared.print.object(0).layer(1),fixture.island(),rows);
+        INFO("predicted "<<fidelity.predicted<<" generated "<<fidelity.generated<<" unmatched "<<fidelity.unmatched<<
+            " unfitted "<<fidelity.unfitted<<" deviation "<<fidelity.deviation);
+        if (const char *path=std::getenv("SLIC3R_BRIDGE_ROWS_FIDELITY")) {
+            std::ofstream out(path,std::ios::app);
+            out<<name<<' '<<pattern<<' '<<fidelity.predicted<<' '<<fidelity.generated<<' '<<fidelity.unmatched<<' '
+               <<fidelity.unfitted<<' '<<fidelity.deviation<<'\n';
+        }
+        CHECK(fidelity.unfitted==0);
+        CHECK(fidelity.unmatched==0);
+        // Same integer row positions; only the rounding of the rotations may move an endpoint by about one unit.
+        CHECK(fidelity.deviation<1e-5);
+        // No side addition stays outside the bands of the actual rows, up to rounding slivers.
+        const ExPolygons bare=opening_ex(diff_ex(peripheral,union_ex(fidelity.bands)),scale_d(.005));
+        INFO("bare side area "<<area(bare)*SCALING_FACTOR*SCALING_FACTOR);
+        CHECK(area(bare)*SCALING_FACTOR*SCALING_FACTOR<1e-6);
+    }
+    const ExPolygons blank=diff_ex(peripheral,union_ex(footprints));
+    // The thin clipped corner of the sketch: its side strip gets no row and returns entirely to the infill.
+    if (shape=="square_corner" && uniform==.1 && depth==.1 && nozzle==.4 && rotation==0.)
+        CHECK(area(peripheral)*SCALING_FACTOR*SCALING_FACTOR<1e-6);
+    // With a full inset frame and uniform >= one nozzle diameter, there must be
+    // room for peripheral rows. This guards against declaring all offset bands bad.
+    if ((shape=="frame" && uniform>=nozzle) || margin_row) CHECK_FALSE(intersection_pl(rows,to_polygons(peripheral)).empty());
+    if (const char *path=std::getenv("SLIC3R_BRIDGE_OFFSET_DUMP")) {
+        std::ofstream out(path,std::ios::app);
+        REQUIRE(out.good());
+        out<<std::setprecision(12)<<"case "<<name<<' '<<uniform<<' '<<nozzle<<' '<<depth<<' '<<rotation<<' '<<axial<<'\n';
+        const auto dump=[&out](const char *label,const ExPolygons &areas) {
+            for (const ExPolygon &area : areas) {
+                out<<label;
+                for (const Point &point : area.contour.points) out<<' '<<unscaled(point.x())<<','<<unscaled(point.y());
+                out<<'\n';
+                for (const Polygon &hole : area.holes) {
+                    out<<"hole";
+                    for (const Point &point : hole.points) out<<' '<<unscaled(point.x())<<','<<unscaled(point.y());
+                    out<<'\n';
+                }
+            }
+        };
+        dump("upper",upper);dump("lower",lower);dump("core",core);dump("bridge",bridges);
+        dump("anchor",anchors);dump("peripheral",peripheral);dump("blank",blank);
+        for (size_t idx=0;idx<rows.size();++idx) {
+            out<<"row "<<widths[idx];
+            for (const Point &p : rows[idx].points) out<<' '<<unscaled(p.x())<<','<<unscaled(p.y());
+            out<<'\n';
+        }
+        out<<"end\n";
+    }
+}
+} // namespace
+
+TEST_CASE("Uniform bridge offsets leave clipped peripheral anchor tabs on varied contours","[plugins][bridge-preparation][bridge-offset-tabs]")
+{
+    for (const std::string shape : {"frame","trapezoid","square_corner","chamfer","round_corner","thin_finger","hole"})
+        for (const double turn : {0.,std::atan2(3.,4.)*180./PI,90.})
+            for (const double uniform : {.1,.25,.6})
+                reproduce_offset_anchor(shape+"_"+std::to_string(int(turn))+"_"+std::to_string(uniform),shape,uniform,.1,.4,turn);
+}
+
+TEST_CASE("Predicted bridge rows match monotonic threads on varied contours","[plugins][bridge-preparation][bridge-offset-tabs]")
+{
+    for (const std::string shape : {"frame","trapezoid","square_corner","chamfer","round_corner","thin_finger","hole"})
+        for (const double turn : {0.,std::atan2(3.,4.)*180./PI,90.})
+            reproduce_offset_anchor("monotonic_"+shape+"_"+std::to_string(int(turn)),shape,.25,.1,.4,turn,.8,"monotonic");
+}
+
+TEST_CASE("Clipped bridge tabs span half-nozzle depths without imposing a filter","[plugins][bridge-preparation][bridge-offset-tabs]")
+{
+    // With a 0.8 mm nozzle, three 0.89 mm rows fit the bridge and the third one lies in the 0.6 mm margin above the core.
+    for (const double nozzle : {.25,.4,.8}) for (const double delta : {-.001,0.,.001})
+        reproduce_offset_anchor("depth_"+std::to_string(nozzle)+"_"+std::to_string(delta),"square_corner",nozzle*.75,nozzle/2.+delta,nozzle,
+            0.,.8,"rectilinear",nozzle==.8);
+}
+
+TEST_CASE("Offset tab controls distinguish axial anchors and printable peripheral rows","[plugins][bridge-preparation][bridge-offset-tabs]")
+{
+    for (const double axial : {0.,.05,.8})
+        reproduce_offset_anchor("axial_control_"+std::to_string(axial),"square_corner",0.,.1,.4,0.,axial);
+    for (const double axial : {0.,.05,.2})
+        reproduce_offset_anchor("short_axial_"+std::to_string(axial),"square_corner",.1,.1,.4,0.,axial);
+    for (const double depth : {.02,.1,.4,.8})
+        reproduce_offset_anchor("tab_depth_"+std::to_string(depth),"square_corner",.6,depth);
+    reproduce_offset_anchor("wide_frame","frame",.8);
 }
 
 TEST_CASE("Bridge preparation detects its direction and respects explicit zero and half turns","[plugins][bridge-preparation]")

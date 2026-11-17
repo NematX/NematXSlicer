@@ -21,6 +21,7 @@
 
    Distances are in millimeters except the scaled phase; angles are in radians. Inputs stay unchanged and
    temporary geometry belongs to the caller's storage. */
+#include <vector>
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 namespace slic3r_api { namespace BridgeRows {
@@ -51,5 +52,11 @@ coord_t anchor(const ExPolygon &area, double angle, const Fit &fit);
 // side of area's rotated bounding box, between zero and the pattern's line spacing. Coverage and overflow are not
 // scored and stay zero; an invalid spacing or pitch gives a Fit that is not found().
 Fit anchored(const ExPolygon &area, double angle, double spacing, double pitch, coord_t anchor);
+// One predicted bridge thread: a straight segment between two scaled points of the area's frame.
+struct Row { c_point from, to; };
+// The rows that the rectilinear patterns draw on area for a found fit, as fit() models them: the line spacing that the
+// recipe's density gives, the first line at fit.phase from the rotated bounding box, and every interval of the 0.05
+// spacing contour that meets the 0.48 spacing contour. A fit that is not found() gives no row.
+std::vector<Row> rows(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const Fit &fit);
 }}
 #endif
