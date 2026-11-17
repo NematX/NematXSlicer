@@ -32,8 +32,6 @@ the production stage validates them; plugin execution never repairs these trees.
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepPostSlicing.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
-#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
-#include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 
 namespace {
 
@@ -141,45 +139,41 @@ TEST_CASE("CreateRetraction classifies a routed hole crossing without bypassing 
         {"retract_before_travel", mode == 1 ? "100" : "0.5"}, {"retract_layer_change", "0"},
         {"retract_length", "2"}, {"fill_density", "20%"}
     });
+    // A sliced normal layer with a central hole: auxiliary layers are off object and are not routed.
     Print print;
     Model model;
-    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model, config);
-    Polygon contour({Point(0, 0), Point(scale_i(30.), 0), Point(scale_i(30.), scale_i(30.)), Point(0, scale_i(30.))});
-    contour.make_counter_clockwise();
-    Polygon hole({Point(scale_i(10.), scale_i(10.)), Point(scale_i(20.), scale_i(10.)),
-                  Point(scale_i(20.), scale_i(20.)), Point(scale_i(10.), scale_i(20.))});
-    hole.make_clockwise();
-    const ExPolygons subject{ExPolygon(std::move(contour), {std::move(hole)})};
-    PluginStorage storage;
-    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
-    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&print.object(0)));
-    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
-        reinterpret_cast<storage_handle *>(&storage), print_view, object_view,
-        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
-        scale_i(.2), scale_i(.2), scale_i(.1));
-    REQUIRE(built.created);
-    Layer &native_layer = *reinterpret_cast<Layer *>(const_cast<layer_handle *>(built.layer.handle()));
-    ApiInternal::LayerIslandAccess::perimeter_slices_mutable(native_layer.island(0)) = subject;
-    const slic3r_api::LayerRegionIsland region = built.layer.island(0).get_or_create_full_region_island(0);
-    REQUIRE(region.valid());
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_with_hole}, print, model, config);
+    print.set_status_silent();
+    print.process();
+    print.pipeline_progress().reset();
+    PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() > 1);
+    Layer &source_layer = object.layer(1);
+    REQUIRE(source_layer.lslices().size() == 1);
+    REQUIRE(source_layer.lslices().front().holes.size() == 1);
+    LayerSliceIsland &island = source_layer.island(0);
+    LayerRegionIsland &region = island.get_or_add_region_island(island.regions(), 0);
+    // The hole spans 5 mm on each side of the center and the part 10 mm.
+    const Point center = get_extents(source_layer.lslices()).center() + object.instances().front().shift;
     PrintingPlan &plan = print.mutable_printing_plan();
-    const PrintingObjectInstanceId catalog = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.clear();
+    const PrintingObjectInstanceId catalog = plan.find_or_add_object_instance(object, 0);
     plan.groups.emplace_back();
+    // Like a built plan, the group lists the instance it prints.
+    plan.groups.back().printing_catalog_ids.push_back(catalog);
     plan.groups.back().layers.emplace_back();
     PrintingLayerGroup &layer = plan.groups.back().layers.back();
-    layer.print_z = scale_i(.2);
+    layer.print_z = source_layer.scaled_print_z();
     layer.tool_groups.emplace_back();
     PrintingToolGroup &tool = layer.tool_groups.back();
     tool.extruder_id = 0;
-    const c_point shift = object_view.instance_shift(0);
-    for (const double x : {4., 25.}) {
+    for (const double x : {-8., 7.}) {
         std::unique_ptr<ExtrusionPath> path = make_print_path(0., 1.);
-        path->set_polyline(ArcPolyline(Points{Point(scale_i(x) + shift.x, scale_i(15.) + shift.y),
-            Point(scale_i(x + 1.) + shift.x, scale_i(15.) + shift.y)}));
+        path->set_polyline(ArcPolyline(Points{center + Point(scale_i(x), 0), center + Point(scale_i(x + 1.), 0)}));
         if (mode == 2) path->get_or_add_property<ExtrusionPropertyModifier>().enforce_retraction = 1;
         if (mode == 3) path->get_or_add_property<ExtrusionPropertyModifier>().disable_retraction = 1;
         append_printing_extrusion(tool, path->clone_canonical());
-        tool.extrusions.back().region_island = reinterpret_cast<const LayerRegionIsland *>(region.handle());
+        tool.extrusions.back().region_island = &region;
         tool.extrusions.back().printing_catalog_id = catalog;
     }
     const char *travel = avoiding ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN;
