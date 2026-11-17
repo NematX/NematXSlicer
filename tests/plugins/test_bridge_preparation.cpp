@@ -866,9 +866,9 @@ TEST_CASE("Uniform bridge expansion adds side area before axial anchors and clip
         slic3r_api::StoredExPolygonCollection expanded=BridgeGeometry::expand_bridge(handle,view(core),view(domain),angle,scale_i(1.),scale_i(.5));
         const ExPolygons &native=*reinterpret_cast<const ExPolygons *>(expanded.readonly().handle());
         REQUIRE(native.size()==1);
-        // A round .5 mm offset adds perimeter*r + pi*r*r. The following axial
-        // sweep adds 2*1 mm times the widened height of 3 mm.
-        CHECK(native.front().area()*SCALING_FACTOR*SCALING_FACTOR==Approx(8.+12.*.5+PI*.25+6.).margin(.002));
+        // A mitered .5 mm offset adds perimeter*r + 4*r*r: its corners stay square. The
+        // following axial sweep adds 2*1 mm times the widened height of 3 mm.
+        CHECK(native.front().area()*SCALING_FACTOR*SCALING_FACTOR==Approx(8.+12.*.5+4.*.25+6.).margin(1e-4));
         ExPolygons aligned=native;
         for (ExPolygon &area : aligned) area.rotate(-angle);
         const BoundingBox bounds=get_extents(aligned);

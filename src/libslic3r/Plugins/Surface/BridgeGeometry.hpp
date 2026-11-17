@@ -37,7 +37,7 @@ StoredExPolygonCollection intersect(storage_handle *storage, const ExPolygonColl
 // Geometry/allocation failures and cancellation through the borrowed context propagate.
 StoredExPolygonCollection axial_expand(storage_handle *storage, const ExPolygonCollection &core,
     const ExPolygonCollection &domain, double angle, coord_t margin, const plugin_run_context *ctx = nullptr);
-// Add a round uniform margin within domain, retaining only components meeting core,
+// Add a mitered uniform margin within domain, retaining only components meeting core,
 // then extend their ends axially. Zero uniform margin preserves axial_expand().
 // Inputs are borrowed; results use storage. Geometry failures and cancellation propagate.
 StoredExPolygonCollection expand_bridge(storage_handle *storage, const ExPolygonCollection &core,

@@ -532,15 +532,16 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
             // local support request. The request itself does not count as lower material.
             ClipperContext clipper(run_ctx->plugin_storage);
             StoredExPolygonCollection deficient(run_ctx->plugin_storage);
+            // Footprints end flat at the thread ends: a cap past them would count area the thread does not cover.
             if (peripheral || info.core_rule==2) {
                 StoredPolyline unsupported(run_ctx->plugin_storage);
                 for (const double position : {gap.first,gap.second})
                     unsupported.push_back({start.x+scale_i(position*ux),start.y+scale_i(position*uy)});
-                deficient=clipper_offset(clipper(unsupported.readonly()),scale_d(width*.5),CLIPPER_JOIN_ROUND,3.,CLIPPER_END_OPEN_ROUND).to_expolygon_collection();
+                deficient=clipper_offset(clipper(unsupported.readonly()),scale_d(width*.5),CLIPPER_JOIN_MITER,3.,CLIPPER_END_OPEN_BUTT).to_expolygon_collection();
                 StoredExPolygonCollection prepared(run_ctx->plugin_storage);prepared.push_back(work.surface.expolygon());
                 deficient=intersect(run_ctx->plugin_storage,deficient.readonly(),prepared.readonly());
             } else {
-                StoredExPolygonCollection footprint=clipper_offset(clipper(line.readonly()),scale_d(width*.5),CLIPPER_JOIN_ROUND,3.,CLIPPER_END_OPEN_ROUND).to_expolygon_collection();
+                StoredExPolygonCollection footprint=clipper_offset(clipper(line.readonly()),scale_d(width*.5),CLIPPER_JOIN_MITER,3.,CLIPPER_END_OPEN_BUTT).to_expolygon_collection();
                 deficient=intersect(run_ctx->plugin_storage,footprint.readonly(),work.core.readonly());
             }
             const ExPolygonCollection requested(ctx.get_requested_support_areas(work.island.handle()));
