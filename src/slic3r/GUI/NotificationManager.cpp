@@ -1766,7 +1766,8 @@ void NotificationManager::SlicingProgressNotification::init()
 void NotificationManager::SlicingProgressNotification::count_lines()
 {
 	PopNotification::count_lines();
-	if (m_text2 != "") {
+	if (m_sp_state == SlicingProgressState::SP_PROGRESS) {
+		// Keep the two-line progress layout while the secondary status is empty.
 		m_lines_count = 4;
 	}
 }
@@ -1907,32 +1908,20 @@ bool  NotificationManager::SlicingProgressNotification::update_state(bool paused
 void NotificationManager::SlicingProgressNotification::render_text(ImGuiWrapper& imgui, const float win_size_x, const float win_size_y, const float win_pos_x, const float win_pos_y)
 {
 	if (m_sp_state == SlicingProgressState::SP_PROGRESS /*|| (m_sp_state == SlicingProgressState::SP_COMPLETED && !m_sidebar_collapsed)*/) {
-		if (m_text2 == "") {
-			ProgressBarNotification::render_text(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y);
-		} else {
-			////two line text, two line bar
-			//ImGui::SetCursorPosX(m_left_indentation);
-			//ImGui::SetCursorPosY(-m_line_height*2);
-			//imgui.text(m_text1.c_str());
-			//if (m_has_cancel_button)
-			//	render_cancel_button(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y);
-			//ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, -m_line_height, m_percentage, m_render_percentage);
-			//ImGui::SetCursorPosX(m_left_indentation);
-			//ImGui::SetCursorPosY(0);
-			//imgui.text(m_text2.c_str());
-			//ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, m_line_height, m_percentage, m_render_percentage);
-		// two lines text (what doesnt fit, wont show), one line bar
-			ImGui::SetCursorPosX(m_left_indentation);
-			ImGui::SetCursorPosY(m_line_height / 4);
-			imgui.text(m_text1.c_str());
+		// Keep both rows in the same positions while the secondary status changes.
+		ImGui::SetCursorPosX(m_left_indentation);
+		ImGui::SetCursorPosY(m_line_height / 4);
+		imgui.text(m_text1.c_str());
+		if (!m_text2.empty()) {
 			ImGui::SetCursorPosX(m_left_indentation);
 			ImGui::SetCursorPosY(m_line_height * 2 + m_line_height / 4);
 			imgui.text(m_text2.c_str());
-			if (m_has_cancel_button)
-				render_cancel_button(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y);
-			ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, -m_line_height, m_percentage, false);
-			ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, m_line_height, m_percentage2, true);
 		}
+		if (m_has_cancel_button)
+			render_cancel_button(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y);
+		ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, -m_line_height, m_percentage, false);
+		if (!m_text2.empty())
+			ProgressBarNotification::render_bar(imgui, win_size_x, win_size_y, win_pos_x, win_pos_y, m_line_height, m_percentage2, true);
 		/* // enable for hypertext during slicing (correct call of export_enabled needed)
 		if (m_multiline) {
 			// two lines text, one line bar
