@@ -20,7 +20,8 @@ views. Parallel workers mutate only their own layer's process phases.
         -> write_outgoing_retraction / write_incoming_retraction: E-axis events
 
 The preview reuses the perimeter travel provider's router before any wipe is
-created. Missing provenance and unknown travel providers retain retraction;
+created; Advanced travel with its legacy planner uses the same routes. Missing
+provenance, unknown travel providers and the zone planner retain retraction;
 explicit requests, tool changes and configured layer changes are not suppressed.
 */
 
@@ -1002,8 +1003,14 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
     const orchestrator_plugin_handle *travel_provider = orchestrator_select_plugin(
         m_orchestrator, print_config.handle(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     const char *travel_id = orchestrator_plugin_id(travel_provider);
-    const bool perimeter_avoiding = travel_id != nullptr &&
-        std::strcmp(travel_id, "layer_extrusion_edit.travel.avoid_crossing_perimeters") == 0;
+    // Advanced travel routes like the perimeter-avoiding provider unless its zone planner is selected.
+    const bool advanced_legacy_routes = travel_id != nullptr &&
+        std::strcmp(travel_id, "layer_extrusion_edit.travel.advanced") == 0 &&
+        orchestrator_select_plugin(m_orchestrator, print_config.handle(), STEP_LAYER_EXTRUSION_EDIT,
+                                   "layer_extrusion_edit.travel.advanced.planner") !=
+            orchestrator_find_plugin(m_orchestrator, "layer_extrusion_edit.travel.advanced.planner.advanced");
+    const bool perimeter_avoiding = advanced_legacy_routes || (travel_id != nullptr &&
+        std::strcmp(travel_id, "layer_extrusion_edit.travel.avoid_crossing_perimeters") == 0);
     const bool known_travel_provider = perimeter_avoiding || (travel_id != nullptr &&
         std::strcmp(travel_id, "layer_extrusion_edit.travel.default") == 0);
 
