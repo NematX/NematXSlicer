@@ -180,8 +180,9 @@ TEST_CASE("A setting without an Orca equivalent is omitted and counted once",
 {
     DynamicPrintConfig config = make_config({{"resolution_internal", "0.0125"}, {"avoid_crossing_not_first_layer", "1"}});
     const BambuConfigTranslation translation = translate_config_to_bambu(config);
-    // None of them is an Orca setting, so none keeps its SuperSlicer name.
-    for (const char *ss_key : {"resolution_internal", "avoid_crossing_not_first_layer", "gcode_flavor", "platter_fan", "printer_model_id"})
+    // None of them is an Orca setting, so none keeps its SuperSlicer name. gcode_flavor selects the firmware here and is
+    // written under Orca's key of the same name.
+    for (const char *ss_key : {"resolution_internal", "avoid_crossing_not_first_layer", "platter_fan", "printer_model_id"})
         CHECK(find_entry(translation, ss_key) == nullptr);
     const std::vector<std::string>::difference_type counts = std::count_if(translation.warnings.begin(), translation.warnings.end(),
         [](const std::string &warning) { return warning.find("have no Orca equivalent") != std::string::npos; });
