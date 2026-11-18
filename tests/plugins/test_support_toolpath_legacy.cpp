@@ -991,8 +991,9 @@ TEST_CASE("Contact groups retain their declaring provider and elect complete sel
     const char *group = top ? Common::k_top_contact_role : Common::k_bottom_contact_role;
     const char *native_id = top ? Common::k_legacy_top_contact_id : Common::k_legacy_bottom_contact_id;
     const std::string native_label = top ? "Top support contact" : "Bottom support contact";
-    const std::string native_tooltip = top ? "Selects the algorithm that prints support contacts above the support." :
-        "Selects the algorithm that prints support contacts below the object.";
+    const std::string native_tooltip = top ?
+        "Algorithm that prints the topmost support layer, directly under the supported surface of the object." :
+        "Algorithm that prints the support layer resting directly on the object, below the bottom interface.";
     const Orchestrator::ExclusiveGroupDefinition *native = host.exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
     REQUIRE(native != nullptr);
     CHECK(native->plugin_id == native_id);
