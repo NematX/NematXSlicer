@@ -98,6 +98,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/DefaultInfillGenerator.hpp"
 #include "libslic3r/Plugins/Infill/EnsuringPattern.hpp"
 #include "libslic3r/Plugins/Infill/GyroidPattern.hpp"
+#include "libslic3r/Plugins/Infill/InternalBridgeAnchors.hpp"
 #include "libslic3r/Plugins/Infill/PostFullFillVolume.hpp"
 #include "libslic3r/Plugins/Infill/PostInfillGapFill.hpp"
 #include "libslic3r/Plugins/Infill/Rectilinear/RectilinearPatterns.hpp"
@@ -865,6 +866,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::Infill::PostFullFillVolumePlugin::register_post_full_fill_volume_plugin(
             orchestrator_handle_value);
+        slic3r_api::Infill::InternalBridgeAnchorsPlugin::register_internal_bridge_anchors_plugin(
+            orchestrator_handle_value);
         slic3r_api::DenseInfillPlugin::register_dense_infill_plugins(orchestrator_handle_value);
         slic3r_api::Ordering::DefaultOrderingPlugin::register_default_ordering_plugins(orchestrator_handle_value);
         slic3r_api::WipeTower::register_wipe_tower_manager_plugin(orchestrator_handle_value);
@@ -1152,6 +1155,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "surface.solid_shells");
         activate_plugin_or_fail(orchestrator, "surface.bridge_preparation");
         activate_plugin_or_fail(orchestrator, "infill.recipe.bridge_preparation");
+        activate_plugin_or_fail(orchestrator, "infill.post_process.internal_bridge_anchors");
         activate_plugin_or_fail(orchestrator, "bridge.finalize_surface_volume");
         activate_plugin_or_fail(orchestrator, "bridge.finalize_volume");
         activate_plugin_or_fail(orchestrator, "surface.top_surface_expansion");
@@ -1211,6 +1215,7 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("bridge.finalize_surface_volume", false);
         orchestrator.set_plugin_active("bridge.finalize_volume", false);
         orchestrator.set_plugin_active("infill.recipe.bridge_preparation", false);
+        orchestrator.set_plugin_active("infill.post_process.internal_bridge_anchors", false);
         orchestrator.set_plugin_active("surface.bridge_preparation", false);
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         orchestrator.set_plugin_active("com.example.selector", false);

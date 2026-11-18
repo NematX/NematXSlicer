@@ -81,7 +81,7 @@ public:
         Orchestrator &host = Orchestrator::instance();
         for (Plugin *plugin : host.active_plugins())
             previous.push_back(plugin);
-        for (const char *id : {"surface.bridge_preparation", "infill.recipe.bridge_preparation", "bridge.finalize_surface_volume"})
+        for (const char *id : {"surface.bridge_preparation", "infill.recipe.bridge_preparation", "infill.post_process.internal_bridge_anchors", "bridge.finalize_surface_volume"})
             REQUIRE(host.set_plugin_active(id, enabled));
         REQUIRE(host.set_plugin_active("bridge.finalize_volume", enabled && experimental));
         REQUIRE(host.set_plugin_active(ordering, true));
@@ -1052,7 +1052,7 @@ TEST_CASE("Fresh profiles activate the complete bridge feature with compensation
     REQUIRE(input.good());
     std::ostringstream contents;
     contents << input.rdbuf();
-    for (const char *id : {"surface.bridge_preparation", "infill.recipe.bridge_preparation", "bridge.finalize_surface_volume", "bridge_detector.default"})
+    for (const char *id : {"surface.bridge_preparation", "infill.recipe.bridge_preparation", "infill.post_process.internal_bridge_anchors", "bridge.finalize_surface_volume", "bridge_detector.default"})
         CHECK(contents.str().find(std::string(id) + " = 1") != std::string::npos);
     CHECK(contents.str().find("bridge.finalize_volume = 1") != std::string::npos);
     const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -1089,7 +1089,7 @@ TEST_CASE("Bridge and ensuring declared settings pass a linear STL slicing and e
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Activation active(true);
     Orchestrator &host = Orchestrator::instance();
-    const std::vector<std::string> ids{"surface.bridge_preparation", "infill.recipe.bridge_preparation", "bridge.finalize_surface_volume", "bridge.finalize_volume", "ensuring"};
+    const std::vector<std::string> ids{"surface.bridge_preparation", "infill.recipe.bridge_preparation", "infill.post_process.internal_bridge_anchors", "bridge.finalize_surface_volume", "bridge.finalize_volume", "ensuring"};
     const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
     DynamicPrintConfig baseline = bridge_config(false);
     // Keep the fast fixture's printer/export setup, but use actual default
@@ -1122,6 +1122,7 @@ TEST_CASE("Bridge and ensuring declared settings pass a linear STL slicing and e
         {"full density with a full-capable pattern",{{"fill_density","100%"},{"fill_pattern","rectilinear"}}}}});
     add_values("internal_bridge_min_width", {"0", "0.5", "500%"});
     add_values("internal_bridge_expansion", {"0", "1"});
+    add_values("infill_overlap", {"0", "0.1", "50%"});
     add_values("fill_angle", {"0", "30"});
     add_values("fill_angle_increment", {"0", "90"});
     add_values("fill_angle_cross", {"0", "1"});

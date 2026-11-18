@@ -2,7 +2,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #ifndef slic3r_BridgePreparation_hpp_
 #define slic3r_BridgePreparation_hpp_
-/* Register the passes that choose bridge directions and expand their fill areas.
+/* Register the passes that choose bridge directions and expand external bridge fill areas.
 
    The loader first registers the pass that changes surfaces, then the pass that
    sets their infill parameters. Volume correction is registered in BridgeVolume.hpp.

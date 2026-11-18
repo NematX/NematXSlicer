@@ -1,16 +1,19 @@
 ///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
-/* Move bridge edge gaps over lower material and give bridge threads longer anchors.
-   Grow their fill areas uniformly, then along the direction in which they print.
+/* Move bridge edge gaps over lower material and give external bridge threads longer anchors.
+   Grow external bridge fill areas uniformly, then along the direction in which they print.
 
    This plugin also marks the first solid cover over internal sparse or void as
-   an internal bridge, including a top cover. It retains the internal width and
-   expansion settings; external margins never grow an internal bridge.
+   an internal bridge, including a top cover. It retains the internal width
+   setting and records internal_bridge_expansion, but never grows an internal
+   bridge: infill.post_process.internal_bridge_anchors (InternalBridgeAnchors.cpp)
+   extends its generated threads to the actual extrusions around them.
 
-   This plugin chooses a direction for each unsupported bottom area, then extends
-   into nearby internal infill areas above the model's lower slices. Uniform growth
-   can add peripheral rows outside the unsupported area. The experimental volume provider checks
-   their actual lower contacts when selected. Preparation does not generate supports or change flow.
+   This plugin chooses a direction for each unsupported bottom area, then grows
+   external bridge areas into nearby infill above the model's lower slices. Uniform
+   growth can add peripheral rows outside the unsupported area. The experimental volume
+   provider checks their actual lower contacts when selected. Preparation does not
+   generate supports or change flow.
 
    The rows of each prepared bridge are fitted here, within bridge_overlap and bridge_overlap_min
    (BridgeRows.hpp), and stored on its surfaces as PreparedRows with their direction. Clipped at the part outline, uniform
@@ -45,7 +48,6 @@
            |   |-- append_prepared() [external geometry, metadata and rows]
            |   `-- prepare_internal()
            |       |-- direction() [detection, or perpendicular sparse fallback]
-           |       |-- expand_bridge() [internal end expansion only]
            |       |-- fit_components()
            |       `-- append_prepared() [internal classification, metadata and rows]
            `-- set_region_island_fill_surfaces() [host callback, one collection at a time]
@@ -143,7 +145,7 @@ struct PreparedComponent { StoredExPolygonCollection area; BridgeRows::Fit fit; 
     assert(false && "Broken bridge preparation invariant");
     throw std::runtime_error(message);
 }
-// Choose directions and extend bridge areas in one island without changing its
+// Choose directions and grow external bridge areas in one island without changing its
 // input surfaces. Throw if region ownership or the resulting area partition is invalid;
 // the caller then drops the island's private outputs, so it keeps its input surfaces.
 void prepare_island(orchestrator_handle *orch, const run_ctx_surface_generation &ctx, storage_handle *storage,
@@ -189,8 +191,9 @@ std::vector<InternalCandidate> internal_candidates(storage_handle *storage,const
 // Find lower internal sparse/void, excluding full-density sparse and perimeter bands.
 // The returned union is owned by storage and uses each lower region's own density.
 StoredExPolygonCollection lower_sparse(storage_handle *storage,const LayerIsland &island,const std::vector<Destination> &outputs);
-// Convert first solid covers and optionally extend their ends within this region's
-// eligible infill. Reserve each claimed area once before ordinary surfaces publish.
+// Convert first solid covers, without growing them. Reserve each claimed area once
+// before ordinary surfaces publish.
+// Publish each first solid internal cover at its original core geometry and record whether its generated threads may be extended later.
 void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation &ctx,storage_handle *storage,
     const LayerIsland &island,uint32_t layer_idx,uint32_t island_idx,const std::vector<Piece> &pieces,
     const std::vector<InternalCandidate> &candidates,const ExPolygonCollection &sparse,const ExPolygonCollection &lower,size_t first_destination,
@@ -207,7 +210,7 @@ private:
     // Name the bridge-area pass in the plugin UI.
     const char *name_impl() const noexcept override { return "Bridge surface preparation"; }
     // Describe its geometry changes without claiming a physical bridge simulation.
-    const char *description_impl() const noexcept override { return "Chooses bridge directions, widens bridge areas and extends their anchors within available infill."; }
+    const char *description_impl() const noexcept override { return "Chooses bridge directions and widens external bridge areas."; }
     // Run while typed fill surfaces can still be reassigned.
     slicing_step_t step_impl() const noexcept override { return STEP_SURFACE_GENERATION; }
     // Wait for solid areas to be classified and for the bridge direction detector.
@@ -800,6 +803,7 @@ std::vector<InternalCandidate> internal_candidates(storage_handle *storage,const
     return candidates;
 }
 
+// Publish each internal bridge at its core geometry, reserve that geometry for this island, and record whether later infill may extend its rows.
 void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation &ctx,storage_handle *storage,
     const LayerIsland &island,uint32_t layer_idx,uint32_t island_idx,const std::vector<Piece> &pieces,
     const std::vector<InternalCandidate> &candidates,const ExPolygonCollection &sparse,const ExPolygonCollection &lower,size_t first_destination,
@@ -812,40 +816,24 @@ void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation
         throw_if_cancelled(run_ctx);
         const Piece &piece=pieces[candidate.piece];const Config config=piece.region.print_region().config();
         Config fallback=config;uint32_t fallback_layer=layer_idx;
-        const c_flow solid=piece.region.flow(RAW_EXTRUSION_ROLE_SOLID_INFILL);
-        double reach=unscaled(solid.spacing);
         bool found=false;
         for (const LayerIsland lower_island : island.lower_islands())
-            for (uint32_t j=0;j<lower_island.region_island_count();++j)
+            for (uint32_t j=0;j<lower_island.region_island_count() && !found;++j)
                 for (const LayerRegion owner : lower_island.region_island(j).regions()) {
                     const StoredExPolygonCollection overlap=intersect(storage,candidate.core.readonly(),owner.slices());
                     if (overlap.empty()) continue;
                     const Config lower_config=owner.print_region().config();
                     const double density=lower_config.get("fill_density").get_effective_value(1.);
-                    if (density>0. && density<1.) {
-                        // One lower sparse pitch reaches the next possible supporting
-                        // line without importing extrusion footprints into this pass.
-                        reach=std::max(reach,unscaled(owner.flow(RAW_EXTRUSION_ROLE_INTERNAL_INFILL).spacing)/density);
-                        if (!found) { fallback=lower_config;fallback_layer=layer_idx-1;found=true; }
-                    }
+                    if (density>0. && density<1.) { fallback=lower_config;fallback_layer=layer_idx-1;found=true;break; }
                 }
         bool from_user=false;
         const double angle=direction(orch,Print(ctx.print).config(),piece.region,candidate.core.readonly(),full.readonly(),layer_idx,from_user,&fallback,fallback_layer);
+        // The surface keeps its core: infill.post_process.internal_bridge_anchors extends the
+        // generated threads to the actual extrusions around them when expansion is requested.
         const bool extension=config.get("internal_bridge_expansion").get_bool();
-        StoredExPolygonCollection receivers(storage);
-        for (const Piece &receiver : pieces)
-            if (receiver.region.handle()==piece.region.handle() &&
-                (surface_type_is_internal(receiver.source.type()) || receiver.source.handle()==piece.source.handle()) &&
-                !surface_type_is_bridge(receiver.source.type()) &&
-                (surface_type_is_solid(receiver.source.type()) || surface_type_is_sparse(receiver.source.type())))
-                receivers.append_copy_from(receiver.area.readonly());
-        for (const InternalCandidate &other : candidates) receivers=subtract(storage,receivers.readonly(),other.core.readonly());
         std::map<const layer_region_handle *,StoredExPolygonCollection>::iterator reserved=claimed.find(piece.region.handle());
-        if (reserved!=claimed.end()) receivers=subtract(storage,receivers.readonly(),reserved->second.readonly());
-        receivers.append_copy_from(candidate.core.readonly());receivers=unite(storage,receivers.readonly());
-        StoredExPolygonCollection expanded=expand_bridge(storage,candidate.core.readonly(),receivers.readonly(),angle,extension ? scale_i(reach) : 0,0,run_ctx);
-        if (reserved==claimed.end()) claimed.emplace(piece.region.handle(),expanded.readonly().clone(storage));
-        else reserved->second.append_copy_from(expanded.readonly());
+        if (reserved==claimed.end()) claimed.emplace(piece.region.handle(),candidate.core.readonly().clone(storage));
+        else reserved->second.append_copy_from(candidate.core.readonly());
         const extruder_index_t tool=layer_region_get_role_extruder(piece.region.handle(),RAW_EXTRUSION_ROLE_SOLID_INFILL);
         if (tool==EXTRUDER_ID_UNKNOWN) throw std::runtime_error("An internal bridge has no resolved solid-infill tool.");
         size_t destination=first_destination;
@@ -859,9 +847,9 @@ void prepare_internal(orchestrator_handle *orch,const run_ctx_surface_generation
         if (region_idx==layer.region_count()) throw std::runtime_error("An internal bridge region is not owned by its layer.");
         for (const uint64_t value : {uint64_t(layer_idx),uint64_t(island_idx),uint64_t(region_idx),uint64_t(tool),uint64_t(2)})
             info.logical_key=(info.logical_key^value)*1099511628211ull;
-        info.policy_signature=(uint64_t(extension)^uint64_t(scale_i(reach)))*1099511628211ull;
+        info.policy_signature=uint64_t(extension)*1099511628211ull;
         info.angle_from_user=from_user;info.extension_requested=extension;
-        for (const PreparedComponent &component : fit_components(storage,rows_inputs(piece.region),expanded.readonly(),angle))
+        for (const PreparedComponent &component : fit_components(storage,rows_inputs(piece.region),candidate.core.readonly(),angle))
             append_prepared(ctx,outputs[destination],piece,component,angle,info,rows_key);
     }
 }

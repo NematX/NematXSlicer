@@ -379,6 +379,8 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/HilbertCurvePattern.cpp
 	Plugins/Infill/Honeycomb3DPattern.cpp
 	Plugins/Infill/HoneycombPattern.cpp
+	Plugins/Infill/InternalBridgeAnchors.cpp
+	Plugins/Infill/InternalBridgeAnchors.hpp
 	Plugins/Infill/LinePattern.cpp
 	Plugins/Infill/OctagramSpiralPattern.cpp
 	Plugins/Infill/PatternPluginHelpers.hpp

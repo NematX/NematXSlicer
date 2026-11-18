@@ -62,6 +62,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <memory>
 #include <string>
 #include <vector>
 #include "perimeter_test_helpers.hpp"
@@ -77,11 +78,16 @@
 #include "libslic3r/Api/plugin/cpp/properties/BridgeProperties.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_finalize_slicing.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_ordering.h"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
+#include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Plugins/Infill/BridgeClearance.hpp"
 #include "libslic3r/Plugins/Infill/BridgeSurfaceVolume.hpp"
@@ -91,6 +97,7 @@
 #include "libslic3r/Steps/StepFinalizeSlicing.hpp"
 #include "libslic3r/Steps/StepGenerateInfill.hpp"
 #include "libslic3r/Steps/StepPostInfillGeneration.hpp"
+#include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepSupportDemand.hpp"
 #include "libslic3r/Steps/StepGenerateSupport.hpp"
 #include "libslic3r/Steps/StepSupportToolpath.hpp"
@@ -139,12 +146,12 @@ struct Fixture {
     void frame(const ExPolygons &cores=ExPolygons{rectangle_expolygon(-2,-1,2,1)});
     // Put the solid core inside a complete lower sparse slice, with solid side
     // anchors. The next solid layer stays ordinary and top position is retained.
-    void internal(SurfaceType position=stPosInternal);
+    void internal(SurfaceType position=stPosInternal,double min_x=-8.,double max_x=8.);
     // Supply typed input for untouched islands, then run only bridge preparation.
     void prepare();
     // Seed a straight X-axis bridge and optional lower contact paths, then mark
     // synthetic demand/material as known; this does not run support providers.
-    void add_paths(bool contacts=true);
+    void add_paths(bool contacts=true,ExtrusionRole bridge_role=ExtrusionRole::BridgeInfill);
 };
 // Invoke callback on borrowed printable leaves with resolved inherited attributes.
 // Missing attributes fail the test; the tree and attribute ownership stay unchanged.
@@ -273,13 +280,14 @@ void Fixture::prepare()
     // The fixture supplies the post-SolidShells snapshot; run only preparation.
     Steps::StepSurfaceGeneration::run_step(Orchestrator::instance(),prepared.print);
 }
-void Fixture::internal(SurfaceType position)
+// Replace the linked fixture layers with a configurable full internal slice and solid bridge core.
+void Fixture::internal(SurfaceType position,double min_x,double max_x)
 {
     PrintObject &object=prepared.print.object(0);
     for (Layer &layer : object.layers()) for (LayerSliceIsland &island : layer.islands()) {
         island.overlaps_above.clear();island.overlaps_below.clear();
     }
-    const ExPolygons full{rectangle_expolygon(-8,-2,8,2)},core{rectangle_expolygon(-2,-2,2,2)};
+    const ExPolygons full{rectangle_expolygon(min_x,-2,max_x,2)},core{rectangle_expolygon(-2,-2,2,2)};
     const ExPolygons sides=diff_ex(full,core);
     for (size_t idx=0;idx<3;++idx) {
         Layer &layer=object.layer(idx);
@@ -304,7 +312,8 @@ Surface &Fixture::bridge()
             if (surface.get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr) return surface;
     throw std::runtime_error("Missing prepared bridge in fixture.");
 }
-void Fixture::add_paths(bool contacts)
+// Add synthetic contact and bridge paths with the requested role, then mark support demand and material as already known.
+void Fixture::add_paths(bool contacts,ExtrusionRole bridge_role)
 {
     PrintObject &object=prepared.print.object(0);
     if (contacts) for (size_t idx=0;idx<2;++idx) {
@@ -319,7 +328,7 @@ void Fixture::add_paths(bool contacts)
         for (const Surface &surface : ri.fill_surfaces()) {
             if (surface.get_property<slic3r_api::BridgeSurfaceInfo>()==nullptr) continue;
             ExtrusionEntity path(true,ArcPolyline(Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)}));
-            path.add_property(ExtrusionAttributes(ExtrusionRole::BridgeInfill,Flow::bridging_flow(.4f,.4f)));
+            path.add_property(ExtrusionAttributes(bridge_role,Flow::bridging_flow(.4f,.4f)));
             path.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=surface.id();
             ri.mutable_extrusion(LayerRegionIsland::INFILLS).append_child(std::move(path));
     }
@@ -349,6 +358,17 @@ void visit_leaves(const ExtrusionEntity &root,const std::function<void(const Ext
     for (const ExtrusionEntityUPtr &child : root.children()) if (child) visit_leaves(*child,callback,attributes);
 }
 }
+
+// Declare the local synthetic-path builders before the early rounding case uses them; definitions follow the fixture helpers.
+static void add_anchor_path(LayerRegionIsland &region,ExtrusionRole role,const Points &points,
+    ExtrusionRole bucket=LayerRegionIsland::INFILLS,float width=.4f,float height=.2f);
+static void add_bridge_path(LayerRegionIsland &region,uint64_t surface_id,const Points &points,
+    bool arc=false,bool local_z=false,float arc_radius=1.f);
+// Declare the independent diagonal-target geometry used by the rounded-end case.
+static Points diagonal_target(Point center,bool positive_ray);
+static Point diagonal_target_endpoint(Point origin,Point center,bool positive_ray);
+// Collect internal bridge endpoints from a region-island tree, including nested priority groups.
+static std::vector<std::pair<Point,Point>> bridge_endpoints(const LayerRegionIsland &region);
 
 TEST_CASE("Bridge finalizers accept integer-rounded short rows in either direction","[plugins][bridge-volume][bridge-direction-rounding]")
 {
@@ -383,6 +403,94 @@ TEST_CASE("Bridge finalizers accept integer-rounded short rows in either directi
                         CHECK(leaf.last_point()==points.back());
                     });
             CHECK(leaves==1);
+    }
+}
+
+TEST_CASE("Active bridge anchors retain independently rounded diagonal endpoints through both finalizers","[plugins][bridge-anchors][bridge-volume][bridge-direction-rounding]")
+{
+    // Independent endpoint rounding forms a row outside BridgeVolume's normal-error bound, while reprojection from an
+    // integer support keeps the decision-3 row inside its own bound. The two target centers give non-integral .4 mm-hook
+    // distances of about 17951.629 and 13253.272 scaled units.
+    const Points original{Point(439545,255222),Point(1908,2550)};
+    const Point first_target(541694,314198),second_target(-96172,-54077);
+    const double axis_x=std::cos(PI/6.),axis_y=std::sin(PI/6.);
+    // Reproject a changed endpoint from the other integer endpoint, using only the target center and the .1 mm hook.
+    auto reproject_from_support=[&](Point support,Point changed_origin,Point target,bool positive_ray) {
+        const double dx=positive_ray ? axis_x : -axis_x,dy=positive_ray ? axis_y : -axis_y;
+        const double distance=(double(target.x()-changed_origin.x())*dx+double(target.y()-changed_origin.y())*dy)-scale_i(.1);
+        const double support_position=double(support.x())*dx+double(support.y())*dy;
+        const double changed_position=double(changed_origin.x())*dx+double(changed_origin.y())*dy+distance;
+        return Point(coord_t(std::llround(double(support.x())+dx*(changed_position-support_position))),
+            coord_t(std::llround(double(support.y())+dy*(changed_position-support_position))));
+    };
+    for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"})
+        for (const bool both_ends : {false,true}) for (const bool reversed : {false,true}) {
+            INFO(provider<<" both="<<both_ends<<" reversed="<<reversed);
+            Fixture fixture({{"bridge_angle","30"},{"bridge_volume_compensation",provider},
+                {"fill_density","30%"},{"internal_bridge_expansion","1"}});
+            fixture.internal();fixture.prepare();
+            LayerRegionIsland &current=fixture.island().regions_islands().front();
+            Points path=original;if (reversed) std::reverse(path.begin(),path.end());
+            add_bridge_path(current,fixture.bridge().id(),path);
+            add_anchor_path(current,ExtrusionRole::InternalInfill,diagonal_target(first_target,true));
+            if (both_ends) add_anchor_path(current,ExtrusionRole::InternalInfill,diagonal_target(second_target,false));
+            const bool front_has_target=!reversed || both_ends;
+            const bool back_has_target=reversed || both_ends;
+            const Point front_target=reversed ? second_target : first_target;
+            const Point back_target=reversed ? first_target : second_target;
+            const bool front_positive=!reversed,back_positive=reversed;
+            const Point naive_front=front_has_target ? diagonal_target_endpoint(path.front(),front_target,front_positive) : path.front();
+            const Point naive_back=back_has_target ? diagonal_target_endpoint(path.back(),back_target,back_positive) : path.back();
+            const Point decision3_back=both_ends ? reproject_from_support(path.front(),path.back(),back_target,back_positive) : naive_back;
+            if (both_ends) {
+                const auto normal_error=[&](Point front,Point back) {
+                    const double dx=double(back.x())-double(front.x()),dy=double(back.y())-double(front.y());
+                    return std::abs(dx*axis_y-dy*axis_x);
+                };
+                const auto bridge_volume_bound=[&](Point front,Point back) {
+                    const double length=std::hypot(double(back.x())-double(front.x()),double(back.y())-double(front.y()));
+                    return 1e-6*length+std::abs(axis_x)+std::abs(axis_y);
+                };
+                const double naive_error=normal_error(naive_front,naive_back);
+                const double naive_bound=bridge_volume_bound(naive_front,naive_back);
+                const double decision3_error=normal_error(naive_front,decision3_back);
+                const double decision3_bound=bridge_volume_bound(naive_front,decision3_back);
+                CHECK(naive_error>naive_bound);
+                CHECK(decision3_error<=decision3_bound);
+                CHECK(naive_back!=decision3_back);
+            }
+            // A one-ended variant has no alternate support choice, but it still distinguishes single-support
+            // reprojection from independently rounding the changed endpoint.
+            Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation",
+                "infill.post_process.internal_bridge_anchors"});
+            Orchestrator &orchestrator=Orchestrator::instance();
+            (void)orchestrator.consume_plugin_messages();
+            REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(orchestrator,fixture.prepared.print));
+            Point expected_front=path.front(),expected_back=path.back();
+            if (both_ends) {
+                expected_front=naive_front;expected_back=decision3_back;
+            } else if (front_has_target) {
+                expected_front=reproject_from_support(path.back(),path.front(),front_target,front_positive);
+                CHECK(expected_front!=naive_front);
+            } else if (back_has_target) {
+                expected_back=reproject_from_support(path.front(),path.back(),back_target,back_positive);
+                CHECK(expected_back!=naive_back);
+            }
+            REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(orchestrator,fixture.prepared.print));
+            std::vector<std::pair<Point,Point>> pieces;
+            size_t stamps=0;
+            visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+                if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+                ++stamps;REQUIRE(leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr);
+                pieces.emplace_back(leaf.first_point(),leaf.last_point());
+            });
+            REQUIRE(stamps>0);REQUIRE(pieces.size()==stamps);
+            CHECK(std::abs(pieces.front().first.x()-expected_front.x())<=1);CHECK(std::abs(pieces.front().first.y()-expected_front.y())<=1);
+            CHECK(std::abs(pieces.back().second.x()-expected_back.x())<=1);CHECK(std::abs(pieces.back().second.y()-expected_back.y())<=1);
+            for (size_t idx=1;idx<pieces.size();++idx) CHECK(pieces[idx-1].second==pieces[idx].first);
+            for (const Orchestrator::PluginMessage &message : orchestrator.consume_plugin_messages())
+                if (message.level==Orchestrator::PluginMessageLevel::Warning)
+                    CHECK(message.message.find("bridge compensation skipped")==std::string::npos);
         }
 }
 
@@ -465,7 +573,7 @@ TEST_CASE("Internal bridge expansion ignores external margins and its automatic 
             {"bridged_infill_uniform_margin",margin}});fixture.internal();fixture.prepare();
         const Surface &surface=fixture.bridge();
         const BoundingBox bounds=get_extents(surface.expolygon);
-        CHECK((bounds.max.x()>scale_i(2.))==expansion);CHECK(bounds.max.y()==scale_i(2.));
+        CHECK(bounds.max.x()==scale_i(2.));CHECK(bounds.max.y()==scale_i(2.));
         const uint64_t key=BridgeGeometry::geometry_key(view(ExPolygons{surface.expolygon}));
         if (std::string(margin)=="0") reference=key;else CHECK(key==reference);
     }
@@ -478,7 +586,7 @@ TEST_CASE("Internal bridge expansion ignores external margins and its automatic 
     automatic.prepare();CHECK(automatic.bridge().bridge_angle==Approx(107.*PI/180.).margin(1e-6));
 }
 
-TEST_CASE("Lower internal bridge extensions count as solid before preparing the next cover","[plugins][bridge-internal][bridge-preparation]")
+TEST_CASE("Lower internal bridge cores remain unchanged before preparing the next cover","[plugins][bridge-internal][bridge-preparation]")
 {
     Fixture fixture({{"fill_density","30%"},{"internal_bridge_min_width","0"},{"internal_bridge_expansion","1"}});fixture.internal();
     LayerSliceIsland &above=fixture.prepared.print.object(0).layer(2).island(0);
@@ -487,9 +595,879 @@ TEST_CASE("Lower internal bridge extensions count as solid before preparing the 
     surfaces.clear();surfaces.append(cover,stPosInternal|stDensSolid);
     surfaces.append(diff_ex(above.infill_areas(),cover),stPosInternal|stDensSparse);
     fixture.prepare();
-    CHECK(get_extents(fixture.bridge().expolygon).max.x()>scale_i(3.));
+    CHECK(get_extents(fixture.bridge().expolygon).max.x()==scale_i(2.));
+    size_t bridges=0;ExPolygons bridge_areas;
     for (const LayerRegionIsland &group : above.regions_islands())
-        for (const Surface &surface : group.fill_surfaces()) CHECK(surface.get_property<slic3r_api::BridgeSurfaceInfo>()==nullptr);
+        for (const Surface &surface : group.fill_surfaces())
+            if (const slic3r_api::BridgeSurfaceInfo *info=surface.get_property<slic3r_api::BridgeSurfaceInfo>()) {
+                ++bridges;bridge_areas.push_back(surface.expolygon);CHECK(info->core_rule==2);
+            }
+    CHECK(bridges==2);
+    same_area(view(bridge_areas),ExPolygons{rectangle_expolygon(-3,-2,-2,2),rectangle_expolygon(2,-2,3,2)});
+}
+
+// Construct one synthetic extrusion with the supplied role, points and flow; the caller owns the returned leaf and may
+// place it in any tree bucket without sharing storage with the region-island fixture.
+static ExtrusionEntity make_anchor_entity(ExtrusionRole role,const Points &points,float width=.4f,float height=.2f)
+{
+    ExtrusionEntity path(true,ArcPolyline(points));
+    path.add_property(ExtrusionAttributes(role,ExtrusionFlow(.08,width,height)));
+    return path;
+}
+// Add one synthetic extrusion to a selected region-island bucket so the post-infill anchor pass sees a normal leaf.
+static void add_anchor_path(LayerRegionIsland &region,ExtrusionRole role,const Points &points,
+    ExtrusionRole bucket,float width,float height)
+{
+    region.mutable_extrusion(bucket).append_child(make_anchor_entity(role,points,width,height));
+}
+// Construct one internal bridge leaf with the source-surface stamp used by finalization; optional local arc/Z data
+// deliberately exercises the anchor eligibility checks, and the returned leaf remains owned by its caller.
+static ExtrusionEntity make_bridge_entity(uint64_t surface_id,const Points &points,bool arc=false,bool local_z=false,
+    float arc_radius=1.f)
+{
+    ExtrusionEntity path(true,ArcPolyline(points));
+    path.add_property(ExtrusionAttributes(ExtrusionRole::InternalBridgeInfill,Flow::bridging_flow(.4f,.4f)));
+    path.get_or_add_property<ExtrusionPropertyInfill>().source_surface_id=surface_id;
+    if (arc || local_z) {
+        slic3r_api::MutableExtrusionEntity writable(reinterpret_cast<extrusion_entity_handle *>(&path));
+        std::vector<c_extrusion_segment> segments=writable.segments();
+        REQUIRE(!segments.empty());
+        if (arc) {
+            segments.front().radius=float(scale_i(arc_radius));
+            segments.front().orientation=RAW_EXTRUSION_ARC_ORIENTATION_CCW;
+        }
+        if (local_z) segments.front().z_offset_b=scale_i(.01);
+        REQUIRE(writable.set_segments(segments));
+    }
+    return path;
+}
+// Add one synthetic internal bridge leaf with the source-surface stamp used by finalization; optional local arc/Z data
+// deliberately exercises the anchor eligibility checks.
+static void add_bridge_path(LayerRegionIsland &region,uint64_t surface_id,const Points &points,
+    bool arc,bool local_z,float arc_radius)
+{
+    region.mutable_extrusion(LayerRegionIsland::INFILLS).append_child(
+        make_bridge_entity(surface_id,points,arc,local_z,arc_radius));
+}
+// Dispatch the post-infill bridge anchor pass with its preparation dependency active.
+static void run_anchor_pass(Print &print)
+{
+    Active active({"surface.bridge_preparation","infill.recipe.bridge_preparation",
+        "infill.post_process.internal_bridge_anchors"});
+    REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),print));
+}
+// Collect internal bridge leaf endpoints after the pass, including leaves moved
+// into ordering groups; the caller owns the unchanged fixture tree.
+static std::vector<std::pair<Point,Point>> bridge_endpoints(const LayerRegionIsland &region)
+{
+    std::vector<std::pair<Point,Point>> result;
+    visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),
+        [&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role==ExtrusionRole::InternalBridgeInfill)
+                result.emplace_back(leaf.first_point(),leaf.last_point());
+        });
+    return result;
+}
+// Record direct identities, child counts and ordering permissions so a post-infill pass can be checked for exact no-op behavior.
+struct TreeSnapshot {
+    uint64_t id;
+    uint32_t child_count;
+    bool sortable, reversible, rotatable;
+    std::vector<TreeSnapshot> children;
+};
+// Snapshot a tree recursively; all identities and permission flags are read without changing ownership or geometry.
+static TreeSnapshot snapshot_tree(const ExtrusionEntity &entity)
+{
+    TreeSnapshot result{entity.get_id(),uint32_t(entity.child_count()),entity.can_sort(),entity.can_reverse(),entity.can_rotate(),{}};
+    result.children.reserve(entity.child_count());
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (child) result.children.push_back(snapshot_tree(*child));
+    return result;
+}
+// Compare two recursive snapshots and report all identity, shape and permission differences through Catch assertions.
+static void check_same_snapshot(const TreeSnapshot &actual,const TreeSnapshot &expected)
+{
+    REQUIRE(actual.id==expected.id);CHECK(actual.child_count==expected.child_count);
+    CHECK(actual.sortable==expected.sortable);CHECK(actual.reversible==expected.reversible);CHECK(actual.rotatable==expected.rotatable);
+    REQUIRE(actual.children.size()==expected.children.size());
+    for (size_t idx=0;idx<actual.children.size();++idx) check_same_snapshot(actual.children[idx],expected.children[idx]);
+}
+// Return a target segment perpendicular to a 30-degree bridge ray, centered at a chosen scaled point, with enough
+// length to make its narrowed hook rectangle a finite current-layer target.
+static Points diagonal_target(Point center,bool positive_ray)
+{
+    const double dx=std::cos(PI/6.),dy=std::sin(PI/6.);
+    const double nx=positive_ray ? -dy : dy,ny=positive_ray ? dx : -dx;
+    const coord_t radius=scale_i(1.);
+    return {center+Point(coord_t(std::llround(nx*radius)),coord_t(std::llround(ny*radius))),
+        center-Point(coord_t(std::llround(nx*radius)),coord_t(std::llround(ny*radius)))};
+}
+// Compute an endpoint independently from the anchor implementation: project the target center on the ray, subtract the
+// .1 mm narrowed-hook half-width of a .4 mm target, then round the resulting scaled point.
+static Point diagonal_target_endpoint(Point origin,Point center,bool positive_ray)
+{
+    const double dx=positive_ray ? std::cos(PI/6.) : -std::cos(PI/6.);
+    const double dy=positive_ray ? std::sin(PI/6.) : -std::sin(PI/6.);
+    const double distance=(double(center.x())-double(origin.x()))*dx+
+        (double(center.y())-double(origin.y()))*dy-scale_i(.1);
+    return Point(coord_t(std::llround(double(origin.x())+dx*distance)),
+        coord_t(std::llround(double(origin.y())+dy*distance)));
+}
+
+TEST_CASE("Internal bridge anchors enter a current-layer extrusion by a quarter width","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    add_anchor_path(current,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    REQUIRE(current.has_extrusion(LayerRegionIsland::INFILLS));
+    REQUIRE(fixture.bridge().get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr);
+    Active active({"surface.bridge_preparation","infill.recipe.bridge_preparation","infill.post_process.internal_bridge_anchors"});
+    REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print));
+    size_t bridges=0;
+    visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+        ++bridges;CHECK(leaf.last_point().x()==scale_i(3.9));CHECK(leaf.first_point().x()==scale_i(-3.));
+    });
+    CHECK(bridges==1);
+}
+
+TEST_CASE("Internal bridge anchors use the configured perimeter overlap","[plugins][bridge-anchors]")
+{
+    for (const auto &[overlap,expected] : {std::pair<const char *,double>{"20%",3.89},
+        {"50%",4.},{"80%",4.}}) {
+        INFO("overlap "<<overlap);
+        Fixture fixture({{"internal_bridge_expansion","1"},{"infill_overlap",overlap}});
+        fixture.internal();fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_anchor_path(current,ExtrusionRole::Perimeter,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))},LayerRegionIsland::PERIMETERS);
+        Active active({"surface.bridge_preparation","infill.recipe.bridge_preparation","infill.post_process.internal_bridge_anchors"});
+        REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print));
+        size_t bridges=0;
+        visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+            ++bridges;CHECK(leaf.last_point().x()==scale_i(expected));CHECK(leaf.first_point().x()==scale_i(-3.));
+        });
+        CHECK(bridges==1);
+    }
+}
+
+TEST_CASE("Internal bridge anchors pass a lower-layer extrusion by one nozzle","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+    LayerRegionIsland &lower=fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front();
+    add_anchor_path(lower,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))});
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    REQUIRE(current.has_extrusion(LayerRegionIsland::INFILLS));
+    REQUIRE(fixture.bridge().get_property<slic3r_api::BridgeSurfaceInfo>()!=nullptr);
+    Active active({"surface.bridge_preparation","infill.recipe.bridge_preparation","infill.post_process.internal_bridge_anchors"});
+    REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print));
+    size_t bridges=0;
+    visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+        ++bridges;CHECK(leaf.last_point().x()==scale_i(3.9));CHECK(leaf.first_point().x()==scale_i(-3.));
+    });
+    CHECK(bridges==1);
+}
+
+TEST_CASE("Internal bridge anchors respect search limits, support behind an end and blocking footprints","[plugins][bridge-anchors]")
+{
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal(stPosInternal,-20.,20.);fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().first.x()==scale_i(-3.));CHECK(ends.front().second.x()==scale_i(3.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal(stPosInternal,-20.,20.);fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(13.),scale_i(-1.)),Point(scale_i(13.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(13.4));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal(stPosInternal,-20.,20.);fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(13.01),scale_i(-1.)),Point(scale_i(13.01),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(-2.8),scale_i(-1.)),Point(scale_i(-2.8),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().first.x()==scale_i(-3.2));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(3.),scale_i(.3)),Point(scale_i(5.),scale_i(.3))},LayerRegionIsland::INFILLS,.8f);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+}
+
+TEST_CASE("Internal bridge search accepts exactly twenty-five nozzle diameters but not the next grid point","[plugins][bridge-anchors]")
+{
+    for (const bool beyond : {false,true}) {
+        INFO("beyond="<<beyond);
+        Fixture fixture({{"internal_bridge_expansion","1"},{"nozzle_diameter","0.5"}});fixture.internal(stPosInternal,-40.,40.);fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-1.),0),Point(scale_i(1.),0)});
+        const double axis=13.5+(beyond ? 1e-6 : 0.);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(axis),scale_i(-1.)),Point(scale_i(axis),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);REQUIRE(ends.size()==1);
+        CHECK(ends.front().first.x()==scale_i(-1.));
+        CHECK(ends.front().second.x()==(beyond ? scale_i(1.) : scale_i(14.)));
+    }
+}
+
+TEST_CASE("Internal bridge anchors choose the first footprint, can use a bridge footprint and stop at a face","[plugins][bridge-anchors]")
+{
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))});
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.5),scale_i(-1.)),Point(scale_i(4.5),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.4));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==2);CHECK(ends.front().second.x()==scale_i(3.9));
+        CHECK(ends.back().first.x()==scale_i(4.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        current.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+        add_bridge_path(current,fixture.bridge().id(),
+            Points{Point(scale_i(-3.),0),Point(scale_i(-1.),0)});
+        add_bridge_path(current,fixture.bridge().id(),
+            Points{Point(scale_i(1.),0),Point(scale_i(3.),0)});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==2);CHECK(ends.front().second.x()==scale_i(1.));CHECK(ends.back().first.x()==scale_i(1.));
+        CHECK(ends.front().second.x()<=ends.back().first.x());
+    }
+}
+
+TEST_CASE("Internal bridge anchoring changes only the two endpoints of a collinear multi-segment leaf","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    const Points original{Point(scale_i(-3.),0),Point(scale_i(-1.),0),Point(scale_i(1.),0),Point(scale_i(3.),0)};
+    add_bridge_path(current,fixture.bridge().id(),original);
+    add_anchor_path(current,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    run_anchor_pass(fixture.prepared.print);
+    const ExtrusionEntity *bridge=nullptr;
+    visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        if (attributes.role==ExtrusionRole::InternalBridgeInfill) bridge=&leaf;
+    });
+    REQUIRE(bridge!=nullptr);REQUIRE(bridge->polyline_ref().size()==original.size());
+    CHECK(bridge->polyline_ref().get_point(0)==Point(scale_i(-3.),0));CHECK(bridge->polyline_ref().get_point(1)==original[1]);
+    CHECK(bridge->polyline_ref().get_point(2)==original[2]);CHECK(bridge->polyline_ref().get_point(3)==Point(scale_i(3.9),0));
+}
+
+TEST_CASE("Internal bridge anchors reject bent, returning, arc, loop and Z-offset leaves","[plugins][bridge-anchors]")
+{
+    struct Shape { const char *name; Points points; bool arc; bool local_z; float arc_radius; };
+    const std::vector<Shape> shapes{
+        {"bend",Points{Point(scale_i(-3.),0),Point(0,scale_i(1.)),Point(scale_i(3.),0)},false,false,1.f},
+        {"return",Points{Point(scale_i(-3.),0),Point(scale_i(3.),0),Point(scale_i(-2.),0),Point(scale_i(3.),0)},false,false,1.f},
+        {"arc",Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)},true,false,4.f},
+        {"loop",Points{Point(scale_i(-3.),0),Point(scale_i(3.),0),Point(scale_i(-3.),0)},false,false,1.f},
+        {"local Z",Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)},false,true,1.f}};
+    for (const Shape &shape : shapes) {
+        INFO(shape.name);
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),shape.points,shape.arc,shape.local_z,shape.arc_radius);
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);
+        CHECK(ends.front().first.x()==shape.points.front().x());CHECK(ends.front().first.y()==shape.points.front().y());
+        CHECK(ends.front().second.x()==shape.points.back().x());CHECK(ends.front().second.y()==shape.points.back().y());
+    }
+    Fixture inherited({{"internal_bridge_expansion","1"}});inherited.internal();inherited.prepare();
+    LayerRegionIsland &current=inherited.island().regions_islands().front();
+    current.mutable_extrusion(LayerRegionIsland::INFILLS).get_or_add_property<slic3r_api::EPropertyZOffset>().set(scale_i(.01));
+    add_bridge_path(current,inherited.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+    add_anchor_path(current,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    run_anchor_pass(inherited.prepared.print);
+    const auto ends=bridge_endpoints(current);
+    REQUIRE(ends.size()==1);CHECK(ends.front().first.x()==scale_i(-3.));CHECK(ends.front().second.x()==scale_i(3.));
+}
+
+TEST_CASE("A valid arc is a footprint but never an eligible bridge thread","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    current.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))},true,false,4.f);
+    REQUIRE(current.extrusion(LayerRegionIsland::INFILLS).child(0).polyline_ref().is_valid());
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+    run_anchor_pass(fixture.prepared.print);
+    const auto ends=bridge_endpoints(current);
+    REQUIRE(ends.size()==2);
+    CHECK(ends.front().first==Point(scale_i(4.),scale_i(-1.)));CHECK(ends.front().second==Point(scale_i(4.),scale_i(1.)));
+    CHECK(ends.back().first==Point(scale_i(-3.),0));CHECK(ends.back().second.x()>scale_i(3.));
+}
+
+TEST_CASE("Internal bridge anchors ignore dedicated gap fills but accept a gap-fill leaf in infills","[plugins][bridge-anchors]")
+{
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        add_anchor_path(current,ExtrusionRole::GapFill,
+            Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))},LayerRegionIsland::GAP_FILLS);
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),ExtrusionRole::GapFill,
+            Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))},LayerRegionIsland::GAP_FILLS);
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.9));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        add_anchor_path(current,ExtrusionRole::GapFill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.9));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        LayerRegionIsland &lower=fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        add_anchor_path(lower,ExtrusionRole::GapFill,
+            Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))},LayerRegionIsland::GAP_FILLS);
+        add_anchor_path(lower,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(4.4));
+    }
+    // The same x=3.5 gap-fill footprint is ignored in the dedicated bucket, so rule 2 reaches the lower x=4 axis plus
+    // one nozzle; in INFILLS it is a rule-1 target and wins earlier at x=3.4.
+    for (const bool dedicated : {true,false}) {
+        INFO("dedicated="<<dedicated);
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        LayerRegionIsland &lower=fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        add_anchor_path(current,ExtrusionRole::GapFill,
+            Points{Point(scale_i(3.5),scale_i(-1.)),Point(scale_i(3.5),scale_i(1.))},
+            dedicated ? LayerRegionIsland::GAP_FILLS : LayerRegionIsland::INFILLS);
+        add_anchor_path(lower,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);
+        CHECK(ends.front().second.x()==scale_i(dedicated ? 4.4 : 3.4));
+    }
+}
+
+TEST_CASE("Internal bridge anchors stop at contours and holes, including an endpoint on the contour","[plugins][bridge-anchors]")
+{
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(7.9),scale_i(-1.)),Point(scale_i(7.9),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(8.),0)});
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(8.5),scale_i(-1.)),Point(scale_i(8.5),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(8.));CHECK(ends.front().second.y()==0);
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(7.6),scale_i(-1.)),Point(scale_i(7.6),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();
+        ExPolygon &slice=ApiInternal::LayerIslandAccess::slice_mutable(fixture.island());
+        Polygon hole=rectangle_expolygon(5.,-1.,6.,1.).contour;hole.reverse();slice.holes.push_back(std::move(hole));
+        fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(5.5),scale_i(-1.)),Point(scale_i(5.5),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+    {
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();
+        ExPolygon &slice=ApiInternal::LayerIslandAccess::slice_mutable(fixture.island());
+        Polygon hole=rectangle_expolygon(5.,-1.,6.,1.).contour;hole.reverse();slice.holes.push_back(std::move(hole));
+        fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        add_anchor_path(fixture.prepared.print.object(0).layer(0).island(0).regions_islands().front(),
+            ExtrusionRole::InternalInfill,Points{Point(scale_i(7.),scale_i(-1.)),Point(scale_i(7.),scale_i(1.))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(fixture.island().regions_islands().front());
+        REQUIRE(ends.size()==1);CHECK(ends.front().second.x()==scale_i(3.));
+    }
+}
+
+TEST_CASE("Contour edges parallel to horizontal and vertical rays accept boundary targets identically","[plugins][bridge-anchors]")
+{
+    for (const bool vertical : {false,true}) {
+        INFO("vertical="<<vertical);
+        Fixture fixture({{"internal_bridge_expansion","1"},{"bridge_angle",vertical ? "90" : "0"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();current.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+        if (!vertical) {
+            add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-1.),scale_i(2.)),Point(scale_i(0.),scale_i(2.))});
+            add_anchor_path(current,ExtrusionRole::InternalInfill,
+                Points{Point(scale_i(4.),scale_i(1.)),Point(scale_i(4.),scale_i(3.))});
+        } else {
+            add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(8.),scale_i(-1.)),Point(scale_i(8.),scale_i(0.))});
+            add_anchor_path(current,ExtrusionRole::InternalInfill,
+                Points{Point(scale_i(7.),scale_i(1.)),Point(scale_i(9.),scale_i(1.))});
+        }
+        const auto before=bridge_endpoints(current);REQUIRE(before.size()==1);
+        run_anchor_pass(fixture.prepared.print);
+        const auto after=bridge_endpoints(current);REQUIRE(after.size()==1);
+        CHECK(after.front().first==before.front().first);
+        if (!vertical) CHECK(after.front().second==Point(scale_i(3.9),scale_i(2.)));
+        else CHECK(after.front().second==Point(scale_i(8.),scale_i(.9)));
+    }
+}
+
+TEST_CASE("A sparse curved footprint stops an internal bridge at its independently known entry","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+    Points curve;curve.reserve(33);
+    const double center_x=4.5,radius=.5;
+    for (size_t idx=0;idx<=32;++idx) {
+        const double angle=PI+PI*double(idx)/32.;
+        curve.emplace_back(scale_i(center_x+radius*std::cos(angle)),scale_i(radius*std::sin(angle)));
+    }
+    add_anchor_path(current,ExtrusionRole::InternalInfill,curve);
+    run_anchor_pass(fixture.prepared.print);
+    const auto ends=bridge_endpoints(current);
+    REQUIRE(ends.size()==1);
+    // The first sampled circle point is (4,0); its square-ended hook begins there, so the ray's first valid contact is x=4.
+    CHECK(ends.front().second.x()==scale_i(4.));CHECK(ends.front().second.y()==0);
+}
+
+TEST_CASE("Layer-order anchoring never uses a bridge extension from the layer below","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    PrintObject &object=fixture.prepared.print.object(0);
+    LayerRegionIsland &lower_bridge=object.layer(1).island(0).regions_islands().front();
+    LayerRegionIsland &bottom=object.layer(0).island(0).regions_islands().front();
+    add_bridge_path(lower_bridge,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+    add_anchor_path(bottom,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    LayerRegionIsland &upper=object.layer(2).island(0).regions_islands().front();
+    // The copied fixture metadata identifies the synthetic upper surface as an extension-requested core-rule-2 bridge;
+    // only its direction is changed here because this test needs a vertical upper ray against a horizontal lower row.
+    Surface &upper_surface=upper.set_fill_surfaces().surfaces.emplace_back(fixture.bridge(),fixture.bridge().expolygon);
+    upper_surface.bridge_angle=PI/2.;
+    slic3r_api::BridgeSurfaceInfo &upper_info=upper_surface.get_or_add_property<slic3r_api::BridgeSurfaceInfo>();
+    upper_info.schema_version=1;upper_info.core_rule=2;upper_info.extension_requested=1;
+    const auto upper_rows_key=slic3r_api::BridgePreparation::prepared_rows_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    surface_handle *upper_handle=reinterpret_cast<surface_handle *>(&upper_surface);
+    slic3r_api::MutableSurface mutable_upper(upper_handle,const_cast<plugin_property_container_handle *>(surface_get_properties(upper_handle)));
+    slic3r_api::BridgePreparation::PreparedRows &upper_rows=upper_rows_key.get_or_add(mutable_upper);
+    upper_rows={PI/2.,.4,0};
+    REQUIRE(upper_info.core_rule==2);REQUIRE(upper_info.extension_requested);CHECK(upper_surface.bridge_angle==Approx(PI/2.));
+    add_bridge_path(upper,upper_surface.id(),Points{Point(scale_i(3.5),scale_i(-.1)),Point(scale_i(3.5),scale_i(-1.))});
+    // The first pass prolongs the lower row, but its read-only lower-axis snapshot cannot use that new portion yet.
+    run_anchor_pass(fixture.prepared.print);
+    const auto lower_first=bridge_endpoints(lower_bridge),upper_first=bridge_endpoints(upper);
+    REQUIRE(lower_first.size()==1);REQUIRE(upper_first.size()==1);
+    CHECK(lower_first.front().second.x()==scale_i(4.4));
+    CHECK(upper_first.front().first==Point(scale_i(3.5),scale_i(-.1)));
+    // A second pass sees the real lower extension at x=3.5; the vertical upper ray then reaches that axis plus one nozzle.
+    run_anchor_pass(fixture.prepared.print);
+    const auto lower_ends=bridge_endpoints(lower_bridge),upper_ends=bridge_endpoints(upper);
+    REQUIRE(lower_ends.size()==1);REQUIRE(upper_ends.size()==1);
+    CHECK(lower_ends.front().second.x()==scale_i(4.4));
+    CHECK(upper_ends.front().first==Point(scale_i(3.5),scale_i(.4)));
+    CHECK(upper_ends.front().second==Point(scale_i(3.5),scale_i(-1.)));
+}
+
+TEST_CASE("Internal bridge anchors keep the same relative entry after rotating the prepared direction","[plugins][bridge-anchors]")
+{
+    for (const double angle : {0.,PI/6.,PI/2.}) {
+        INFO("angle "<<angle);
+        Fixture fixture({{"internal_bridge_expansion","1"},{"bridge_angle",std::to_string(angle*180./PI)}});
+        fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        current.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+        const Vec2d direction{std::cos(angle),std::sin(angle)},normal{-direction.y(),direction.x()};
+        const Point front{scale_i(-1.5*direction.x()),scale_i(-1.5*direction.y())};
+        const Point back{scale_i(1.5*direction.x()),scale_i(1.5*direction.y())};
+        add_bridge_path(current,fixture.bridge().id(),Points{front,back});
+        const Point target_center{scale_i(2.*direction.x()),scale_i(2.*direction.y())};
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{target_center+Point(scale_i(-normal.x()),scale_i(-normal.y())),
+                target_center+Point(scale_i(normal.x()),scale_i(normal.y()))});
+        run_anchor_pass(fixture.prepared.print);
+        const auto ends=bridge_endpoints(current);
+        REQUIRE(ends.size()==1);
+        CHECK(std::abs(ends.front().second.x()-scale_i(1.9*direction.x()))<=1);
+        CHECK(std::abs(ends.front().second.y()-scale_i(1.9*direction.y()))<=1);
+    }
+}
+
+TEST_CASE("Internal bridge expansion zero leaves bridge geometry and root structure untouched","[plugins][bridge-anchors]")
+{
+    for (const bool enabled : {false,true}) {
+        INFO("enabled "<<enabled);
+        Fixture fixture({{"internal_bridge_expansion",enabled ? "1" : "0"}});fixture.internal();fixture.prepare();
+        fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        const ExtrusionEntity &root=current.extrusion(LayerRegionIsland::INFILLS);
+        const uint32_t child_count=root.child_count();const bool sortable=root.can_sort(),reversible=root.can_reverse(),rotatable=root.can_rotate();
+        const auto before=bridge_endpoints(current);REQUIRE(before.size()==1);
+        run_anchor_pass(fixture.prepared.print);
+        const auto after=bridge_endpoints(current);REQUIRE(after.size()==1);
+        if (!enabled) {
+            CHECK(after.front().first.x()==before.front().first.x());CHECK(after.front().first.y()==before.front().first.y());
+            CHECK(after.front().second.x()==before.front().second.x());CHECK(after.front().second.y()==before.front().second.y());
+            CHECK(root.child_count()==child_count);CHECK(root.can_sort()==sortable);CHECK(root.can_reverse()==reversible);CHECK(root.can_rotate()==rotatable);
+        } else {
+            CHECK(after.front().second.x()==scale_i(3.9));CHECK(root.child_count()>=child_count);
+            CHECK_FALSE(root.can_sort());CHECK_FALSE(root.can_reverse());CHECK_FALSE(root.can_rotate());
+        }
+    }
+}
+
+TEST_CASE("Internal bridge anchoring keeps other infill first and preserves child identities","[plugins][bridge-anchors][bridge-ordering]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    ExtrusionEntityCollection &root=current.mutable_extrusion(LayerRegionIsland::INFILLS);root.clear();
+    add_anchor_path(current,ExtrusionRole::InternalInfill,Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(-2.),0)});
+    add_anchor_path(current,ExtrusionRole::InternalInfill,Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(1.),0),Point(scale_i(3.),0)});
+    const uint64_t other_first=root.child(0).get_id(),bridge_first=root.child(1).get_id(),other_second=root.child(2).get_id(),bridge_second=root.child(3).get_id();
+    run_anchor_pass(fixture.prepared.print);
+    const ExtrusionEntity &actual=current.extrusion(LayerRegionIsland::INFILLS);
+    REQUIRE(actual.child_count()==2);CHECK_FALSE(actual.can_sort());CHECK_FALSE(actual.can_reverse());CHECK_FALSE(actual.can_rotate());
+    REQUIRE(actual.child(0).child_count()==2);REQUIRE(actual.child(1).child_count()==2);
+    CHECK(actual.child(0).can_sort());CHECK(actual.child(0).can_reverse());CHECK(actual.child(0).can_rotate());
+    CHECK(actual.child(1).can_sort());CHECK(actual.child(1).can_reverse());CHECK(actual.child(1).can_rotate());
+    CHECK(actual.child(0).child(0).get_id()==other_first);CHECK(actual.child(0).child(1).get_id()==other_second);
+    CHECK(actual.child(1).child(0).get_id()==bridge_first);CHECK(actual.child(1).child(1).get_id()==bridge_second);
+}
+
+TEST_CASE("Internal bridge anchoring appends a bridge group to an already fixed infill root","[plugins][bridge-anchors][bridge-ordering]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    ExtrusionEntityCollection &root=current.mutable_extrusion(LayerRegionIsland::INFILLS);root.clear();
+    add_anchor_path(current,ExtrusionRole::InternalInfill,Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+    auto fixed_group=std::make_unique<ExtrusionEntityCollection>(false,false);fixed_group->set_can_rotate(false);
+    const uint64_t fixed_id=fixed_group->get_id();
+    fixed_group->append_child(std::make_unique<ExtrusionEntity>(make_anchor_entity(ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(-1.),scale_i(-1.)),Point(scale_i(-1.),scale_i(1.))})));
+    const uint64_t fixed_leaf_id=fixed_group->child(0).get_id();
+    ExtrusionEntityUPtr fixed_base=std::move(fixed_group);root.append_child(std::move(fixed_base));
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(1.),0),Point(scale_i(3.),0)});
+    const uint64_t other_id=root.child(0).get_id(),bridge_id=root.child(2).get_id();
+    root.set_can_sort_reverse(false,false);root.set_can_rotate(false);
+    run_anchor_pass(fixture.prepared.print);
+    const ExtrusionEntity &actual=current.extrusion(LayerRegionIsland::INFILLS);
+    REQUIRE(actual.child_count()==3);CHECK_FALSE(actual.can_sort());CHECK_FALSE(actual.can_reverse());CHECK_FALSE(actual.can_rotate());
+    CHECK(actual.child(0).get_id()==other_id);CHECK(actual.child(1).get_id()==fixed_id);CHECK(actual.child(1).child_count()==1);
+    CHECK(actual.child(1).child(0).get_id()==fixed_leaf_id);CHECK_FALSE(actual.child(1).can_sort());CHECK_FALSE(actual.child(1).can_reverse());CHECK_FALSE(actual.child(1).can_rotate());
+    REQUIRE(actual.child(2).child_count()==1);CHECK(actual.child(2).child(0).get_id()==bridge_id);
+    CHECK(actual.child(2).can_sort());CHECK(actual.child(2).can_reverse());CHECK(actual.child(2).can_rotate());
+}
+
+TEST_CASE("An infill root without an extended bridge remains structurally identical","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    ExtrusionEntityCollection &root=current.mutable_extrusion(LayerRegionIsland::INFILLS);root.clear();
+    add_anchor_path(current,ExtrusionRole::InternalInfill,Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+    auto fixed_group=std::make_unique<ExtrusionEntityCollection>(false,false);fixed_group->set_can_rotate(false);
+    fixed_group->append_child(std::make_unique<ExtrusionEntity>(make_anchor_entity(ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(1.),scale_i(-1.)),Point(scale_i(1.),scale_i(1.))})));
+    ExtrusionEntityUPtr fixed_base=std::move(fixed_group);root.append_child(std::move(fixed_base));
+    const TreeSnapshot before=snapshot_tree(root);
+    run_anchor_pass(fixture.prepared.print);
+    check_same_snapshot(snapshot_tree(current.extrusion(LayerRegionIsland::INFILLS)),before);
+}
+
+TEST_CASE("Bridge finalization preserves the anchor priority groups and their permissions","[plugins][bridge-anchors][bridge-volume]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"},{"bridge_volume_compensation","bridge.finalize_surface_volume"}});
+    fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    ExtrusionEntityCollection &root=current.mutable_extrusion(LayerRegionIsland::INFILLS);root.clear();
+    add_anchor_path(current,ExtrusionRole::InternalInfill,Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+    run_anchor_pass(fixture.prepared.print);
+    Active active({"bridge.finalize_surface_volume","surface.bridge_preparation","infill.recipe.bridge_preparation","surface.solid_shells"});
+    REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+    const ExtrusionEntity &actual=current.extrusion(LayerRegionIsland::INFILLS);
+    REQUIRE(actual.child_count()==2);CHECK_FALSE(actual.can_sort());CHECK_FALSE(actual.can_reverse());CHECK_FALSE(actual.can_rotate());
+    CHECK(actual.child(0).can_sort());CHECK(actual.child(0).can_reverse());CHECK(actual.child(0).can_rotate());
+    CHECK(actual.child(1).can_sort());CHECK(actual.child(1).can_reverse());CHECK(actual.child(1).can_rotate());
+    size_t ordinary=0,bridges=0;
+    visit_leaves(actual.child(0),[&](const ExtrusionEntity &,const ExtrusionAttributes &attributes) { ++ordinary;CHECK(attributes.role==ExtrusionRole::InternalInfill); });
+    visit_leaves(actual.child(1),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        ++bridges;CHECK(attributes.role==ExtrusionRole::InternalBridgeInfill);CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()!=nullptr);
+    });
+    CHECK(ordinary==1);CHECK(bridges==1);
+}
+
+TEST_CASE("STEP_ORDERING prints every extended internal bridge after its root's other infill","[plugins][bridge-anchors][bridge-ordering]")
+{
+    for (const char *provider : {"ordering.extrusion_tree.advanced","ordering.extrusion_tree.xy_serpentine"}) {
+        INFO(provider);
+        Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();
+        LayerRegionIsland &source=fixture.island().regions_islands().front();
+        source.mutable_extrusion(LayerRegionIsland::INFILLS).clear();
+        add_anchor_path(source,ExtrusionRole::InternalInfill,Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+        add_bridge_path(source,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(-2.),0)});
+        add_anchor_path(source,ExtrusionRole::InternalInfill,Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        add_bridge_path(source,fixture.bridge().id(),Points{Point(scale_i(1.),0),Point(scale_i(3.),0)});
+        run_anchor_pass(fixture.prepared.print);
+
+        Printing::PrintingPlan &plan=fixture.prepared.print.mutable_printing_plan();
+        plan.groups.emplace_back();plan.groups.back().layers.emplace_back();plan.groups.back().layers.back().tool_groups.emplace_back();
+        Printing::PrintingToolGroup &tool=plan.groups.back().layers.back().tool_groups.back();tool.extruder_id=0;
+        Printing::PrintingExtrusion extrusion;extrusion.region_island=&source;extrusion.sregion_island_role=LayerRegionIsland::INFILLS;
+        extrusion.root=std::make_unique<ExtrusionEntityCollection>(source.extrusion(LayerRegionIsland::INFILLS));
+        slic3r_api::MutableExtrusionEntity output(reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get()));
+        slic3r_api::EntryPointProperty &entry=slic3r_api::entry_point_property_key(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance())).get_or_add(output);
+        entry.entry=output.front();entry.exit=output.back();
+        tool.region_islands.push_back(&source);tool.extrusions.push_back(std::move(extrusion));
+        run_ctx_extrusion_ordering context={};context.print=reinterpret_cast<const print_handle *>(&fixture.prepared.print);
+        context.plan=reinterpret_cast<printing_plan_handle *>(&plan);
+        slic3r_api::OrchestratorView orchestrator(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+        Active active({provider,"seam_placer.cost"});
+        REQUIRE(orchestrator.execute(orchestrator.find_plugin(provider),context.print,context)==RAW_PLUGIN_EXECUTION_SUCCESS);
+        bool bridge_seen=false;
+        visit_leaves(*tool.extrusions.front().root,[&](const ExtrusionEntity &,const ExtrusionAttributes &attributes) {
+            if (attributes.role==ExtrusionRole::InternalBridgeInfill) bridge_seen=true;
+            else CHECK_FALSE(bridge_seen);
+        });
+        CHECK(bridge_seen);
+    }
+}
+
+TEST_CASE("Internal bridge anchoring preserves the unchanged leaf flow and source properties","[plugins][bridge-anchors]")
+{
+    Fixture fixture({{"internal_bridge_expansion","1"}});fixture.internal();fixture.prepare();fixture.add_paths(false,ExtrusionRole::InternalBridgeInfill);
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    const ExtrusionEntity &before=**current.mutable_extrusion(LayerRegionIsland::INFILLS).begin();
+    const ExtrusionAttributes original=*before.get_property<ExtrusionAttributes>();
+    const ExtrusionPropertyInfill *original_infill=before.get_property<ExtrusionPropertyInfill>();
+    REQUIRE(original_infill!=nullptr);
+    const uint64_t surface_id=original_infill->source_surface_id;
+    add_anchor_path(current,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    run_anchor_pass(fixture.prepared.print);
+    const auto ends=bridge_endpoints(current);REQUIRE(ends.size()==1);
+    const ExtrusionEntity *after=nullptr;
+    visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        if (attributes.role==ExtrusionRole::InternalBridgeInfill) after=&leaf;
+    });
+    REQUIRE(after!=nullptr);
+    const ExtrusionAttributes *attributes=after->get_property<ExtrusionAttributes>();REQUIRE(attributes!=nullptr);
+    CHECK(attributes->role==original.role);CHECK(attributes->width==original.width);CHECK(attributes->height==original.height);
+    CHECK(attributes->mm3_per_mm==original.mm3_per_mm);
+    const ExtrusionPropertyInfill *infill=after->get_property<ExtrusionPropertyInfill>();REQUIRE(infill!=nullptr);
+    CHECK(infill->source_surface_id==surface_id);
+}
+
+TEST_CASE("Internal bridge volume accepts an anchor printed on the current layer","[plugins][bridge-anchors][bridge-volume]")
+{
+    Fixture fixture({{"bridge_volume_compensation","bridge.finalize_volume"},{"internal_bridge_expansion","1"}});
+    fixture.internal();fixture.prepare();
+    LayerRegionIsland &current=fixture.island().regions_islands().front();
+    add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-2.),0),Point(scale_i(2.),0)});
+    add_anchor_path(current,ExtrusionRole::InternalInfill,
+        Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+    slic3r_api::SupportPipelineInfo &state=fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>();
+    state.demand_computed=1;state.material_generated=1;
+    Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation",
+        "infill.post_process.internal_bridge_anchors"});
+    REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print));
+    size_t bridges=0;
+    visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+        if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+        ++bridges;CHECK(leaf.first_point().x()==scale_i(-2.));CHECK(leaf.last_point().x()==scale_i(3.9));
+    });
+    REQUIRE(bridges==1);
+    REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(Orchestrator::instance(),fixture.prepared.print));
+}
+
+TEST_CASE("Synthetic end anchors affect only diagnostics and distinguish a one-sided bridge","[plugins][bridge-anchors][bridge-volume]")
+{
+    struct Piece { double length,area,height; };
+    auto pieces=[&](const LayerRegionIsland &region) {
+        std::vector<Piece> result;
+        visit_leaves(region.extrusion(LayerRegionIsland::INFILLS),[&](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role!=ExtrusionRole::InternalBridgeInfill) return;
+            const slic3r_api::BridgeVolumeInfo *info=leaf.get_property<slic3r_api::BridgeVolumeInfo>();
+            REQUIRE(info!=nullptr);
+            result.push_back({unscaled(leaf.polyline_ref().length()),info->effective_area_mm2,info->effective_height_mm});
+        });
+        return result;
+    };
+    std::vector<Piece> synthetic;
+    {
+        Fixture fixture({{"bridge_volume_compensation","bridge.finalize_volume"},{"internal_bridge_expansion","1"}});
+        fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(-4.),scale_i(-1.)),Point(scale_i(-4.),scale_i(1.))});
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        slic3r_api::SupportPipelineInfo &state=fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>();
+        state.demand_computed=1;state.material_generated=1;
+        Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation",
+            "infill.post_process.internal_bridge_anchors"});
+        Orchestrator &orch=Orchestrator::instance();
+        (void)orch.consume_plugin_messages();
+        REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(orch,fixture.prepared.print));
+        const auto anchored=bridge_endpoints(current);
+        REQUIRE(anchored.size()==1);CHECK(anchored.front().first.x()==scale_i(-3.9));CHECK(anchored.front().second.x()==scale_i(3.9));
+        size_t pre_warnings=0;
+        for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages())
+            if (message.level==Orchestrator::PluginMessageLevel::Warning) ++pre_warnings;
+        CHECK(pre_warnings==0);
+        REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(orch,fixture.prepared.print));
+        size_t warnings=0;
+        for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages())
+            if (message.level==Orchestrator::PluginMessageLevel::Warning) ++warnings;
+        CHECK(warnings==0);
+        synthetic=pieces(current);REQUIRE(!synthetic.empty());
+        const double nominal=PI*.4*.4/4.;double length=0.,volume=0.;
+        for (const Piece &piece : synthetic) {
+            CHECK(piece.area==Approx(nominal).margin(1e-8));CHECK(piece.height==Approx(.4).margin(1e-8));
+            length+=piece.length;volume+=piece.length*piece.area;
+        }
+        CHECK(length==Approx(7.8).margin(1e-6));CHECK(volume==Approx(length*nominal).margin(1e-7));
+    }
+    {
+        Fixture fixture({{"bridge_volume_compensation","bridge.finalize_volume"},{"internal_bridge_expansion","1"}});
+        fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.9),0),Point(scale_i(3.9),0)});
+        ApiInternal::LayerIslandAccess::support_demand_mutable(fixture.island())=
+            ExPolygons{rectangle_expolygon(-8.,-2.,8.,2.)};
+        slic3r_api::SupportPipelineInfo &state=fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>();
+        state.demand_computed=1;state.material_generated=1;
+        Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation"});
+        Orchestrator &orch=Orchestrator::instance();(void)orch.consume_plugin_messages();
+        REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(orch,fixture.prepared.print));
+        const std::vector<Piece> control=pieces(current);REQUIRE(control.size()==synthetic.size());
+        for (size_t idx=0;idx<control.size();++idx) {
+            CHECK(control[idx].length==Approx(synthetic[idx].length).margin(1e-6));
+            CHECK(control[idx].area==Approx(synthetic[idx].area).margin(1e-8));
+            CHECK(control[idx].height==Approx(synthetic[idx].height).margin(1e-8));
+        }
+    }
+    {
+        Fixture fixture({{"bridge_volume_compensation","bridge.finalize_volume"},{"internal_bridge_expansion","1"}});
+        fixture.internal();fixture.prepare();
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-2.),0),Point(scale_i(3.),0)});
+        add_anchor_path(current,ExtrusionRole::InternalInfill,
+            Points{Point(scale_i(4.),scale_i(-1.)),Point(scale_i(4.),scale_i(1.))});
+        ApiInternal::LayerIslandAccess::support_demand_mutable(fixture.island()).clear();
+        slic3r_api::SupportPipelineInfo &state=fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>();
+        state.demand_computed=1;state.material_generated=1;
+        Active active({"bridge.finalize_volume","surface.bridge_preparation","infill.recipe.bridge_preparation",
+            "infill.post_process.internal_bridge_anchors"});
+        REQUIRE_NOTHROW(Steps::StepPostInfillGeneration::run_step(Orchestrator::instance(),fixture.prepared.print));
+        const auto anchored=bridge_endpoints(current);
+        REQUIRE(anchored.size()==1);CHECK(anchored.front().first.x()==scale_i(-2.));CHECK(anchored.front().second.x()==scale_i(3.9));
+        Orchestrator &orch=Orchestrator::instance();(void)orch.consume_plugin_messages();
+        REQUIRE_NOTHROW(Steps::StepFinalizeSlicing::run_step(orch,fixture.prepared.print));
+        bool missing=false,skipped=false;
+        for (const Orchestrator::PluginMessage &message : orch.consume_plugin_messages()) {
+            INFO(message.message);
+            missing=missing || message.message.find("missing modeled anchors")!=std::string::npos;
+            skipped=skipped || message.message.find("bridge compensation skipped")!=std::string::npos;
+        }
+        CHECK(missing);CHECK_FALSE(skipped);
+    }
+}
+
+TEST_CASE("Bridge volume refuses a synthetic row that leaves its surface in the middle","[plugins][bridge-volume][bridge-anchors]")
+{
+    for (const char *provider : {"bridge.finalize_surface_volume","bridge.finalize_volume"}) {
+        INFO(provider);
+        Fixture fixture({{"bridge_volume_compensation",provider},{"internal_bridge_expansion","1"}});
+        fixture.internal();fixture.prepare();
+        ExPolygon &surface=fixture.bridge().expolygon;
+        Polygon hole=rectangle_expolygon(-.2,-.5,.2,.5).contour;hole.reverse();surface.holes.push_back(std::move(hole));
+        LayerRegionIsland &current=fixture.island().regions_islands().front();
+        add_bridge_path(current,fixture.bridge().id(),Points{Point(scale_i(-3.),0),Point(scale_i(3.),0)});
+        slic3r_api::SupportPipelineInfo &state=fixture.prepared.print.object(0).get_or_add_property<slic3r_api::SupportPipelineInfo>();
+        state.demand_computed=1;state.material_generated=1;
+        Active active({provider,"surface.bridge_preparation","infill.recipe.bridge_preparation"});
+        CHECK(finalize_skipped(fixture.prepared.print).size()==1);
+        visit_leaves(current.extrusion(LayerRegionIsland::INFILLS),[](const ExtrusionEntity &leaf,const ExtrusionAttributes &attributes) {
+            if (attributes.role==ExtrusionRole::InternalBridgeInfill)
+                CHECK(leaf.get_property<slic3r_api::BridgeVolumeInfo>()==nullptr);
+        });
+    }
 }
 
 TEST_CASE("Prepared top bridges retain their metadata through top expansion and cleanup","[plugins][bridge-internal][bridge-preparation]")

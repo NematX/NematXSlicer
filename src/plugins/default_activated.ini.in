@@ -81,6 +81,7 @@ lightning = 1
 ensuring = 1
 infill.post_process.gap_fill = 1
 infill.post_process.full_fill_volume = 1
+infill.post_process.internal_bridge_anchors = 1
 ordering.plan_builder.default = 1
 ordering.object_instance_catalog = 1
 ordering.custom_gcode_tool_overrides = 1

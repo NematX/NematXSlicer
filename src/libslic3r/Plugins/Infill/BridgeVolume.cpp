@@ -7,7 +7,9 @@
    Both providers consume surfaces marked with BridgeSurfaceInfo. An external
    bridge's original unsupported core is reconstructed by subtracting linked
    lower slices. An internal bridge uses its complete prepared area as its
-   working core. The direction stored with the prepared rows (PreparedRows), or the
+   working core; when its preparation requested expansion, its rows may leave
+   that area at their ends, extended by InternalBridgeAnchors.cpp to the
+   extrusions around it. The direction stored with the prepared rows (PreparedRows), or the
    surface's direction when none were stored, and the source-surface identity connect each
    generated row to this geometry and to its owning region's settings.
 
@@ -83,12 +85,14 @@
    The copies then own the old contents. This is not a rollback of earlier plugin
    runs. One object run is sequential; different objects may run in parallel.
 
-   A refused correction never stops slicing; only cancellation does. A row that
-   fails a check restores its whole bucket copy from the original infill, a prepared
-   surface refused while collecting is skipped, and a failure before any correction
-   leaves the whole object unchanged. These keep their nominal flow and are reported
-   in one warning per object. Broken invariants of this finalizer also assert in
-   debug builds; refused geometry and other plugins' contract violations do not.
+    A refused correction never stops slicing; only cancellation does. A row that
+    fails a check restores its whole bucket copy from the original infill, a prepared
+    surface refused while collecting is skipped, and a failure before any correction
+    leaves the whole object unchanged. These keep their nominal flow and are reported
+    in one warning per object. When internal end extensions are present, synthetic
+    endpoint contacts represent the complete row only for missing-anchor diagnostics;
+    they never change corrected sections or volume. Broken invariants of this finalizer
+    also assert in debug builds; refused geometry and other plugins' contract violations do not.
 */
 #include "BridgeVolume.hpp"
 #include "BridgeClearance.hpp"
@@ -400,6 +404,7 @@ void CorrectionVisitor::visit_leaf(MutableExtrusionEntity leaf)
     }
 }
 
+// Validate one bridge leaf, optionally add its end extensions as diagnostic contacts, and publish corrected flow pieces.
 void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,const SurfaceWork &work,
     const BridgeClearance::Index &index,double z,const Config &print_config,
     const run_ctx_finalize_slicing &ctx,uint64_t signature,bool unknown,
@@ -453,8 +458,17 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
     ClipperContext clipper(run_ctx->plugin_storage);
     prepared=clipper_offset(clipper(prepared.readonly()),double(SCALED_EPSILON)).to_expolygon_collection();
     const StoredPolylineCollection outside=clipper_diff_polyline_expolygons(run_ctx->plugin_storage,line.readonly(),prepared.readonly());
+    // The anchors pass extends the rows of an internal bridge beyond its surface, at their ends only.
+    const bool extended=info.core_rule==2 && info.extension_requested;
+    const auto at_end=[&](const Polyline &part) {
+        for (const c_point point : {part.front(),part.back()})
+            for (const c_point end : {start,finish})
+                if (norm(point-end)<=2*SCALED_EPSILON) return true;
+        return false;
+    };
     for (const Polyline part : outside.readonly())
-        if (part.length()>SCALED_EPSILON) throw std::runtime_error("A bridge row lies outside its prepared surface.");
+        if (part.length()>SCALED_EPSILON && !(extended && at_end(part)))
+            throw std::runtime_error("A bridge row lies outside its prepared surface.");
     StoredPolylineCollection inside=clipper_intersection_polyline_expolygons(run_ctx->plugin_storage,line.readonly(),work.core.readonly());
     double core_length=0.,first_core=length,last_core=0.;
     for (const Polyline part : inside) {
@@ -509,7 +523,36 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
         if (interval.unknown && (peripheral || interval.begin<first_core || interval.end>last_core)) contacts_unknown=true;
     if (contacts_unknown || !ctx.support_demand_computed) diagnostics.unknown=true;
     else {
-        const std::vector<std::pair<double,double>> contacts=index.contacts(a,b,height,z);
+        std::vector<std::pair<double,double>> contacts=index.contacts(a,b,height,z);
+        if (extended) {
+            // An internal bridge extension is printed material at the end of the
+            // row. It may satisfy anchor diagnostics, but never changes sections.
+            for (const Polyline &part : outside.readonly()) {
+                bool touches_start=false,touches_finish=false;
+                for (const c_point point : {part.front(),part.back()}) {
+                    touches_start=touches_start || norm(point-start)<=2*SCALED_EPSILON;
+                    touches_finish=touches_finish || norm(point-finish)<=2*SCALED_EPSILON;
+                }
+                if (!touches_start && !touches_finish) continue;
+                double begin=length,end=0.;
+                for (const c_point point : part.points()) {
+                    const double position=unscaled(double(point.x-start.x)*ux+double(point.y-start.y)*uy);
+                    begin=std::min(begin,position);end=std::max(end,position);
+                }
+                // The outside part itself is not in the bridge core. Represent
+                // its printed length as a synthetic contact at an endpoint of the
+                // complete row for diagnostics only; it never changes sections or volume.
+                const double extent=std::min(length,std::max(0.,end-begin));
+                if (touches_start && extent>tolerance) contacts.emplace_back(0.,extent);
+                if (touches_finish && extent>tolerance) contacts.emplace_back(length-extent,length);
+            }
+            std::sort(contacts.begin(),contacts.end());
+            std::vector<std::pair<double,double>> merged;
+            for (const std::pair<double,double> &contact : contacts)
+                if (merged.empty() || merged.back().second<contact.first) merged.push_back(contact);
+                else merged.back().second=std::max(merged.back().second,contact.second);
+            contacts.swap(merged);
+        }
         std::vector<std::pair<double,double>> gaps;
         if (peripheral || info.core_rule==2) {
             // Lower slices authorize this row, but sparse infill may leave real
