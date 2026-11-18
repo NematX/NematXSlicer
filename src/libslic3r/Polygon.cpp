@@ -817,7 +817,7 @@ bool remove_same_neighbor(Polygons &polygons)
     return exist;
 }
 
-void normalize_mesh_polygons(Polygons &polygons)
+void normalize_mesh_polygons(Polygons &polygons, bool keep_collinear)
 {
     // Polygon's move constructor may trim a near-closing point. Transfer point
     // arrays instead so exact normalization never introduces that tolerance.
@@ -855,8 +855,8 @@ void normalize_mesh_polygons(Polygons &polygons)
             // Signed zero area alone can also describe crossing lobes. Only
             // discard a ring proven collinear; leave other intersections to
             // the caller's existing fill-rule operation.
-            bool collinear = true;
-            for (size_t i = 2; i < ring.size(); ++i) {
+            bool collinear = !keep_collinear;
+            for (size_t i = 2; collinear && i < ring.size(); ++i) {
                 if (int128::orient(ring.points.front(), ring.points[1], ring.points[i]) != 0) {
                     collinear = false;
                     break;

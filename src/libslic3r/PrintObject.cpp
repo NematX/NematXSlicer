@@ -589,6 +589,8 @@ bool PrintObject::update_layer_height_profile(const ModelObject& model_object, c
 template<class LayerPtrContainer>
 // Project an already selected patch. Filter only a local copy, retain its open
 // boundaries, and normalize generated rings with the same helper as mesh slices.
+// A painted vertical facet projects to a collinear ring. It is kept: the painting
+// consumers widen the projections by a margin before using them.
 static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers, const indexed_triangle_set &source_facets, const Transform3f &tr, bool seam, std::vector<Polygons> &out)
 {
     indexed_triangle_set scratch;
@@ -787,7 +789,7 @@ static void project_triangles_to_slabs(RefView<Layer, LayerPtrContainer> layers,
         }
     }
     for (Polygons &polygons : out)
-        normalize_mesh_polygons(polygons);
+        normalize_mesh_polygons(polygons, true);
 }
 
 std::vector<Polygons> PrintObject::project_and_append_custom_facets(

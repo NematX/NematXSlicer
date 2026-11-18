@@ -173,7 +173,9 @@ bool remove_same_neighbor(Polygons &polygons);
 // Remove exact duplicate neighbors and collinear zero-area rings; split exact
 // repeated-vertex contacts into separate rings, retaining each ring's winding.
 // This does not resolve arbitrary segment intersections or simplify coordinates.
-void normalize_mesh_polygons(Polygons &polygons);
+// keep_collinear keeps the collinear rings: a painted vertical facet projects to
+// one, and the painting consumers widen it by a margin before using it.
+void normalize_mesh_polygons(Polygons &polygons, bool keep_collinear = false);
 // remove any point that are at epsilon  (or resolution) 'distance' (douglas_peuckere algo for now) and all polygons that are too small to be valid
 
 void ensure_valid(Polygons &polygons, coord_t resolution = SCALED_EPSILON);
