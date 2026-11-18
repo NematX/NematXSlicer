@@ -30,6 +30,9 @@ enum CompleteObjectSort {
     cosObject,
     cosZ,
     cosY,
+    cosX,
+    cosMaxX,
+    cosMaxY,
 };
 
 enum WipeAlgo {

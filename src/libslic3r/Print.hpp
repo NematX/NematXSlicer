@@ -289,6 +289,8 @@ public:
     std::vector<const PrintInstance*> sort_object_instances_by_max_z() const;
     // Sort the PrintObjects by their increasing Y, likely useful for avoiding colisions on printer with a x-bar during sequential prints.
     std::vector<const PrintInstance*> sort_object_instances_by_max_y() const;
+    // Sort instance center positions by X or Y, ascending or descending; equal coordinates retain source object/copy order.
+    std::vector<const PrintInstance*> sort_object_instances_by_xy(bool x_axis, bool descending) const;
     // Produce a vector of PrintObjects in the order of their respective ModelObjects in print.model().
     std::vector<const PrintInstance*> sort_object_instances_by_model_order() const;
 

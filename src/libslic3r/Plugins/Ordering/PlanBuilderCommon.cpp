@@ -101,8 +101,8 @@ const raw_extrusion_role k_region_island_roles[] = {
 Return the object-instance order for a complete-object plan.
 
 This intentionally stays plugin-side. Exact host model order is not exposed as a
-callback; the plugin uses source order, object height, instance Y, or a greedy
-nearest-neighbor walk over instance shifts depending on complete_objects_sort.
+callback; the plugin uses source order, object height, increasing or decreasing
+instance X/Y, or a greedy nearest-neighbor walk over instance shifts depending on complete_objects_sort.
 */
 std::vector<SourceInstance> ordered_source_instances_for_object_plan(
     const Print &print,
@@ -251,16 +251,20 @@ std::vector<SourceInstance> ordered_source_instances_for_object_plan(
                           return lhs.object_idx < rhs.object_idx;
                       return lhs.object_instance_idx < rhs.object_instance_idx;
                   });
-    } else if (sort_mode == "lowy") {
+    } else if (sort_mode == "lowx" || sort_mode == "highx" || sort_mode == "lowy" || sort_mode == "highy") {
         /*
         The plugin API exposes the instance center shift, not the full object
-        convex hull used by legacy code. Sorting by shift.y keeps the mode
-        plugin-side and still gives a stable front-to-back object order.
+        convex hull used by legacy code. Sorting the chosen shift coordinate
+        keeps the XY modes plugin-side, with source indices breaking ties.
         */
+        const bool x_axis = sort_mode == "lowx" || sort_mode == "highx";
+        const bool descending = sort_mode == "highx" || sort_mode == "highy";
         std::sort(out.begin(), out.end(),
-                  [](const SourceInstance &lhs, const SourceInstance &rhs) {
-                      if (lhs.shift.y != rhs.shift.y)
-                          return lhs.shift.y < rhs.shift.y;
+                  [x_axis, descending](const SourceInstance &lhs, const SourceInstance &rhs) {
+                      const coord_t left = x_axis ? lhs.shift.x : lhs.shift.y;
+                      const coord_t right = x_axis ? rhs.shift.x : rhs.shift.y;
+                      if (left != right)
+                          return descending ? left > right : left < right;
                       if (lhs.object_idx != rhs.object_idx)
                           return lhs.object_idx < rhs.object_idx;
                       return lhs.object_instance_idx < rhs.object_instance_idx;

@@ -90,6 +90,7 @@ Print-sequence checks compare cloned object plans with native ordinary-layer
 plans, exercise effective provider selection and load the obsolete switch through
 the supported text and project paths. The STL export catalogue varies each
 declared object-builder setting independently.
+XY order checks distinguish both directions and stable copy ties, including shared first layers and INI/3MF persistence.
 Auxiliary scenes independently enumerate source layers, owner markers and shifted
 extrusion endpoints. Explicit model indices distinguish every object sort mode.
 The plugins_inactive_builder_import CTest entry runs the isolated import case
@@ -3284,7 +3285,7 @@ TEST_CASE("Plan builders preserve auxiliary sources and owners in distinct scene
     }
 }
 
-// Distinct heights and XY positions distinguish model, height, Y and nearest
+// Distinct heights and XY positions distinguish model, height, axis and nearest
 // ordering; expected model indices are literal, not derived from either builder.
 TEST_CASE("Object sort settings produce distinct explicit instance orders", "[plugins][printing-plan][print-sequence][ordering]")
 {
@@ -3305,7 +3306,8 @@ TEST_CASE("Object sort settings produce distinct explicit instance orders", "[pl
     check_sequence_builder(print, false);
     struct Order { const char *setting; std::vector<size_t> indices; };
     const Order orders[] = {{"object", {0, 1, 2, 3}}, {"lowz", {1, 3, 0, 2}},
-        {"lowy", {1, 0, 3, 2}}, {"nearest", {0, 3, 2, 1}}};
+        {"lowy", {1, 0, 3, 2}}, {"nearest", {0, 3, 2, 1}},
+        {"lowx", {0, 3, 2, 1}}, {"highx", {1, 2, 3, 0}}, {"highy", {2, 3, 0, 1}}};
     for (const Order &order : orders) {
         CAPTURE(order.setting);
         config.set_deserialize_strict("complete_objects_sort", order.setting);
@@ -3319,6 +3321,64 @@ TEST_CASE("Object sort settings produce distinct explicit instance orders", "[pl
             const Printing::PrintingObjectInstance &instance = plan.object_instances[plan.groups[g].printing_catalog_ids.front()];
             CHECK(instance.object->model_object()->id() == model.objects()[order.indices[g]].id());
             CHECK(instance.object_instance_idx == 0);
+        }
+    }
+}
+
+// Repeated coordinates distinguish stable object/copy ties from reversing an ascending result.
+// A shared first-layer group must visit its copies in the same order as the later whole-copy groups.
+TEST_CASE("XY object sorts keep copy ties stable through the shared first layer",
+          "[plugins][printing-plan][print-sequence][ordering][object-sort]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool shared_first_layer = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0"}, {"complete_objects_sort", "object"},
+        {"complete_objects_one_first_layer", shared_first_layer ? "1" : "0"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"support_material", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"}});
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 1.2), make_cube(2., 2., 1.2)}, print, model, config);
+    model.objects()[0].instances.front()->set_offset(Vec3d(20., 80., 0.));
+    model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(20., 20., 0.));
+    model.objects()[0].add_instance(*model.objects()[0].instances.front())->set_offset(Vec3d(80., 20., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(20., 50., 0.));
+    model.objects()[1].add_instance(*model.objects()[1].instances.front())->set_offset(Vec3d(80., 50., 0.));
+    using Copy = std::pair<size_t, size_t>;
+    struct Order { const char *setting; std::vector<Copy> copies; };
+    const Order orders[] = {
+        {"lowx", {{0, 0}, {0, 1}, {1, 0}, {0, 2}, {1, 1}}},
+        {"highx", {{0, 2}, {1, 1}, {0, 0}, {0, 1}, {1, 0}}},
+        {"lowy", {{0, 1}, {0, 2}, {1, 0}, {1, 1}, {0, 0}}},
+        {"highy", {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0, 2}}}
+    };
+    for (const Order &order : orders) {
+        CAPTURE(order.setting, shared_first_layer);
+        config.set_deserialize_strict("complete_objects_sort", order.setting);
+        print.apply(model, config);
+        print.process();
+        // The native builder has no shared first-layer group; its low-Y hull sort is a separate compatibility mode.
+        if (!shared_first_layer && std::string(order.setting) != "lowy")
+            check_sequence_builder(print, true);
+        else
+            check_stack_sequence_sources(print);
+        REQUIRE(print.printing_plan() != nullptr);
+        const Printing::PrintingPlan &plan = *print.printing_plan();
+        const size_t prefix = shared_first_layer ? 1 : 0;
+        REQUIRE(plan.groups.size() == order.copies.size() + prefix);
+        if (shared_first_layer)
+            REQUIRE(plan.groups.front().printing_catalog_ids.size() == order.copies.size());
+        for (size_t i = 0; i < order.copies.size(); ++i) {
+            const Printing::PrintingGroup &group = plan.groups[i + prefix];
+            REQUIRE(group.printing_catalog_ids.size() == 1);
+            const Printing::PrintingObjectInstance &instance = plan.object_instances[group.printing_catalog_ids.front()];
+            CHECK(instance.object->model_object()->id() == model.objects()[order.copies[i].first].id());
+            CHECK(instance.object_instance_idx == order.copies[i].second);
+            if (shared_first_layer)
+                CHECK(plan.groups.front().printing_catalog_ids[i] == group.printing_catalog_ids.front());
         }
     }
 }
@@ -3909,11 +3969,49 @@ TEST_CASE("Object sort helper maps serialized names", "[plugins][config][print-s
     DynamicPrintConfig config;
     CHECK(complete_objects_sort(config) == cosObject);
     const std::pair<const char *, CompleteObjectSort> orders[] = {
-        { "object", cosObject }, { "lowy", cosY }, { "lowz", cosZ }, { "nearest", cosNearest }
+        { "object", cosObject }, { "lowy", cosY }, { "lowz", cosZ }, { "nearest", cosNearest },
+        { "lowx", cosX }, { "highx", cosMaxX }, { "highy", cosMaxY }
     };
     for (const auto &order : orders) {
         config.set_deserialize_strict("complete_objects_sort", order.first);
         CHECK(complete_objects_sort(config) == order.second);
+    }
+}
+
+// Keep the dropdown's serialized names and labels explicit; presets and projects must retain each new choice unchanged.
+TEST_CASE("Object XY sort choices persist through INI and 3MF", "[plugins][config][print-sequence][object-sort]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get("complete_objects_sort");
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->enum_def.get() != nullptr);
+    const std::vector<std::string> values{"object", "lowx", "highx", "lowy", "highy", "lowz", "nearest"};
+    const std::vector<std::string> labels{"Right panel", "Min X", "Max X", "lowest Y", "Max Y", "lowest Z", "Nearest"};
+    CHECK(definition->enum_def->values() == values);
+    CHECK(definition->enum_def->labels() == labels);
+    CHECK(definition->default_value->serialize() == "object");
+    CHECK(definition->invalidates_step == STEP_ORDERING);
+    ScopedNatureDirectory directory;
+    Model model;
+    Print print;
+    Test::init_print({make_cube(2., 2., 1.)}, print, model);
+    for (const char *value : {"lowx", "highx", "highy"}) {
+        CAPTURE(value);
+        DynamicPrintConfig saved;
+        saved.set_deserialize_strict("complete_objects_sort", value);
+        const boost::filesystem::path ini = directory.path() / "object-sort.ini";
+        saved.save(ini.string(), ConfigWriteTarget::Local);
+        DynamicPrintConfig loaded_ini;
+        loaded_ini.load(ini.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+        CHECK(loaded_ini.opt_serialize("complete_objects_sort") == value);
+        const boost::filesystem::path archive = directory.path() / "object-sort.3mf";
+        REQUIRE(store_3mf(archive.string().c_str(), &model, &saved));
+        DynamicPrintConfig loaded;
+        Model loaded_model;
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::EnableSilent};
+        REQUIRE(load_3mf(archive.string().c_str(), loaded, substitutions, &loaded_model, false, false));
+        CHECK(loaded.opt_serialize("complete_objects_sort") == value);
     }
 }
 

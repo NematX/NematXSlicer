@@ -138,6 +138,9 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(CompleteObjectSort, {
     {"object", cosObject},
     {"lowy", cosY},
     {"lowz", cosZ},
+    {"lowx", cosX},
+    {"highx", cosMaxX},
+    {"highy", cosMaxY},
 })
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WipeAlgo, {
     {"linear", waLinear},

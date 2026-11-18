@@ -53,6 +53,7 @@ marked with an owner are included only for that instance; unmarked local layers
 are reproduced for every copy. Sources remain unchanged.
 The provider owns object order, height step, height limit, island and first-layer settings.
 Their activation rules keep them editable only for the selected By object mode.
+XY orders compare instance positions on the plate, keeping source order on ties.
 
     register_by_object_plan_builder_plugin() -> register the alternative provider
         ByObjectPlanBuilder::inilialize_impl() -> define settings and activation rules
@@ -390,7 +391,8 @@ void append_island_groups(const Print &print, PrintingPlan &plan,
 void initialize_by_object_settings(orchestrator_handle *orch)
 {
     const key_value_string_pair_t order_values[] = {
-        { "object", "Right panel" }, { "lowy", "lowest Y" },
+        { "object", "Right panel" }, { "lowx", "Min X" }, { "highx", "Max X" },
+        { "lowy", "lowest Y" }, { "highy", "Max Y" },
         { "lowz", "lowest Z" }, { "nearest", "Nearest" }
     };
     raw_config_option_def def = raw_config_option_def_init();
@@ -406,10 +408,12 @@ void initialize_by_object_settings(orchestrator_handle *orch)
     def.label = "Object sort";
     def.tooltip = "When printing multiple objects or copies on after another, this will help you to choose how it's ordered."
         "\nObject will sort them by the order of the right panel."
-        "\nLowest Y will sort them by their lowest Y point. Useful for printers with a X-bar."
+        "\nMin X sorts copy positions from the lowest to the highest X coordinate; Max X reverses that order."
+        "\nLowest Y sorts copy positions from the lowest to the highest Y coordinate; Max Y reverses that order."
+        " Useful for printers with a X-bar. Equal coordinates keep the object and copy order."
         "\nLowest Z will sort them by their height, useful for delta printers."
         "\nNearest will try to jump to the nearest.";
-    def.enum_def.value_label_pairs = { order_values, 4 };
+    def.enum_def.value_label_pairs = { order_values, 7 };
     def.default_serialized_value = "object";
     orchestrator_create_option_def(orch, &def);
 

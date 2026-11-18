@@ -1240,6 +1240,12 @@ std::vector<const PrintInstance *> ordered_print_instances_for_object_plan(const
         return print.sort_object_instances_by_max_z();
     case cosY:
         return print.sort_object_instances_by_max_y();
+    case cosX:
+        return print.sort_object_instances_by_xy(true, false);
+    case cosMaxX:
+        return print.sort_object_instances_by_xy(true, true);
+    case cosMaxY:
+        return print.sort_object_instances_by_xy(false, true);
     case cosNearest:
         return chain_print_object_instances(print);
     case cosObject:

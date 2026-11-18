@@ -1707,6 +1707,12 @@ void Print::process() {
                 instances_ordering = this->sort_object_instances_by_max_z();
             else if (complete_objects_sort(config()) == cosY)
                 instances_ordering = this->sort_object_instances_by_max_y();
+            else if (complete_objects_sort(config()) == cosX)
+                instances_ordering = this->sort_object_instances_by_xy(true, false);
+            else if (complete_objects_sort(config()) == cosMaxX)
+                instances_ordering = this->sort_object_instances_by_xy(true, true);
+            else if (complete_objects_sort(config()) == cosMaxY)
+                instances_ordering = this->sort_object_instances_by_xy(false, true);
             else if (complete_objects_sort(config()) == cosNearest)
                 instances_ordering = chain_print_object_instances(*this);
             // Find the 1st printing object, find its tool ordering and the initial extruder ID.
@@ -2011,6 +2017,21 @@ std::vector<const PrintInstance*> Print::sort_object_instances_by_max_y() const
         }
     }
     std::sort(instances.begin(), instances.end(), [&map_min_y](const PrintInstance* po1, const PrintInstance* po2) { return map_min_y[po1] < map_min_y[po2]; });
+    return instances;
+}
+
+std::vector<const PrintInstance*> Print::sort_object_instances_by_xy(bool x_axis, bool descending) const
+{
+    std::vector<const PrintInstance*> instances;
+    instances.reserve(this->num_object_instances());
+    for (const PrintObject &object : this->objects())
+        for (const PrintInstance &instance : object.instances())
+            instances.push_back(&instance);
+    std::stable_sort(instances.begin(), instances.end(), [x_axis, descending](const PrintInstance *lhs, const PrintInstance *rhs) {
+        const coord_t left = x_axis ? lhs->shift.x() : lhs->shift.y();
+        const coord_t right = x_axis ? rhs->shift.x() : rhs->shift.y();
+        return descending ? left > right : left < right;
+    });
     return instances;
 }
 

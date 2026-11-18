@@ -2364,6 +2364,12 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
             print_object_instances_ordering = print.sort_object_instances_by_max_z();
         else if (complete_objects_sort(print.config()) == cosY)
             print_object_instances_ordering = print.sort_object_instances_by_max_y();
+        else if (complete_objects_sort(print.config()) == cosX)
+            print_object_instances_ordering = print.sort_object_instances_by_xy(true, false);
+        else if (complete_objects_sort(print.config()) == cosMaxX)
+            print_object_instances_ordering = print.sort_object_instances_by_xy(true, true);
+        else if (complete_objects_sort(print.config()) == cosMaxY)
+            print_object_instances_ordering = print.sort_object_instances_by_xy(false, true);
         else if(complete_objects_sort(print.config()) == cosNearest)
             print_object_instances_ordering = chain_print_object_instances(print);
         // Find the 1st printing object, find its tool ordering and the initial extruder ID.
