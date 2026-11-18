@@ -932,6 +932,8 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         && config.perimeters                  == other_config.perimeters
         && region_config_option_equal(config, other_config, "external_perimeter_acceleration")
         && config.external_perimeter_extrusion_width == other_config.external_perimeter_extrusion_width
+        && config.external_perimeter_extrusion_spacing == other_config.external_perimeter_extrusion_spacing
+        && config.external_perimeter_extrusion_change_odd_layers == other_config.external_perimeter_extrusion_change_odd_layers
         && config.external_perimeter_overlap == other_config.external_perimeter_overlap
         && region_config_option_equal(config, other_config, "external_perimeter_speed") // it os mandatory? can't this be set at gcode.cpp?
         && config.external_perimeters_first == other_config.external_perimeters_first
@@ -981,6 +983,8 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         && config.perimeter_acceleration    == other_config.perimeter_acceleration
         && config.perimeter_direction       == other_config.perimeter_direction
         && config.perimeter_extrusion_width == other_config.perimeter_extrusion_width
+        && config.perimeter_extrusion_spacing == other_config.perimeter_extrusion_spacing
+        && config.perimeter_extrusion_change_odd_layers == other_config.perimeter_extrusion_change_odd_layers
         && config.perimeter_generator       == other_config.perimeter_generator
         && config.perimeter_loop            == other_config.perimeter_loop
         && config.perimeter_loop_seam       == other_config.perimeter_loop_seam

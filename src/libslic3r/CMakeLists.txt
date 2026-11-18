@@ -261,6 +261,8 @@ set(SLIC3R_SOURCES
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
 	Plugins/Common/ClipperHelpers.hpp
+	Plugins/Common/ExtrusionTreeReverse.cpp
+	Plugins/Common/ExtrusionTreeReverse.hpp
 	Plugins/Common/PluginEdgeGrid.cpp
 	Plugins/Common/PluginEdgeGrid.hpp
 	Plugins/Common/PolygonWorkBuffers.hpp
@@ -557,6 +559,8 @@ set(SLIC3R_SOURCES
 	Plugins/Perimeter/ExtraPerimetersOnOverhangs.hpp
 	Plugins/Perimeter/FuzzySkin.cpp
 	Plugins/Perimeter/FuzzySkin.hpp
+	Plugins/Perimeter/LoopDirection.cpp
+	Plugins/Perimeter/LoopDirection.hpp
 	Plugins/Perimeter/MarkFirstLoop.cpp
 	Plugins/Perimeter/MarkFirstLoop.hpp
 	Plugins/Perimeter/OnlyOnePerimeterFirstLayer.cpp

@@ -12,9 +12,17 @@ inner area used by the host to create the next node. The first loop is the
 external perimeter (external role and flow); the following loops are internal
 perimeters (internal role and flow, offsets at the internal spacing).
 
+Like the native provider, it never lets regions that disagree on the perimeter
+count, the extruder, a setting of the two flows or a loop direction setting
+share one tree: RegionSettings
+cuts the island slice into the largest areas where these settings agree, and
+each connected piece of such an area becomes the root of one region group.
+
     run()
-    |-- read both role flows and the requested count from the source region
-    `-- _generate_node(): select shell flow, publish loops and remaining areas
+    |-- RegionSettings: areas whose regions agree on the settings
+    |-- per area: both role flows from its first region, its perimeter count
+    `-- per connected piece: run_region_group() with _generate_node()
+        `-- _generate_node(): select shell flow, publish loops and remaining areas
         `-- _make_perimeter_extrusion(): offset a borrowed area in caller storage
             `-- _append_perimeter_loop(): keep LOOP/HOLE flags on the wrapper
 
@@ -34,6 +42,7 @@ from slic3r_api import (
     PluginCancelled,
     PluginBase,
     RAW_EXTRUSION_FLAG_REVERSIBLE,
+    RegionSettings,
     RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER,
     RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER,
     STEP_PERIMETER,
@@ -44,6 +53,25 @@ from slic3r_api import (
 
 
 PLUGIN_ID = "python.perimeter.generator.simple"
+# The perimeter count first, as the key of the region groups, then the
+# extruder, every setting the two perimeter flows read and the direction
+# settings that the loop direction post-process reads.
+_GROUP_KEYS = [
+    "perimeters",
+    "perimeter_extruder",
+    "external_perimeter_extrusion_width",
+    "external_perimeter_extrusion_spacing",
+    "external_perimeter_extrusion_change_odd_layers",
+    "external_perimeter_overlap",
+    "perimeter_extrusion_width",
+    "perimeter_extrusion_spacing",
+    "perimeter_extrusion_change_odd_layers",
+    "perimeter_overlap",
+    "perimeter_direction",
+    "perimeter_reverse",
+    "overhangs_reverse",
+    "overhangs_reverse_threshold",
+]
 LOOP_ROLE_DEFAULT = 1 << 0
 LOOP_ROLE_HOLE = LOOP_ROLE_DEFAULT | (1 << 3)
 
@@ -139,19 +167,33 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
 
     def _run_perimeter(self, ctx, run_ctx_address: int) -> None:
         island = ctx.perimeter_island()
-        regions = list(island.regions())
-        if not regions:
+        if island.region_count() == 0:
             return
 
-        region_config = regions[0].print_region().config()
-        perimeter_count = max(0, region_config.int("perimeters"))
-        state = SimpleGeneratorState(
-            regions[0].flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
-            regions[0].flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER),
-            perimeter_count,
-            run_ctx_address,
-        )
-        ctx.run_region_group(regions, island.slice(), state, self._generate_node)
+        # Regions that agree on the perimeter count, the extruder and the
+        # settings of both flows share one tree; an accept-all clip keeps the
+        # whole slice when every region agrees.
+        settings = RegionSettings(self.api, ctx.plugin_storage(), island, [_GROUP_KEYS])
+        settings.segregate(island.slice())
+
+        for values, clip in settings.get_areas(_GROUP_KEYS[0]):
+            regions = settings.get_regions(_GROUP_KEYS[0], values)
+            if not regions:
+                continue
+
+            state = SimpleGeneratorState(
+                regions[0].flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
+                regions[0].flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER),
+                max(0, values.get_int("perimeters")),
+                run_ctx_address,
+            )
+            root_areas = clip.intersections(island.slice())
+            try:
+                for root_area in root_areas:
+                    throw_if_cancelled(run_ctx_address)
+                    ctx.run_region_group(regions, root_area, state, self._generate_node)
+            finally:
+                root_areas.free_from_storage()
 
     def _generate_node(self, state: SimpleGeneratorState, generation, node, inner_areas, inner_fill_areas) -> bool:
         throw_if_cancelled(state.run_ctx_address)

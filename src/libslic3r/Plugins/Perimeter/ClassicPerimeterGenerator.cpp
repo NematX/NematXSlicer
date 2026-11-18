@@ -94,6 +94,16 @@ const char *k_perimeters_key = "perimeters";
 const char *k_perimeter_extruder_key = "perimeter_extruder";
 const char *k_external_perimeter_width_key = "external_perimeter_extrusion_width";
 const char *k_perimeter_width_key = "perimeter_extrusion_width";
+const char *k_external_perimeter_spacing_key = "external_perimeter_extrusion_spacing";
+const char *k_external_perimeter_odd_layers_key = "external_perimeter_extrusion_change_odd_layers";
+const char *k_external_perimeter_overlap_key = "external_perimeter_overlap";
+const char *k_perimeter_spacing_key = "perimeter_extrusion_spacing";
+const char *k_perimeter_odd_layers_key = "perimeter_extrusion_change_odd_layers";
+const char *k_perimeter_overlap_key = "perimeter_overlap";
+const char *k_perimeter_direction_key = "perimeter_direction";
+const char *k_perimeter_reverse_key = "perimeter_reverse";
+const char *k_overhangs_reverse_key = "overhangs_reverse";
+const char *k_overhangs_reverse_threshold_key = "overhangs_reverse_threshold";
 const char *k_overhangs_key = "overhangs";
 const char *k_overhangs_flow_ratio_key = "overhangs_flow_ratio";
 const char *k_overhangs_width_key = "overhangs_width";
@@ -118,7 +128,10 @@ const char *k_gap_fill_overlap_key = "gap_fill_overlap";
 // configuration options this generator reads, and with which type. The island
 // split itself is done later by RegionSettings; keeping both lists explicit
 // makes it visible when a new setting is only read globally, or must also split
-// the root geometry into separate region groups.
+// the root geometry into separate region groups. The spacing, odd-layer and
+// overlap flow settings and the loop direction settings are only compared, as in
+// the simple generator: the flows and the loop direction plugin read them, but
+// declaring them would give them selector activation rules.
 const raw_used_config_key k_used_config_keys[] = {
     { k_perimeters_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { k_perimeter_extruder_key, RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
@@ -1471,15 +1484,28 @@ void ClassicPerimeterGenerator::run_impl(const plugin_run_context *run_ctx) cons
         return;
 
     // Classic cannot safely share one perimeter tree between regions with
-    // different perimeter counts, widths, overhang behavior or thin-perimeter
-    // overlap. RegionSettings cuts the LayerIsland into the largest areas where
-    // these values are identical, then each area gets its own root node.
+    // different perimeter counts, flows, overhang behavior or thin-perimeter
+    // overlap. The flows read the widths, spacings, odd-layer changes and
+    // overlaps of both perimeter roles, and the loop direction plugin reads the
+    // direction settings of the group. RegionSettings cuts the LayerIsland into
+    // the largest areas where these values are identical, then each area gets
+    // its own root node.
     RegionSettings settings(run_ctx->plugin_storage,
                             island,
                             {{ k_perimeters_key,
                                k_perimeter_extruder_key,
                                k_external_perimeter_width_key,
+                               k_external_perimeter_spacing_key,
+                               k_external_perimeter_odd_layers_key,
+                               k_external_perimeter_overlap_key,
                                k_perimeter_width_key,
+                               k_perimeter_spacing_key,
+                               k_perimeter_odd_layers_key,
+                               k_perimeter_overlap_key,
+                               k_perimeter_direction_key,
+                               k_perimeter_reverse_key,
+                               k_overhangs_reverse_key,
+                               k_overhangs_reverse_threshold_key,
                                k_overhangs_key,
                                k_overhangs_flow_ratio_key,
                                k_overhangs_width_key,

@@ -101,7 +101,7 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     const bool default_accel = fl("default_acceleration") > 0;
     const bool pp_ironing = has_top && b("ironing");
     const bool ext_not_loop = ext && !loop_seam;
-    const bool can_reverse = !A && overhangs && !b("perimeter_reverse");
+    const bool can_reverse = overhangs && !b("perimeter_reverse");
     const bool soluble = have_support &&
         config.opt_enum<SupportZDistanceType>("support_material_contact_distance_type") == zdNone;
     const bool seam_cost = P && config.opt_enum<SeamPosition>("seam_position") == spCost;
