@@ -6,6 +6,8 @@
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <random>
@@ -26,7 +28,8 @@ FFF print GUI rules tests
 The core rule registry describes which configuration controls are meaningful.
 These tests compare it with an independent imperative model on default settings,
 curated tower combinations and seeded fuzz. Towers distinguish global XY from
-shared object offsets; no GUI implementation is loaded or tested here.
+   shared object offsets. The merged support layout keeps contact controls next
+   to the general XY separation; no GUI implementation is loaded or tested here.
 */
 
 using namespace Slic3r;
@@ -486,6 +489,43 @@ TEST_CASE("FFF print GUI rules match independent activation logic", "[plugins][g
         INFO("key " << entry.first);
         CHECK(found->second == entry.second);
     }
+}
+
+// Check the real layout after every plugin fragment is merged, and the fallback of an older custom layout without a contact row.
+TEST_CASE("Support contact controls stay directly below the general XY separation",
+          "[plugins][gui-rules][support-contact-xy][support-layout]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &host = Orchestrator::instance();
+    std::ifstream file(std::string(TEST_DATA_DIR) + "/../../resources/ui_layout/default/print.ui");
+    REQUIRE(file.good());
+    const std::string base{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    const std::string merged = host.merged_ui_layout("print.ui", base);
+    const std::string gap_key = ":support_material_xy_spacing\n";
+    const size_t gap = merged.find(gap_key);
+    REQUIRE(gap != std::string::npos);
+    const size_t next_row = merged.find_first_not_of(" \t\r\n", gap + gap_key.size());
+    const size_t contact_row = merged.find("line:Contact XY separation\n");
+    REQUIRE(contact_row != std::string::npos);
+    CHECK(next_row == contact_row);
+    const size_t contact = merged.find(":support_material_contact_xy_spacing\n", contact_row);
+    const size_t row_end = merged.find("end_line", contact_row);
+    REQUIRE(contact != std::string::npos);
+    REQUIRE(row_end != std::string::npos);
+    CHECK(contact < row_end);
+    CHECK(merged.find(":support_material_contact_xy_spacing\n", contact + 1) == std::string::npos);
+    const size_t bridge = merged.find(":dont_support_bridges\n");
+    REQUIRE(bridge != std::string::npos);
+    CHECK(bridge > row_end);
+    CHECK(bridge < merged.find("group:", row_end));
+    CHECK(merged.find(":dont_support_bridges\n", bridge + 1) == std::string::npos);
+
+    const std::string old_layout = host.merged_ui_layout("print.ui",
+        "page:Support material\ngroup:Options for support material and raft\n"
+        "setting:support_material_xy_spacing\nsetting:support_material_synchronize_layers\n");
+    const size_t old_bridge = old_layout.find(":dont_support_bridges\n");
+    REQUIRE(old_bridge != std::string::npos);
+    CHECK(old_layout.find(":dont_support_bridges\n", old_bridge + 1) == std::string::npos);
 }
 
 TEST_CASE("FFF print GUI rules match independent activation logic on a seeded fuzz",

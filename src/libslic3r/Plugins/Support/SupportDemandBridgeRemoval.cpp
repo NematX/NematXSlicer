@@ -248,7 +248,7 @@ const char *SupportDemandBridgeRemoval::print_ui_fragment() noexcept
 {
     return "page:Support material\n"
            "group:Options for support material and raft\n"
-           "setting:insert$aftersetting$support_material_xy_spacing:dont_support_bridges\n";
+           "setting:insert$afterline$Contact XY separation:dont_support_bridges\n";
 }
 
 void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
