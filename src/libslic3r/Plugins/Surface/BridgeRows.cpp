@@ -16,12 +16,29 @@
    edge then overflow on one side to compensate the other side they leave bare, which discrete rows cannot avoid,
    but rows parallel to an edge cannot spill beyond it, for example over the inner corner of an L.
 
+   Between parallel edges, several phases often cover the area equally well. The rows are then centered: the space
+   between the extent of the area across the rows and the outer kept rows is split between both sides.
+
+   rows() draws the rows of a fit as the pattern does, with its integer line spacing and line count, for callers that
+   need the actual threads rather than a score. anchor() and anchored() carry a fit to another outline of the same
+   bridge: the rows keep their absolute positions, only the phase from the side of the new outline changes.
+
        fit()
-       |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
-       |-- append_rings() [rotate the area and both contours into the row frame]
+       |-- frame()
+       |   |-- clipper_offset() [the 0.05 and 0.48 spacing contours of the rows]
+       |   `-- append_rings() [rotate the area and both contours into the row frame]
        `-- score() [kept rows, their bands and the covered and overflowing areas]
            |-- intervals() [crossings of a vertical cut with rings, even-odd]
            `-- clipped_area() [exact area of the bridge inside one band]
+
+       rows()
+       |-- line_spacing() [the pattern's integer spacing of the rows]
+       |-- frame()
+       `-- intervals() [kept rows, rotated back to the area]
+
+       anchor() and anchored()
+       |-- frame_left() [side of the rotated bounding box]
+       `-- line_spacing()
 
    All work vectors are local to one call. */
 #include "BridgeRows.hpp"
@@ -33,13 +50,34 @@ namespace slic3r_api { namespace BridgeRows {
 namespace {
 using Ring = std::vector<std::pair<double, double>>;
 using Rings = std::vector<Ring>;
+// The area and the two row contours rotated into the frame where the rows are vertical, with the x extent of the area.
+struct Frame {
+    Rings area, outer, inner;
+    double left = 0., right = 0.;
+    float turn = 0.f;
+};
+// Build the frame of the rows along angle for the bridge flow spacing.
+Frame frame(storage_handle *storage, const ExPolygon &area, double angle, double spacing);
+// The row frame's turn for rows along angle, in the float precision of FillRectilinear.
+double frame_turn(double angle);
+// The left of area in the row frame: the side of its rotated bounding box from which the pattern places the rows.
+double frame_left(const ExPolygon &area, double angle);
+// The pattern's scaled line spacing for rows at pitch: the recipe passes the pitch as a float density of spacing.
+// Zero for an invalid spacing or pitch.
+coord_t line_spacing(double spacing, double pitch);
 // Append the contour and holes of area rotated by angle around the origin, as the rectilinear pattern rotates them.
 void append_rings(Rings &out, const ExPolygon &area, double angle);
 // Sorted filled intervals of the vertical cut at x through rings, read with the even-odd rule.
 std::vector<std::pair<double, double>> intervals(const Rings &rings, double x);
+// A scored candidate and the positions across the rows of its first and last kept rows, to center equally good rows.
+struct Candidate {
+    Fit fit;
+    double first = 0., last = 0.;
+    bool kept = false;
+};
 // Coverage and overflow, in fractions of total, of the rows at phase, phase + pitch... from the left of the area.
-Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
-          double phase);
+Candidate score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
+                double phase);
 // Signed area of rings inside the rectangle [x0, x1] x [y0, y1]; the sign follows the ring orientation, so holes
 // subtract from their contour. Each ring is clipped by the convex window (Sutherland-Hodgman), which gives the exact
 // area even when the clipped ring degenerates along the window.
@@ -73,27 +111,34 @@ std::vector<std::pair<double, double>> intervals(const Rings &rings, double x)
     return out;
 }
 
-Fit score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
-          double phase)
+Candidate score(const Rings &area, const Rings &outer, const Rings &inner, double left, double right, double total, double pitch,
+                double phase)
 {
+    Candidate out;
     double covered = 0., overflow = 0.;
     for (double x = left + phase; x <= right; x += pitch) {
         const std::vector<std::pair<double, double>> reached = intervals(inner, x);
+        bool kept = false;
         for (const std::pair<double, double> &row : intervals(outer, x)) {
             // A drawn row is an interval of the 0.05 spacing contour that meets the 0.48 spacing contour.
             if (std::none_of(reached.begin(), reached.end(), [&row](const std::pair<double, double> &r) { return r.second > row.first && r.first < row.second; }))
                 continue;
+            kept = true;
             const double inside = std::abs(clipped_area(area, x - pitch / 2., x + pitch / 2., row.first, row.second));
             covered += inside;
             overflow += pitch * (row.second - row.first) - inside;
         }
+        if (kept) {
+            if (!out.kept) out.first = x;
+            out.last = x;
+            out.kept = true;
+        }
     }
-    Fit fit;
-    fit.pitch = pitch;
-    fit.phase = coord_t(std::llround(phase));
-    fit.coverage = covered / total;
-    fit.overflow = overflow / total;
-    return fit;
+    out.fit.pitch = pitch;
+    out.fit.phase = coord_t(std::llround(phase));
+    out.fit.coverage = covered / total;
+    out.fit.overflow = overflow / total;
+    return out;
 }
 
 double clipped_area(const Rings &rings, double x0, double x1, double y0, double y1)
@@ -145,43 +190,83 @@ PitchRange pitch_range(const Config &region_config, double spacing, double nozzl
     return range;
 }
 
-Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const PitchRange &range)
+namespace {
+Frame frame(storage_handle *storage, const ExPolygon &area, double angle, double spacing)
 {
     const ClipperContext clipper(storage);
     const StoredExPolygonCollection outer_areas = clipper_offset(clipper(area), -scale_d(0.05 * spacing), CLIPPER_JOIN_MITER, 3.).to_expolygon_collection();
     const StoredExPolygonCollection inner_areas = clipper_offset(clipper(area), -scale_d(0.48 * spacing), CLIPPER_JOIN_MITER, 3.).to_expolygon_collection();
-    // The frame of FillRectilinear: rows along the bridge angle become vertical, in its float precision.
-    float turn = float(angle);
-    turn += float(PI / 2.);
-    Rings area_rings, outer, inner;
-    append_rings(area_rings, area, -double(turn));
-    for (const ExPolygon part : outer_areas.readonly()) append_rings(outer, part, -double(turn));
-    for (const ExPolygon part : inner_areas.readonly()) append_rings(inner, part, -double(turn));
-    double left = 0., right = 0.;
+    Frame out;
+    out.turn = float(frame_turn(angle));
+    append_rings(out.area, area, -double(out.turn));
+    for (const ExPolygon part : outer_areas.readonly()) append_rings(out.outer, part, -double(out.turn));
+    for (const ExPolygon part : inner_areas.readonly()) append_rings(out.inner, part, -double(out.turn));
     bool first = true;
-    for (const Ring &ring : area_rings)
+    for (const Ring &ring : out.area)
         for (const std::pair<double, double> &point : ring) {
-            left = first ? point.first : std::min(left, point.first);
-            right = first ? point.first : std::max(right, point.first);
+            out.left = first ? point.first : std::min(out.left, point.first);
+            out.right = first ? point.first : std::max(out.right, point.first);
             first = false;
         }
+    return out;
+}
+
+double frame_turn(double angle)
+{
+    // The frame of FillRectilinear: rows along the bridge angle become vertical.
+    float turn = float(angle);
+    turn += float(PI / 2.);
+    return double(turn);
+}
+
+double frame_left(const ExPolygon &area, double angle)
+{
+    Rings rings;
+    append_rings(rings, area, -frame_turn(angle));
+    double left = 0.;
+    bool first = true;
+    for (const Ring &ring : rings)
+        for (const std::pair<double, double> &point : ring) {
+            left = first ? point.first : std::min(left, point.first);
+            first = false;
+        }
+    return left;
+}
+
+coord_t line_spacing(double spacing, double pitch)
+{
+    if (!(spacing > 0.) || !(pitch > 0.)) return 0;
+    const float density = float(spacing / pitch);
+    return scale_i(spacing / double(density));
+}
+} // namespace
+
+Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const PitchRange &range)
+{
+    const Frame rows_frame = frame(storage, area, angle, spacing);
+    const Rings &area_rings = rows_frame.area, &outer = rows_frame.outer, &inner = rows_frame.inner;
+    const double left = rows_frame.left, right = rows_frame.right;
     const double total = unscaled(unscaled(area.area()));
     if (inner.empty() || !(total > 0.)) return Fit{};
     // Areas below are in scaled units squared; convert the bridge area once.
     const double total_scaled = scale_d(scale_d(total));
     const double low = scale_d(range.minimum), high = scale_d(range.maximum);
-    const auto better = [](const Fit &a, const Fit &b) {
-        if (std::abs(a.coverage - b.coverage) > 1e-9) return a.coverage > b.coverage;
-        if (std::abs(a.overflow - b.overflow) > 1e-9) return a.overflow < b.overflow;
-        if (a.pitch != b.pitch) return a.pitch < b.pitch;
-        return a.phase < b.phase;
+    // Difference between the space left before the first kept row and after the last one, across the rows.
+    const auto imbalance = [left, right](const Candidate &c) { return c.kept ? std::abs((c.first - left) - (right - c.last)) : 0.; };
+    const auto better = [&imbalance](const Candidate &a, const Candidate &b) {
+        if (std::abs(a.fit.coverage - b.fit.coverage) > 1e-9) return a.fit.coverage > b.fit.coverage;
+        if (std::abs(a.fit.overflow - b.fit.overflow) > 1e-9) return a.fit.overflow < b.fit.overflow;
+        if (a.fit.pitch != b.fit.pitch) return a.fit.pitch < b.fit.pitch;
+        // Equally good rows are centered, so that both sides share the space they leave.
+        if (std::abs(imbalance(a) - imbalance(b)) > 1.) return imbalance(a) < imbalance(b);
+        return a.fit.phase < b.fit.phase;
     };
-    Fit best;
+    Candidate best;
     bool any = false;
     const auto consider = [&](double pitch, double phase) {
-        const Fit candidate = score(area_rings, outer, inner, left, right, total_scaled, pitch, phase);
+        const Candidate candidate = score(area_rings, outer, inner, left, right, total_scaled, pitch, phase);
         // Material outside the bridge may only stand for what its rows leave uncovered inside it.
-        if (candidate.overflow > 1. - candidate.coverage + 1e-9) return;
+        if (candidate.fit.overflow > 1. - candidate.fit.coverage + 1e-9) return;
         if (!any || better(candidate, best)) best = candidate;
         any = true;
     };
@@ -191,7 +276,7 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
         for (int j = 0; j < 10; ++j) consider(pitch, pitch * j / 10.);
     }
     if (!any) return Fit{};
-    const Fit coarse = best;
+    const Fit coarse = best.fit;
     for (int i = -2; i <= 2; ++i) {
         const double pitch = std::clamp(coarse.pitch + pitch_step / 10. * i, low, high);
         for (int j = -2; j <= 2; ++j) {
@@ -200,8 +285,58 @@ Fit fit(storage_handle *storage, const ExPolygon &area, double angle, double spa
             consider(pitch, phase);
         }
     }
-    if (!(best.coverage > 0.)) return Fit{};
-    best.pitch = unscaled(best.pitch);
-    return best;
+    // The sampled phases only approach the centered rows: also try the phase that centers the best rows exactly.
+    if (best.kept) {
+        const double pitch = best.fit.pitch;
+        double phase = double(best.fit.phase) + ((right - best.last) - (best.first - left)) / 2.;
+        phase -= std::floor(phase / pitch) * pitch;
+        consider(pitch, phase);
+    }
+    if (!(best.fit.coverage > 0.)) return Fit{};
+    Fit out = best.fit;
+    out.pitch = unscaled(out.pitch);
+    return out;
+}
+
+coord_t anchor(const ExPolygon &area, double angle, const Fit &fit)
+{
+    return coord_t(frame_left(area, angle)) + fit.phase;
+}
+
+Fit anchored(const ExPolygon &area, double angle, double spacing, double pitch, coord_t anchor)
+{
+    Fit out;
+    const coord_t step = line_spacing(spacing, pitch);
+    if (step <= 0) return out;
+    coord_t phase = (anchor - coord_t(frame_left(area, angle))) % step;
+    if (phase < 0) phase += step;
+    out.pitch = pitch;
+    out.phase = phase;
+    return out;
+}
+
+std::vector<Row> rows(storage_handle *storage, const ExPolygon &area, double angle, double spacing, const Fit &fit)
+{
+    std::vector<Row> out;
+    if (!fit.found()) return out;
+    const coord_t step = line_spacing(spacing, fit.pitch);
+    if (step <= 0) return out;
+    const Frame rows_frame = frame(storage, area, angle, spacing);
+    if (rows_frame.inner.empty()) return out;
+    // FillRectilinear: lines from the left of the rotated bounding box plus bridge_offset, 1 + (width - 10) / spacing of them.
+    const coord_t left = coord_t(rows_frame.left), width = coord_t(rows_frame.right) - left;
+    const coord_t count = 1 + (width - 10) / step;
+    const double c = std::cos(double(rows_frame.turn)), s = std::sin(double(rows_frame.turn));
+    const auto back = [c, s](double x, double y) {
+        return c_point{coord_t(std::llround(c * x - s * y)), coord_t(std::llround(c * y + s * x))};
+    };
+    for (coord_t idx = 0; idx < count; ++idx) {
+        const double x = double(left + fit.phase + idx * step);
+        const std::vector<std::pair<double, double>> reached = intervals(rows_frame.inner, x);
+        for (const std::pair<double, double> &row : intervals(rows_frame.outer, x))
+            if (std::any_of(reached.begin(), reached.end(), [&row](const std::pair<double, double> &r) { return r.second > row.first && r.first < row.second; }))
+                out.push_back({back(x, row.first), back(x, row.second)});
+    }
+    return out;
 }
 }}

@@ -48,9 +48,11 @@
 /* Describe a surface with a chosen bridge direction and prepared fill area.
    core_rule 1 identifies an external bridge: subtract the linked lower-island
    slices from the prepared area to reconstruct its original unsupported core.
-   With core_rule 2, the entire prepared internal bridge, including extensions,
-   is the working core; sparse/void support lies inside the lower model slice.
-   Read the printing direction with surface_get_bridge_angle(). */
+   With core_rule 2, the entire prepared internal bridge is the working core;
+   sparse/void support lies inside the lower model slice. Its area is not
+   extended: with extension_requested, its threads may leave it at their ends,
+   where infill.post_process.internal_bridge_anchors extends them after infill
+   generation. Read the printing direction with surface_get_bridge_angle(). */
 typedef struct c_bridge_surface_property {
     /* Payload schema; the supported value is 1. */
     uint32_t schema_version;
@@ -63,7 +65,8 @@ typedef struct c_bridge_surface_property {
     uint64_t policy_signature;
     /* 1 for an enabled user angle override, otherwise 0 for detection. */
     uint8_t angle_from_user;
-    /* 1 for a positive requested margin, not proof that anchors were obtained. */
+    /* 1 for a positive requested margin, or for internal_bridge_expansion on an
+       internal bridge; not proof that anchors were obtained. */
     uint8_t extension_requested;
     uint8_t reserved[6];
 } c_bridge_surface_property;

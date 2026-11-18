@@ -4012,8 +4012,8 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("internal_bridge_expansion", coBool, ptFFF);
     def->label = L("Extends internal bridge to infill");
     def->category = OptionCategory::skirtBrim;
-    def->tooltip = L("When creating internal bridges, extends the line to the nearest internal line it can use to support itself."
-        " This way, it can avoid curling up as when bridges lines ends over a void.");
+    def->tooltip = L("When creating internal bridges, anchors their lines on the nearest extrusion of the current layer, "
+        "or, when none is available, on an extrusion of the layer below. This avoids curling when a bridge line ends over a void.");
     def->category = OptionCategory::infill;
     def->invalidates_step = STEP_PRE_INFILL;
     def->mode = comAdvancedE | comSuSi;

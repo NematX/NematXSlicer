@@ -28,8 +28,8 @@
 namespace slic3r_api {
 // Identify a bridge group and the rule for interpreting its prepared surface area.
 // With core_rule 1, subtract linked lower-island slices to recover the original
-// unsupported core. With core_rule 2, use the entire prepared internal bridge,
-// including its extensions, as the working core. See slic3r_bridge.h.
+// unsupported core. With core_rule 2, use the entire prepared internal bridge
+// as the working core; its threads may leave it at their ends. See slic3r_bridge.h.
 struct BridgeSurfaceInfo : BuiltInPluginPropertyPayload<BridgeSurfaceInfo,
     c_bridge_surface_property, SLIC3R_PROPERTY_TYPE_BRIDGE_SURFACE> {};
 // Record one path piece's incoming/adjusted flow and its gap or mean-volume state.

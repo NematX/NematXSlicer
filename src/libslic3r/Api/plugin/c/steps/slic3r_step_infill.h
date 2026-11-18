@@ -18,7 +18,8 @@ extern "C" {
 STEP_INFILL plugin interface
 ============================
 
-The host runs one selected generator over the print's fill surfaces. The
+The host runs STEP_INFILL plugins in priority order. The generator exclusive
+group selects one provider without excluding other passes on the step. The
 generator resolves a recipe and applies surface modifiers during setup_run(),
 reports grouped work to the host, and calls the selected INFILL_PATTERN plugin
 during run(). The host owns pattern selection, plugin contexts and extrusion
@@ -289,8 +290,8 @@ Per-print initialization payload delivered to an INFILL_PATTERN plugin.
 
 A generator reports its discovery result through
 run_ctx_generate_infill::report_pattern_assignments() during its setup_run()
-phase. The host aggregates the groups per pattern plugin and calls setup() once
-with this payload before any generator run. The plugin may process the objects
+phase. After all object discoveries finish, the host services aggregate the
+groups and call setup() once before the first normal pattern generation. The plugin may process the objects
 in parallel; the data only describes work that the current print will generate.
 */
 typedef struct run_ctx_infill_pattern_init {

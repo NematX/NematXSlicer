@@ -118,6 +118,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/BridgeVolume.hpp"
 #include "libslic3r/Plugins/Infill/EnsuringPattern.hpp"
 #include "libslic3r/Plugins/Infill/GyroidPattern.hpp"
+#include "libslic3r/Plugins/Infill/InternalBridgeAnchors.hpp"
 #include "libslic3r/Plugins/Infill/PostFullFillVolume.hpp"
 #include "libslic3r/Plugins/Infill/PostInfillGapFill.hpp"
 #include "libslic3r/Plugins/Infill/Rectilinear/RectilinearPatterns.hpp"
@@ -800,6 +801,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Infill::PostInfillGapFillPlugin::register_post_infill_gap_fill_plugin);
     register_builtin_plugin(orchestrator, "infill.post_process.full_fill_volume",
         slic3r_api::Infill::PostFullFillVolumePlugin::register_post_full_fill_volume_plugin);
+    register_builtin_plugin(orchestrator, "infill.post_process.internal_bridge_anchors",
+        slic3r_api::Infill::InternalBridgeAnchorsPlugin::register_internal_bridge_anchors_plugin);
     register_builtin_plugin(orchestrator, "ordering.default",
         slic3r_api::Ordering::DefaultOrderingPlugin::register_default_ordering_plugins);
     register_builtin_plugin(orchestrator, "wipe_tower.manager.default",

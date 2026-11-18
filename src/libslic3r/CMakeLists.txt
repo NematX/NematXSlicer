@@ -87,6 +87,8 @@ set(SLIC3R_SOURCES
 	Api/host/slic3r_utils.cpp
 	Api/host/slic3r_volume.cpp
 	Api/host/steps/BridgeDetectorStep.cpp
+	Api/host/steps/InfillStep.cpp
+	Api/host/steps/InfillStep.hpp
 	Api/host/steps/LayerHeightStep.cpp
 	Api/host/steps/LayerHeightStep.hpp
 	Api/host/steps/PostSlicingStep.cpp
@@ -379,6 +381,8 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/HilbertCurvePattern.cpp
 	Plugins/Infill/Honeycomb3DPattern.cpp
 	Plugins/Infill/HoneycombPattern.cpp
+	Plugins/Infill/InternalBridgeAnchors.cpp
+	Plugins/Infill/InternalBridgeAnchors.hpp
 	Plugins/Infill/LinePattern.cpp
 	Plugins/Infill/OctagramSpiralPattern.cpp
 	Plugins/Infill/PatternPluginHelpers.hpp

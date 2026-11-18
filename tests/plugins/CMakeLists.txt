@@ -116,6 +116,7 @@ add_executable(${_TEST_NAME}_tests
     test_host_preferences.cpp
     test_host_simple_filament.cpp
     test_infill_pattern_init.cpp
+    test_infill_phases.cpp
     test_infill_pattern_lists.cpp
     test_layer_extrusion_edit_entry_state.cpp
     test_layer_extrusion_edit_lift.cpp

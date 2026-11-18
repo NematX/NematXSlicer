@@ -8,6 +8,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
@@ -28,8 +29,8 @@ struct DefaultInfillObjectWorkCache;
 //
 // setup_run() performs a discovery pass per object: it resolves every fill
 // surface recipe, groups surfaces that share one recipe and reports the groups
-// so the host can initialize the used pattern plugins. run() generates from
-// that cache instead of recomputing the recipes.
+// for the host to initialize the used patterns for the whole print. run() then
+// generates from that cache instead of recomputing the recipes.
 class DefaultInfillGenerator : public PluginBase
 {
 public:
@@ -42,6 +43,7 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
+    const char *exclusive_group_impl() const noexcept override { return "generator"; }
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
@@ -53,6 +55,7 @@ private:
 
     // Recipes discovered during setup_run() and reused by run().
     mutable std::map<const Slic3r::PrintObject *, std::shared_ptr<DefaultInfillObjectWorkCache>> m_object_caches;
+    mutable std::mutex m_cache_mutex;
 };
 
 void register_default_infill_generator_plugin(orchestrator_handle *orch);

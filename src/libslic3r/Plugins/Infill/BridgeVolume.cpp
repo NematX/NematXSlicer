@@ -7,7 +7,10 @@
    Both providers consume surfaces marked with BridgeSurfaceInfo. An external
    bridge's original unsupported core is reconstructed by subtracting linked
    lower slices. An internal bridge uses its complete prepared area as its
-   working core. The chosen direction and source-surface identity connect each
+   working core; when its preparation requested expansion, its rows may leave
+   that area at their ends, extended by InternalBridgeAnchors.cpp to the
+   extrusions around it. The direction stored with the prepared rows (PreparedRows), or the
+   surface's direction when none were stored, and the source-surface identity connect each
    generated row to this geometry and to its owning region's settings.
 
    The default surface model asks BridgeSurfaceVolume::Index for a mean volume
@@ -82,12 +85,14 @@
    The copies then own the old contents. This is not a rollback of earlier plugin
    runs. One object run is sequential; different objects may run in parallel.
 
-   A refused correction never stops slicing; only cancellation does. A row that
-   fails a check restores its whole bucket copy from the original infill, a prepared
-   surface refused while collecting is skipped, and a failure before any correction
-   leaves the whole object unchanged. These keep their nominal flow and are reported
-   in one warning per object. Broken invariants of this finalizer also assert in
-   debug builds; refused geometry and other plugins' contract violations do not.
+    A refused correction never stops slicing; only cancellation does. A row that
+    fails a check restores its whole bucket copy from the original infill, a prepared
+    surface refused while collecting is skipped, and a failure before any correction
+    leaves the whole object unchanged. These keep their nominal flow and are reported
+    in one warning per object. When internal end extensions are present, synthetic
+    endpoint contacts represent the complete row only for missing-anchor diagnostics;
+    they never change corrected sections or volume. Broken invariants of this finalizer
+    also assert in debug builds; refused geometry and other plugins' contract violations do not.
 */
 #include "BridgeVolume.hpp"
 #include "BridgeClearance.hpp"
@@ -121,6 +126,7 @@ const char *dependencies[]={"surface.bridge_preparation","infill.recipe.bridge_p
 // External core is recovered by subtracting lower slices; an internal bridge
 // uses its whole prepared area because its void is inside the lower model.
 // uniform_core is its clipped uniform expansion before the additional end margin.
+// angle is the direction the recipe printed the rows in.
 struct SurfaceWork {
     Surface surface;
     LayerIsland island;
@@ -133,6 +139,7 @@ struct SurfaceWork {
     bool peripheral_rows;
     double layer_height;
     double bottom_z;
+    double angle;
 };
 // A bucket is an extrusion tree for one region-island and role. Keep its original
 // root beside the corrected copy; after replacement, output owns the old contents.
@@ -397,6 +404,7 @@ void CorrectionVisitor::visit_leaf(MutableExtrusionEntity leaf)
     }
 }
 
+// Validate one bridge leaf, optionally add its end extensions as diagnostic contacts, and publish corrected flow pieces.
 void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attributes,const SurfaceWork &work,
     const BridgeClearance::Index &index,double z,const Config &print_config,
     const run_ctx_finalize_slicing &ctx,uint64_t signature,bool unknown,
@@ -428,7 +436,7 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
     const double length=unscaled(norm(finish-start));
     if (length<=0.) throw std::runtime_error("A prepared bridge strand has zero length.");
     const double ux=(finish.x-start.x)/scale_d(length),uy=(finish.y-start.y)/scale_d(length);
-    const double angle=work.surface.bridge_angle();
+    const double angle=work.angle;
     if (!std::isfinite(angle) || angle<0.) throw std::runtime_error("A prepared bridge lost its canonical direction.");
     const coord_t fill_resolution=std::min(scale_i(width)/16,
         std::max(SCALED_EPSILON,scale_i(print_config.get("resolution_internal").get_float())));
@@ -450,8 +458,17 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
     ClipperContext clipper(run_ctx->plugin_storage);
     prepared=clipper_offset(clipper(prepared.readonly()),double(SCALED_EPSILON)).to_expolygon_collection();
     const StoredPolylineCollection outside=clipper_diff_polyline_expolygons(run_ctx->plugin_storage,line.readonly(),prepared.readonly());
+    // The anchors pass extends the rows of an internal bridge beyond its surface, at their ends only.
+    const bool extended=info.core_rule==2 && info.extension_requested;
+    const auto at_end=[&](const Polyline &part) {
+        for (const c_point point : {part.front(),part.back()})
+            for (const c_point end : {start,finish})
+                if (norm(point-end)<=2*SCALED_EPSILON) return true;
+        return false;
+    };
     for (const Polyline part : outside.readonly())
-        if (part.length()>SCALED_EPSILON) throw std::runtime_error("A bridge row lies outside its prepared surface.");
+        if (part.length()>SCALED_EPSILON && !(extended && at_end(part)))
+            throw std::runtime_error("A bridge row lies outside its prepared surface.");
     StoredPolylineCollection inside=clipper_intersection_polyline_expolygons(run_ctx->plugin_storage,line.readonly(),work.core.readonly());
     double core_length=0.,first_core=length,last_core=0.;
     for (const Polyline part : inside) {
@@ -506,7 +523,36 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
         if (interval.unknown && (peripheral || interval.begin<first_core || interval.end>last_core)) contacts_unknown=true;
     if (contacts_unknown || !ctx.support_demand_computed) diagnostics.unknown=true;
     else {
-        const std::vector<std::pair<double,double>> contacts=index.contacts(a,b,height,z);
+        std::vector<std::pair<double,double>> contacts=index.contacts(a,b,height,z);
+        if (extended) {
+            // An internal bridge extension is printed material at the end of the
+            // row. It may satisfy anchor diagnostics, but never changes sections.
+            for (const Polyline &part : outside.readonly()) {
+                bool touches_start=false,touches_finish=false;
+                for (const c_point point : {part.front(),part.back()}) {
+                    touches_start=touches_start || norm(point-start)<=2*SCALED_EPSILON;
+                    touches_finish=touches_finish || norm(point-finish)<=2*SCALED_EPSILON;
+                }
+                if (!touches_start && !touches_finish) continue;
+                double begin=length,end=0.;
+                for (const c_point point : part.points()) {
+                    const double position=unscaled(double(point.x-start.x)*ux+double(point.y-start.y)*uy);
+                    begin=std::min(begin,position);end=std::max(end,position);
+                }
+                // The outside part itself is not in the bridge core. Represent
+                // its printed length as a synthetic contact at an endpoint of the
+                // complete row for diagnostics only; it never changes sections or volume.
+                const double extent=std::min(length,std::max(0.,end-begin));
+                if (touches_start && extent>tolerance) contacts.emplace_back(0.,extent);
+                if (touches_finish && extent>tolerance) contacts.emplace_back(length-extent,length);
+            }
+            std::sort(contacts.begin(),contacts.end());
+            std::vector<std::pair<double,double>> merged;
+            for (const std::pair<double,double> &contact : contacts)
+                if (merged.empty() || merged.back().second<contact.first) merged.push_back(contact);
+                else merged.back().second=std::max(merged.back().second,contact.second);
+            contacts.swap(merged);
+        }
         std::vector<std::pair<double,double>> gaps;
         if (peripheral || info.core_rule==2) {
             // Lower slices authorize this row, but sparse infill may leave real
@@ -532,15 +578,16 @@ void correct_leaf(MutableExtrusionEntity leaf,const EPropertyAttributes &attribu
             // local support request. The request itself does not count as lower material.
             ClipperContext clipper(run_ctx->plugin_storage);
             StoredExPolygonCollection deficient(run_ctx->plugin_storage);
+            // Footprints end flat at the thread ends: a cap past them would count area the thread does not cover.
             if (peripheral || info.core_rule==2) {
                 StoredPolyline unsupported(run_ctx->plugin_storage);
                 for (const double position : {gap.first,gap.second})
                     unsupported.push_back({start.x+scale_i(position*ux),start.y+scale_i(position*uy)});
-                deficient=clipper_offset(clipper(unsupported.readonly()),scale_d(width*.5),CLIPPER_JOIN_ROUND,3.,CLIPPER_END_OPEN_ROUND).to_expolygon_collection();
+                deficient=clipper_offset(clipper(unsupported.readonly()),scale_d(width*.5),CLIPPER_JOIN_MITER,3.,CLIPPER_END_OPEN_BUTT).to_expolygon_collection();
                 StoredExPolygonCollection prepared(run_ctx->plugin_storage);prepared.push_back(work.surface.expolygon());
                 deficient=intersect(run_ctx->plugin_storage,deficient.readonly(),prepared.readonly());
             } else {
-                StoredExPolygonCollection footprint=clipper_offset(clipper(line.readonly()),scale_d(width*.5),CLIPPER_JOIN_ROUND,3.,CLIPPER_END_OPEN_ROUND).to_expolygon_collection();
+                StoredExPolygonCollection footprint=clipper_offset(clipper(line.readonly()),scale_d(width*.5),CLIPPER_JOIN_MITER,3.,CLIPPER_END_OPEN_BUTT).to_expolygon_collection();
                 deficient=intersect(run_ctx->plugin_storage,footprint.readonly(),work.core.readonly());
             }
             const ExPolygonCollection requested(ctx.get_requested_support_areas(work.island.handle()));
@@ -714,6 +761,7 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
         return;
     }
     const Object object(ctx->object);const Config print_config=Print(ctx->print).config();
+    const PluginPropertyKey<BridgePreparation::PreparedRows> rows_key=BridgePreparation::prepared_rows_key(m_orchestrator);
     const std::string prefix="Object '"+object.name()+"': ";
     Diagnostics diagnostics;
     std::map<uint64_t,SurfaceWork> surfaces;
@@ -751,7 +799,9 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                         input=mix(input,ctx->support_demand_computed);
                         if (ctx->support_demand_computed)
                             input=mix(input,geometry_key(ExPolygonCollection(ctx->get_requested_support_areas(island.handle()))));
-                        const double angle=surface.bridge_angle();
+                        // The recipe prints the stored rows in their own direction.
+                        const BridgePreparation::PreparedRows *rows=rows_key.get(surface);
+                        const double angle=rows!=nullptr ? rows->angle : surface.bridge_angle();
                         uint64_t bits=0;std::memcpy(&bits,&angle,sizeof(bits));input=mix(input,bits);
                         for (const char *key : {"min_layer_height","resolution_internal","bridge_volume_compensation_enabled","bridged_infill_uniform_margin"}) {
                             const bool regional=std::strcmp(key,"bridge_volume_compensation_enabled")==0 || std::strcmp(key,"bridged_infill_uniform_margin")==0;
@@ -770,7 +820,7 @@ void Finalizer::run_impl(const plugin_run_context *run_ctx) const
                         input=mix(mix(input,uint64_t(margins.axial)),uint64_t(margins.uniform));
                         StoredExPolygonCollection uniform_core=expand_bridge(run_ctx->plugin_storage,core.readonly(),prepared.readonly(),angle,0,margins.uniform,run_ctx);
                         surfaces.emplace(surface.id(),SurfaceWork{surface,island,owner,std::move(core),std::move(uniform_core),input,floor,enabled,margins.uniform>0,
-                            layer_height,unscaled(layer.print_z()-layer.height())});affected=true;
+                            layer_height,unscaled(layer.print_z()-layer.height()),angle});affected=true;
                     } catch (const PluginCancelled &) {
                         throw;
                     } catch (const std::exception &error) {

@@ -10,7 +10,7 @@
    Between polygon vertex levels the bounds are straight lines, so only their
    crossings can change which bound stops the extension.
 
-   expand_bridge() first clips a round uniform offset to the allowed area and
+   expand_bridge() first clips a mitered uniform offset to the allowed area and
    keeps only components that meet the original core. axial_expand() then extends
    the ends of those rows without adding rows beside them. Its sweep builds
    strips between vertex/crossing levels, clips the rounded result to the allowed
@@ -161,9 +161,8 @@ StoredExPolygonCollection expand_bridge(storage_handle *storage, const ExPolygon
     allowed.append_copy_from(core);
     allowed=unite(storage,allowed.readonly());
     ClipperContext clipper(storage);
-    // Sampling arcs finer than the boolean cleanup epsilon lets repeated clips
-    // remove their tangent endpoints. Use the same geometric precision for both.
-    StoredExPolygonCollection grown=clipper_offset(clipper(core),double(uniform_margin),CLIPPER_JOIN_ROUND,double(SCALED_EPSILON)).to_expolygon_collection();
+    // Bridge offsets never use round joins: mitered corners keep the margin's edges straight and parallel to the core's.
+    StoredExPolygonCollection grown=clipper_offset(clipper(core),double(uniform_margin),CLIPPER_JOIN_MITER,3.).to_expolygon_collection();
     grown=intersect(storage,grown.readonly(),allowed.readonly());
     StoredExPolygonCollection connected=core.clone(storage);
     // Clipping an offset may leave a detached patch across a forbidden area.
