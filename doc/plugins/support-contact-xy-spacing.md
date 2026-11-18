@@ -25,11 +25,12 @@ per support layer. It is a distance in millimeters or a percentage of the
 interface nozzle diameter, **not** the external perimeter width. Its default is
 67%, which keeps the 0.67-nozzle step of profiles without this setting.
 
-A positive value sets `contact_cone_step` (at least one scaled coordinate unit)
-and `contact_cone_layers` is `ceil((gap_xy - mingap) / contact_cone_step)`.
-A smaller step allows the cone to reach more layers. A larger step shortens the
-transition but increases the overhang between consecutive layers. It is a
-distance per counted layer, not an angle or a distance per millimeter of Z.
+A positive value sets `contact_cone_step` (at least one scaled coordinate unit).
+`contact_cone_layers`, `ceil((gap_xy - mingap) / contact_cone_step)`, is the
+number of steps from the contact gap back to `gap_xy`; the merge below does not
+use it as a limit. A smaller step makes longer transitions. A larger step
+shortens them but increases the overhang between consecutive layers. It is a
+distance per support layer, not an angle or a distance per millimeter of Z.
 
 Zero adds no transition cones: `contact_cone_step` and `contact_cone_layers` are
 zero, but the contact itself still keeps `mingap`. It may then lack support
@@ -47,22 +48,25 @@ layers of their Z window, the no-support zones and the bridge footprints are
 grown by `mingap` instead of `gap_xy`. The overhang margin of the grid top
 contacts is limited by `mingap` too.
 
-Every other slab, interface or sparse, keeps its usual area cut with `gap_xy`
-and gains the cones of the contacts:
+Every other slab, interface or sparse, keeps its usual area cut with `gap_xy`.
+`Common::merge_contact_cones()` then merges the cone of each contact into the
+slabs, one slab at a time, downwards from a top contact and upwards from a
+bottom contact:
 
 ```
-normal(L) = raw(L) - (obstacles(L) + gap_xy)
-cones(L)  = union of C - step * depth(L, C) for the contacts C near L
-final(L)  = normal(L) + (cones(L) - contacts beside L) - (obstacles(L) + mingap)
+cone = C
+for each slab L away from C:
+    cone = cone - step                      (inward offset)
+    stop if cone is empty
+    touching = islands of L that meet cone
+    stop if cone - touching is empty        (the support covers it)
+    printed = cone - (obstacles(L) + mingap) - contacts beside L
+    L = L + printed
+    cone = printed + touching
 ```
 
-`Common::contact_cones()` walks the slabs away from each contact, downwards for
-a top contact and upwards for a bottom contact. A slab whose column, its area
-before the object trimming, meets the contact receives the contact shrunk by
-`contact_cone_step` times its depth: 1 for the first such slab, plus one for
-each such slab between it and the contact. A slab of another column at the same
-Z is not counted and receives nothing. The walk stops after
-`contact_cone_layers` slabs or when the cone vanishes.
+The next cone grows from the printed part and the islands it joined, so a cone
+that meets the support follows that support until the support covers it.
 
 ```
           wall
@@ -74,9 +78,9 @@ Z is not counted and receives nothing. The walk stops after
    C-3    ####|<-gap_xy->::::   the cone lies inside the normal area
 ```
 
-Each slab overhangs the one below by at most one step; the chosen growth must
+Each cone overhangs the next one by at most one step; the chosen growth must
 remain printable for the material and layer height. A cone that does not reach
-the normal support is kept as it is.
+the normal support is kept until it vanishes.
 
 ## Families
 
@@ -84,9 +88,8 @@ the normal support is kept as it is.
   `carve_interfaces()`, so the part of a cone in the interface window becomes
   interface. Grid merged clips its sparse body to the dense footprint grown by
   `mingap` instead of `gap_xy`, so the cones survive.
-- Filled: the contact is projected again with `mingap`. Every layer with a
-  projection keeps an interface slab that receives the cones; the empty ones are
-  dropped. The support carried to the layers below keeps `gap_xy`.
+- Filled: the contact is projected again with `mingap`. Every layer keeps an
+  interface slab into which the cones merge; the empty ones are dropped. The support carried to the layers below keeps `gap_xy`.
 - Tree and organic ignore the option.
 - The support column volumes keep `gap_xy`: they have no contact of their own.
 - The first-layer foot is widened with `gap_xy` as before.
@@ -99,8 +102,8 @@ contact.
 
 `[support-contact-xy]` covers the parameters, both growth units, zero growth,
 profile/project persistence, invalidation and their fallbacks, the cone
-depth on synthetic slabs (depth limit, slabs of another column, vanishing cones,
-bottom contacts, neighbouring contacts), and sliced fixtures in both modes: a
+merge on synthetic slabs (vanishing cones, cones covered by the support, cones
+joining and following the support, bottom contacts, zero step), and sliced fixtures in both modes: a
 tab narrower than `gap_xy`, a steep slope, a sharp lower edge, the normal
 support of an overhanging roof with several interface layers, the settings that
 must change nothing, the filled family and the tree family.

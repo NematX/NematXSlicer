@@ -19,9 +19,8 @@
    contact marking and interface ids. Demand is final after post-infill bridge removal. Run storage owns all results;
    borrowed object geometry is unchanged. Only soluble support without a raft is supported.
    In contact mode (SupportParams::contact_mode) the contact is projected again with gap_xy_contact instead of gap_xy, and
-   every layer with a projection keeps an interface slab, possibly empty, that receives the cones of the contacts above it
-   (Common::contact_cones(), the projection before the object trimming being the column); the slabs left empty are dropped
-   at the end. The support carried downwards keeps gap_xy. */
+   every layer keeps an interface slab, possibly empty, into which Common::merge_contact_cones() merges the cones of the
+   contacts above it; the slabs left empty are dropped at the end. The support carried downwards keeps gap_xy. */
 
 namespace slic3r_api::Support::Filled {
 namespace {
@@ -32,17 +31,15 @@ using Polys = StoredPolygonCollection;
 // Borrowed inputs stay unchanged; geometry and allocation failures propagate.
 ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Layer &upper, const Layer &layer, size_t layer_idx,
                       const std::vector<ExPolys> &zones, coord_t gap, const Common::SupportParams &params);
-// The united carried support and upper-layer demand, before any trimming.
-Polys projected_area(storage_handle *storage, const ExPolys &carried, const Layer &upper);
 // Split support at layers[id] and append nonempty slabs at layers[id-1]; id must be in [1,layers.size()). contact_support,
 // when given, replaces support for the contact part. With keep_interface the interface slab is appended even when empty.
 // Out owns the slabs in run storage; borrowed layers stay unchanged and geometry/allocation failures propagate.
 void add_layer_slabs(storage_handle *storage, const std::vector<Layer> &layers, size_t id, const ExPolys &support,
                      const ExPolys *contact_support, bool keep_interface, Common::GeneratedSupport &out);
-// Unite each interface slab with the cones of the contacts, less the contacts at its Z and its object layer (layer_ids) grown
-// by gap_xy_contact, then drop the interface slabs left empty. layer_ids and columns follow out.interfaces.
-void add_contact_cones(const std::vector<Layer> &layers, const std::vector<size_t> &layer_ids, const std::vector<Polys> &columns,
-                       const Common::SupportParams &params, Common::GeneratedSupport &out);
+// Merge the cones of the contacts into the interface slabs, less the contacts at their Z and their object layer (layer_ids,
+// following out.interfaces) grown by gap_xy_contact, then drop the interface slabs left empty.
+void add_contact_cones(const std::vector<Layer> &layers, const std::vector<size_t> &layer_ids, const Common::SupportParams &params,
+                       Common::GeneratedSupport &out);
 }
 
 void generate_support(const plugin_run_context *context, const Print &, const Object &object,
@@ -54,21 +51,16 @@ void generate_support(const plugin_run_context *context, const Print &, const Ob
         throw std::runtime_error("Filled support needs raft_layers set to 0.");
     const std::vector<Layer> layers = Common::object_layers(object);
     ExPolys carried(out.storage);
-    // Contact mode: the object layer and the column of each interface slab, top first like out.interfaces.
+    // Contact mode: the object layer of each interface slab, top first like out.interfaces.
     std::vector<size_t> layer_ids;
-    std::vector<Polys> columns;
     for (size_t id = layers.size(); id-- > 1;) {
         throw_if_cancelled(context);
         ExPolys support = project_layer(out.storage, carried, layers[id], layers[id - 1], id - 1, out.no_support_zones, params.gap_xy, params);
         if (params.contact_mode) {
-            Polys column = projected_area(out.storage, carried, layers[id]);
-            if (!column.empty()) {
-                const ExPolys contact = project_layer(out.storage, carried, layers[id], layers[id - 1], id - 1, out.no_support_zones,
-                                                      params.gap_xy_contact, params);
-                add_layer_slabs(out.storage, layers, id, support, &contact, true, out);
-                layer_ids.push_back(id - 1);
-                columns.push_back(std::move(column));
-            }
+            const ExPolys contact = project_layer(out.storage, carried, layers[id], layers[id - 1], id - 1, out.no_support_zones,
+                                                  params.gap_xy_contact, params);
+            add_layer_slabs(out.storage, layers, id, support, &contact, true, out);
+            layer_ids.push_back(id - 1);
         } else if (!support.empty())
             add_layer_slabs(out.storage, layers, id, support, nullptr, false, out);
         carried = std::move(support);
@@ -77,8 +69,7 @@ void generate_support(const plugin_run_context *context, const Print &, const Ob
     std::reverse(out.interfaces.begin(), out.interfaces.end());
     if (params.contact_mode) {
         std::reverse(layer_ids.begin(), layer_ids.end());
-        std::reverse(columns.begin(), columns.end());
-        add_contact_cones(layers, layer_ids, columns, params, out);
+        add_contact_cones(layers, layer_ids, params, out);
     }
     if (!carried.empty()) {
         const Layer &first = layers.front();
@@ -107,15 +98,6 @@ ExPolys project_layer(storage_handle *storage, const ExPolys &carried, const Lay
     return support;
 }
 
-Polys projected_area(storage_handle *storage, const ExPolys &carried, const Layer &upper)
-{
-    const ClipperContext clipper(storage);
-    ClipperOperand projected = clipper(carried);
-    for (uint32_t island = 0; island < upper.island_count(); ++island)
-        projected += clipper(upper.island(island).support_demand());
-    return projected.empty() ? Polys(storage) : clipper_union(projected).to_polygon_collection();
-}
-
 void add_layer_slabs(storage_handle *storage, const std::vector<Layer> &layers, size_t id, const ExPolys &support,
                      const ExPolys *contact_support, bool keep_interface, Common::GeneratedSupport &out)
 {
@@ -137,24 +119,18 @@ void add_layer_slabs(storage_handle *storage, const std::vector<Layer> &layers, 
     add_slab(Common::LayerType::TopInterface, Common::native_expolygons(std::get<1>(parts)), out.interfaces, keep_interface);
 }
 
-void add_contact_cones(const std::vector<Layer> &layers, const std::vector<size_t> &layer_ids, const std::vector<Polys> &columns,
-                       const Common::SupportParams &params, Common::GeneratedSupport &out)
+void add_contact_cones(const std::vector<Layer> &layers, const std::vector<size_t> &layer_ids, const Common::SupportParams &params,
+                       Common::GeneratedSupport &out)
 {
     const ClipperContext clipper(out.storage);
-    const std::vector<Polys> cones = Common::contact_cones(params.contact_cone_step, params.contact_cone_layers, out, out.interfaces,
-                                                           columns);
-    for (size_t i = 0; i < out.interfaces.size(); ++i) {
-        if (cones[i].empty()) continue;
-        Common::GeneratorLayer &slab = *out.interfaces[i];
+    Common::merge_contact_cones(params.contact_cone_step, params.resolution, out, out.interfaces, [&](size_t i, const Polys &cone) {
+        const Common::GeneratorLayer &slab = *out.interfaces[i];
         ClipperOperand mask = clipper_offset(Common::support_obstacle(clipper, layers[layer_ids[i]], layer_ids[i], out.no_support_zones),
                                              double(params.gap_xy_contact), CLIPPER_JOIN_SQUARE, 0.);
         for (const Common::GeneratorLayer *contact : out.top)
             if (contact->print_z == slab.print_z) mask += clipper(contact->polygons);
-        ClipperOperand area = clipper(slab.polygons);
-        area += clipper_diff(clipper(cones[i]), mask);
-        slab.polygons = clipper_union(area).to_polygon_collection();
-        slab.polygons.ensure_valid(params.resolution);
-    }
+        return clipper_diff(clipper(cone), mask).to_polygon_collection();
+    });
     out.interfaces.erase(std::remove_if(out.interfaces.begin(), out.interfaces.end(),
         [](const Common::GeneratorLayer *slab) { return slab->polygons.empty(); }), out.interfaces.end());
 }

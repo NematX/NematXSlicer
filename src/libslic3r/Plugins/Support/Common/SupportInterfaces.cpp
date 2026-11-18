@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
+#include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 
 /* Implementation of the shared interface carving and of the first-layer foot widening (see SupportInterfaces.hpp).
@@ -19,8 +20,9 @@
    The file has three entry points. project_interface_contacts() and carve_interfaces() build the interfaces, in this order for a family
    whose base slabs do not cover the contacts. expand_first_layer_foot() then widens the first base slab. The widening uses the
    finalized contacts and interfaces (it keeps the foot clear of those on the bed), so it runs after carve_interfaces().
-   contact_cones() is independent of the windows: it walks the slabs away from each contact and shrinks the contact once per
-   slab whose column meets it, so a slab of another column at the same Z does not deepen the cone.
+   merge_contact_cones() is independent of the windows: it walks the slabs away from each contact, merging into each one the
+   cone shrunk by one step, until the cone vanishes or the islands it meets cover it. The next cone grows from the merged part
+   and those islands, so the transition follows the support it joins.
     The support ignores the brim and the skirt: it uses all the room it wants on the first layer.
     Projection and carving change polygons, not contact Z or contact order. Each
     entry validates the enabled contact lists once before its base-slab loop.
@@ -33,6 +35,7 @@
 namespace slic3r_api::Support::Common {
 namespace {
 using Polys = StoredPolygonCollection;
+using ExPolys = StoredExPolygonCollection;
 constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
 // Check the stable binary-search preconditions for lists that will be queried;
@@ -108,28 +111,33 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
     }
 }
 
-std::vector<Polys> contact_cones(coord_t step, size_t max_depth, const GeneratedSupport &out, const GeneratorLayers &slabs,
-                                 const std::vector<Polys> &columns)
+void merge_contact_cones(coord_t step, coord_t resolution, GeneratedSupport &out, GeneratorLayers &slabs, const ConeTrim &trim)
 {
-    assert(columns.size() == slabs.size());
     assert(std::is_sorted(slabs.begin(), slabs.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
         return a->print_z < b->print_z;
     }));
-    std::vector<Polys> cones;
-    cones.reserve(slabs.size());
-    for (size_t i = 0; i < slabs.size(); ++i) cones.emplace_back(out.storage);
-    if (max_depth == 0 || slabs.empty()) return cones;
+    if (step <= 0 || slabs.empty()) return;
     const ClipperContext clipper(out.storage);
-    // Walk from the slab next to the contact, away from it, and give each slab whose column meets the contact its cone.
+    // Walk from the slab next to the contact, away from it, merging the shrinking cone until it vanishes or the support covers it.
     const auto walk = [&](const GeneratorLayer &contact, size_t first, bool down) {
-        size_t depth = 1;
-        for (size_t i = first; i < slabs.size() && depth <= max_depth; down ? --i : ++i) {
-            if (clipper_intersection(clipper(columns[i]), clipper(contact.polygons)).empty()) continue;
-            Polys cone = clipper_offset(clipper(contact.polygons), -double(step * coord_t(depth)), join_type, 0.)
-                .to_polygon_collection();
-            if (cone.empty()) break;
-            cones[i].append_move_from(cone);
-            ++depth;
+        ExPolys cone = clipper_union(clipper(contact.polygons)).to_expolygon_collection();
+        for (size_t i = first; i < slabs.size(); down ? --i : ++i) {
+            cone = clipper_offset(clipper(cone), -double(step), join_type, 0.).to_expolygon_collection();
+            if (cone.empty()) return;
+            GeneratorLayer &slab = *slabs[i];
+            ExPolys touching(out.storage);
+            const ExPolys islands = clipper_union(clipper(slab.polygons)).to_expolygon_collection();
+            for (const ExPolygon island : islands)
+                if (!clipper_intersection(clipper(island), clipper(cone)).empty()) touching.push_back(island);
+            if (clipper_diff(clipper(cone), clipper(touching)).empty()) return;
+            const Polys printed = trim(i, to_polygons(out.storage, cone));
+            if (!printed.empty()) {
+                slab.polygons = clipper_union2(clipper(slab.polygons), clipper(printed)).to_polygon_collection();
+                slab.polygons.ensure_valid(resolution);
+            }
+            ClipperOperand next = clipper(printed);
+            next += clipper(touching);
+            cone = clipper_union(next).to_expolygon_collection();
         }
     };
     const auto print_z_less = [](const GeneratorLayer *slab, coord_t z) { return slab->print_z < z; };
@@ -147,9 +155,6 @@ std::vector<Polys> contact_cones(coord_t step, size_t max_depth, const Generated
         while (first < slabs.size() && slabs[first]->bottom_print_z() < contact->print_z) ++first;
         walk(*contact, first, false);
     }
-    for (Polys &cone : cones)
-        if (!cone.empty()) cone = clipper_union(clipper(cone)).to_polygon_collection();
-    return cones;
 }
 
 // Widen the first base slab, the foot of the support, to improve its adhesion to the bed.
