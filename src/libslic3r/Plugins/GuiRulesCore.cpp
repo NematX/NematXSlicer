@@ -379,6 +379,11 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
                "support_material_contact_xy_spacing", "support_material_bottom_interface_layers",
                "support_material_interface_layers" }, have_support);
 
+    add_rule({ "support_material_contact_cone_growth" }, all_of({ have_support,
+        enabled("support_material_contact_xy_spacing"),
+        int_not_equals("support_material_style", int(SupportMaterialStyle::smsTree)),
+        int_not_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)) }));
+
     add_rule({ "support_material_threshold" },
              all_of({ have_support, true_("support_material_auto") }));
 

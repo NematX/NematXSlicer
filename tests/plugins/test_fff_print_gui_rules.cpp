@@ -274,6 +274,8 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     };
     for (const char *key : support_keys)
         set(key, have_support);
+    set("support_material_contact_cone_growth", have_support && en("support_material_contact_xy_spacing") &&
+        style != SupportMaterialStyle::smsTree && style != SupportMaterialStyle::smsOrganic);
     set("support_material_threshold", have_support && b("support_material_auto"));
     set("support_material_bottom_contact_distance", have_support && !soluble);
     set("support_material_contact_distance", have_support && !soluble);
@@ -454,6 +456,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     set_enum("seam_position", coin(rng) ? int(spCost) : int(spAligned));
     config.set_deserialize_strict("top_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
     config.set_deserialize_strict("print_plan_builder", coin(rng) ? "ordering.plan_builder.by_object" : "ordering.plan_builder.by_layer");
+    config.set_deserialize_strict("support_material_contact_xy_spacing", coin(rng) ? "10%" : "!10%");
     config.set_deserialize_strict("bottom_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
     // solid_fill_pattern is a plugin-defined enum storing plugin ids.
     config.set_deserialize_strict("solid_fill_pattern", coin(rng) ? "smooth" : "rectilinear");
@@ -513,6 +516,11 @@ TEST_CASE("Support contact controls stay directly below the general XY separatio
     REQUIRE(contact != std::string::npos);
     REQUIRE(row_end != std::string::npos);
     CHECK(contact < row_end);
+    const size_t growth = merged.find(":support_material_contact_cone_growth\n", contact_row);
+    REQUIRE(growth != std::string::npos);
+    CHECK(contact < growth);
+    CHECK(growth < row_end);
+    CHECK(merged.find(":support_material_contact_cone_growth\n", growth + 1) == std::string::npos);
     CHECK(merged.find(":support_material_contact_xy_spacing\n", contact + 1) == std::string::npos);
     const size_t bridge = merged.find(":dont_support_bridges\n");
     REQUIRE(bridge != std::string::npos);
@@ -662,6 +670,32 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
         INFO("support " << foot_case.support << " raft " << foot_case.raft << " enforce " << foot_case.enforce);
         CHECK(enabled.at("raft_first_layer_expansion") == foot_case.expected);
         CHECK(enabled.at("raft_first_layer_density") == foot_case.expected);
+    }
+}
+
+// Evaluate the combined GUI rules, including provider preferences, not only the core rule's own clauses.
+TEST_CASE("Contact cone growth is editable only for enabled contacts in supported families",
+          "[plugins][gui-rules][support-contact-xy]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &host = Orchestrator::instance();
+    for (const char *style : {"grid", "snug", "grid_merged", "filled", "tree", "organic"}) {
+        for (const bool support : {false, true}) {
+            for (const bool contact : {false, true}) {
+                CAPTURE(style, support, contact);
+                DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+                config.set_deserialize_strict({{"support_material_style", style}, {"support_material", support ? "1" : "0"},
+                    {"raft_layers", "0"}, {"support_material_contact_xy_spacing", contact ? "10%" : "!10%"}});
+                bool found = false;
+                for (const Orchestrator::GuiRuleApplication &application :
+                     host.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1)) {
+                    if (application.target_key != "support_material_contact_cone_growth") continue;
+                    found = true;
+                    CHECK(application.enabled == (support && contact && std::string(style) != "tree" && std::string(style) != "organic"));
+                }
+                REQUIRE(found);
+            }
+        }
     }
 }
 

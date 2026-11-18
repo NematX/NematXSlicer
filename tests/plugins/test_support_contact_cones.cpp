@@ -8,7 +8,8 @@
 
 /* The cones of the contacts (Common::contact_cones()), checked on synthetic slabs without slicing a model. A 0.2-mm stack of
    base slabs lies under a top contact or over a bottom contact; each scene reads the area of the cone each slab receives. The
-   depth counts only the slabs whose column meets the contact, and the walk stops at the depth limit or when the cone vanishes. */
+   depth counts only the slabs whose column meets the contact, and the walk stops at the depth limit or when the cone vanishes.
+   Configured-step cases derive the step and depth through SupportParams, then measure both directions on the same stack. */
 
 using namespace Slic3r;
 namespace SC = slic3r_api::Support::Common;
@@ -128,4 +129,34 @@ TEST_CASE("Contact cones of neighbouring contacts are united", "[plugins][suppor
     // Two 9-mm squares shifted by 5 mm overlap on a 4 x 9 mm band.
     const std::vector<double> areas = scene.areas(scale_i(0.5), 1);
     CHECK(areas[0] == Approx(2. * 81. - 36.));
+}
+
+// Changing the configured distance changes both the footprint at every depth and the last slab reached by the cone.
+TEST_CASE("Configured cone growth controls top and bottom contact footprints", "[plugins][support-contact-xy]")
+{
+    const bool above = GENERATE(false, true);
+    for (const char *growth : {"25%", "67%", "100%", "0.268", "0"}) {
+        CAPTURE(above, growth);
+        DynamicPrintConfig config = SG::config();
+        config.set_deserialize_strict({{"support_material_xy_spacing", "1.5"}, {"support_material_contact_xy_spacing", "0.1"},
+            {"support_material_contact_cone_growth", growth}});
+        Print print;
+        Model model;
+        Test::init_print({SG::slab()}, print, model, config);
+        const SC::SupportParams params = SG::params(print, print.object(0));
+        Scene scene(above ? 0.2 : 0., 10);
+        const coord_t top = scale_to_layer_coord(above ? 0.2 : 2.2);
+        SC::GeneratorLayer &contact = SC::add_layer(scene.support, above ? SC::LayerType::BottomContact : SC::LayerType::TopContact,
+            top, top - scale_to_layer_coord(0.2), scale_to_layer_coord(0.2));
+        contact.polygons = square(scene.support.storage, 0., 10.);
+        (above ? scene.support.bottom : scene.support.top).push_back(&contact);
+        const std::vector<double> areas = scene.areas(params.contact_cone_step, params.contact_cone_layers);
+        REQUIRE(areas.size() == 10);
+        for (size_t i = 0; i < areas.size(); ++i) {
+            const size_t depth = above ? i + 1 : areas.size() - i;
+            const double side = std::max(0., 10. - 2. * unscaled(params.contact_cone_step) * double(depth));
+            const double expected = depth <= params.contact_cone_layers ? side * side : 0.;
+            CHECK(areas[i] == Approx(expected));
+        }
+    }
 }

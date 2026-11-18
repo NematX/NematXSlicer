@@ -345,6 +345,7 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionBool,                 support_material_with_sheath))
     ((ConfigOptionFloatOrPercent,       support_material_xy_spacing))
     ((ConfigOptionFloatOrPercent,       support_material_contact_xy_spacing))
+    ((ConfigOptionFloatOrPercent,       support_material_contact_cone_growth))
     // Tree supports
     ((ConfigOptionFloat,                support_tree_angle))
     ((ConfigOptionFloat,                support_tree_angle_slow))

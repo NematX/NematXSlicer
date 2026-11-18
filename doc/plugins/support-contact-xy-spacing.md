@@ -20,8 +20,24 @@ default.
 - enabled and smaller than `gap_xy`: contact mode, `gap_xy_contact` is the
   option value (`mingap`).
 
-In contact mode, `contact_cone_step` is 0.67 times the interface nozzle diameter
+In contact mode, `support_material_contact_cone_growth` sets the lateral change
+per support layer. It is a distance in millimeters or a percentage of the
+interface nozzle diameter, **not** the external perimeter width. Its default is
+67%, which keeps the 0.67-nozzle step of profiles without this setting.
+
+A positive value sets `contact_cone_step` (at least one scaled coordinate unit)
 and `contact_cone_layers` is `ceil((gap_xy - mingap) / contact_cone_step)`.
+A smaller step allows the cone to reach more layers. A larger step shortens the
+transition but increases the overhang between consecutive layers. It is a
+distance per counted layer, not an angle or a distance per millimeter of Z.
+
+Zero adds no transition cones: `contact_cone_step` and `contact_cone_layers` are
+zero, but the contact itself still keeps `mingap`. It may then lack support
+below. Outside contact mode the growth value has no effect.
+
+In the settings window, the contact gap and cone growth share the row directly
+below the general XY separation. The growth control is inactive when supports or
+contacts are disabled, or the style is tree or organic.
 
 ## Geometry
 
@@ -58,8 +74,9 @@ Z is not counted and receives nothing. The walk stops after
    C-3    ####|<-gap_xy->::::   the cone lies inside the normal area
 ```
 
-Each slab overhangs the one below by at most one step, so the cone prints. A
-cone that does not reach the normal support is kept as it is.
+Each slab overhangs the one below by at most one step; the chosen growth must
+remain printable for the material and layer height. A cone that does not reach
+the normal support is kept as it is.
 
 ## Families
 
@@ -80,9 +97,13 @@ contact.
 
 ## Verification
 
-`[support-contact-xy]` covers the parameters and their fallbacks, the cone
+`[support-contact-xy]` covers the parameters, both growth units, zero growth,
+profile/project persistence, invalidation and their fallbacks, the cone
 depth on synthetic slabs (depth limit, slabs of another column, vanishing cones,
 bottom contacts, neighbouring contacts), and sliced fixtures in both modes: a
 tab narrower than `gap_xy`, a steep slope, a sharp lower edge, the normal
 support of an overhanging roof with several interface layers, the settings that
 must change nothing, the filled family and the tree family.
+The default is compared with independently reconstructed fixed-step parameters;
+the STL-to-G-code matrix varies growth linearly and checks real contact surfaces,
+support interface paths and emitted extrusion moves.

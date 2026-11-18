@@ -31,6 +31,8 @@ user-facing names as labels; their setting and GUI fragment are created only
 after the available plugin set is known.
 StepSelectorTraits.hpp defines how step modules place selectors in the UI and enable
 plugin settings. A plugin's own layout fragment takes precedence over generated placement.
+The shared contact-cone control uses its core activation rule instead of selector rules,
+so selecting a provider cannot enable it without an enabled contact gap.
 
 Operation notes:
 - reconcile the requested package configuration with the local cache
@@ -936,6 +938,10 @@ void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
         return;
     for (const Plugin *plugin : plugins) {
         for (const Plugin::UsedConfigKey &setting : plugin->get_used_config_keys()) {
+            // The cone control belongs to the enabled contact gap, not to a toolpath selector. Its core rule is registered
+            // after these automatic rules, and OR-ing a selector reason into it would bypass that prerequisite.
+            if (setting.key == "support_material_contact_cone_growth")
+                continue;
             add_selector_rule(orchestrator, group, setting.key, plugin->get_id().c_str(), plugin->get_id());
             if (group.traits.auto_value)
                 add_selector_rule(orchestrator, group, setting.key, SLIC3R_SELECTOR_AUTO_VALUE, plugin->get_id());

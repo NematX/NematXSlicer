@@ -981,6 +981,7 @@ void init_categories(PrintConfigDef &definition)
         "support_material_speed", 
         "support_material_xy_spacing",
         "support_material_contact_xy_spacing",
+        "support_material_contact_cone_growth",
         "travel_speed", "travel_speed_z",
         // gapfill
         "gap_fill_flow_match_perimeter",
@@ -6289,7 +6290,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("If enabled and smaller than the XY separation, the support contact layers, the ones touching the object,"
                    " only keep this separation from it. The layers below a top contact (above a bottom contact) come back"
-                   " to the XY separation by steps of 0.67 nozzle diameter per layer, so sharp corners, small areas and the"
+                   " to the XY separation using the cone growth per layer, so sharp corners, small areas and the"
                    " top of steep slopes keep their support. The other support keeps the XY separation."
                    "\nIf expressed as percentage (for example 10%), it will be calculated over external perimeter width."
                    "\nThe tree and organic supports ignore it.");
@@ -6300,6 +6301,26 @@ void init_fff_params(PrintConfigDef &definition)
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(disable_default_option(new ConfigOptionFloatOrPercent(10, true)));
+
+    def = definition.add("support_material_contact_cone_growth", coFloatOrPercent, ptFFF);
+    def->label = L("Cone growth per layer");
+    def->full_label = L("Support contact cone growth per layer");
+    def->container_type = ConfigOptionContainerType::Object;
+    def->category = OptionCategory::support;
+    def->invalidates_step = STEP_SUPPORT;
+    def->tooltip = L("Lateral change of a support contact cone from one support layer to the next. Moving away from a contact,"
+                   " its footprint shrinks by this distance per layer until the normal XY separation is reached."
+                   " Smaller values allow a longer transition; larger values give a shorter transition with larger overhangs between layers."
+                   "\nIf expressed as percentage, it is calculated over the support interface nozzle diameter, not the external perimeter width."
+                   "\nSet to 0 to add no transition cones. The contact XY separation still applies, but the contacts may then lack support below."
+                   "\nOnly used when contact XY separation is enabled and smaller than the normal XY separation."
+                   " Tree and organic supports ignore it.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "nozzle_diameter";
+    def->min = 0;
+    def->max_literal = { 10, false };
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(67, true));
 
     def = definition.add("support_material_angle", coFloat, ptFFF);
     def->label = L("Pattern angle");

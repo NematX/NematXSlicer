@@ -82,7 +82,9 @@ struct SupportParams
     coord_t min_height = 0, gap_xy = 0, resolution = SCALED_EPSILON;
     // Contact mode: support_material_contact_xy_spacing is enabled and below gap_xy. The contact slabs then keep only
     // gap_xy_contact (scaled) from the object, and the cone of a contact, shrunk by contact_cone_step (scaled) per support
-    // layer, joins the slabs of the next contact_cone_layers layers. Otherwise gap_xy_contact is gap_xy and the cones are off.
+    // layer, joins the slabs of the next contact_cone_layers layers. The step comes from support_material_contact_cone_growth:
+    // a distance or a percent of the interface nozzle. Zero turns only the cones off, not the reduced contact gap.
+    // Outside contact mode gap_xy_contact is gap_xy and the cones are off.
     bool contact_mode = false;
     coord_t gap_xy_contact = 0, contact_cone_step = 0;
     size_t contact_cone_layers = 0;

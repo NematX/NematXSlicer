@@ -104,6 +104,7 @@ table; the persistence checks write configurations to files, 3MF and AMF archive
 and read the text back, to verify that each destination only receives the keys that
 the nature of their definition allows. Redefinition diagnostics are captured from
 the host log, independently of the returned registration status.
+Contact-cone settings round-trip both units through INI and 3MF, including object overrides.
 The Prusa checks read Metadata/Slic3r_PE.config inside the 3MF archive.
 They distinguish compatible plugin options from SuperSlicer-only options.
 Print sequence checks compare cloned extrusion sources and placements with native
@@ -2412,6 +2413,44 @@ TEST_CASE("3MF project configuration files follow their destination",
     std::string loaded_sections;
     REQUIRE(Slic3r::load_3mf(archive.string().c_str(), loaded_config, substitutions, &loaded_model, false, false, &loaded_sections));
     CHECK(loaded_sections == k_profile_sections_text);
+}
+
+// Save both unit forms through the real INI and 3MF paths; object overrides must retain the same value and unit.
+TEST_CASE("Contact cone growth keeps its units in presets and projects", "[plugins][config][project][support-contact-xy]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    const char *const key = "support_material_contact_cone_growth";
+    for (const char *value : {"25%", "67%", "100%", "0.268", "0"}) {
+        CAPTURE(value);
+        Model model;
+        Print print;
+        DynamicPrintConfig config = Test::SupportGrid::config();
+        config.set_deserialize_strict({{key, value}, {"support_material_contact_xy_spacing", "0.1"}});
+        Test::init_print({Test::SupportGrid::slab()}, print, model, config);
+        model.objects()[0].config.set_deserialize_strict(key, value);
+        // Fixture-only dotted option names stop the legacy 3MF footer parser; save only the native settings tested here.
+        DynamicPrintConfig saved;
+        saved.set_deserialize_strict({{key, value}, {"support_material_contact_xy_spacing", "0.1"}});
+        const boost::filesystem::path ini = directory.path() / "contact.ini";
+        saved.save(ini.string(), ConfigWriteTarget::Local);
+        DynamicPrintConfig loaded_ini;
+        loaded_ini.load(ini.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+        REQUIRE(loaded_ini.has(key));
+        CHECK(loaded_ini.opt_serialize(key) == value);
+        const boost::filesystem::path archive = directory.path() / "contact.3mf";
+        REQUIRE(store_3mf(archive.string().c_str(), &model, &saved));
+        REQUIRE(read_archive_entry(archive, "Metadata/Slic3r.config").find(std::string(key) + " = " + value) != std::string::npos);
+        DynamicPrintConfig loaded_config;
+        Model loaded_model;
+        ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::EnableSilent};
+        REQUIRE(load_3mf(archive.string().c_str(), loaded_config, substitutions, &loaded_model, false, false));
+        REQUIRE(loaded_config.has(key));
+        CHECK(loaded_config.opt_serialize(key) == value);
+        REQUIRE(loaded_model.objects().size() == 1);
+        CHECK(loaded_model.objects()[0].config.opt_serialize(key) == value);
+    }
 }
 
 // In the 3MF's Prusa-compatible configuration, keep thin_walls but exclude gap_fill_extension.

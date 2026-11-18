@@ -1,11 +1,14 @@
 #include <catch2/catch.hpp>
 
+#include <atomic>
 #include <cmath>
 #include <string>
 #include <vector>
 
+#include "plugin_e2e_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "support_pattern_test_context.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Plugins/Support/Filled/FilledSupportGenerator.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSupportGenerator.hpp"
 
@@ -18,7 +21,10 @@
    - normal support: the overhanging roof of SG::slab(), whose sparse body far from the contacts must not change.
    In contact mode every slab keeps the contact gap from the object layers beside it, and the part of a non-contact slab nearer
    than the XY gap lies under a contact shrunk by at least one cone step. The settings that do not reduce the gap give the same
-   slabs as the disabled setting, and the tree family ignores the setting. */
+   slabs as the disabled setting, and the tree family ignores the setting.
+   Growth variants compare the fixed-step reference with the default, measure clearance at other steps, and export a small STL
+   through the normal pipeline. Contact areas are measured before toolpaths can merge them into interfaces; paths and G-code
+   are checked after slicing. The shared support gap-fill catalogue checks coverage of all declared geometry keys. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -33,15 +39,15 @@ struct Generated {
     PluginStorage storage;
     Common::GeneratedSupport support{SG::handle(storage)};
     Common::SupportParams params;
-    Generated(Print &print, const std::string &style)
-        : params(SG::params(print, print.object(0)))
+    Generated(Print &print, const std::string &style, const Common::SupportParams *reference = nullptr)
+        : params(reference == nullptr ? SG::params(print, print.object(0)) : *reference)
     {
         const PrintObject &object = print.object(0);
         if (style == "filled")
             slic3r_api::Support::Filled::generate_support(nullptr, SG::print_view(print), SG::object_view(object), params, support);
-        else if (style == "tree") {
+        else if (style == "tree" || style == "organic") {
             const Slic3r::Test::SupportTree::SupportPatternContext patterns(print, SG::handle(storage));
-            Slic3r::TreeFamily::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(object), params, false,
+            Slic3r::TreeFamily::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(object), params, style == "organic",
                                                       support);
         } else
             slic3r_api::Support::Grid::generate_support(nullptr, SG::print_view(print), SG::object_view(object), params, support);
@@ -52,11 +58,14 @@ struct Generated {
 struct Sliced {
     Print print;
     Model model;
-    Sliced(const TriangleMesh &mesh, const std::string &style, const char *contact, const char *xy = xy_gap, int interfaces = 3)
+    Sliced(const TriangleMesh &mesh, const std::string &style, const char *contact, const char *xy = xy_gap, int interfaces = 3,
+           const char *growth = nullptr, const char *resolution = nullptr)
     {
-        DynamicPrintConfig config = SG::config(style.c_str(), style == "filled", interfaces);
+        DynamicPrintConfig config = SG::config(style.c_str(), style == "filled" || style == "grid_merged", interfaces);
         config.set_deserialize_strict({{"support_material_xy_spacing", xy}, {"support_material_contact_xy_spacing", contact},
-                                       {"support_material_threshold", "60"}, {"raft_layers", "0"}});
+                                        {"support_material_threshold", "60"}, {"raft_layers", "0"}});
+        if (growth != nullptr) config.set_deserialize_strict("support_material_contact_cone_growth", growth);
+        if (resolution != nullptr) config.set_deserialize_strict("resolution_internal", resolution);
         Test::init_print({mesh}, print, model, config);
         SG::prefix(print);
     }
@@ -132,7 +141,8 @@ void check_gaps(const PrintObject &object, const Generated &generated)
     for (const Common::GeneratorLayers *list : {&generated.support.top, &generated.support.bottom})
         for (const Common::GeneratorLayer *contact : *list)
             append(contacts, SG::native(contact->polygons));
-    const Polygons cone_bound = offset(union_(contacts), -double(p.contact_cone_step - SCALED_EPSILON), ClipperLib::jtSquare);
+    const Polygons cone_bound = p.contact_cone_layers == 0 ? Polygons{} :
+        offset(union_(contacts), -double(p.contact_cone_step - SCALED_EPSILON), ClipperLib::jtSquare);
     for (const Common::GeneratorLayers *list : {&generated.support.top, &generated.support.bottom, &generated.support.base,
                                                 &generated.support.interfaces})
         for (const Common::GeneratorLayer *slab : *list) {
@@ -256,4 +266,138 @@ TEST_CASE("Tree support ignores the contact gap", "[plugins][support-contact-xy]
     const Generated without(off.print, "tree"), with(on.print, "tree");
     REQUIRE(with.params.contact_mode);
     CHECK(same_slabs(without, with));
+}
+
+// Reconstruct the fixed 0.67-nozzle reference independently, and compare the complete generated slabs with the default setting.
+TEST_CASE("Default cone growth preserves fixed-step support slabs", "[plugins][support-contact-xy]")
+{
+    for (const char *style : {"grid", "snug", "grid_merged", "filled"}) {
+        CAPTURE(style);
+        Sliced sliced(small_zone(), style, contact_gap);
+        const Generated current(sliced.print, style);
+        Common::SupportParams fixed = current.params;
+        REQUIRE(fixed.contact_mode);
+        fixed.contact_cone_step = std::max(coord_t(1), scale_i(0.67 * fixed.interface_flow_mm.nozzle_diameter));
+        fixed.contact_cone_layers = size_t((fixed.gap_xy - fixed.gap_xy_contact + fixed.contact_cone_step - 1) / fixed.contact_cone_step);
+        const Generated reference(sliced.print, style, &fixed);
+        CHECK(same_slabs(current, reference));
+        check_gaps(sliced.print.object(0), current);
+    }
+}
+
+// The contact stays at the reduced gap; only its transition changes, and zero leaves every ordinary slab at the normal gap.
+TEST_CASE("Cone growth changes transition slabs without moving support contacts", "[plugins][support-contact-xy]")
+{
+    for (const char *style : {"grid", "snug", "grid_merged", "filled"}) {
+        CAPTURE(style);
+        // A wide roof retains Filled's lower projection; fine resolution isolates cone bounds from polygon simplification.
+        Sliced normal(SG::slab(), style, contact_gap, xy_gap, 3, nullptr, "0.000001");
+        const Generated reference(normal.print, style);
+        for (const char *growth : {"25%", "100%", "0"}) {
+            CAPTURE(growth);
+            Sliced varied(SG::slab(), style, contact_gap, xy_gap, 3, growth, "0.000001");
+            const Generated result(varied.print, style);
+            CHECK(contact_area(result) == Approx(contact_area(reference)));
+            CHECK_FALSE(same_slabs(result, reference));
+            check_gaps(varied.print.object(0), result);
+        }
+    }
+}
+
+// Ignored input values must not leak into tree geometry or into the ordinary-gap fallback.
+TEST_CASE("Cone growth changes nothing outside contact mode or in tree families", "[plugins][support-contact-xy]")
+{
+    for (const char *style : {"grid", "snug", "tree", "organic"}) {
+        for (const char *contact : {"!0.1", "1.5"}) {
+            CAPTURE(style, contact);
+            Sliced a(small_zone(), style, contact, xy_gap, 3, "25%");
+            Sliced b(small_zone(), style, contact, xy_gap, 3, "100%");
+            const Generated first(a.print, style), second(b.print, style);
+            CHECK_FALSE(first.params.contact_mode);
+            CHECK(same_slabs(first, second));
+        }
+    }
+    for (const char *style : {"tree", "organic"}) {
+        CAPTURE(style);
+        Sliced a(small_zone(), style, contact_gap, xy_gap, 3, "0");
+        Sliced b(small_zone(), style, contact_gap, xy_gap, 3, "100%");
+        const Generated first(a.print, style), second(b.print, style);
+        REQUIRE(first.params.contact_mode);
+        CHECK(same_slabs(first, second));
+    }
+}
+
+// The imported tab really publishes contact surfaces and prints support-interface moves for every independent growth variation.
+TEST_CASE("Contact cone growth exports a linear STL matrix", "[plugins][support-contact-xy][plugin-e2e][contact-cone-e2e]")
+{
+    namespace E2E = Test::PluginE2E;
+    DynamicPrintConfig baseline = SG::config();
+    baseline.set_deserialize_strict({{"support_material_xy_spacing", xy_gap}, {"support_material_contact_xy_spacing", contact_gap},
+        {"support_material_threshold", "60"}, {"gcode_flavor", "marlin2"}, {"gcode_comments", "1"},
+        {"filament_diameter", "1.75,1.75"},
+        {"gcode_exporter_plugin", "gcode.exporter.simple"}});
+    const std::vector<E2E::Case> cases = E2E::linear_cases(Orchestrator::instance(), {}, baseline,
+        {{{"support_material_contact_cone_growth"}, {{"gentle", {{"support_material_contact_cone_growth", "25%"}}},
+            {"short", {{"support_material_contact_cone_growth", "100%"}}},
+            {"absolute", {{"support_material_contact_cone_growth", "0.268"}}},
+            {"no cones", {{"support_material_contact_cone_growth", "0"}}}}}});
+    const TriangleMesh mesh = E2E::stl_fixture(small_zone());
+    double default_contact = 0., default_volume = 0.;
+    for (const E2E::Case &c : cases) {
+        CAPTURE(c.name);
+        DynamicPrintConfig config = E2E::apply_case(baseline, c);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        double contact = 0., support_volume = 0.;
+        std::atomic<bool> observed{false};
+        // The first toolpath status precedes dispatch. Contacts still have their marker before automatic interface fusion.
+        print.set_status_callback([&](const PrintBase::SlicingStatus &) {
+            if (print.running_step() != STEP_SUPPORT_TOOLPATH || observed.exchange(true)) return;
+            for (const Layer &layer : print.object(0).auxiliary_layers())
+                for (const LayerSliceIsland &island : layer.islands())
+                    for (const LayerRegionIsland &region : island.regions_islands())
+                        for (const Surface &surface : region.fill_surfaces()) {
+                            const double area = unscaled(unscaled(std::abs(surface.expolygon.area())));
+                            if ((surface.surface_type & stModContact) != 0) contact += area;
+                            if (surface.has_mod_support()) support_volume += area * unscaled(layer.scaled_height());
+                        }
+        });
+        print.process();
+        print.set_status_silent();
+        REQUIRE(observed.load());
+        CHECK(contact > 0.);
+        CHECK(support_volume > 0.);
+        if (c.name == "default") {
+            default_contact = contact;
+            default_volume = support_volume;
+        } else {
+            CHECK(contact == Approx(default_contact));
+            if (c.name == "absolute") CHECK(support_volume == Approx(default_volume));
+            else CHECK(support_volume != Approx(default_volume));
+        }
+        double interface_length = 0.;
+        for (const Layer &layer : print.object(0).auxiliary_layers()) {
+            for (const auto &[role, measure] : SG::measure_layer(layer))
+                if (is_support_interface(static_cast<ExtrusionRoleModifier>(role.second)))
+                    interface_length += measure.length;
+        }
+        CHECK(interface_length > 0.);
+        const std::string code = Test::gcode(print);
+        size_t interface_moves = 0;
+        std::string role;
+        GCodeReader reader;
+        reader.apply_config(config);
+        reader.parse_buffer(code, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (line.comment().rfind("TYPE:", 0) == 0) role = line.comment().substr(5);
+            if (role == "Support material interface" && line.extruding(state) && line.dist_XY(state) > 0.) ++interface_moves;
+        });
+        CHECK(interface_moves > 0);
+        REQUIRE(print.step_state_with_warnings(STEP_SUPPORT).is_done());
+        config.set_deserialize_strict("support_material_contact_cone_growth", c.name == "gentle" ? "67%" : "25%");
+        CHECK(print.apply(model, config) == Print::APPLY_STATUS_INVALIDATED);
+        CHECK_FALSE(print.step_state_with_warnings(STEP_SUPPORT).is_done());
+        // Support changes resume from the shared Slicing checkpoint, which also replays perimeters but keeps slices.
+        CHECK(print.step_state_with_warnings(STEP_POST_SLICING).is_done());
+    }
 }

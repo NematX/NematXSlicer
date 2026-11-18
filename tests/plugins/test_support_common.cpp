@@ -39,8 +39,9 @@
    compare each one with the native code on the same inputs.
 
    - SupportParams runs on the configurations of the legacy-comparison harness
-      (support_grid_test_helpers.hpp) and a few variants, after slicing; the mixed-nozzle
-      bounds test derives settings-based values before slicing, without layer contributions to min_height.
+     (support_grid_test_helpers.hpp) and a few variants, after slicing; the mixed-nozzle
+     bounds test derives settings-based values before slicing, without layer contributions to min_height.
+     Contact cone tests resolve millimeters or percentages against the interface nozzle and keep the reduced contact gap at zero growth.
    - The enum helpers run on every value of the native enum lists.
    - The smooth contact fill runs on a sliced print with non-default ironing settings and is
      compared with the native FillSmooth on the same surfaces.
@@ -1025,6 +1026,57 @@ TEST_CASE("Support params enable the contact gap only below the XY gap", "[plugi
     const Common::SupportParams params = SG::params(print, print.object(0));
     REQUIRE(params.contact_mode);
     CHECK(params.gap_xy_contact == Approx(double(params.gap_xy) / 20.).margin(2));
+}
+
+// Nozzle percentages resolve against the interface tool, even when the object nozzle and external width differ.
+TEST_CASE("Contact cone growth resolves distance and nozzle percentage without changing contact activation",
+          "[plugins][support-common][support-contact-xy]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *const key = "support_material_contact_cone_growth";
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    REQUIRE(definition != nullptr);
+    CHECK(definition->container_type == ConfigOptionContainerType::Object);
+    CHECK(definition->invalidates_step == STEP_SUPPORT);
+    CHECK(definition->min == 0.);
+    CHECK_FALSE(definition->can_be_disabled);
+    CHECK(definition->default_value->serialize() == "67%");
+    struct Case { const char *value; double nozzle_fraction; double distance; };
+    for (const Case &c : {Case{"25%", 0.25, 0.}, Case{"67%", 0.67, 0.}, Case{"100%", 1., 0.},
+                         Case{"0.536", 0., 0.536}, Case{"0", 0., 0.}, Case{"0%", 0., 0.}, Case{"0.0000000001", 0., 1e-10}}) {
+        CAPTURE(c.value);
+        DynamicPrintConfig config = SG::config();
+        config.set_deserialize_strict({{"support_material_xy_spacing", "1.5"}, {"support_material_contact_xy_spacing", "0.1"},
+            {"nozzle_diameter", "0.4,0.8"}, {"external_perimeter_extrusion_width", "0.6"}, {key, c.value}});
+        Print print;
+        Model model;
+        Test::init_print({SG::slab()}, print, model, config);
+        const Common::SupportParams params = SG::params(print, print.object(0));
+        REQUIRE(params.contact_mode);
+        CHECK(params.gap_xy_contact == scale_i(0.1));
+        REQUIRE(params.interface_flow_mm.nozzle_diameter == Approx(0.8));
+        const double distance = c.nozzle_fraction != 0. ? c.nozzle_fraction * params.interface_flow_mm.nozzle_diameter : c.distance;
+        const coord_t step = distance > 0. ? std::max(coord_t(1), scale_i(distance)) : 0;
+        CHECK(params.contact_cone_step == step);
+        CHECK(params.contact_cone_layers == (step == 0 ? size_t(0) :
+            size_t((params.gap_xy - params.gap_xy_contact + step - 1) / step)));
+    }
+
+    // Profiles without this key use the fixed 0.67 coefficient with its exact scaled-coordinate rounding.
+    DynamicPrintConfig old_profile = SG::config();
+    old_profile.erase(key);
+    old_profile.set_deserialize_strict({{"support_material_xy_spacing", "1.5"}, {"support_material_contact_xy_spacing", "0.1"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, old_profile);
+    const Common::SupportParams params = SG::params(print, print.object(0));
+    REQUIRE(params.contact_mode);
+    CHECK(params.contact_cone_step == scale_i(0.67 * params.interface_flow_mm.nozzle_diameter));
+    for (const char *value : {"-0.1", "-1%"}) {
+        DynamicPrintConfig invalid = SG::config();
+        invalid.set_deserialize_strict(key, value);
+        CHECK(invalid.validate().find(key) != std::string::npos);
+    }
 }
 
 TEST_CASE("Support enum helpers read every serialized value", "[plugins][support-common]")

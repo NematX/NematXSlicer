@@ -30,6 +30,8 @@
      values; the bottom contact flow is read in millimeters only (bottom_flow_mm). Values the native code derives from a
      flow width or spacing in millimeters (densities, the XY gap) read the _mm values, so they are exact.
    The path fields reproduce the PathParams of the legacy toolpaths.
+   Contact mode adds a smaller XY gap and a cone step per support layer. The step is a configured distance or a percentage
+   of the interface nozzle; zero preserves the contact gap but adds no transition cones.
 
    object_layers() lists borrowed object-layer views in layer-id order; object_has_support_demand() checks their islands for demand.
    The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
@@ -219,14 +221,19 @@ SupportParams::SupportParams(const Print &print, const Object &object)
         external_width = std::max(external_width, object.region_flow_mm(region_idx, raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
                                                                         layer_height, 2).width);
     gap_xy = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_width));
-    // Contact gap: active only when enabled and below gap_xy; the cones then shrink by 0.67 interface nozzle per layer.
+    // Contact gap: active only when enabled and below gap_xy; the cone step is a distance or a fraction of the interface nozzle.
     const ConfigOption contact_xy = config.get("support_material_contact_xy_spacing");
     const coord_t contact_gap = scale_i(contact_xy.get_effective_value(external_width));
     contact_mode = config_option_is_enabled(contact_xy.handle(), -1) != 0 && contact_gap < gap_xy;
     gap_xy_contact = contact_mode ? contact_gap : gap_xy;
     if (contact_mode) {
-        contact_cone_step = std::max(coord_t(1), scale_i(0.67 * interface_flow_mm.nozzle_diameter));
-        contact_cone_layers = size_t((gap_xy - gap_xy_contact + contact_cone_step - 1) / contact_cone_step);
+        const c_float_or_percent growth = config.get("support_material_contact_cone_growth").get_float_or_percent();
+        // Form the nozzle fraction first: the default 67% uses exactly the 0.67 coefficient before scaling.
+        const double step_mm = growth.percent ? (growth.value / 100.) * interface_flow_mm.nozzle_diameter : growth.value;
+        if (step_mm > 0.) {
+            contact_cone_step = std::max(coord_t(1), scale_i(step_mm));
+            contact_cone_layers = size_t((gap_xy - gap_xy_contact + contact_cone_step - 1) / contact_cone_step);
+        }
     }
     bottom_expansion = config.get("support_material_bottom_interface_expansion").get_float_or_percent();
 

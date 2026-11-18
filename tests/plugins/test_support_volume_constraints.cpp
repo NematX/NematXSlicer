@@ -232,6 +232,29 @@ TEST_CASE("A distant no-support zone leaves the support unchanged", "[plugins][s
     }
 }
 
+// Columns have no contact of their own: varying cone growth must leave their normal XY clearance and published sections unchanged.
+TEST_CASE("Contact cone growth does not change support column volumes", "[plugins][support-volumes][support-column][support-contact-xy]")
+{
+    for (const char *style : {"grid", "snug", "filled", "tree", "organic"}) {
+        CAPTURE(style);
+        Print first, second;
+        Model first_model, second_model;
+        const std::vector<TriangleMesh> columns{zone_box(9., 2., 1., 4., 4., 3.)};
+        column_print(first, first_model, style, columns, true, ModelVolumeType::SUPPORT_COLUMN, {}, {},
+            {"support_material_xy_spacing", "1.5", "support_material_contact_xy_spacing", "0.1", "support_material_contact_cone_growth", "0"});
+        column_print(second, second_model, style, columns, true, ModelVolumeType::SUPPORT_COLUMN, {}, {},
+            {"support_material_xy_spacing", "1.5", "support_material_contact_xy_spacing", "0.1", "support_material_contact_cone_growth", "100%"});
+        REQUIRE(support_area(first.object(0)) > 0.);
+        const std::vector<const Layer *> a = auxiliary_layers(first.object(0)), b = auxiliary_layers(second.object(0));
+        REQUIRE(a.size() == b.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            REQUIRE(a[i]->scaled_print_z() == b[i]->scaled_print_z());
+            const ExPolygons pa = support_surfaces(*a[i]), pb = support_surfaces(*b[i]);
+            CHECK((diff_ex(pa, pb).empty() && diff_ex(pb, pa).empty()));
+        }
+    }
+}
+
 // A column beside a cube that asks for no support becomes sparse support over its own height only: its 2 x 2 mm section on every
 // layer between z = 1 and 4, nothing below it (the column is not extended to the bed) and nothing above it.
 TEST_CASE("A support column alone becomes support over its own height in each built-in family", "[plugins][support-volumes][support-column]")
