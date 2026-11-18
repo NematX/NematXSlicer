@@ -9,9 +9,9 @@
        Common::project_interface_contacts(params, out);  // tree only
        Common::carve_interfaces(params, snug, out);
 
-   In contact mode (SupportParams::contact_mode), the contacts keep only gap_xy_contact from the object. contact_cones() gives
-   the cones that bring the slabs near a contact from that gap back to gap_xy; a family unites them with its slabs before the
-   carving, so the part of a cone in the interface window becomes interface.
+   In contact mode (SupportParams::contact_mode), the contacts keep only gap_xy_contact from the object. merge_contact_cones()
+   merges the cone of each contact into the slabs away from it, layer by layer; a family calls it before the carving, so the
+   part of a cone in the interface window becomes interface.
 
    Once the slabs are final, expand_first_layer_foot() widens the first base slab, for every family. The support ignores the
    brim and the skirt: it uses all the room it wants on the first layer.
@@ -19,6 +19,8 @@
        Common::expand_first_layer_foot(object, layers, params, out); */
 #ifndef plugins_support_common_interfaces_hpp_
 #define plugins_support_common_interfaces_hpp_
+
+#include <functional>
 
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
@@ -29,14 +31,15 @@ void project_interface_contacts(const SupportParams &p, GeneratedSupport &out);
 // Carve the top and bottom interface regions out of the base slabs and list them as interface slabs in out.interfaces;
 // snug support closes and smooths the overhangs of its top contacts, other styles only unite the contact footprints.
 void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out);
-// The cones of the contacts of out on the slabs (sorted by print_z): one collection per slab, in out.storage. columns[i] is the
-// area slabs[i] covers before the object trimming. Below a top contact (above a bottom contact), each slab whose column meets the
-// contact receives the contact shrunk by step times its depth: 1 for the first such slab, plus one for each such slab between it
-// and the contact. Slabs whose column misses the contact are not counted and receive nothing. The walk stops after max_depth
-// slabs or when the cone vanishes; max_depth 0 (outside contact mode, p.contact_cone_layers) gives only empty collections. The
-// cones are raw: the caller removes the object grown by p.gap_xy_contact and the contacts beside each slab.
-std::vector<StoredPolygonCollection> contact_cones(coord_t step, size_t max_depth, const GeneratedSupport &out,
-                                                   const GeneratorLayers &slabs, const std::vector<StoredPolygonCollection> &columns);
+// The part of a cone that slab i (an index into the slabs given to merge_contact_cones()) may print: the cone less the object
+// grown by p.gap_xy_contact and the contacts beside the slab.
+using ConeTrim = std::function<StoredPolygonCollection(size_t i, const StoredPolygonCollection &cone)>;
+// Merge the cone of every contact of out into the slabs (sorted by print_z), slab by slab away from the contact: downwards for a
+// top contact, upwards for a bottom contact. The cone starts as the contact; on each slab it shrinks by step, and the walk ends
+// when it vanishes or when the islands of the slab that it meets cover it. Otherwise the slab gains trim(i, cone), and the next
+// cone is that part united with the islands it met, so a cone that joins the support follows it. step 0 changes nothing. The
+// slabs are normalized at resolution.
+void merge_contact_cones(coord_t step, coord_t resolution, GeneratedSupport &out, GeneratorLayers &slabs, const ConeTrim &trim);
 // Widen the first base slab, when it starts on the bed, by the raft_first_layer_expansion setting without crossing the first object
 // layer grown by gap_xy, then remove from it the footprints of the contacts and interfaces on the bed. Other slabs are not changed.
 // Details are in the definition.
