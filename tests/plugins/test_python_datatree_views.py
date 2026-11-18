@@ -5,6 +5,8 @@ call the public Python views and check the arguments, optional values and copied
 results, including projections of instance-owned auxiliary layers. No native
 Print or slicing job is created; the fixture owns the fake handles and restores
 the API binding after use.
+Hull-bound checks verify value copying and a visible failure when the host cannot
+provide geometry, without substituting empty bounds for an ordering coordinate.
 
 Representative direct calls (branches are not a timeline):
 
@@ -294,6 +296,30 @@ class PythonDataTreeViewTests(unittest.TestCase):
             obj.instance_shift(-1)
         with self.assertRaises(IndexError):
             obj.instance_shift(2)
+
+    def test_object_hull_bounds_are_values_and_host_failure_is_visible(self):
+        """Copy the host's centered bounds and reject an unsuccessful query."""
+        api = self.make_api()
+        calls = []
+
+        def hull_bounds(obj, output):
+            """Fill the caller's value, without sharing native storage."""
+            calls.append(address(obj))
+            bounds = ctypes.cast(output, ctypes.POINTER(self.generated.CBoundingBox)).contents
+            bounds.min = self.generated.CPoint(-10, -20)
+            bounds.max = self.generated.CPoint(30, 40)
+            return 1
+
+        api.host.object_get_convex_hull_bounding_box = hull_bounds
+        obj = self.views.Object(api, 50)
+        first = obj.convex_hull_bounding_box()
+        first.min.x = 99
+        second = obj.convex_hull_bounding_box()
+        self.assertEqual((second.min.x, second.min.y, second.max.x, second.max.y), (-10, -20, 30, 40))
+        self.assertEqual(calls, [50, 50])
+        api.host.object_get_convex_hull_bounding_box = lambda obj, output: 0
+        with self.assertRaisesRegex(RuntimeError, "printable hull bounds"):
+            obj.convex_hull_bounding_box()
 
     def test_object_support_and_region_flows_forward_their_arguments(self):
         api = self.make_api()

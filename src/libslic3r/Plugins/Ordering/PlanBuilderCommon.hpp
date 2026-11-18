@@ -79,7 +79,8 @@ Return the object-instance order for a complete-object plan.
 
 This intentionally stays plugin-side. Exact host model order is not exposed as a
 callback; the plugin uses source order, object height, increasing or decreasing
-instance X/Y, or a greedy nearest-neighbor walk over instance shifts depending on complete_objects_sort.
+placed hull edges on X/Y, or a greedy nearest-neighbor walk over instance shifts
+depending on complete_objects_sort. Hull bounds are computed once per object.
 */
 std::vector<SourceInstance> ordered_source_instances_for_object_plan(
     const Print &print,

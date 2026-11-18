@@ -36,6 +36,8 @@ below. `Layer` provides Z positions and the collection of islands. `Object`
 provides layers, instances, volumes, object configuration, and object-owned
 auxiliary layers. `Print` provides the objects, print configuration, records,
 and the hidden auxiliary object used for print-level generated geometry.
+Object::convex_hull_bounding_box() copies centered bounds of the transformed
+printable model above the bed; add instance_shift() to place them on the plate.
 Read preset defaults through Print::default_object_config() or
 Print::default_region_config() without creating that hidden object. For helper
 paths belonging to a model object, use object.default_region_config(print);
@@ -600,6 +602,15 @@ public:
     coord_t max_z() const { return object_get_max_z(handle()); }
     c_matrix4d transform() const { return object_get_transform(handle()); }
     c_point center_offset() const { return object_get_center_offset(handle()); }
+
+    // Copy centered, transformed printable hull bounds above the bed; add an instance shift for plate coordinates.
+    // Missing geometry or a host failure throws instead of supplying a false ordering coordinate.
+    c_bounding_box convex_hull_bounding_box() const {
+        c_bounding_box bounds;
+        if (!object_get_convex_hull_bounding_box(handle(), &bounds))
+            throw std::runtime_error("The object's printable hull bounds could not be computed.");
+        return bounds;
+    }
 
     c_matrix4d transform_centered() const {
         const c_point offset = center_offset();

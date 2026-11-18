@@ -35,6 +35,8 @@ creating an auxiliary object. Its borrowed result must be reacquired after apply
 Print.default_object_config() reads preset object settings, such as the global
 wipe tower position. Object.default_region_config(print) uses the host's fallback
 for objects without regions. These queries never create geometry or edit settings.
+Object.convex_hull_bounding_box() copies centered bounds of the transformed
+printable model above the bed; add instance_shift() to place them on the plate.
 
 Inspect region-island extrusions:
 
@@ -65,6 +67,7 @@ import math
 from typing import Iterable, Iterator, NamedTuple, Sequence
 
 from slic3r_api_generated import (
+    CBoundingBox,
     CLayerAdhesionProperty,
     CLayerInstanceProperty,
     CLayerBrimProperty,
@@ -2010,6 +2013,18 @@ class Object(DataTreeView):
 
     def center_offset(self) -> CPoint:
         return self.api.host.object_get_center_offset(self.c_handle())
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def convex_hull_bounding_box(self) -> CBoundingBox:
+        """Copy centered printable hull bounds above the bed, including model transforms.
+
+        Add instance_shift() to both corners for plate coordinates. Missing geometry
+        or a host failure raises instead of supplying a false ordering coordinate.
+        """
+        bounds = CBoundingBox()
+        if not self.api.host.object_get_convex_hull_bounding_box(self.c_handle(), ctypes.byref(bounds)):
+            raise RuntimeError("The object's printable hull bounds could not be computed.")
+        return bounds
 
     def transform_centered(self) -> CMatrix4d:
         offset = self.center_offset()

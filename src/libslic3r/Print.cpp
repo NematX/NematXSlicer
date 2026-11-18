@@ -43,6 +43,8 @@ Validation checks print-level active settings against their selected plugin
 group providers; object/region overrides are not inspected by that guard.
 By object clearance checks fill warning contours without rejecting close or tall
 copies. The warnings vector carries close-copy notices to GUI notifications.
+XY object ordering compares transformed hull edges above the bed, translated for
+each physical copy. Bounds are computed once per object; tied edges retain source order.
 It also warns when lift_min exceeds the printer ceiling; motion generation clamps
 that floor without making the print invalid. Its warning token has an independent
 GUI notification so other warnings and their action links remain visible.
@@ -80,6 +82,7 @@ Representative direct calls (branches are not a timeline):
 #include <limits>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/path.hpp>
@@ -1987,51 +1990,29 @@ std::vector<const PrintInstance*> Print::sort_object_instances_by_max_z() const
     return instances;
 }
 
-// Sort the PrintObjects by their increasing Y, likely useful for avoiding colisions on printer with a x-bar during sequential prints.
 std::vector<const PrintInstance*> Print::sort_object_instances_by_max_y() const
 {
-    std::vector<const PrintObject*> objects;
-    objects.reserve(this->objects().size());
-    for (const PrintObject &object : this->objects())
-        objects.emplace_back(&object);
-    std::sort(objects.begin(), objects.end(), [](const PrintObject* po1, const PrintObject* po2) { return po1->height() < po2->height(); });
-    std::vector<const PrintInstance*> instances;
-    instances.reserve(objects.size());
-    std::map<const PrintInstance*, coord_t> map_min_y;
-    for (const PrintObject* object : objects) {
-        for (size_t i = 0; i < object->instances().size(); ++i) {
-            instances.emplace_back(&object->instances()[i]);
-            // Calculate the convex hull of a printable object. 
-            Polygon poly = object->model_object()->convex_hull_2d(
-                object->trafo()
-                // already in object->trafo()
-                //* Geometry::assemble_transform(Vec3d::Zero(),
-                //    object->instances()[i].model_instance->get_rotation(), 
-                //    object->instances()[i].model_instance->get_scaling_factor(), 
-                //    object->instances()[i].model_instance->get_mirror())
-            );
-            BoundingBox bb(poly.points);
-            Vec2crd offset = object->instances()[i].shift - object->center_offset();
-            bb.translate(offset.x(), offset.y());
-            map_min_y[instances.back()] = bb.min.y();
-        }
-    }
-    std::sort(instances.begin(), instances.end(), [&map_min_y](const PrintInstance* po1, const PrintInstance* po2) { return map_min_y[po1] < map_min_y[po2]; });
-    return instances;
+    return sort_object_instances_by_xy(false, false);
 }
 
 std::vector<const PrintInstance*> Print::sort_object_instances_by_xy(bool x_axis, bool descending) const
 {
-    std::vector<const PrintInstance*> instances;
-    instances.reserve(this->num_object_instances());
-    for (const PrintObject &object : this->objects())
+    std::vector<std::pair<const PrintInstance *, coord_t>> coordinates;
+    coordinates.reserve(this->num_object_instances());
+    for (const PrintObject &object : this->objects()) {
+        const BoundingBox bounds = object.convex_hull_bounding_box();
+        const Point &edge = descending ? bounds.max : bounds.min;
         for (const PrintInstance &instance : object.instances())
-            instances.push_back(&instance);
-    std::stable_sort(instances.begin(), instances.end(), [x_axis, descending](const PrintInstance *lhs, const PrintInstance *rhs) {
-        const coord_t left = x_axis ? lhs->shift.x() : lhs->shift.y();
-        const coord_t right = x_axis ? rhs->shift.x() : rhs->shift.y();
-        return descending ? left > right : left < right;
+            coordinates.emplace_back(&instance, x_axis ? edge.x() + instance.shift.x() : edge.y() + instance.shift.y());
+    }
+    std::stable_sort(coordinates.begin(), coordinates.end(), [descending](
+        const std::pair<const PrintInstance *, coord_t> &lhs, const std::pair<const PrintInstance *, coord_t> &rhs) {
+        return descending ? lhs.second > rhs.second : lhs.second < rhs.second;
     });
+    std::vector<const PrintInstance*> instances;
+    instances.reserve(coordinates.size());
+    for (const std::pair<const PrintInstance *, coord_t> &entry : coordinates)
+        instances.push_back(entry.first);
     return instances;
 }
 

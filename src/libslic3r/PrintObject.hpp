@@ -93,6 +93,9 @@ public:
     // Bounding box is used to align the object infill patterns, and to calculate attractor for the rear seam.
     // The bounding box may not be quite snug.
     BoundingBox bounding_box() const;
+    // Bounds of the transformed printable hull above the bed, in centered scaled XY coordinates.
+    // Add an instance shift to place these bounds on the plate. No model or no hull returns an undefined box.
+    BoundingBox convex_hull_bounding_box() const;
     // Height is used for slicing, for sorting the objects by height for sequential printing and for checking vertical clearence in sequential print mode.
     // The height is snug.
     coord_t                     height() const         { return m_size.z(); }

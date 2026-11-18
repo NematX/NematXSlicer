@@ -110,15 +110,15 @@ TEST_CASE("Orchestrator package requirements accept 3.5 and reject newer minors"
 }
 
 // Check additive data-tree requirements against the host's compiled version table.
-TEST_CASE("Data tree package requirements accept 5.1 through 5.5 and reject 5.6", "[plugins][abi][data-tree]")
+TEST_CASE("Data tree package requirements accept 5.1 through 5.6 and reject 5.7", "[plugins][abi][data-tree]")
 {
     const std::string version = GENERATE(std::string("5.1"), std::string("5.2"), std::string("5.3"),
-        std::string("5.4"), std::string("5.5"), std::string("5.6"));
+        std::string("5.4"), std::string("5.5"), std::string("5.6"), std::string("5.7"));
     PluginPackageMetadata metadata;
     std::string error;
     REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=2.7.63.0\n"
         "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_data_tree.h=" + version + "\n", metadata, error));
-    CHECK(metadata.compatibility.compatible() == (version != "5.6"));
+    CHECK(metadata.compatibility.compatible() == (version != "5.7"));
 }
 
 TEST_CASE("Package ABI rejects missing invalid and conflicting requirements", "[plugins][abi][repository]")

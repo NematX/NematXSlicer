@@ -53,7 +53,7 @@ marked with an owner are included only for that instance; unmarked local layers
 are reproduced for every copy. Sources remain unchanged.
 The provider owns object order, height step, height limit, island and first-layer settings.
 Their activation rules keep them editable only for the selected By object mode.
-XY orders compare instance positions on the plate, keeping source order on ties.
+XY orders compare transformed hull edges on the plate, keeping source order on ties.
 
     register_by_object_plan_builder_plugin() -> register the alternative provider
         ByObjectPlanBuilder::inilialize_impl() -> define settings and activation rules
@@ -408,8 +408,11 @@ void initialize_by_object_settings(orchestrator_handle *orch)
     def.label = "Object sort";
     def.tooltip = "When printing multiple objects or copies on after another, this will help you to choose how it's ordered."
         "\nObject will sort them by the order of the right panel."
-        "\nMin X sorts copy positions from the lowest to the highest X coordinate; Max X reverses that order."
-        "\nLowest Y sorts copy positions from the lowest to the highest Y coordinate; Max Y reverses that order."
+        "\nMin X sorts copies by their minimum hull X coordinate, from lowest to highest."
+        " Max X sorts by their maximum hull X coordinate, from highest to lowest."
+        "\nLowest Y sorts copies by their minimum hull Y coordinate, from lowest to highest."
+        " Max Y sorts by their maximum hull Y coordinate, from highest to lowest."
+        " Hulls include rotation, scaling and mirroring, and are placed on the plate."
         " Useful for printers with a X-bar. Equal coordinates keep the object and copy order."
         "\nLowest Z will sort them by their height, useful for delta printers."
         "\nNearest will try to jump to the nearest.";

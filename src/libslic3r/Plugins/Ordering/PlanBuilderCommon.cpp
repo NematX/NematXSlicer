@@ -17,6 +17,8 @@
 Ordering builders share the construction of plan-owned geometry through these
 helpers. First, source_instances reads object placements and caches heights;
 the object-order helper sorts that cache without changing the source Print.
+XY orders cache each object's transformed hull bounds above the bed, then add
+each copy's shift to compare physical edges rather than instance centers.
 Next, append helpers find Z and tool buckets, record borrowed source context once,
 clone printable role trees, and translate the clones to plate coordinates through
 the core geometry bridge. Global auxiliary layers already use plate coordinates
@@ -102,7 +104,8 @@ Return the object-instance order for a complete-object plan.
 
 This intentionally stays plugin-side. Exact host model order is not exposed as a
 callback; the plugin uses source order, object height, increasing or decreasing
-instance X/Y, or a greedy nearest-neighbor walk over instance shifts depending on complete_objects_sort.
+placed hull edges on X/Y, or a greedy nearest-neighbor walk over instance shifts
+depending on complete_objects_sort. Hull bounds are computed once per object.
 */
 std::vector<SourceInstance> ordered_source_instances_for_object_plan(
     const Print &print,
@@ -253,16 +256,23 @@ std::vector<SourceInstance> ordered_source_instances_for_object_plan(
                   });
     } else if (sort_mode == "lowx" || sort_mode == "highx" || sort_mode == "lowy" || sort_mode == "highy") {
         /*
-        The plugin API exposes the instance center shift, not the full object
-        convex hull used by legacy code. Sorting the chosen shift coordinate
-        keeps the XY modes plugin-side, with source indices breaking ties.
+        Copies share one centered hull. Cache its bounds once, then add each
+        copy's shift to compare the selected physical edge on the plate.
         */
+        std::vector<c_bounding_box> bounds;
+        bounds.reserve(print.object_count());
+        for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+            throw_if_cancelled(run_ctx);
+            bounds.push_back(print.object(object_idx).convex_hull_bounding_box());
+        }
         const bool x_axis = sort_mode == "lowx" || sort_mode == "highx";
         const bool descending = sort_mode == "highx" || sort_mode == "highy";
         std::sort(out.begin(), out.end(),
-                  [x_axis, descending](const SourceInstance &lhs, const SourceInstance &rhs) {
-                      const coord_t left = x_axis ? lhs.shift.x : lhs.shift.y;
-                      const coord_t right = x_axis ? rhs.shift.x : rhs.shift.y;
+                  [x_axis, descending, &bounds](const SourceInstance &lhs, const SourceInstance &rhs) {
+                      const c_point left_edge = descending ? bounds[lhs.object_idx].max : bounds[lhs.object_idx].min;
+                      const c_point right_edge = descending ? bounds[rhs.object_idx].max : bounds[rhs.object_idx].min;
+                      const coord_t left = x_axis ? left_edge.x + lhs.shift.x : left_edge.y + lhs.shift.y;
+                      const coord_t right = x_axis ? right_edge.x + rhs.shift.x : right_edge.y + rhs.shift.y;
                       if (left != right)
                           return descending ? left > right : left < right;
                       if (lhs.object_idx != rhs.object_idx)

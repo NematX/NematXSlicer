@@ -378,7 +378,8 @@ coordinates.
 Each PrintingGroup produced by this builder contains one object instance. The
 same source Layer pointer may therefore appear in several groups, but each group
 owns its own shifted extrusion clones. The groups are ordered with
-the complete_objects_sort setting: model order, object height, increasing or decreasing X/Y, or
+the complete_objects_sort setting: model order, object height, placed hull minima
+in increasing X/Y or maxima in decreasing X/Y, or
 nearest-neighbor chaining from the instance centers.
 */
 PrintingPlan build_printing_plan_by_object(const Print &print);

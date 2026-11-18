@@ -54,6 +54,8 @@ to layers and their descendants must not survive a rebuild of those collections.
 Region zero is the object's fallback for helper geometry outside all volume
 masks. Its configuration combines Print defaults with object overrides, using
 the same normalization as volume regions but no volume or layer-range override.
+Hull bounds use the transformed printable model above the bed, centered like the
+slices. Ordering adds each copy's shift to compare its actual edges on the plate.
 
 Representative direct calls (branches are not a timeline):
 
@@ -65,6 +67,10 @@ Representative direct calls (branches are not a timeline):
     object_default_region_config()
         |-- apply_to_print_region_config(): apply only object-level overrides
         `-- finalize_region_config(): share extruder, density and fuzzy-skin rules
+
+    PrintObject::convex_hull_bounding_box()
+        |-- ModelObject::convex_hull_2d(): transform printable volumes above the bed
+        `-- BoundingBox::translate(): subtract the slicing center offset
 */
 
 using namespace std::literals;
@@ -261,6 +267,16 @@ Transform3d PrintObject::trafo_centered() const {
 
 BoundingBox PrintObject::bounding_box() const {
     return BoundingBox(Point(-m_size.x() / 2, -m_size.y() / 2), Point(m_size.x() / 2, m_size.y() / 2));
+}
+
+BoundingBox PrintObject::convex_hull_bounding_box() const
+{
+    if (model_object() == nullptr)
+        return {};
+    BoundingBox bounds(model_object()->convex_hull_2d(trafo()).points);
+    if (bounds.defined)
+        bounds.translate(-center_offset().x(), -center_offset().y());
+    return bounds;
 }
 
 bool PrintObject::is_mm_painted() const { return this->model_object()->is_mm_painted(); }

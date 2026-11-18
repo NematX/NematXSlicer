@@ -59,6 +59,8 @@ Default configuration queries borrow Print-owned settings without creating the
 auxiliary object. Concurrent readers require stable defaults, as other views do.
 The region resolver delegates to PrintObject::default_region_config(), so host
 callers and SDK views share one rule for objects without regions.
+Hull-bound queries copy centered bounds from PrintObject, sharing the native
+above-bed model projection without exposing its mesh or transferring ownership.
 
 Scratch setters keep ownership unchanged, validate arguments and contain failures
 before returning through C. Null, range and phase rules are documented with their functions
@@ -77,6 +79,9 @@ Representative direct calls (branches are not a timeline):
         |-- Slic3r::to_object()
         |-- layer_count()
         `-- layer()
+
+    object_get_convex_hull_bounding_box()
+        `-- PrintObject::convex_hull_bounding_box(): copy centered model bounds
 
     layer_region_island_set_fill_surfaces()
         |-- Slic3r::to_layer_region_island()
@@ -1199,6 +1204,21 @@ c_matrix4d object_get_transform(const object_handle *me)
 c_point object_get_center_offset(const object_handle *me)
 {
     return me == nullptr ? c_point{} : Slic3r::to_c_point(Slic3r::to_object(me)->center_offset());
+}
+
+int32_t object_get_convex_hull_bounding_box(const object_handle *me, c_bounding_box *out)
+{
+    if (me == nullptr || out == nullptr)
+        return 0;
+    try {
+        const Slic3r::BoundingBox bounds = Slic3r::to_object(me)->convex_hull_bounding_box();
+        if (!bounds.defined)
+            return 0;
+        *out = c_bounding_box{Slic3r::to_c_point(bounds.min), Slic3r::to_c_point(bounds.max)};
+        return 1;
+    } catch (...) {
+        return 0;
+    }
 }
 
 uint32_t object_count_instance(const object_handle *me)

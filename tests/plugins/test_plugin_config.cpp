@@ -91,6 +91,8 @@ plans, exercise effective provider selection and load the obsolete switch throug
 the supported text and project paths. The STL export catalogue varies each
 declared object-builder setting independently.
 XY order checks distinguish both directions and stable copy ties, including shared first layers and INI/3MF persistence.
+Unequal and transformed copies distinguish hull-edge sorting from center sorting.
+Literal bounds check the shared above-bed projection independently of plan construction.
 Auxiliary scenes independently enumerate source layers, owner markers and shifted
 extrusion endpoints. Explicit model indices distinguish every object sort mode.
 The plugins_inactive_builder_import CTest entry runs the isolated import case
@@ -3360,8 +3362,8 @@ TEST_CASE("XY object sorts keep copy ties stable through the shared first layer"
         config.set_deserialize_strict("complete_objects_sort", order.setting);
         print.apply(model, config);
         print.process();
-        // The native builder has no shared first-layer group; its low-Y hull sort is a separate compatibility mode.
-        if (!shared_first_layer && std::string(order.setting) != "lowy")
+        // The native builder has no shared first-layer group.
+        if (!shared_first_layer)
             check_sequence_builder(print, true);
         else
             check_stack_sequence_sources(print);
@@ -3381,6 +3383,145 @@ TEST_CASE("XY object sorts keep copy ties stable through the shared first layer"
                 CHECK(plan.groups.front().printing_catalog_ids[i] == group.printing_catalog_ids.front());
         }
     }
+}
+
+// A wide copy crosses the small copies' X centers; its rotated copy does the same on Y.
+// Literal edge orders differ from center orders in every XY mode, including after a settings replay.
+TEST_CASE("XY object sorts compare transformed hull edges on the plate",
+          "[plugins][printing-plan][print-sequence][ordering][object-sort]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool shared_first_layer = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"print_plan_builder", "ordering.plan_builder.by_object"},
+        {"complete_objects_step", "0"}, {"complete_objects_sort", "object"},
+        {"complete_objects_one_first_layer", shared_first_layer ? "1" : "0"},
+        {"skirts", "0"}, {"brim_width", "0"}, {"support_material", "0"}, {"wipe_tower", "0"},
+        {"extruder_clearance_radius", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"}});
+    Model model;
+    Print print;
+    Test::init_print({make_cube(20., 4., 1.2), make_cube(4., 4., 1.2), make_cube(4., 4., 1.2),
+        make_cube(4., 4., 1.2), make_cube(4., 4., 1.2)}, print, model, config);
+    for (size_t idx = 0; idx < model.objects().size(); ++idx) {
+        // add_volume() centers the mesh itself; keep XY centered and raise its bottom to the bed.
+        model.objects()[idx].volumes.front()->set_offset(Vec3d(0., 0., 0.6));
+        model.objects()[idx].instances.front()->set_rotation(Vec3d::Zero());
+    }
+    model.objects()[0].instances.front()->set_offset(Vec3d(50., 20., 0.));
+    ModelInstance *rotated = model.objects()[0].add_instance(*model.objects()[0].instances.front());
+    rotated->set_rotation(Vec3d(0., 0., 0.5 * PI));
+    rotated->set_offset(Vec3d(100., 50., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(46., 60., 0.));
+    model.objects()[2].instances.front()->set_offset(Vec3d(54., 100., 0.));
+    model.objects()[3].instances.front()->set_offset(Vec3d(140., 46., 0.));
+    model.objects()[3].instances.front()->set_scaling_factor(Vec3d(2., 1., 1.));
+    model.objects()[3].instances.front()->set_mirror(Vec3d(-1., 1., 1.));
+    model.objects()[4].instances.front()->set_offset(Vec3d(180., 54., 0.));
+    using Copy = std::pair<size_t, size_t>;
+    const std::map<Copy, std::array<double, 4>> expected_bounds = {
+        {{0, 0}, {40., 18., 60., 22.}}, {{0, 1}, {98., 40., 102., 60.}},
+        {{1, 0}, {44., 58., 48., 62.}}, {{2, 0}, {52., 98., 56., 102.}},
+        {{3, 0}, {136., 44., 144., 48.}}, {{4, 0}, {178., 52., 182., 56.}}
+    };
+    struct Order { const char *setting; std::vector<Copy> copies; };
+    const Order orders[] = {
+        {"lowx", {{0, 0}, {1, 0}, {2, 0}, {0, 1}, {3, 0}, {4, 0}}},
+        {"highx", {{4, 0}, {3, 0}, {0, 1}, {0, 0}, {2, 0}, {1, 0}}},
+        {"lowy", {{0, 0}, {0, 1}, {3, 0}, {4, 0}, {1, 0}, {2, 0}}},
+        {"highy", {{2, 0}, {1, 0}, {0, 1}, {4, 0}, {3, 0}, {0, 0}}}
+    };
+    for (const Order &order : orders) {
+        CAPTURE(order.setting, shared_first_layer);
+        config.set_deserialize_strict("complete_objects_sort", order.setting);
+        print.apply(model, config);
+        print.process();
+        if (shared_first_layer)
+            check_stack_sequence_sources(print);
+        else
+            check_sequence_builder(print, true);
+        REQUIRE(print.printing_plan() != nullptr);
+        const Printing::PrintingPlan &plan = *print.printing_plan();
+        const size_t prefix = shared_first_layer ? 1 : 0;
+        REQUIRE(plan.groups.size() == order.copies.size() + prefix);
+        if (shared_first_layer)
+            REQUIRE(plan.groups.front().printing_catalog_ids.size() == order.copies.size());
+        for (size_t idx = 0; idx < order.copies.size(); ++idx) {
+            const Printing::PrintingGroup &group = plan.groups[idx + prefix];
+            REQUIRE(group.printing_catalog_ids.size() == 1);
+            const Printing::PrintingObjectInstance &instance = plan.object_instances[group.printing_catalog_ids.front()];
+            const Copy &expected = order.copies[idx];
+            const PrintInstance &actual = instance.object->instances()[instance.object_instance_idx];
+            BoundingBox bounds = instance.object->convex_hull_bounding_box();
+            bounds.translate(actual.shift);
+            CAPTURE(idx, expected.first, expected.second, actual.model_instance->id().id,
+                unscaled(bounds.min.x()), unscaled(bounds.min.y()), unscaled(bounds.max.x()), unscaled(bounds.max.y()));
+            CHECK(instance.object->instances()[instance.object_instance_idx].model_instance->id() ==
+                model.objects()[expected.first].instances[expected.second]->id());
+            const std::array<double, 4> &edges = expected_bounds.at(expected);
+            CHECK(unscaled(bounds.min.x()) == Approx(edges[0]).margin(0.00001));
+            CHECK(unscaled(bounds.min.y()) == Approx(edges[1]).margin(0.00001));
+            CHECK(unscaled(bounds.max.x()) == Approx(edges[2]).margin(0.00001));
+            CHECK(unscaled(bounds.max.y()) == Approx(edges[3]).margin(0.00001));
+            if (shared_first_layer)
+                CHECK(plan.groups.front().printing_catalog_ids[idx] == group.printing_catalog_ids.front());
+        }
+    }
+}
+
+// The model includes a wide submerged part and a remote modifier. Neither contributes to the printable hull.
+// Volume and instance transforms give literal plate bounds, independently of the native and API helpers.
+TEST_CASE("Object hull bounds include transforms and exclude nonprinting geometry",
+          "[plugins][data-tree][object-sort]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    TriangleMesh mesh = make_cube(4., 6., 2.);
+    mesh.translate(-2., -3., 0.);
+    TriangleMesh submerged = make_cube(100., 100., 1.);
+    submerged.translate(-50., -50., -2.);
+    mesh.merge(submerged);
+    Model model;
+    ModelObject *object = model.add_object();
+    ModelVolume *part = object->add_volume(mesh);
+    part->set_rotation(Vec3d(0., 0., 0.5 * PI));
+    part->set_offset(Vec3d(7., 11., 0.));
+    ModelVolume *modifier = object->add_volume(make_cube(200., 200., 2.));
+    modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    modifier->set_offset(Vec3d(1000., 1000., 0.));
+    ModelInstance *instance = object->add_instance();
+    instance->set_rotation(Vec3d(0., 0., 0.5 * PI));
+    instance->set_scaling_factor(Vec3d(2., 1., 1.));
+    instance->set_mirror(Vec3d(-1., 1., 1.));
+    instance->set_offset(Vec3d(80., 90., 0.));
+    Print print;
+    print.apply(model, DynamicPrintConfig::full_print_config());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &native = print.object(0);
+    const slic3r_api::Object view(reinterpret_cast<const object_handle *>(&native));
+    const c_bounding_box bounds = view.convex_hull_bounding_box();
+    const c_point shift = view.instance_shift(0);
+    CHECK(unscaled(bounds.min.x + shift.x) == Approx(67.).margin(0.00001));
+    CHECK(unscaled(bounds.max.x + shift.x) == Approx(71.).margin(0.00001));
+    CHECK(unscaled(bounds.min.y + shift.y) == Approx(70.).margin(0.00001));
+    CHECK(unscaled(bounds.max.y + shift.y) == Approx(82.).margin(0.00001));
+    const BoundingBox native_bounds = native.convex_hull_bounding_box();
+    CHECK(bounds.min.x == native_bounds.min.x());
+    CHECK(bounds.max.x == native_bounds.max.x());
+    CHECK(bounds.min.y == native_bounds.min.y());
+    CHECK(bounds.max.y == native_bounds.max.y());
+
+    c_bounding_box sentinel{{1, 2}, {3, 4}};
+    CHECK(object_get_convex_hull_bounding_box(nullptr, &sentinel) == 0);
+    CHECK(object_get_convex_hull_bounding_box(view.handle(), nullptr) == 0);
+    const PrintObject &auxiliary = print.mutable_auxiliary_object();
+    CHECK(object_get_convex_hull_bounding_box(reinterpret_cast<const object_handle *>(&auxiliary), &sentinel) == 0);
+    const slic3r_api::Object auxiliary_view(reinterpret_cast<const object_handle *>(&auxiliary));
+    REQUIRE_THROWS_AS(auxiliary_view.convex_hull_bounding_box(), std::runtime_error);
+    CHECK(sentinel.min.x == 1);
+    CHECK(sentinel.min.y == 2);
+    CHECK(sentinel.max.x == 3);
+    CHECK(sentinel.max.y == 4);
 }
 
 // Stack unequal boxes and support geometry, then compare source roles, owners,

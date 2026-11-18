@@ -287,9 +287,9 @@ public:
     uint16_t                    num_object_instances() const;
     // Sort the PrintObjects by their increasing Z, likely useful for avoiding colisions on Deltas during sequential prints.
     std::vector<const PrintInstance*> sort_object_instances_by_max_z() const;
-    // Sort the PrintObjects by their increasing Y, likely useful for avoiding colisions on printer with a x-bar during sequential prints.
+    // Sort copies by increasing minimum hull Y on the plate, for sequential printing with an X bar.
     std::vector<const PrintInstance*> sort_object_instances_by_max_y() const;
-    // Sort instance center positions by X or Y, ascending or descending; equal coordinates retain source object/copy order.
+    // Sort placed hull minima ascending or maxima descending on X or Y; ties retain source object/copy order.
     std::vector<const PrintInstance*> sort_object_instances_by_xy(bool x_axis, bool descending) const;
     // Produce a vector of PrintObjects in the order of their respective ModelObjects in print.model().
     std::vector<const PrintInstance*> sort_object_instances_by_model_order() const;

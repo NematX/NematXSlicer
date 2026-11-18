@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 5u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 6u
 
 /*
 Data-tree access for a sliced Print.
@@ -37,6 +37,9 @@ For travel boundaries, layer_island_get_perimeter_slices borrows filled XY
 areas published by perimeter processing, not extrusion paths. They are empty
 before publication and on auxiliary/support islands. No lock is acquired:
 concurrent readers require that no thread modifies or destroys the island.
+For object ordering, object_get_convex_hull_bounding_box copies centered bounds
+of the transformed printable model above the bed. Add each instance's XY shift
+to compare physical edges rather than instance centers.
 
 Developer guide: [Using Plugin Properties](/doc/plugins/properties.md)
 
@@ -801,6 +804,18 @@ sent to Clipper. This is a slicer-space 2D value, so it uses coord_t through
 c_point. Convert with unscaled() before composing it with c_matrix4d.
 */
 SLIC3R_HOST_API c_point object_get_center_offset(const object_handle *me);
+
+/*
+Copy the bounds of the transformed printable hull above Z=0 in scaled, centered
+XY coordinates, without an instance shift. Model-part volumes contribute their
+own transforms; modifiers and auxiliary geometry do not contribute. Rotation,
+scaling and mirroring are included. Add object_get_instance_shift() to both
+corners to place the result on the plate. The value owns no host memory.
+Returns 1 on success. Returns 0 for a null argument, an object without a model,
+an empty hull or an internal failure; out is unchanged and no exception crosses C.
+Readers require that the source model and its transforms remain unchanged.
+*/
+SLIC3R_HOST_API int32_t object_get_convex_hull_bounding_box(const object_handle *me, c_bounding_box *out);
 
 /*
 Return the number of physical instances of this printable Object. Extrusion
