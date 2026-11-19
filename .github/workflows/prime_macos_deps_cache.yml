@@ -18,7 +18,7 @@ jobs:
       dependency_build_args: -ad
       dmg_artifact_name: unused-arm-dependency-primer.dmg
       package_build_args: -asi
-      runner: macos-14
+      runner: macos-15
       tgz_artifact_name: unused-arm-dependency-primer.tgz
       use_texinfo: false
   intel-dependencies:

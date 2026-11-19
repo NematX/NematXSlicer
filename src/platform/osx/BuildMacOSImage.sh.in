@@ -71,6 +71,8 @@ done
 
         # copy Resources
         cp -Rf ../resources/ pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Resources
+        cp -f "@SLIC3R_BUILD_RESOURCES_DIR@/plugins/default_activated.ini" pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Resources/plugins/ || exit 1
+        rm -f pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Resources/profiles/.git
         cp pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Resources/icons/@SLIC3R_APP_KEY@.icns \
             pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Resources/@SLIC3R_APP_KEY@.icns
         cp src/Info.final.plist pack/@SLIC3R_APP_KEY@/@SLIC3R_APP_KEY@.app/Contents/Info.plist

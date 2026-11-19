@@ -29,7 +29,7 @@ jobs:
       dependency_build_args: -ad
       dmg_artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.dmg
       package_build_args: -asiv
-      runner: macos-14
+      runner: macos-15
       tgz_artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.tgz
       use_texinfo: false
   nightly-intel:
@@ -56,7 +56,7 @@ jobs:
       enabled: true
       artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.dmg
       artifact_suffix: arm
-      runner: macos-14
+      runner: macos-15
       signed_artifact_name: signed_nightly_${{ github.event.repository.name }}-macOS-arm
   sign-beta-intel:
     if: github.ref_type == 'branch' && github.ref_name == 'beta'
@@ -81,7 +81,7 @@ jobs:
       dependency_build_args: -ad
       dmg_artifact_name: rc_${{ github.event.repository.name }}-macOS-arm.dmg
       package_build_args: -asi
-      runner: macos-14
+      runner: macos-15
       tgz_artifact_name: rc_${{ github.event.repository.name }}-macOS-arm.tgz
       use_texinfo: false
   rc-intel:
@@ -103,7 +103,7 @@ jobs:
       dependency_build_args: -ad
       dmg_artifact_name: release_${{ github.event.repository.name }}-macOS-arm.dmg
       package_build_args: -asi
-      runner: macos-14
+      runner: macos-15
       tgz_artifact_name: release_${{ github.event.repository.name }}-macOS-arm.tgz
       use_texinfo: false
   release-intel:
@@ -129,7 +129,7 @@ jobs:
       enabled: true
       artifact_name: release_${{ github.event.repository.name }}-macOS-arm.dmg
       artifact_suffix: arm
-      runner: macos-14
+      runner: macos-15
       signed_artifact_name: signed_${{ github.event.repository.name }}-macOS-arm
   sign-release-intel:
     if: github.ref_type == 'tag'

@@ -134,11 +134,13 @@ jobs:
       with:
         name: ${{ inputs.dmg_artifact_name }}
         path: build/${{ github.event.repository.name }}-macOS-${{ inputs.architecture }}.dmg
+        if-no-files-found: error
     - name: Upload TGZ
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.tgz_artifact_name }}
         path: build/${{ github.event.repository.name }}-macOS-${{ inputs.architecture }}.tgz
+        if-no-files-found: error
     - name: Report sccache statistics
       if: always()
       run: sccache --show-stats
