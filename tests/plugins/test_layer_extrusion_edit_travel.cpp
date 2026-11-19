@@ -508,7 +508,7 @@ TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
     CHECK(plugin->get_used_config_keys().empty());
 }
 
-// The advanced provider reads the compatibility planner's routing settings and the fixed bed shape.
+// The advanced provider reads the compatibility planner's routing settings, its attractor inset and the fixed bed shape.
 TEST_CASE("Advanced travel exposes routing settings and bed shape",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
@@ -525,7 +525,7 @@ TEST_CASE("Advanced travel exposes routing settings and bed shape",
     namespace avoidance = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
     std::vector<raw_used_config_key> expected(size_t(avoidance::CompatibilityPlanner::used_config_keys(nullptr)));
     avoidance::CompatibilityPlanner::used_config_keys(expected.data());
-    REQUIRE(actual.size() == expected.size() + 1);
+    REQUIRE(actual.size() == expected.size() + 2);
     for (size_t idx = 0; idx < expected.size(); ++idx) {
         CHECK(actual[idx].key == expected[idx].key);
         CHECK(actual[idx].type == expected[idx].type);
@@ -535,6 +535,8 @@ TEST_CASE("Advanced travel exposes routing settings and bed shape",
     CHECK(std::any_of(actual.begin(), actual.end(), [](const Plugin::UsedConfigKey &key) {
         return key.key == "avoid_crossing_perimeters" && key.type == RAW_CO_BOOL;
     }));
+    CHECK(actual[expected.size()].key == "avoid_crossing_perimeters_inset");
+    CHECK(actual[expected.size()].type == RAW_CO_FLOAT_OR_PERCENT);
     CHECK(actual.back().key == "bed_shape");
     CHECK(actual.back().type == RAW_CO_VECTOR_POINT);
     CHECK(actual.back().container_type == RAW_CONTAINER_TYPE_NONE);

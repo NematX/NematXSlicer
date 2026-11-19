@@ -365,6 +365,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {{"avoid_crossing_perimeters"}, {{"straight", {{"avoid_crossing_perimeters", "0"}}}}},
         {{"avoid_crossing_not_first_layer"}, {{"skip-first", {{"avoid_crossing_not_first_layer", "1"}}}}},
         {{"avoid_crossing_perimeters_max_detour"}, {{"detour-limit", {{"avoid_crossing_perimeters_max_detour", "5"}}}}},
+        {{"avoid_crossing_perimeters_inset"}, {{"inset", {{"avoid_crossing_perimeters_inset", "50%"}}}}},
         {{"nozzle_diameter"}, {{"nozzle", {{"nozzle_diameter", "0.6,0.4"}}}}},
         {{"bed_shape"}, {{"bed-shape", {{"bed_shape", "-40x-40,140x-40,140x140,-40x140"}}}}},
         {{"avoid_crossing_top"}, {{"tops", {{"avoid_crossing_top", "1"}}}}},
@@ -628,6 +629,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"avoid_crossing_perimeters", {"0"}},
         {"avoid_crossing_not_first_layer", {"1"}},
         {"avoid_crossing_perimeters_max_detour", {"5", "200%"}},
+        {"avoid_crossing_perimeters_inset", {"50%", "0.2"}},
         {"avoid_crossing_top", {"1"}},
         {"ironing", {"1"}},
         {"perimeters", {"1", "3"}},
@@ -703,6 +705,9 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
                 CHECK(result.deviated == 0);
             else
                 CHECK(result.deviated > 0);
+            // A different inset moves the attractor rings, so routes inside the islands change.
+            if (domain.first == "avoid_crossing_perimeters_inset")
+                CHECK(result.travels != enabled.travels);
             if ((domain.first == "avoid_crossing_perimeters_max_detour" && value == "5") ||
                 (domain.first == "avoid_crossing_not_first_layer" && value == "1"))
                 CHECK(result.deviated < enabled.deviated);

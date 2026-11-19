@@ -799,7 +799,8 @@ The other contributors are independently activated plugins under
   The planner performs the late withdrawal after forbidden material is removed:
   each M component is passed separately to `elephant_foot_compensation` with a
   minimum width of `min(0.01 mm, nozzle_diameter / 10)` and a requested
-   withdrawal of `1.5 * perimeter_spacing`. The resulting W components are used
+   withdrawal of `avoid_crossing_perimeters_inset`: millimetres, or a percentage of
+   the perimeter spacing (150% by default). The resulting W components are used
    only for ring routing and retain one non-empty result per valid M component.
    If a component is too narrow for the withdrawal, the compensation can leave
    `W_a = M_a`; a route may then follow an obstacle at zero clearance, but it still

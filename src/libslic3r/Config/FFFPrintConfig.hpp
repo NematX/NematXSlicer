@@ -734,6 +734,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionBool,                 allow_empty_layers))
     ((ConfigOptionBool,                 avoid_crossing_curled_overhangs))
     ((ConfigOptionBool,                 avoid_crossing_not_first_layer))
+    ((ConfigOptionFloatOrPercent,       avoid_crossing_perimeters_inset))
     ((ConfigOptionFloatOrPercent,       avoid_crossing_perimeters_max_detour))
     ((ConfigOptionPoints,               bed_shape))
     ((ConfigOptionInts,                 bed_temperature))

@@ -362,9 +362,12 @@ std::optional<ZonePlanner::Route> ZonePlanner::route(const PendingTravel &pendin
                     obstacles.component_sources[component].push_back(source_index);
             }
         }
-        // W_a uses min(0.01 mm, nozzle/10) and withdraws 1.5 perimeter spacings from each M_a component.
+        // W_a uses min(0.01 mm, nozzle/10) and withdraws avoid_crossing_perimeters_inset (in mm, or a
+        // percentage of the perimeter spacing, 150% by default) from each M_a component.
         const double minimum_width = std::min(0.01, nozzle_diameter / 10.);
-        const coord_t withdrawal = coord_t(1.5 * double(spacing));
+        const c_float_or_percent inset = m_config.float_or_percent_or_default(
+            "avoid_crossing_perimeters_inset", c_float_or_percent{150., 1});
+        const coord_t withdrawal = inset.percent ? coord_t(0.01 * inset.value * double(spacing)) : scale_i(inset.value);
         for (const work::ExPolygon &component : obstacles.components) {
             throw_if_cancelled(m_context);
             const StoredExPolygonCollection stored_component = clipper::to_stored_expolygons(

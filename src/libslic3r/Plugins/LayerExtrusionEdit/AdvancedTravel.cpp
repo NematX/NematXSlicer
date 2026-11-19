@@ -246,6 +246,8 @@ int32_t AdvancedTravel::used_config_keys(raw_used_config_key *keys) const noexce
         {"perimeter_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"perimeters", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        // Attractor rings are withdrawn by this distance from each island outline.
+        {"avoid_crossing_perimeters_inset", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         // Advanced routes use the fixed printable contour as their initial platter.
         {"bed_shape", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
     };

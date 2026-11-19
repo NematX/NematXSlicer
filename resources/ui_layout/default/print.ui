@@ -63,6 +63,7 @@ group:Avoid crossing perimeters
 	line:Activate
 		setting:label$_:avoid_crossing_perimeters
 		setting:sidetext_width$15:avoid_crossing_perimeters_max_detour
+		setting:sidetext_width$15:avoid_crossing_perimeters_inset
 	end_line
 	line:Modifiers
 		setting:label_width$12:label$Not on first layer:avoid_crossing_not_first_layer

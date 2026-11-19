@@ -971,6 +971,7 @@ void init_categories(PrintConfigDef &definition)
         "only_retract_when_crossing_perimeters", "enforce_retract_first_layer",
         "infill_first",
         "avoid_crossing_perimeters_max_detour",
+        "avoid_crossing_perimeters_inset",
         "max_volumetric_extrusion_rate_slope_positive", "max_volumetric_extrusion_rate_slope_negative", 
         // speeds
         "default_speed",
@@ -1614,6 +1615,21 @@ void init_fff_params(PrintConfigDef &definition)
     def->max_literal = { 1000, false };
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
+
+    def = definition.add("avoid_crossing_perimeters_inset", coFloatOrPercent, ptFFF);
+    def->label = L("Avoid crossing perimeters - Travel inset");
+    def->category = OptionCategory::perimeter;
+    def->invalidates_step = STEP_GCODE;
+    def->tooltip = L("Distance between the outline of an island and the paths that travels follow inside it "
+                     "when they avoid crossing perimeters. A larger value keeps travels farther from the perimeters; "
+                     "narrow parts of an island stay usable. "
+                     "Can be specified either as an absolute value or as a percentage of the perimeter spacing.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "computed_on_the_fly";
+    def->min = 0;
+    def->max_literal = { 10, false };
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(150., true));
 
     def = definition.add("avoid_crossing_top", coBool, ptFFF);
     def->label = L("Avoid top surface for travels");
