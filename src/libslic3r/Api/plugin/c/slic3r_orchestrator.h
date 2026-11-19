@@ -576,10 +576,10 @@ typedef struct raw_gui_rule_clause {
     const char *condition_string_value;
 } raw_gui_rule_clause;
 
+/* Return an empty clause with no specific item and no borrowed keys. */
 static inline raw_gui_rule_clause raw_gui_rule_clause_init()
 {
-    raw_gui_rule_clause clause = {0};
-    clause.condition_index = RAW_GUI_RULE_INDEX_ALL;
+    raw_gui_rule_clause clause = {RAW_GUI_RULE_CONDITION_NONE, 0, RAW_GUI_RULE_INDEX_ALL, 0.0, 0};
     return clause;
 }
 
