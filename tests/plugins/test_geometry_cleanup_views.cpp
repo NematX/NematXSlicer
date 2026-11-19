@@ -1,15 +1,18 @@
-/* Collection clean-ups and the polyline offset of the plugin API must give the
-   exact native results, because plugins replace the native
-   calls with these functions and their output is compared with the legacy output.
+/* Check that the geometry SDK matches native cleanup and offset results.
+   The tests pass native polygons and polylines to the C API through handles
+   and compare the result with the native operation applied to a copy.
+   The C++ wrapper tests use storage-owned shapes to check that point-sequence
+   handles refer to the same geometry and that edits reach read-only views.
 
-   Each test builds native Polygons or Polylines, passes them to the C API
-   through reinterpret_cast handles (in the host process a handle is the native
-   object), and compares point for point with the native function applied to a
-   copy. The C++ views are checked on one case each, through storage-owned
-   collections. */
+    TEST_CASE
+        |-- mesh normalization -> check degenerate rings and hole ownership
+        |-- collection cleanup and offset -> compare with native results
+        `-- point-sequence accessors -> compare handle types, identity and edits
+*/
 #include <catch2/catch.hpp>
 
 #include <algorithm>
+#include <type_traits>
 #include <vector>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -147,6 +150,46 @@ TEST_CASE("Mesh surface normalization retains hole ownership", "[mesh-repair][ri
     const ExPolygons unsplit_before = unsplit;
     normalize_mesh_expolygons(unsplit);
     CHECK(unsplit == unsplit_before);
+}
+
+// Both access modes must refer to the same points, not a converted copy.
+TEST_CASE("Geometry wrappers borrow the native point sequence", "[plugins][geometry-cleanup][multipoint-handles]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const slic3r_api::StoredPolygon polygon(storage);
+    const slic3r_api::StoredPolyline polyline(storage);
+    const slic3r_api::Polygon polygon_view = polygon.readonly();
+    const slic3r_api::Polyline polyline_view = polyline.readonly();
+    const slic3r_api::MultiPoint points(polygon_view.as_multipoint_handle());
+
+    static_assert(std::is_same_v<decltype(points.as_multipoint_handle()), const multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polygon_view.as_multipoint_handle()), const multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polyline_view.as_multipoint_handle()), const multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polygon.as_multipoint_handle()), const multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polyline.as_multipoint_handle()), const multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polygon.as_mutable_multipoint_handle()), multipoint_handle *>);
+    static_assert(std::is_same_v<decltype(polyline.as_mutable_multipoint_handle()), multipoint_handle *>);
+
+    CHECK(points.as_multipoint_handle() == points.handle());
+    CHECK(polygon_view.as_multipoint_handle() == polygon_as_multipoint_const(polygon_view.handle()));
+    CHECK(polyline_view.as_multipoint_handle() == polyline_as_multipoint_const(polyline_view.handle()));
+    CHECK(polygon.as_multipoint_handle() == polygon_view.as_multipoint_handle());
+    CHECK(polyline.as_multipoint_handle() == polyline_view.as_multipoint_handle());
+    REQUIRE(polygon.as_mutable_multipoint_handle() == polygon_as_multipoint(polygon.mutable_handle()));
+    REQUIRE(polyline.as_mutable_multipoint_handle() == polyline_as_multipoint(polyline.mutable_handle()));
+
+    multipoint_push_back(polygon.as_mutable_multipoint_handle(), {1, 2});
+    multipoint_push_back(polyline.as_mutable_multipoint_handle(), {3, 4});
+    REQUIRE(polygon_view.size() == 1);
+    REQUIRE(polyline_view.size() == 1);
+    REQUIRE(points.size() == 1);
+    CHECK(polygon_view.front().x == 1);
+    CHECK(polygon_view.front().y == 2);
+    CHECK(polyline_view.front().x == 3);
+    CHECK(polyline_view.front().y == 4);
+    CHECK(points.front().x == 1);
+    CHECK(points.front().y == 2);
 }
 
 TEST_CASE("Polygon collection ensure_valid matches the native one, holes of a removed contour included",

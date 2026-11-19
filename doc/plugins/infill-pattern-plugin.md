@@ -107,6 +107,14 @@ Use the view helpers instead of internal slicer types:
   `bounding_box_rotate()`, `bounding_box_merge_rotated()`,
   `bounding_box_merge_aligned()`, ...) to build a pattern frame.
 
+When calling the C point-sequence functions from C++, use
+`as_multipoint_handle()` to borrow the sequence without copying it.
+`StoredPolygon` and `StoredPolyline` also provide
+`as_mutable_multipoint_handle()` for in-place edits. These names replace
+`multipoint_handle()` and `mutable_multipoint_handle()` in C++ plugin source;
+`handle()` and `mutable_handle()` still return the native handle. The C and
+Python interfaces are unchanged.
+
 A pattern that generates its lines from `box.min` must anchor the lattice to the
 world frame, otherwise the pattern shifts with the cross-section of every layer:
 call `bounding_box_merge_aligned(box, {module_x, module_y})` before generating,

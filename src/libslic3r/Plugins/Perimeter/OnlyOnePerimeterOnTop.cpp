@@ -244,7 +244,7 @@ StoredExPolygonCollection collection_from_expolygon(storage_handle *storage, con
 StoredExPolygonCollection collection_from_polygon(storage_handle *storage, const Polygon &polygon)
 {
     StoredExPolygon expolygon(storage);
-    multipoint_copy(polygon_as_multipoint(expolygon_contour(expolygon.mutable_handle())), polygon.multipoint_handle());
+    multipoint_copy(polygon_as_multipoint(expolygon_contour(expolygon.mutable_handle())), polygon.as_multipoint_handle());
 
     StoredExPolygonCollection collection(storage);
     collection.push_back(expolygon.readonly());
@@ -461,7 +461,7 @@ StoredExPolygonCollection grow_upper_slices_preserving_islands(storage_handle *s
     for (const ExPolygon &expolygon : upper_slices) {
         StoredExPolygon contour_expolygon(storage);
         multipoint_copy(polygon_as_multipoint(expolygon_contour(contour_expolygon.mutable_handle())),
-                        expolygon.contour().multipoint_handle());
+                        expolygon.contour().as_multipoint_handle());
 
         StoredPolygonCollection grown_contours =
             clipper_offset2(clipper(contour_expolygon.readonly()), -double(offset_top_surface),

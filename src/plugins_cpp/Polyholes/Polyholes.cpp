@@ -154,7 +154,7 @@ bool replace_matching_hole_points(expolygon_handle *expolygon,
         polygon_handle *hole_handle = expolygon_hole_at(expolygon, hole_idx);
         Polygon hole(hole_handle);
         if (equals(hole.view(), hole_to_replace.view())) {
-            multipoint_copy(polygon_as_multipoint(hole_handle), replacement.multipoint_handle());
+            multipoint_copy(polygon_as_multipoint(hole_handle), replacement.as_multipoint_handle());
             return true;
         }
     }

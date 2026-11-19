@@ -68,6 +68,7 @@ class MultiPoint
     bool valid() const;
     explicit operator bool() const;
     const multipoint_handle *handle() const;
+    const multipoint_handle *as_multipoint_handle() const;
     bool same_handle(const MultiPoint &other) const;
     uint32_t size() const;
     bool empty() const;
@@ -85,7 +86,7 @@ class MultiPoint
 class Polygon : public MultiPoint read API
   Read-only view over a polygon. It has every MultiPoint read method, plus:
     const polygon_handle *handle() const;
-    const multipoint_handle *multipoint_handle() const;
+    const multipoint_handle *as_multipoint_handle() const;
     bool valid_polygon() const;
     double area() const;
     bool is_counter_clockwise() const;
@@ -101,6 +102,7 @@ class StoredPolygon : public Polygon read API + MultiPoint mutable API
     explicit StoredPolygon(storage_handle *storage);
     static StoredPolygon adopt(storage_handle *storage, polygon_handle *handle);
     polygon_handle *mutable_handle() const;
+    multipoint_handle *as_mutable_multipoint_handle() const;
     storage_handle *storage() const;
     bool free_from_storage();
     bool set(uint32_t idx, c_point point);
@@ -127,7 +129,7 @@ class StoredPolygon : public Polygon read API + MultiPoint mutable API
 class Polyline : public MultiPoint read API
   Same read methods as MultiPoint. Extra methods compared to MultiPoint:
     const polyline_handle *handle() const;
-    const multipoint_handle *multipoint_handle() const;
+    const multipoint_handle *as_multipoint_handle() const;
     bool valid_polyline() const;
 
 class StoredPolyline : public Polyline read API + Stored MultiPoint mutable API
@@ -135,6 +137,7 @@ class StoredPolyline : public Polyline read API + Stored MultiPoint mutable API
   compared to Polyline and to the Stored MultiPoint mutable API:
     explicit StoredPolyline(storage_handle *storage);
     static StoredPolyline adopt(storage_handle *storage, polyline_handle *handle);
+    multipoint_handle *as_mutable_multipoint_handle() const;
     void clip_end(distf_t distance);
     void clip_start(distf_t distance);
     void extend_end(distf_t distance);
@@ -636,27 +639,27 @@ protected:
 /*
 CRTP read API shared by MultiPoint, Polygon, Polyline and their Stored*
 counterparts. Polygon and Polyline are native Slic3r types, but both are also
-point sequences, so they expose multipoint_handle() explicitly for point-level
-ABI calls.
+point sequences. as_multipoint_handle() borrows the same geometry for point-level
+ABI calls without copying or transferring ownership.
 */
 template<class Derived> class MultiPointReadApi
 {
 public:
-    uint32_t size() const { return multipoint_size(self().multipoint_handle()); }
+    uint32_t size() const { return multipoint_size(self().as_multipoint_handle()); }
     bool empty() const { return size() == 0; }
-    bool is_valid() const { return multipoint_valid(self().multipoint_handle()) != 0; }
-    c_point at(uint32_t idx) const { assert(idx < size()); return multipoint_get(self().multipoint_handle(), idx); }
+    bool is_valid() const { return multipoint_valid(self().as_multipoint_handle()) != 0; }
+    c_point at(uint32_t idx) const { assert(idx < size()); return multipoint_get(self().as_multipoint_handle(), idx); }
     c_point operator[](uint32_t idx) const { return at(idx); }
     c_point front() const {
         assert(!empty());
-        return multipoint_get(self().multipoint_handle(), 0);
+        return multipoint_get(self().as_multipoint_handle(), 0);
     }
     c_point back() const {
         assert(!empty());
-        return multipoint_get(self().multipoint_handle(), size() - 1);
+        return multipoint_get(self().as_multipoint_handle(), size() - 1);
     }
-    distf_t length() const { return multipoint_length(self().multipoint_handle()); }
-    multipoint_const_view view() const { return multipoint_view_const(self().multipoint_handle()); }
+    distf_t length() const { return multipoint_length(self().as_multipoint_handle()); }
+    multipoint_const_view view() const { return multipoint_view_const(self().as_multipoint_handle()); }
 
     c_bounding_box bounding_box() const {
         multipoint_const_view mp_view = view();
@@ -694,42 +697,42 @@ template<class Derived> class MultiPointMutableApi
 {
 public:
     bool set(uint32_t idx, c_point point) {
-        return multipoint_set(self().mutable_multipoint_handle(), idx, point) != 0;
+        return multipoint_set(self().as_mutable_multipoint_handle(), idx, point) != 0;
     }
 
     bool is_cw() {
-        multipoint_view mp_view = multipoint_view_mut(self().mutable_multipoint_handle());
+        multipoint_view mp_view = multipoint_view_mut(self().as_mutable_multipoint_handle());
         return multipoint_is_cw(&mp_view) != 0;
     }
 
-    void push_back(c_point point) { multipoint_push_back(self().mutable_multipoint_handle(), point); }
-    void insert(uint32_t idx, c_point point) { multipoint_insert(self().mutable_multipoint_handle(), idx, point); }
+    void push_back(c_point point) { multipoint_push_back(self().as_mutable_multipoint_handle(), point); }
+    void insert(uint32_t idx, c_point point) { multipoint_insert(self().as_mutable_multipoint_handle(), idx, point); }
     void insert_array(uint32_t idx, const c_point *array, uint32_t array_size) {
-        multipoint_insert_array(self().mutable_multipoint_handle(), idx, array, array_size);
+        multipoint_insert_array(self().as_mutable_multipoint_handle(), idx, array, array_size);
     }
-    void pop_back() { multipoint_pop_back(self().mutable_multipoint_handle()); }
-    void clear() { multipoint_clear(self().mutable_multipoint_handle()); }
-    void erase(uint32_t idx) { multipoint_erase(self().mutable_multipoint_handle(), idx, 1); }
+    void pop_back() { multipoint_pop_back(self().as_mutable_multipoint_handle()); }
+    void clear() { multipoint_clear(self().as_mutable_multipoint_handle()); }
+    void erase(uint32_t idx) { multipoint_erase(self().as_mutable_multipoint_handle(), idx, 1); }
     void erase(uint32_t begin_idx, uint32_t erase_size) {
-        multipoint_erase(self().mutable_multipoint_handle(), begin_idx, erase_size);
+        multipoint_erase(self().as_mutable_multipoint_handle(), begin_idx, erase_size);
     }
-    template<class Other> void copy_from(const Other &other) { multipoint_copy(self().mutable_multipoint_handle(), other.multipoint_handle()); }
-    void scale(double factor) { multipoint_scale(self().mutable_multipoint_handle(), factor); }
+    template<class Other> void copy_from(const Other &other) { multipoint_copy(self().as_mutable_multipoint_handle(), other.as_multipoint_handle()); }
+    void scale(double factor) { multipoint_scale(self().as_mutable_multipoint_handle(), factor); }
     void scale_xy(double factor_x, double factor_y) {
-        multipoint_scale_xy(self().mutable_multipoint_handle(), factor_x, factor_y);
+        multipoint_scale_xy(self().as_mutable_multipoint_handle(), factor_x, factor_y);
     }
-    void translate(double x, double y) { multipoint_translate(self().mutable_multipoint_handle(), x, y); }
-    void rotate_origin(double angle) { multipoint_rotate_origin(self().mutable_multipoint_handle(), angle); }
+    void translate(double x, double y) { multipoint_translate(self().as_mutable_multipoint_handle(), x, y); }
+    void rotate_origin(double angle) { multipoint_rotate_origin(self().as_mutable_multipoint_handle(), angle); }
     void rotate_around(double angle, c_point center) {
-        multipoint_rotate_around(self().mutable_multipoint_handle(), angle, center);
+        multipoint_rotate_around(self().as_mutable_multipoint_handle(), angle, center);
     }
-    void reverse() { multipoint_reverse(self().mutable_multipoint_handle()); }
-    void densify(coord_t min_length) { multipoint_densify(self().mutable_multipoint_handle(), min_length); }
+    void reverse() { multipoint_reverse(self().as_mutable_multipoint_handle()); }
+    void densify(coord_t min_length) { multipoint_densify(self().as_mutable_multipoint_handle(), min_length); }
     void simplify(coord_t min_length, coord_t min_deviation) {
-        multipoint_simplify(self().mutable_multipoint_handle(), min_length, min_deviation);
+        multipoint_simplify(self().as_mutable_multipoint_handle(), min_length, min_deviation);
     }
     void ensure_valid(coord_t resolution = SCALED_EPSILON) {
-        multipoint_ensure_valid(self().mutable_multipoint_handle(), resolution);
+        multipoint_ensure_valid(self().as_mutable_multipoint_handle(), resolution);
     }
 
 protected:
@@ -742,7 +745,8 @@ public:
     MultiPoint() = delete;
     using ConstGeometryHandleView<multipoint_handle>::ConstGeometryHandleView;
 
-    const multipoint_handle *multipoint_handle() const { return handle(); }
+    // Expose the native point sequence through the shared read interface.
+    const multipoint_handle *as_multipoint_handle() const { return handle(); }
 };
 
 /* ========================= polygon / polyline views ========================= */
@@ -806,7 +810,7 @@ public:
     using ConstGeometryHandleView<polygon_handle>::ConstGeometryHandleView;
 
     // Polygon has its own ABI type, but point-sequence helpers still operate on MultiPoint.
-    const multipoint_handle *multipoint_handle() const { return polygon_as_multipoint_const(handle()); }
+    const multipoint_handle *as_multipoint_handle() const { return polygon_as_multipoint_const(handle()); }
 };
 
 class StoredPolygon : public StoredGeometryHandleView<StoredPolygon, Polygon, polygon_handle>,
@@ -825,9 +829,10 @@ public:
         return StoredPolygon(storage, handle);
     }
 
-    // The explicit cast keeps the public ABI typed while reusing point mutators.
-    const multipoint_handle *multipoint_handle() const { return polygon_as_multipoint_const(handle()); }
-    ::multipoint_handle *mutable_multipoint_handle() const { return polygon_as_multipoint(mutable_handle()); }
+    // Borrow the polygon's point sequence for read-only operations.
+    const multipoint_handle *as_multipoint_handle() const { return polygon_as_multipoint_const(handle()); }
+    // Borrow the same sequence for in-place editing.
+    multipoint_handle *as_mutable_multipoint_handle() const { return polygon_as_multipoint(mutable_handle()); }
     void move_from(StoredPolygon &other) { polygon_move(mutable_handle(), other.mutable_handle()); }
 
 private:
@@ -873,7 +878,7 @@ public:
     using ConstGeometryHandleView<polyline_handle>::ConstGeometryHandleView;
 
     // Polyline has its own ABI type, but point-sequence helpers still operate on MultiPoint.
-    const multipoint_handle *multipoint_handle() const { return polyline_as_multipoint_const(handle()); }
+    const multipoint_handle *as_multipoint_handle() const { return polyline_as_multipoint_const(handle()); }
 };
 
 class StoredPolyline : public StoredGeometryHandleView<StoredPolyline, Polyline, polyline_handle>,
@@ -892,9 +897,10 @@ public:
         return StoredPolyline(storage, handle);
     }
 
-    // The explicit cast keeps the public ABI typed while reusing point mutators.
-    const multipoint_handle *multipoint_handle() const { return polyline_as_multipoint_const(handle()); }
-    ::multipoint_handle *mutable_multipoint_handle() const { return polyline_as_multipoint(mutable_handle()); }
+    // Borrow the polyline's point sequence for read-only operations.
+    const multipoint_handle *as_multipoint_handle() const { return polyline_as_multipoint_const(handle()); }
+    // Borrow the same sequence for in-place editing.
+    multipoint_handle *as_mutable_multipoint_handle() const { return polyline_as_multipoint(mutable_handle()); }
     void move_from(StoredPolyline &other) { polyline_move(mutable_handle(), other.mutable_handle()); }
 
 private:

@@ -186,7 +186,7 @@ inline StoredPolygonCollection polygons_simplify(storage_handle *storage, const 
 // neighbours, as the native Polygon::remove_collinear(max_offset) does. Returns the number of deleted points.
 inline size_t remove_collinear(StoredPolygon &polygon, coord_t max_offset)
 {
-    return detail::remove_collinear_points(polygon.mutable_multipoint_handle(), max_offset);
+    return detail::remove_collinear_points(polygon.as_mutable_multipoint_handle(), max_offset);
 }
 
 // Same for every ring of the collection; returns the total number of deleted points. A ring is never removed:
