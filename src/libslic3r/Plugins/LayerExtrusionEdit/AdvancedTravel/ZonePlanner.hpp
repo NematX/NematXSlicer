@@ -9,17 +9,20 @@ print_get_default_region_config(). This flag governs travels whose endpoints hav
 valid object instance, such as skirt and brim. Call the static eligible(...) guard
 before constructing TravelZoneView and ZonePlanner, then call path(T, travel) in
 nondecreasing T order.
-Attractors publish original slices. The planner groups original forbidden pieces that
-contain an endpoint or touch such a piece, excludes that group from Z3, then
-subtracts Z3 from the attractor union to form M_a and from a fixed bed_shape contour
-to form M_p; Z4 is the nozzle offset of Z3 and W_a/W_p are the two routing domains.
-It caches these domains by active zones, tool, ignored source components, spacing and
-platter context. Endpoint provenance selects an attractor component when it matches;
-every endpoint may also select a platter component when W_p is nonempty. Candidate
-pairs are ranked by typed inside/outside estimates and built from their exact W
-points. Validation checks the SCALED_EPSILON-expanded initial platter copy, original material, detour budget and
-platter-only reference bound. If no candidate passes, path returns and counts the
-straight line.
+Attractors publish original slices. The planner groups original forbidden and platter pieces
+by overlap or contact and tries keeping or ignoring each group containing an
+endpoint. Each combination caches the remaining union Z3 and its routing domains:
+M_a and M_p subtract Z3 from the attractor union and bed contour, respectively;
+W_a withdraws M_a and W_p subtracts the nozzle offset of Z3 from the bed contour.
+An endpoint in a kept group can exit it by a straight attachment to W_a or W_p.
+The planner checks exits against other kept obstacles and the rest against all of Z3,
+shrinking those masks by SCALED_EPSILON so paths on the original border stay outside.
+Walls thinner than twice that inset can disappear from the check. Domains, detours,
+the reference and the score use the original obstacle geometry. The planner
+then checks the assembled route against the expanded bed, budget and platter-only
+reference. It compares the first admissible route from each combination by length,
+counting length inside endpoint groups three times and keeping the first on ties.
+It publishes only the winner's counts or returns and counts the straight fallback.
 */
 #ifndef slic3r_plugins_advanced_zone_planner_hpp_
 #define slic3r_plugins_advanced_zone_planner_hpp_
@@ -56,24 +59,34 @@ public:
     // Check regional activation only for valid object instances; other endpoints do not veto, and object targets respect first-layer exclusion.
     bool eligible(const TravelConnection::TravelEndpoint &source,
                   const TravelConnection::TravelEndpoint &target) const;
-    // Return the first ranked route whose construction retains exact endpoints and that passes material, budget and reference-bound checks.
-    // A direct result, a domain route or the counted straight fallback may be returned.
+    // Return the lowest-scoring admissible route across endpoint-group combinations, retaining exact endpoints.
+    // When none passes, return and count the straight fallback.
+    // Ineligible travels and travels without XY motion return straight without counting a fallback.
     // Cancellation and geometry errors propagate.
     std::vector<c_point> path(size_t t, const PendingTravel &travel);
     // Count accepted paths that use an attractor attachment or ring route; platter-only paths do not count.
     size_t domain_routes() const { return m_domain_routes; }
-    // Count accepted paths connecting two distinct components through selected bridge points.
+    // Count accepted paths joining distinct attractor components, including joins at a common point.
     size_t bridges() const { return m_bridges; }
-    // Return cumulative ring-routing diagnostics; advanced routing does not update island_jumps.
-    const AvoidCrossing::RouterCounts &router_counts() const { return m_router_counts; }
-    // Return the number of accepted routes longer than their chord by more than SCALED_EPSILON.
-    size_t detours() const { return m_detours; }
-    // Return the number of straight fallbacks after all ranked hypotheses fail.
+    // Return the number of straight fallbacks when no admissible route was found.
     size_t fallbacks() const { return m_fallbacks; }
 
 private:
+    // The geometry of one obstacle piece and its stable identity for cache keys.
+    struct OriginalObstacle {
+        polygon_work::ExPolygon area;
+        ObstacleIdentity identity;
+    };
+    // One admitted route with the measurements and diagnostics to publish if it wins.
+    struct Route {
+        polygon_work::Points points;
+        double length;
+        bool domain_route, bridge;
+    };
     struct Obstacles {
         polygon_work::ExPolygons original;
+        // Shrink original material by SCALED_EPSILON for crossing checks only.
+        polygon_work::ExPolygons blocking;
         // Unioned attractor components after subtracting original Z3 material.
         polygon_work::ExPolygons components;
         // One W_a component per M_a component, used only for attractor ring routing.
@@ -88,13 +101,18 @@ private:
         // M_p is the initial bed contour minus Z3; W_p is the same contour minus Z4.
         polygon_work::ExPolygons platter_components;
         polygon_work::ExPolygons platter_free_components;
-        // Map each W_p component to the M_p component containing it.
+        // Map each W_p component to its overlapping M_p component, or SIZE_MAX if none overlaps.
         std::vector<size_t> platter_component_sources;
     };
     // Present only for travels using slices of the immutable plan's objects.
     using PlatterKey = std::tuple<uint32_t, coord_t>;
     // Cache entries use active zones, tool, ignored source components, spacing and platter context.
     using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<ObstacleIdentity>, coord_t, std::optional<PlatterKey>>;
+    // Find the first admissible route for one set of ignored pieces without changing the published counters.
+    std::optional<Route> route(const PendingTravel &pending, const ActiveZones &active,
+        const std::vector<OriginalObstacle> &pieces, const std::vector<bool> &ignored,
+        const std::vector<size_t> &source_group, const std::vector<size_t> &target_group,
+        const std::optional<PlatterKey> &platter_key, coord_t spacing, double nozzle_diameter, double jump_weight);
     AvoidCrossing::CompatibilityPlanner &m_compatibility;
     TravelZoneView &m_zones;
     Config m_config;
@@ -116,8 +134,6 @@ private:
     std::map<CacheKey, Obstacles> m_obstacles;
     size_t m_domain_routes = 0;
     size_t m_bridges = 0;
-    AvoidCrossing::RouterCounts m_router_counts;
-    size_t m_detours = 0;
     size_t m_fallbacks = 0;
 };
 

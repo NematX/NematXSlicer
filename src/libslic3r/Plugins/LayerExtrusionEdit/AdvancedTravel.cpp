@@ -28,14 +28,18 @@ Printed tops are opt-in and replace static forbidden tops when active; their dat
 start after the last arrival in each original island. Attractors publish raw
 perimeter slices dated by source-or-target membership. The planner builds a fixed
 initial platter from the scaled bed_shape contour, groups endpoint-containing
-original forbidden and outside-part pieces transitively by overlap or contact, then
-unions the remaining pieces as Z3 and forms M_a/W_a and M_p/W_p from the original and
-offset masks separately. It expands only the initial platter by SCALED_EPSILON for
+original forbidden and outside-part pieces transitively by overlap or contact.
+For each combination of keeping or ignoring these groups, it unions the remaining
+pieces as Z3 and forms the attractor and platter routing domains described in
+ZonePlanner.hpp. It expands only the initial platter by SCALED_EPSILON for
 containment checks because diff_pl has no reliable side for a path exactly on a border.
 Attractor and platter hypotheses are ranked by estimated outside length plus weighted
 inside length. Construction retains exact endpoints; validation checks the expanded
-initial platter, forbidden material, the budget and, when a usable platter-only reference
-exists, actual outside length against that reference. Rejected hypotheses
+initial platter and the budget. Straight exits are checked against the inset of other
+kept obstacles; the rest is checked against the inset of Z3. Only material checks
+shrink obstacles by SCALED_EPSILON; domains, detours, the reference and the score use
+the original geometry. When a usable platter-only reference
+exists, validation compares actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
 Each chosen component supplies its own route along crossed W_a rings; bridges and
 connectors detour on W_p rings, including obstacle-facing Z4 rings and the platter
@@ -43,11 +47,10 @@ border, between their selected points.
 Endpoints without a region or on auxiliary layers offer only a platter attachment
 when W_p is nonempty.
 Travels touching such endpoints include slices of the plan's objects as forbidden
-components, not the synthetic wipe tower. Pieces containing an endpoint, and pieces
-touching them transitively, are excluded so mixed travels can reach their in-part
-endpoint. The first hypothesis that passes
-validation is accepted; when all hypotheses fail, the planner returns and counts a
-straight fallback without changing the blocker set.
+components, not the synthetic wipe tower. The first passing hypothesis per
+combination competes by length, with length inside any endpoint group counted
+three times. On ties the first combination wins. The planner counts only the
+winning route, or counts a straight fallback if none passes.
 The planner borrows this layer group's plan, index and Z to cache those slices.
 Support obstacles are opt-in whole-layer object components for travels touching
 support, taken at the group's Z or below for plan-catalog instances.
@@ -75,10 +78,13 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: group endpoint obstacles, build Z3/Z4/M_a/W_a/M_p/W_p and rank hypotheses
+            `-- ZonePlanner::path: group endpoint obstacles and score accepted routes
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
-                |-- touches / union / diff / offset: group pieces and build cached geometry
-                `-- detour: extend a connector chord and call the public Clipper operation on W_p rings
+                |-- touches: group original pieces by overlap or contact
+                `-- route: use cached domains for one combination and try ranked hypotheses
+                    |-- endpoint_candidates / exit_candidates: attach endpoints to W
+                    |-- detour: route connectors on W_p rings with the public Clipper operation
+                    `-- blocked: check exits and the remaining path against their respective obstacle masks
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {

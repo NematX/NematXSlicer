@@ -15,30 +15,37 @@
 /*
 ZonePlanner prepares one cached geometry entry per active-zone id, tool, sorted ignored
 obstacle identities, spacing, and optional platter context (group and Z).
-It forms Z3 as the union of original obstacle pieces left after each transitive group
-seeded by a piece containing an endpoint is excluded; overlap or boundary contact
-joins pieces to that group. It then
+For each endpoint it groups the original pieces containing that point and extends
+the group transitively through overlap or boundary contact. It tries keeping both
+groups, omitting the source group, omitting the target group, then omitting both,
+skipping repeats and absent groups. Each combination unions the remaining pieces
+into Z3, then
 subtracts Z3 from the active attractor union and from a fixed bed_shape contour. M_a
 and M_p are the two membership domains; W_a is made by withdrawing each M_a component,
 while W_p is the bed contour minus the nozzle offset Z4. Endpoint provenance selects a
-matching attractor component and every endpoint can select a W_p component while it is
-nonempty. Hypotheses share their selected W points between stable estimates and
-construction. The initial platter containment check uses a cached copy expanded by
-SCALED_EPSILON because a path exactly on a border has no reliable side for diff_pl;
-detours, estimates, material checks and M-component containment retain their original geometries.
-The attractor link and follow stay in M_a. Platter links stay in M_p;
+matching attractor component. A nonempty W_p allows the planner to look for a
+platter attachment, but the search may fail. An endpoint inside a kept group
+instead tries straight exits to the nearest eligible W point of each type.
+A blocked exit is discarded without trying a farther point.
+Material checks shrink obstacles by SCALED_EPSILON because diff_pl has no reliable side for paths on a border.
+Walls thinner than twice that inset can disappear from the check. Domains, detours,
+the reference and the score still use the original obstacle geometry.
+Hypotheses share their selected W points between stable estimates and construction.
+Ordinary attractor attachments stay in M_a and ordinary platter attachments stay
+in M_p. The estimates treat exits and platter attachments as outside connectors;
 bridges, external connectors and the platter-only reference use W_p rings, whose
-obstacle-facing rings are Z4. Construction retains exact endpoints. Validation measures
+obstacle-facing rings are Z4. Construction checks the route without exits against
+the inset of Z3, then adds the checked exits and retains exact endpoints. Validation measures
 the complete route outside the initial platter expanded by SCALED_EPSILON; this avoids
 treating a path laid exactly on a border as outside when Clipper's diff_pl cannot assign
-it a reliable side. It rejects more than SCALED_EPSILON, avoids Z3, respects the detour
+it a reliable side. It rejects more than SCALED_EPSILON, respects the detour
 budget and, when the platter-only
 reference is valid, stays within its outside-M_a length plus
-SCALED_EPSILON. Rejected hypotheses leave the next ranked choice available. If none
-passes, the straight path is returned and counted as one fallback.
-Accepted paths using an attractor count as domain routes, attractor-to-attractor paths
-between distinct components count as bridges, and paths longer than their chord by
-SCALED_EPSILON count as detours. Outside-part travels also use translated normal
+SCALED_EPSILON. The first admissible route of each combination competes by length,
+counting length inside the original endpoint groups three times. A tie keeps the
+first route. If none passes, the straight path is returned and counted as one fallback.
+Only the winner contributes counts. Paths using an attractor count as domain routes, attractor-to-attractor paths
+between distinct components count as bridges. Outside-part travels also use translated normal
 slices from the plan at the current group Z or below; the synthetic wipe tower is not
 a blocker. The plan catalog, object slices and all other borrowed inputs remain
 unchanged and outlive this worker-local cache.
@@ -49,28 +56,32 @@ ring-following and rounding rules are defined in `slic3r_clipper.h`. ZonePlanner
 extends only external connector chords before the call so a crossing at an endpoint
 is visible when the chord leaves a ring into its interior or arrives from its
 interior. The M-to-W link uses the same operation without that extension. Temporary
-extension points are removed and exact endpoints are restored. The original-area check
+extension points are removed and exact endpoints are restored. The material check
 compares path length with its Clipper difference, and the total detour budget rejects
 unsafe hypotheses; exhaustion produces the counted straight fallback. Cancellation
 propagates.
 
-    path: classify endpoints, group obstacles, cache geometry and rank hypotheses once
+    path: classify endpoints, group obstacles and score admitted routes
     |-- eligible: resolve regional and auxiliary activation
     |-- outside_part / is_off_object_layer: classify normal versus auxiliary provenance
     |-- platter_blockers: collect translated slices for outside-part and mixed travels
     |-- touches: group endpoint-containing obstacle pieces by overlap or contact
-    |-- union / diff / offset: build Z3, Z4, M_a, W_a, M_p and W_p on a cache miss
-    |-- build_boundary: index W_a for each component and, when needed, its combined boundary
-    |-- endpoint_candidates: match source provenance and choose attractor and platter attachments
-    |   |-- nearest_point: find a deterministic W attachment
-    |   `-- detour_in_component: build a link inside M_a or M_p
-    |-- select_island_bridge: estimate weighted approaches between components
-    |-- estimate_cost: weight inside ring estimates and clip the other connectors
-    |   `-- outside_length: measure outside connectors against the complete domain
-    |-- append_component_path: route within one attractor component between selected points
-    |   `-- route_on_boundary: follow crossed W_a rings, else keep the chord
-    |-- detour: extend a connector chord and call the public Clipper operation on W_p rings
-    `-- blocked: compare the complete path with its Clipper difference from original material
+    |-- outside_length: measure the score against the union of the original endpoint groups
+    `-- route: build and validate the first usable hypothesis for one combination
+        |-- union / diff / offset: build Z3, Z4, M_a, W_a, M_p and W_p on a cache miss
+        |-- build_boundary: index W_a for each component and, when needed, its combined boundary
+        |-- endpoint_candidates: match source provenance and choose ordinary attachments
+        |   |-- nearest_point: find a deterministic W attachment
+        |   `-- detour_in_component: build a link inside M_a or M_p
+        |-- exit_candidates: choose the nearest eligible W points and check straight exits
+        |   `-- blocked: check each exit against the inset of the other kept obstacles
+        |-- select_island_bridge: estimate weighted approaches between components
+        |-- estimate_cost: weight inside ring estimates and clip the other connectors
+        |-- append_component_path: route within one attractor component between selected points
+        |   `-- route_on_boundary: follow crossed W_a rings, else keep the chord
+        |-- detour: extend connector chords and call the public Clipper operation on W_p rings
+        |-- blocked: check the rest of the route against the inset of Z3
+        `-- outside_length: check bed containment and compare with the platter-only reference
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
 namespace work = PluginCommon::polygon_work;
@@ -86,19 +97,15 @@ struct Attachment {
     size_t component = 0;
     work::Point ring_point;
     work::Points link;
-};
-// Keep one source component beside its identity so endpoint exclusion can retain
-// exactly the original pieces that form the endpoint obstacle.
-struct OriginalObstacle {
-    work::ExPolygon area;
-    ObstacleIdentity identity;
+    // A straight exit may cross the group containing the original endpoint.
+    bool exit = false;
 };
 // Connector endpoints are shared by estimation and construction so both phases use the same points.
 struct Hypothesis { Attachment source, target; work::Point exit, entry; double cost; size_t rank; };
 // Append a component's route between already attached points (crossed rings, else a direct chord), retaining exact endpoints and borrowing its cached boundary.
-// Epsilon-near points connect directly; no placement or nearby-ring search occurs. Update routing counts; cancellation propagates.
+// Epsilon-near points connect directly. The counter required by route_on_boundary is not published; cancellation propagates.
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
-    const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts);
+    const work::Point &to, const plugin_run_context *context);
 // Inside estimates stand for a route within a component; Outside retains geometric domain intersections.
 enum class EstimateKind { Inside, Outside };
 struct EstimateSegment { work::Point from, to; EstimateKind kind; };
@@ -114,6 +121,14 @@ std::vector<Attachment> endpoint_candidates(const work::ExPolygons &attractor_co
     const std::vector<size_t> &platter_component_sources, const TravelZoneView &zones,
     const travel::TravelEndpoint &endpoint, const work::Point &point, bool include_attractor,
     const plugin_run_context *context);
+// Return the nearest matching attractor and nearest platter exits, rejecting chords crossing other obstacles.
+std::vector<Attachment> exit_candidates(const work::ExPolygons &withdrawn_components,
+    const std::vector<std::vector<size_t>> &component_sources, const work::ExPolygons &platter_free_components,
+    const work::ExPolygons &other_obstacles, const TravelZoneView &zones, const travel::TravelEndpoint &endpoint,
+    const work::Point &point, bool include_attractor, const plugin_run_context *context);
+// Check whether a source matches the endpoint's layer, instance and position.
+bool matches_source(const TravelZoneView &zones, size_t index, const layer_handle *layer,
+    const travel::TravelEndpoint &endpoint, const work::Point &point);
 // Sum segment lengths after clipping to the complement of the domain; an empty domain leaves the whole path outside.
 double outside_length(const work::Points &points, const work::ExPolygons &domain, const plugin_run_context *context);
 // Score inside estimates as weighted inside length; clip other connectors against all domains before weighting their inside portions.
@@ -135,7 +150,7 @@ work::Points detour(const work::Point &from, const work::Point &to, const work::
 // The caller checks the resulting link against the original component.
 work::Points detour_in_component(const work::Point &from, const work::Point &to, const work::ExPolygon &component,
                                  const plugin_run_context *context);
-// Return whether the path loses more than the scaled tolerance inside filled original material.
+// Return whether the path loses more than the scaled tolerance inside the supplied material mask.
 // An empty mask is never blocked; cancellation and Clipper errors propagate.
 bool blocked(const work::Points &points, const work::ExPolygons &areas, const plugin_run_context *context);
 
@@ -183,7 +198,6 @@ bool ZonePlanner::eligible(const AvoidCrossing::CompatibilityPlanner &compatibil
     return true;
 }
 
-// Build or reuse one geometry entry for travel t, return the first accepted route or the straight fallback, and update route counters; cancellation and geometry failures propagate.
 std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pending)
 {
     throw_if_cancelled(m_context);
@@ -232,23 +246,79 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             original_parts.push_back({m_platter_blockers[component], {true, 0, component}});
         platter_key = PlatterKey(m_group_idx, m_print_z);
     }
-    // Group original pieces by endpoint seeds so touching pieces are ignored together without
-    // building a temporary union merely to recover their source identities.
-    std::vector<bool> ignored(original_parts.size(), false);
-    std::vector<size_t> ignored_queue;
-    for (size_t index = 0; index < original_parts.size(); ++index)
-        if (original_parts[index].area.contains(source, true) || original_parts[index].area.contains(target, true)) {
-            ignored[index] = true;
-            ignored_queue.push_back(index);
-        }
-    for (size_t queue = 0; queue < ignored_queue.size(); ++queue) {
-        const size_t current = ignored_queue[queue];
+    // Recover source identities directly by expanding each endpoint seed through touching pieces.
+    const auto group = [&](const work::Point &point) {
+        std::vector<bool> included(original_parts.size(), false);
+        std::vector<size_t> pieces;
         for (size_t index = 0; index < original_parts.size(); ++index)
-            if (!ignored[index] && touches(original_parts[current].area, original_parts[index].area, m_context)) {
-                ignored[index] = true;
-                ignored_queue.push_back(index);
+            if (original_parts[index].area.contains(point, true)) {
+                included[index] = true;
+                pieces.push_back(index);
             }
+        for (size_t queue = 0; queue < pieces.size(); ++queue) {
+            const size_t current = pieces[queue];
+            for (size_t index = 0; index < original_parts.size(); ++index)
+                if (!included[index] && touches(original_parts[current].area, original_parts[index].area, m_context)) {
+                    included[index] = true;
+                    pieces.push_back(index);
+                }
+        }
+        std::sort(pieces.begin(), pieces.end());
+        return pieces;
+    };
+    const std::vector<size_t> source_group = group(source), target_group = group(target);
+    const bool distinct_target = !target_group.empty() && target_group != source_group;
+    work::ExPolygons endpoint_obstacles;
+    for (const size_t index : source_group) endpoint_obstacles.push_back(original_parts[index].area);
+    if (distinct_target)
+        for (const size_t index : target_group) endpoint_obstacles.push_back(original_parts[index].area);
+    if (!endpoint_obstacles.empty())
+        endpoint_obstacles = clipper::union_ex(m_context->plugin_storage, endpoint_obstacles);
+
+    std::optional<Route> best;
+    double best_score = 0.;
+    // The low bit omits the source group, the high bit the distinct target group.
+    for (unsigned combination = 0; combination < 4; ++combination) {
+        if ((combination & 1) && source_group.empty()) continue;
+        if ((combination & 2) && !distinct_target) continue;
+        std::vector<bool> ignored(original_parts.size(), false);
+        if (combination & 1)
+            for (const size_t index : source_group) ignored[index] = true;
+        if (combination & 2)
+            for (const size_t index : target_group) ignored[index] = true;
+        std::optional<Route> candidate = route(pending, active, original_parts, ignored,
+            source_group, target_group, platter_key, spacing, nozzle_diameter, jump_weight);
+        if (!candidate) continue;
+        if (endpoint_obstacles.empty()) {
+            best = std::move(candidate);
+            break;
+        }
+        const double outside = outside_length(candidate->points, endpoint_obstacles, m_context);
+        const double score = outside + 3 * (candidate->length - outside);
+        if (!best || score < best_score) {
+            best = std::move(candidate);
+            best_score = score;
+        }
     }
+    if (!best) {
+        ++m_fallbacks;
+        return direct;
+    }
+    if (best->domain_route) ++m_domain_routes;
+    if (best->bridge) ++m_bridges;
+    std::vector<c_point> result;
+    for (const work::Point &point : best->points) result.push_back({point.x(), point.y()});
+    return result;
+}
+
+std::optional<ZonePlanner::Route> ZonePlanner::route(const PendingTravel &pending, const ActiveZones &active,
+    const std::vector<OriginalObstacle> &original_parts, const std::vector<bool> &ignored,
+    const std::vector<size_t> &source_group, const std::vector<size_t> &target_group,
+    const std::optional<PlatterKey> &platter_key, const coord_t spacing, const double nozzle_diameter,
+    const double jump_weight)
+{
+    const work::Point source(pending.source.position.x, pending.source.position.y);
+    const work::Point target(pending.target.position.x, pending.target.position.y);
     throw_if_cancelled(m_context);
     std::vector<ObstacleIdentity> ignored_ids;
     for (size_t index = 0; index < original_parts.size(); ++index)
@@ -267,6 +337,7 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             obstacles.original = clipper::union_ex(m_context->plugin_storage, z3_parts);
         work::ExPolygons platter_expanded;
         if (!obstacles.original.empty()) {
+            obstacles.blocking = clipper::offset_ex(m_context->plugin_storage, obstacles.original, -double(SCALED_EPSILON));
             const coord_t radius = std::max<coord_t>(1, scale_i(nozzle_diameter * 0.5));
             platter_expanded = clipper::offset_ex(m_context->plugin_storage, obstacles.original, double(radius));
         }
@@ -321,26 +392,42 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                                           2 * spacing, *obstacles.domain);
         }
         for (const work::ExPolygon &free_component : obstacles.platter_free_components) {
+            size_t source_component = SIZE_MAX;
             for (size_t component = 0; component < obstacles.platter_components.size(); ++component)
                 if (overlaps_area(free_component, obstacles.platter_components[component], m_context)) {
-                    obstacles.platter_component_sources.push_back(component);
+                    source_component = component;
                     break;
                 }
+            obstacles.platter_component_sources.push_back(source_component);
         }
         throw_if_cancelled(m_context);
         cached = m_obstacles.emplace(key, std::move(obstacles)).first;
     }
     const Obstacles &obstacles = cached->second;
-    const std::vector<Attachment> sources = endpoint_candidates(
-        obstacles.components, obstacles.withdrawn_components, obstacles.component_sources,
-        obstacles.platter_components, obstacles.platter_free_components,
-        obstacles.platter_component_sources,
-        m_zones, pending.source, source, !source_outside, m_context);
-    const std::vector<Attachment> targets = endpoint_candidates(
-        obstacles.components, obstacles.withdrawn_components, obstacles.component_sources,
-        obstacles.platter_components, obstacles.platter_free_components,
-        obstacles.platter_component_sources,
-        m_zones, pending.target, target, !target_outside, m_context);
+    // Exit masks exclude their own group and any groups omitted from this combination.
+    const auto other_obstacles = [&](const std::vector<size_t> &group) {
+        work::ExPolygons parts;
+        if (group.empty() || ignored[group.front()]) return parts;
+        for (size_t index = 0; index < original_parts.size(); ++index)
+            if (!ignored[index] && !std::binary_search(group.begin(), group.end(), index))
+                parts.push_back(original_parts[index].area);
+        return parts.empty() ? parts : clipper::offset_ex(m_context->plugin_storage,
+            clipper::union_ex(m_context->plugin_storage, parts), -double(SCALED_EPSILON));
+    };
+    const work::ExPolygons source_mask = other_obstacles(source_group);
+    const work::ExPolygons target_mask = target_group == source_group ? work::ExPolygons{} : other_obstacles(target_group);
+    const auto candidates = [&](const travel::TravelEndpoint &endpoint, const work::Point &point,
+                                const std::vector<size_t> &group, const work::ExPolygons &mask) {
+        if (!group.empty() && !ignored[group.front()])
+            return exit_candidates(obstacles.withdrawn_components, obstacles.component_sources,
+                obstacles.platter_free_components, mask, m_zones, endpoint, point, !outside_part(endpoint), m_context);
+        return endpoint_candidates(obstacles.components, obstacles.withdrawn_components, obstacles.component_sources,
+            obstacles.platter_components, obstacles.platter_free_components, obstacles.platter_component_sources,
+            m_zones, endpoint, point, !outside_part(endpoint), m_context);
+    };
+    const std::vector<Attachment> sources = candidates(pending.source, source, source_group, source_mask);
+    const std::vector<Attachment> targets = candidates(pending.target, target, target_group,
+        target_group == source_group ? source_mask : target_mask);
     std::vector<Attachment> filtered_sources = sources, filtered_targets = targets;
     const auto physical_component = [](const work::ExPolygons &areas, const work::Point &point) -> std::optional<size_t> {
         for (size_t component = 0; component < areas.size(); ++component)
@@ -366,16 +453,21 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
             for (work::Points::const_reverse_iterator point = path.rbegin(); point != path.rend(); ++point)
                 points.push_back(*point);
     };
-    const auto build_platter = [&](const Attachment &from, const Attachment &to) {
+    // Validate the core with ordinary attachments, then add the already checked exits.
+    const auto validate = [&](const Attachment &from, const Attachment &to, const work::Points &middle) {
+        work::Points core{from.exit ? from.ring_point : source};
+        if (!from.exit) append_route(core, from.link);
+        append_route(core, middle);
+        if (!to.exit) append_route(core, to.link, true);
+        core.push_back(to.exit ? to.ring_point : target);
+        core.erase(std::unique(core.begin(), core.end()), core.end());
+        if (core.size() > 1 && blocked(core, obstacles.blocking, m_context)) return work::Points{};
         work::Points points;
-        points.push_back(source);
-        append_route(points, from.link);
-        const work::Points connector = detour(from.ring_point, to.ring_point,
-                                              obstacles.platter_free_components, m_platter_initial, m_context);
-        points.insert(points.end(), connector.begin(), connector.end());
-        append_route(points, to.link, true);
-        points.push_back(target);
+        if (from.exit) append_route(points, from.link);
+        append_route(points, core);
+        if (to.exit) append_route(points, to.link, true);
         points.erase(std::unique(points.begin(), points.end()), points.end());
+        if (outside_length(points, m_platter_expanded, m_context) > SCALED_EPSILON) return work::Points{};
         return points;
     };
     std::vector<Attachment> reference_sources, reference_targets;
@@ -383,17 +475,15 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         if (candidate.type == DomainType::Platter) reference_sources.push_back(candidate);
     for (const Attachment &candidate : targets)
         if (candidate.type == DomainType::Platter) reference_targets.push_back(candidate);
-    work::Points reference;
     bool reference_usable = false;
     double reference_outside = 0.;
     for (const Attachment &from : reference_sources) {
         for (const Attachment &to : reference_targets) {
             throw_if_cancelled(m_context);
-            const work::Points candidate = build_platter(from, to);
-            if (outside_length(candidate, m_platter_expanded, m_context) > SCALED_EPSILON ||
-                blocked(candidate, obstacles.original, m_context)) continue;
-            reference = candidate;
-            reference_outside = outside_length(reference, obstacles.components, m_context);
+            const work::Points candidate = validate(from, to, detour(from.ring_point, to.ring_point,
+                obstacles.platter_free_components, m_platter_initial, m_context));
+            if (candidate.empty()) continue;
+            reference_outside = outside_length(candidate, obstacles.components, m_context);
             reference_usable = true;
             break;
         }
@@ -418,43 +508,40 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
                 }
             };
             work::Point exit = from.ring_point, entry = to.ring_point;
+            const EstimateKind from_kind = from_attractor && !from.exit ? EstimateKind::Inside : EstimateKind::Outside;
+            const EstimateKind to_kind = to_attractor && !to.exit ? EstimateKind::Inside : EstimateKind::Outside;
+            append_estimate(from.link, from_kind);
             size_t rank = from_attractor && to_attractor ? 0 : (from_attractor || to_attractor ? 1 : 2);
             if (from_attractor && to_attractor && same_domain(from, to)) {
-                append_estimate(from.link, EstimateKind::Inside);
                 estimate.push_back({from.ring_point, to.ring_point, EstimateKind::Inside});
-                append_estimate(to.link, EstimateKind::Inside, true);
             } else if (from_attractor && to_attractor) {
                 AvoidCrossing::RouterCounts estimate_counts;
                 work::Point start = from.ring_point, end = to.ring_point;
-                const std::optional<AvoidCrossing::IslandBridge> bridge = AvoidCrossing::select_island_bridge(
-                    *obstacles.domain, obstacles.component_rings[from.component], obstacles.component_rings[to.component],
-                    start, end, jump_weight, estimate_counts,
-                    [this]() { throw_if_cancelled(m_context); });
-                if (!bridge) continue;
-                exit = bridge->from;
-                entry = bridge->to;
-                append_estimate(from.link, EstimateKind::Inside);
+                // Coincident attachments already meet; the bridge search needs a nonzero chord.
+                if (start != end) {
+                    const std::optional<AvoidCrossing::IslandBridge> bridge = AvoidCrossing::select_island_bridge(
+                        *obstacles.domain, obstacles.component_rings[from.component], obstacles.component_rings[to.component],
+                        start, end, jump_weight, estimate_counts,
+                        [this]() { throw_if_cancelled(m_context); });
+                    if (!bridge) continue;
+                    exit = bridge->from;
+                    entry = bridge->to;
+                }
                 estimate.push_back({from.ring_point, exit, EstimateKind::Inside});
                 estimate.push_back({exit, entry, EstimateKind::Outside});
                 estimate.push_back({entry, to.ring_point, EstimateKind::Inside});
-                append_estimate(to.link, EstimateKind::Inside, true);
             } else if (from_attractor) {
                 exit = nearest_point(obstacles.withdrawn_components[from.component], to.ring_point);
-                append_estimate(from.link, EstimateKind::Inside);
                 estimate.push_back({from.ring_point, exit, EstimateKind::Inside});
                 estimate.push_back({exit, to.ring_point, EstimateKind::Outside});
-                append_estimate(to.link, EstimateKind::Outside, true);
             } else if (to_attractor) {
                 entry = nearest_point(obstacles.withdrawn_components[to.component], from.ring_point);
-                append_estimate(from.link, EstimateKind::Outside);
                 estimate.push_back({from.ring_point, entry, EstimateKind::Outside});
                 estimate.push_back({entry, to.ring_point, EstimateKind::Inside});
-                append_estimate(to.link, EstimateKind::Inside, true);
             } else {
-                append_estimate(from.link, EstimateKind::Outside);
                 estimate.push_back({from.ring_point, to.ring_point, EstimateKind::Outside});
-                append_estimate(to.link, EstimateKind::Outside, true);
             }
+            append_estimate(to.link, to_kind, true);
             hypotheses.push_back({from, to, exit, entry,
                                   estimate_cost(estimate, obstacles.components, jump_weight, m_context), rank});
         }
@@ -471,52 +558,22 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         const bool from_attractor = from.type == DomainType::Attractor;
         const bool to_attractor = to.type == DomainType::Attractor;
         const bool domain_route = from_attractor || to_attractor;
-        work::Points points;
-        if (!from_attractor && !to_attractor) {
-            points = build_platter(from, to);
-        } else if (from_attractor && to_attractor && same_domain(from, to)) {
-            points.push_back(source);
-            append_route(points, from.link);
-            append_component_path(points, *obstacles.component_boundaries[from.component], from.ring_point, to.ring_point,
-                                  m_context, m_router_counts);
-            append_route(points, to.link, true);
-            points.push_back(target);
-        } else if (from_attractor && to_attractor) {
-            points.push_back(source);
-            append_route(points, from.link);
-            append_component_path(points, *obstacles.component_boundaries[from.component], from.ring_point,
-                                  hypothesis.exit, m_context, m_router_counts);
-            const work::Points connector = detour(hypothesis.exit, hypothesis.entry,
-                                                  obstacles.platter_free_components, m_platter_initial, m_context);
-            points.insert(points.end(), connector.begin(), connector.end());
-            append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry,
-                                  to.ring_point, m_context, m_router_counts);
-            append_route(points, to.link, true);
-            points.push_back(target);
-        } else if (from_attractor) {
-            points.push_back(source);
-            append_route(points, from.link);
-            append_component_path(points, *obstacles.component_boundaries[from.component], from.ring_point,
-                                  hypothesis.exit, m_context, m_router_counts);
-            const work::Points connector = detour(hypothesis.exit, hypothesis.entry,
-                                                  obstacles.platter_free_components, m_platter_initial, m_context);
-            points.insert(points.end(), connector.begin(), connector.end());
-            append_route(points, to.link, true);
-            points.push_back(target);
+        work::Points middle;
+        if (from_attractor && to_attractor && same_domain(from, to)) {
+            append_component_path(middle, *obstacles.component_boundaries[from.component], from.ring_point,
+                                  to.ring_point, m_context);
         } else {
-            points.push_back(source);
-            append_route(points, from.link);
-            const work::Points connector = detour(hypothesis.exit, hypothesis.entry,
-                                                  obstacles.platter_free_components, m_platter_initial, m_context);
-            points.insert(points.end(), connector.begin(), connector.end());
-            append_component_path(points, *obstacles.component_boundaries[to.component], hypothesis.entry,
-                                  to.ring_point, m_context, m_router_counts);
-            append_route(points, to.link, true);
-            points.push_back(target);
+            if (from_attractor)
+                append_component_path(middle, *obstacles.component_boundaries[from.component], from.ring_point,
+                                      hypothesis.exit, m_context);
+            append_route(middle, detour(hypothesis.exit, hypothesis.entry,
+                obstacles.platter_free_components, m_platter_initial, m_context));
+            if (to_attractor)
+                append_component_path(middle, *obstacles.component_boundaries[to.component], hypothesis.entry,
+                                      to.ring_point, m_context);
         }
-        points.erase(std::unique(points.begin(), points.end()), points.end());
-        if (outside_length(points, m_platter_expanded, m_context) > SCALED_EPSILON) continue;
-        if (blocked(points, obstacles.original, m_context)) continue;
+        work::Points points = validate(from, to, middle);
+        if (points.empty()) continue;
         double length = 0.;
         for (size_t i = 1; i < points.size(); ++i) length += work::Line(points[i - 1], points[i]).length();
         if (budget.value > 0.) {
@@ -525,15 +582,10 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         }
         if (reference_usable && outside_length(points, obstacles.components, m_context) >
             reference_outside + SCALED_EPSILON) continue;
-        std::vector<c_point> result;
-        for (const work::Point &point : points) result.push_back({point.x(), point.y()});
-        if (domain_route) ++m_domain_routes;
-        if (from_attractor && to_attractor && from.component != to.component) ++m_bridges;
-        if (length > direct_length + SCALED_EPSILON) ++m_detours;
-        return result;
+        return Route{std::move(points), length, domain_route,
+            from_attractor && to_attractor && from.component != to.component};
     }
-    ++m_fallbacks;
-    return direct;
+    return std::nullopt;
 }
 
 namespace {
@@ -553,15 +605,11 @@ std::vector<Attachment> endpoint_candidates(const work::ExPolygons &attractor_co
             throw_if_cancelled(context);
             if (!attractor_components[component].contains(point, true)) continue;
             bool source_matches = false;
-            for (const size_t index : component_sources[component]) {
-                const TravelZone &zone = zones.zone(index);
-                if (zone.source_layer != layer || zone.scope.printing_catalog_id != endpoint.printing_catalog_id)
-                    continue;
-                if (contains(zones.zone_area(index), point, true)) {
+            for (const size_t index : component_sources[component])
+                if (matches_source(zones, index, layer, endpoint, point)) {
                     source_matches = true;
                     break;
                 }
-            }
             if (!source_matches) continue;
             Attachment selected{DomainType::Attractor, component, point, {}};
             if (!withdrawn_components[component].contains(point, true)) {
@@ -591,7 +639,7 @@ std::vector<Attachment> endpoint_candidates(const work::ExPolygons &attractor_co
             for (size_t component = 0; component < platter_free_components.size(); ++component) {
                 throw_if_cancelled(context);
                 const size_t m_component = platter_component_sources[component];
-                if (!platter_components[m_component].contains(point, true))
+                if (m_component == SIZE_MAX || !platter_components[m_component].contains(point, true))
                     continue;
                 const work::Point ring_point = nearest_point(platter_free_components[component], point);
                 const double distance = point.distance_to(ring_point);
@@ -614,6 +662,48 @@ std::vector<Attachment> endpoint_candidates(const work::ExPolygons &attractor_co
     return candidates;
 }
 
+std::vector<Attachment> exit_candidates(const work::ExPolygons &withdrawn_components,
+    const std::vector<std::vector<size_t>> &component_sources, const work::ExPolygons &platter_free_components,
+    const work::ExPolygons &other_obstacles, const TravelZoneView &zones, const travel::TravelEndpoint &endpoint,
+    const work::Point &point, const bool include_attractor, const plugin_run_context *context)
+{
+    std::vector<Attachment> candidates;
+    const layer_handle *layer = include_attractor ? endpoint.region_island.region(0).layer().handle() : nullptr;
+    // Compare all eligible components before testing the exit; a blocked nearest point is not replaced.
+    for (const DomainType type : {DomainType::Attractor, DomainType::Platter}) {
+        if (type == DomainType::Attractor && !include_attractor) continue;
+        const work::ExPolygons &components = type == DomainType::Attractor ?
+            withdrawn_components : platter_free_components;
+        std::optional<Attachment> best;
+        double best_distance = (std::numeric_limits<double>::max)();
+        for (size_t component = 0; component < components.size(); ++component) {
+            throw_if_cancelled(context);
+            if (type == DomainType::Attractor && std::none_of(component_sources[component].begin(),
+                    component_sources[component].end(), [&](const size_t index) {
+                        return matches_source(zones, index, layer, endpoint, point);
+                    })) continue;
+            const work::Point q = components[component].contains(point, true) ?
+                point : nearest_point(components[component], point);
+            const double distance = point.distance_to(q);
+            if (distance < best_distance) {
+                best = Attachment{type, component, q, {point, q}, true};
+                best_distance = distance;
+            }
+        }
+        if (best && (point == best->ring_point || !blocked(best->link, other_obstacles, context)))
+            candidates.push_back(std::move(*best));
+    }
+    return candidates;
+}
+
+bool matches_source(const TravelZoneView &zones, const size_t index, const layer_handle *layer,
+    const travel::TravelEndpoint &endpoint, const work::Point &point)
+{
+    const TravelZone &zone = zones.zone(index);
+    return zone.source_layer == layer && zone.scope.printing_catalog_id == endpoint.printing_catalog_id &&
+        contains(zones.zone_area(index), point, true);
+}
+
 bool outside_part(const travel::TravelEndpoint &endpoint)
 {
     return !endpoint.region_island.valid() || endpoint.region_island.region_count() == 0 ||
@@ -621,12 +711,13 @@ bool outside_part(const travel::TravelEndpoint &endpoint)
 }
 
 void append_component_path(work::Points &points, AvoidCrossing::Boundary &boundary, const work::Point &from,
-    const work::Point &to, const plugin_run_context *context, AvoidCrossing::RouterCounts &counts)
+    const work::Point &to, const plugin_run_context *context)
 {
     if (from.coincides_with_epsilon(to)) {
         points.push_back(from);
         points.push_back(to);
     } else {
+        AvoidCrossing::RouterCounts counts;
         const work::Points interior = AvoidCrossing::route_on_boundary(boundary, from, to, 0, 0, false, 0.,
             context->plugin_storage, counts, [context]() { throw_if_cancelled(context); }).points;
         points.insert(points.end(), interior.begin(), interior.end());

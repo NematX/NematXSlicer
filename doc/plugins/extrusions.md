@@ -858,10 +858,12 @@ on a border.
    layer is in-part. Regionless endpoints and auxiliary layers (support, raft,
     skirt, brim, tower) are outside-part. Keep the active original forbidden
     components and, when either endpoint is outside-part, the translated
-    `platter_blockers` slices at the layer-group Z or below as separate pieces. The
-    synthetic wipe tower is not a blocker. A piece containing either endpoint is
-    ignored together with every piece joined to it by overlap or boundary contact;
-    this grouping is transitive and does not first union the pieces. At cache
+    `platter_blockers` components of the union of translated slices at the
+    layer-group Z or below as separate pieces. The
+    synthetic wipe tower is not a blocker. For each endpoint, group the pieces
+    containing it (including their borders) with all pieces joined transitively
+    by overlap or contact. Try omitting neither group, the source group, the
+    target group, then both, skipping absent or repeated groups. At cache
     construction, `Z3` is the union of the remaining pieces, and its nozzle offset
     is `Z4`. The cache key retains the
    sorted source/component identities that were ignored. `Z3` is subtracted from
@@ -871,8 +873,13 @@ on a border.
 2. **Rank hypotheses.** An in-part endpoint offers the `M_a` component that contains
    it when its source layer, instance and original attractor slice all match. An
    endpoint in `M_a` but outside `W_a` reaches its nearest `W_a` point through a
-   link that stays in `M_a`. Every endpoint also offers the nearest reachable
-   `W_p` component when `W_p` is nonempty; the platter link stays in `M_p`.
+   link that stays in `M_a`. A nonempty `W_p` allows a search for a platter
+   link; no candidate is offered if the link is missing or fails validation.
+   An ordinary platter link stays in `M_p`. An endpoint in a kept group instead offers straight exits to its nearest
+   `W_p` point and, if in-part, the nearest `W_a` point among all components with
+   matching source provenance. An exit that crosses other remaining obstacles is
+   discarded without trying a farther point. Exits are estimated as outside
+   connectors.
    Attractor identities precede platter identities on stable ties. Platter pairs
    with different component indexes are discarded. When both endpoints share one
    `M_a` component but their chord leaves it, all platter
@@ -890,19 +897,26 @@ on a border.
    to Legacy.
 4. **Validate, then fall back.** Constructed routes retain exact endpoints, stay
    in the `SCALED_EPSILON`-expanded initial platter with `diff_pl` up to
-   `SCALED_EPSILON`, avoid original `Z3` material and respect the complete-path
-   detour budget. Links are checked against their original `M_a` or `M_p`
-   component; estimates, the reference bound and `blocked` retain the original
-   domains. The platter-only
+   `SCALED_EPSILON`, and respect the complete-path detour budget. Before attaching
+   the already checked exits, the rest of the route may run at most
+   `SCALED_EPSILON` inside `Z3` shrunk once by `SCALED_EPSILON`. Material checks
+   use that shrunk mask because `diff_pl` has no reliable side for a path lying
+   on a border.
+   Ordinary links are checked against their original `M_a` or `M_p`
+   component. The platter-only
    reference uses the two platter links and connector even when normal platter
    candidates were removed by the same-component rule or by different indexes. If
    `W_p` is empty or the reference is invalid, the outside-length bound is absent;
-   otherwise a route's length outside `M_a` may exceed the reference by at most
-   `SCALED_EPSILON`. Rejection tries the next ranked hypothesis without changing
-   the blocker set. If none passes, return and count the straight path. An accepted
-   platter route is not a fallback. `domain_routes` counts accepted routes using an
-   attractor, `bridges` accepted inter-attractor bridges, and `detours` accepted
-   paths longer than the chord by more than `SCALED_EPSILON`.
+   otherwise a route's length outside `M_a` may exceed that combination's reference
+   by at most `SCALED_EPSILON`. Rejection tries the next ranked hypothesis without changing
+   the blocker set. Compare the first passing route per combination by total
+   length, counting length inside the union of the original endpoint groups three
+   times. Ties retain the first combination. If none passes, return and count the
+   straight path. Only the winning route updates route counters. `diff_pl` may
+   count length exactly on an obstacle boundary either inside or outside. An
+   accepted platter route is not a fallback. `domain_routes` counts accepted routes using an
+   attractor, `bridges` accepted joins between distinct attractor components
+   (including joins at a common point), and `fallbacks` counts straight fallbacks.
 
 Spacing and island settings come from the target layer input, then the source
 when the target has no region, with nozzle diameter as the spacing fallback.
@@ -917,9 +931,10 @@ like other rings. `W_p` is empty when the expanded blockers cover the complete
 initial platter, so no platter candidate is created.
 `avoid_crossing_perimeters_max_detour` limits extra length in
 millimetres or as a percentage of chord length; zero is unlimited. Routing is
-heuristic, not shortest-path search; `blocked` checks original material while
-initial-platter containment uses its cached expanded copy, and the final fallback
-remains straight.
+heuristic, not shortest-path search; `blocked` checks obstacles shrunk by
+`SCALED_EPSILON`. Walls thinner than twice that inset can disappear from the
+check. Domains, detours, the reference and the score use original obstacle geometry.
+Platter containment uses the cached expanded contour, and the final fallback remains straight.
 
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
@@ -929,15 +944,17 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- TravelZoneView: collect active contributors and cache dated unions of attractors
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
     |-- CompatibilityPlanner::path: use perimeter routing
-    `-- ZonePlanner::path: group endpoint obstacles, cache geometry and rank hypotheses
+    `-- ZonePlanner::path: group endpoint obstacles and score admissible routes
         |-- is_off_object_layer / platter_blockers: resolve outside-part geometry
-        |-- touches / union / diff / offset: group pieces and build Z3/Z4/M_a/W_a/M_p/W_p
-        |-- build_boundary / endpoint_candidates: index components and choose attachments
-        |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
-        |-- append_component_path / route_on_boundary: follow each chosen W_a component
-        |-- detour: extend connectors and call the public Clipper operation on W_p rings
-        |-- detour_in_component: build an unextended M-to-W link
-        `-- validate all segments: accept the first passing hypothesis or count a straight fallback
+        |-- touches: group original pieces by overlap or contact
+        `-- route: find the first admissible route for one combination
+            |-- union / diff / offset / build_boundary: build and index the cached domains
+            |-- endpoint_candidates / detour_in_component: build ordinary attachments
+            |-- exit_candidates / blocked: build straight exits and check against other obstacles
+            |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
+            |-- append_component_path / route_on_boundary: follow each chosen W_a component
+            |-- detour: extend connectors and call the public Clipper operation on W_p rings
+            `-- blocked / outside_length: check the core before assembly, then check bed containment and reference
 ```
 
 ### Crossing wipes and lift
