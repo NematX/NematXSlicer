@@ -2,6 +2,27 @@
 
 A collection of plugins for NematXSlicer.
 
+## Built into NematXSlicer
+
+This directory is the source of truth for the NematX modules. A normal
+NematXSlicer build compiles them into the application via
+[`cmake/NematXBuiltinPlugins.cmake`](../../../cmake/NematXBuiltinPlugins.cmake).
+No sibling checkout or plugin ZIP is needed, and the host build does not run
+the standalone package project in this directory. An installed standalone
+provider can still take precedence over its built-in counterpart.
+
+If an existing host build still points to a sibling checkout, remove only the
+old `NEMATX_PLUGINS_SOURCE_DIR` cache entry by configuring again from the host
+root with `cmake -S . -B build -U NEMATX_PLUGINS_SOURCE_DIR`. A custom source
+directory still works as an explicit override. Use
+`SLIC3R_NEMATX_BUILTIN_PLUGINS=OFF` to disable the built-in modules.
+
+To build standalone packages, configure this directory separately as a CMake
+source tree. Supply the host source directory, a matching built host executable
+and link library, the generated `default_activated.ini`, and the host's full
+version via the `SUPERSLICER_*` cache options in [CMakeLists.txt](CMakeLists.txt).
+Build the relevant package target only when you need the ZIP.
+
 ## Plugins
 
 - [nematx_top_surface_retraction](plugins/top_surface_retraction/README.md): travel retraction over exposed top areas

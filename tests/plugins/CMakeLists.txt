@@ -339,7 +339,7 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugin
     set_tests_properties(nematx_seam_host PROPERTIES LABELS "seam;plugin-e2e" TIMEOUT 30)
 endif()
 
-# Use a separate production plugin runtime for the independently maintained module's replay checks.
+# Use a separate production plugin runtime for the support-interface replay checks.
 if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/support_interface_perimeters/tests/host_tests.cpp")
     add_executable(nematx_support_interface_host_tests
         "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/support_interface_perimeters/tests/host_tests.cpp")

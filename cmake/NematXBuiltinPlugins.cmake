@@ -1,10 +1,10 @@
-# Compile the independently maintained NematX modules into the host without
-# editing their sources or their standalone shared-library/package build.
-set(NEMATX_PLUGINS_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../NematXSlicer_plugins"
-    CACHE PATH "Source checkout of the independently packaged NematX plugins")
+# Compile the in-tree NematX modules into the host. Their standalone package
+# project is not added to this build, so embedding needs no plugin DLLs or ZIPs.
+set(NEMATX_PLUGINS_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/plugins_cpp/NematX"
+    CACHE PATH "NematX plugin source directory (defaults to the in-tree sources)")
 get_filename_component(NEMATX_PLUGINS_SOURCE_DIR "${NEMATX_PLUGINS_SOURCE_DIR}" ABSOLUTE)
 set(_nematx_builtin_default OFF)
-if(SLIC3R_APP_KEY STREQUAL "NematXSlicer" AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/CMakeLists.txt")
+if(SLIC3R_APP_KEY STREQUAL "NematXSlicer")
     set(_nematx_builtin_default ON)
 endif()
 option(SLIC3R_NEMATX_BUILTIN_PLUGINS "Embed the NematX plugins into the host" ${_nematx_builtin_default})

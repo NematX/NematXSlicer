@@ -1,6 +1,12 @@
-"""Configure-only checks of optional NematX embedding, with inert source fixtures."""
+"""Check NematX embedding in a checkout with no sibling plugin repository.
+
+Each fixture copies the real build adapter and gives it inert sources. CMake
+configuration exercises default source selection, explicit overrides and the
+registration and activation it generates, without building the modules.
+"""
 import argparse
 from pathlib import Path
+import shutil
 import subprocess
 import unittest
 
@@ -44,15 +50,19 @@ IDS = (
 
 
 class BuiltinPluginBuildTests(unittest.TestCase):
-    def configure(self, name, brand="NematXSlicer", enabled=None, missing=False):
+    def configure(self, name, brand="NematXSlicer", enabled=None, missing=False, override=False):
+        """Build a minimal checkout layout and configure it without compiling."""
         source = OUT / name / "source"
         binary = OUT / name / "binary"
-        external = source / "external"
+        plugins = source / ("override" if override else "src/plugins_cpp/NematX")
         source.mkdir(parents=True, exist_ok=True)
+        adapter = source / "cmake/NematXBuiltinPlugins.cmake"
+        adapter.parent.mkdir(exist_ok=True)
+        shutil.copyfile(ROOT / "cmake/NematXBuiltinPlugins.cmake", adapter)
         (source / "empty.cpp").write_text("// Inert configure-only fixture.\n", encoding="utf-8")
         if not missing:
             for relative in ("CMakeLists.txt", *SOURCES):
-                path = external / relative
+                path = plugins / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("// Inert configure-only fixture.\n", encoding="utf-8")
         script = f'''cmake_minimum_required(VERSION 3.16)
@@ -60,7 +70,7 @@ project(libslic3r LANGUAGES CXX)
 set(SLIC3R_APP_KEY "{brand}")
 add_library(libslic3r STATIC empty.cpp)
 add_library(boost_headeronly INTERFACE)
-include("{(ROOT / 'cmake/NematXBuiltinPlugins.cmake').as_posix()}")
+include("${{CMAKE_CURRENT_SOURCE_DIR}}/cmake/NematXBuiltinPlugins.cmake")
 get_property(activations GLOBAL PROPERTY SLIC3R_NEMATX_DEFAULT_ACTIVATIONS)
 file(WRITE "${{CMAKE_BINARY_DIR}}/activations.txt" "${{activations}}")
 get_property(targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
@@ -69,12 +79,15 @@ foreach(target IN LISTS targets)
     if(target MATCHES "^nematx_builtin_")
         get_target_property(definitions ${{target}} COMPILE_DEFINITIONS)
         file(WRITE "${{CMAKE_BINARY_DIR}}/${{target}}-definitions.txt" "${{definitions}}")
+        get_target_property(sources ${{target}} SOURCES)
+        file(WRITE "${{CMAKE_BINARY_DIR}}/${{target}}-sources.txt" "${{sources}}")
     endif()
 endforeach()
 '''
         (source / "CMakeLists.txt").write_text(script, encoding="utf-8")
-        command = [CMAKE, "-S", str(source), "-B", str(binary),
-                   "-DNEMATX_PLUGINS_SOURCE_DIR:PATH=" + str(external)]
+        command = [CMAKE, "-S", str(source), "-B", str(binary)]
+        if override:
+            command.append("-DNEMATX_PLUGINS_SOURCE_DIR:PATH=" + str(plugins))
         if enabled is not None:
             command.append("-DSLIC3R_NEMATX_BUILTIN_PLUGINS:BOOL=" + ("ON" if enabled else "OFF"))
         result = subprocess.run(command, capture_output=True, text=True, timeout=900)
@@ -82,6 +95,7 @@ endforeach()
         return binary, result
 
     def test_nematx_embeds_all_modules_by_default(self):
+        """Use only the tracked layout and check every source, symbol and plugin ID."""
         binary, result = self.configure("nematx-default")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         targets = (binary / "targets.txt").read_text().split(";")
@@ -90,31 +104,48 @@ endforeach()
         activated = (binary / "activations.txt").read_text().splitlines()
         self.assertEqual(set(activated), {plugin_id + " = 1" for plugin_id in IDS})
         registry = (binary / "NematXBuiltinPlugins.cpp").read_text()
+        source_root = binary.parent / "source/src/plugins_cpp/NematX"
+        sources = []
         for plugin_id in IDS:
             self.assertIn(f'host.get_plugin("{plugin_id}") == nullptr', registry)
         for target in modules:
             name = target.removeprefix("nematx_builtin_")
+            sources.extend(Path(path).relative_to(source_root).as_posix()
+                           for path in (binary / (target + "-sources.txt")).read_text().split(";"))
             definitions = (binary / (target + "-definitions.txt")).read_text().split(";")
             self.assertIn("register_plugin=nematx_builtin_register_" + name, definitions)
             self.assertIn("slic3r_plugin_abi_version=nematx_builtin_abi_" + name, definitions)
             self.assertIn("slic3r_plugin_abi_manifest=nematx_builtin_manifest_" + name, definitions)
             self.assertNotIn("SLIC3R_PLUGIN_EXPORTS", definitions)
+        self.assertCountEqual(sources, SOURCES)
 
-    def test_optional_embedding_off_needs_no_external_checkout(self):
+    def test_optional_embedding_off_needs_no_plugin_sources(self):
+        """An explicit opt-out works even on a checkout with no module sources."""
         binary, result = self.configure("explicit-off", enabled=False, missing=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((binary / "activations.txt").read_text(), "")
         self.assertNotIn("nematx_builtin_", (binary / "targets.txt").read_text())
 
     def test_other_brands_do_not_enable_embedding(self):
+        """The source directory alone does not enable NematX plugins for other brands."""
         binary, result = self.configure("upstream-default", brand="SuperSlicer")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((binary / "activations.txt").read_text(), "")
 
-    def test_requested_missing_sources_fail_visibly(self):
-        _, result = self.configure("missing-requested", enabled=True, missing=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("NematX plugin sources not found", result.stdout + result.stderr)
+    def test_missing_sources_fail_visibly(self):
+        """A NematX build must not succeed without its requested modules."""
+        for name, enabled, override in (("missing-default", None, False), ("missing-override", True, True)):
+            with self.subTest(name=name):
+                _, result = self.configure(name, enabled=enabled, missing=True, override=override)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("NematX plugin sources not found", result.stdout + result.stderr)
+
+    def test_explicit_source_override(self):
+        """An explicit source tree still supports standalone plugin development."""
+        binary, result = self.configure("source-override", override=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        source = Path((binary / "nematx_builtin_corner_stretch-sources.txt").read_text())
+        self.assertEqual(source, binary.parent / "source/override/src/CornerStretch.cpp")
 
 
 if __name__ == "__main__":
