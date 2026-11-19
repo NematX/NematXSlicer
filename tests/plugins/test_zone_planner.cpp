@@ -38,7 +38,7 @@ M, mixed connectors and unavailable bridges exercise the remaining route branche
 Mixed cases retain the nearest W ring point between a component and a far free endpoint.
 A bent hole's box overlaps a second hole containing an island; an unavailable
 box-selected bridge must leave the mixed hypotheses available.
-Support obstacle checks slice an overhanging roof and two posts, retaining real support
+Platter routing checks slice an overhanging roof and two posts, retaining real support
 printing extrusions. Controlled endpoint chords test each shifted component;
 the support roles are read from the sliced plan, not synthesized.
 When no hypothesis passes across endpoint-group choices, the planner counts one
@@ -164,7 +164,7 @@ struct Owner {
         Slic3r::Printing::PrintingPlan &current = print.mutable_printing_plan();
         plan = slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&current));
         if (current.groups.empty()) current.groups.resize(1);
-        return {print_view, plan, context, Slic3r::scale_i(0.6), cache, chronology.travels};
+        return {print_view, plan, context, cache, chronology.travels};
     }
     // Borrow applied print settings; auxiliary avoidance is passed separately to the planner.
     slic3r_api::Config settings() const
@@ -1020,9 +1020,9 @@ TEST_CASE("Zone planner does not borrow a touching instance source", "[plugins][
     owner.chronology.travels = {gap};
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {first_slice}, 0, SIZE_MAX,
-                                 {EXTRUDER_ID_UNKNOWN, first_catalog, false}, layer.handle()});
+                                 {EXTRUDER_ID_UNKNOWN, first_catalog}, layer.handle()});
     contributor.areas.push_back({zones::ZoneRole::Attractor, {second_slice}, 0, SIZE_MAX,
-                                 {EXTRUDER_ID_UNKNOWN, second_catalog, false}, layer.handle()});
+                                 {EXTRUDER_ID_UNKNOWN, second_catalog}, layer.handle()});
     contributor.areas.push_back({zones::ZoneRole::Forbidden, {forbidden}, 0, SIZE_MAX, {}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     const zones::ActiveZones &active = view.query(0, gap);
@@ -1920,7 +1920,7 @@ TEST_CASE("Zone planner weights an outside connector over an attractor", "[plugi
     const work::ExPolygon domain = rectangle(10., -10., 20., 20.);
     FixedZones contributor;
     contributor.areas.push_back({zones::ZoneRole::Attractor, {domain}, 0, SIZE_MAX,
-                                 {EXTRUDER_ID_UNKNOWN, catalog, false}, source_layer});
+                                 {EXTRUDER_ID_UNKNOWN, catalog}, source_layer});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
     const zones::ActiveZones &active = view.query(0, gap);
     REQUIRE(active.attractor_indexes.size() == 1);
@@ -3183,8 +3183,8 @@ TEST_CASE("Zone planner accepts a mixed connector with coincident endpoints", "[
     CHECK(planner.fallbacks() == 0);
 }
 
-// Slice real support, then test component isolation, instance shifts, Z selection and non-support travels remaining unaffected.
-TEST_CASE("Support obstacles retain other components and catalog instances", "[plugins][zone-planner][travel-zones]")
+// Slice real support, then test platter group selection, translated slices and endpoint obstacle routing.
+TEST_CASE("Support platter routing retains other components and printed instances", "[plugins][zone-planner][travel-zones]")
 {
     Owner owner;
     owner.model.clear_objects();
@@ -3228,17 +3228,31 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
                 &plan.groups[g].layers[l]));
             connector.setup_run(layer_view, g, l, progress);
         }
-    size_t real_support_gaps = 0, real_support_detours = 0;
-    const zones::SupportObstacleContributor real_contributor;
+    size_t real_support_gaps = 0, real_support_detours = 0, real_support_fallbacks = 0;
+    // The pieces have already been united. Separate pieces can still meet at a ring boundary.
+    const auto touches = [](const work::ExPolygon &a, const work::ExPolygon &b) {
+        const auto meets_boundary = [](const work::ExPolygon &from, const work::ExPolygon &to) {
+            for (size_t i = 0; i <= from.holes.size(); ++i) {
+                const work::Polygon &ring = i == 0 ? from.contour : from.holes[i - 1];
+                for (const work::Point &point : ring.points)
+                    for (size_t j = 0; j <= to.holes.size(); ++j) {
+                        const work::Polygon &boundary = j == 0 ? to.contour : to.holes[j - 1];
+                        if (work::contains(boundary, point, true) && !work::contains(boundary, point, false))
+                            return true;
+                    }
+            }
+            return false;
+        };
+        return meets_boundary(a, b) || meets_boundary(b, a);
+    };
     ac::CompatibilityPlanner real_compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
     for (uint32_t g = 0; g < plan.groups.size(); ++g) {
         for (uint32_t l = 0; l < plan.groups[g].layers.size(); ++l) {
             slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(
                 &plan.groups[g].layers[l]));
             const travel::LayerTravelChronology chronology = connector.prepare(layer_view, g, l);
-            zones::ZoneContributorInput real_input = owner.input();
-            real_input.print_z = plan.groups[g].layers[l].print_z;
-            zones::TravelZoneView real_view({std::cref(real_contributor)}, real_input);
+            const work::ExPolygons blockers = ac::platter_blockers(owner.context.plugin_storage, owner.plan, g, layer_view.print_z());
+            zones::TravelZoneView real_view({}, owner.input());
             zones::ZonePlanner real_planner(real_compatibility, real_view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, g, layer_view.print_z());
             for (size_t t = 0; t < chronology.travels.size(); ++t) {
                 const travel::PendingTravel &gap = chronology.travels[t];
@@ -3247,25 +3261,42 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
                       RAW_EXTRUSION_ROLE_IS_SUPPORT(gap.target_extrusion.role())))
                     continue;
                 REQUIRE(real_planner.eligible(gap.source, gap.target));
-                REQUIRE_FALSE(real_view.query(t, gap).forbidden_indexes.empty());
+                const size_t before = real_planner.fallbacks();
                 const std::vector<c_point> route = real_planner.path(t, gap);
                 CHECK(route.size() >= 2);
-                if (is_detour(route)) {
+                if (real_planner.fallbacks() == before) {
+                    std::vector<bool> grouped(blockers.size(), false);
+                    std::vector<size_t> queue;
+                    for (size_t i = 0; i < blockers.size(); ++i)
+                        if (blockers[i].contains({gap.source.position.x, gap.source.position.y}, true) ||
+                            blockers[i].contains({gap.target.position.x, gap.target.position.y}, true)) {
+                            grouped[i] = true;
+                            queue.push_back(i);
+                        }
+                    for (size_t seed = 0; seed < queue.size(); ++seed)
+                        for (size_t i = 0; i < blockers.size(); ++i)
+                            if (!grouped[i] && touches(blockers[queue[seed]], blockers[i])) {
+                                grouped[i] = true;
+                                queue.push_back(i);
+                            }
                     work::ExPolygons remaining;
-                    for (size_t index : real_view.query(t, gap).forbidden_indexes)
-                        for (const work::ExPolygon &area : real_view.zone_area(index))
-                            if (!area.contains({gap.source.position.x, gap.source.position.y}) &&
-                                !area.contains({gap.target.position.x, gap.target.position.y}))
-                                remaining.push_back(area);
+                    for (size_t i = 0; i < blockers.size(); ++i)
+                        if (!grouped[i]) remaining.push_back(blockers[i]);
+                    CAPTURE(g, l, t, route.size(), is_detour(route));
                     check_clear(route, remaining, owner.storage);
-                    ++real_support_detours;
+                } else {
+                    ++real_support_fallbacks;
+                    CHECK(route.size() == 2);
                 }
+                if (is_detour(route)) ++real_support_detours;
                 ++real_support_gaps;
             }
         }
     }
     REQUIRE(real_support_gaps > 0);
     REQUIRE(real_support_detours > 0);
+    if (real_support_fallbacks != 0)
+        WARN("Straight support fallbacks: " << real_support_fallbacks);
     slic3r_api::PrintingExtrusion support(nullptr);
     for (Slic3r::Printing::PrintingGroup &group : owner.print.mutable_printing_plan().groups)
         for (Slic3r::Printing::PrintingLayerGroup &layer : group.layers)
@@ -3276,42 +3307,45 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
     REQUIRE(support.valid());
     const Slic3r::Layer &layer = owner.print.object(0).layers()[2];
     REQUIRE(layer.lslices().size() == 2);
-    zones::SupportObstacleContributor contributor;
-    zones::ZoneContributorInput input = owner.input();
-    input.print_z = layer.scaled_print_z();
-    std::vector<zones::TravelZone> exact, between, absent;
-    contributor.contribute(input, exact);
+    // A group 0 query excludes group 1, which is still in the future.
+    REQUIRE(plan.object_instances.size() == 2);
+    plan.groups.resize(2);
+    for (uint32_t instance = 0; instance < 2; ++instance)
+        plan.groups[instance].printing_catalog_ids = {plan.find_or_add_object_instance(owner.print.object(0), instance)};
+    const auto blockers_at = [&](uint32_t group, coord_t z) {
+        return ac::platter_blockers(owner.context.plugin_storage, owner.plan, group, z);
+    };
+    const work::ExPolygons first_group = blockers_at(0, layer.scaled_print_z());
+    REQUIRE(first_group.size() == 2);
+    const work::ExPolygons exact = blockers_at(1, layer.scaled_print_z());
     REQUIRE(exact.size() == 4);
-    input.print_z += Slic3r::scale_i(0.05);
-    contributor.contribute(input, between);
+    const work::ExPolygons between = blockers_at(1, layer.scaled_print_z() + Slic3r::scale_i(0.05));
+    // Compare filled areas at Clipper's tolerance, not exact vertex coordinates or order.
     REQUIRE(between.size() == exact.size());
-    input.print_z = 0;
-    contributor.contribute(input, absent);
-    CHECK(absent.empty());
+    CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, between, exact).empty());
+    CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, exact, between).empty());
+    CHECK(blockers_at(1, 0).empty());
+    work::ExPolygons expected_all;
+    for (uint32_t instance = 0; instance < 2; ++instance) {
+        const c_point shift = owner.print_view.object(0).instance_shift(instance);
+        Slic3r::ExPolygons translated = layer.lslices();
+        for (Slic3r::ExPolygon &slice : translated)
+            slice.translate(Slic3r::Point(shift.x, shift.y));
+        const work::ExPolygons expected = slic3r_api::PluginCommon::clipper::from_expolygon_collection_view(
+            slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&translated)));
+        CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, expected, first_group).empty() == (instance == 0));
+        CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, expected, exact).empty());
+        if (instance == 0)
+            CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, first_group, expected).empty());
+        expected_all.insert(expected_all.end(), expected.begin(), expected.end());
+    }
+    CHECK(slic3r_api::PluginCommon::clipper::diff_ex(owner.context.plugin_storage, exact, expected_all).empty());
     // The roof replaces two pillar components at the first layer above the pillars.
-    std::vector<zones::TravelZone> roof_exact, below_roof;
-    input.print_z = owner.print.object(0).layers()[10].scaled_print_z();
-    contributor.contribute(input, roof_exact);
-    input.print_z -= Slic3r::scale_i(0.1);
-    contributor.contribute(input, below_roof);
+    const coord_t roof_z = owner.print.object(0).layers()[10].scaled_print_z();
+    const work::ExPolygons roof_exact = blockers_at(1, roof_z);
+    const work::ExPolygons below_roof = blockers_at(1, roof_z - Slic3r::scale_i(0.1));
     REQUIRE(roof_exact.size() == 2);
     REQUIRE(below_roof.size() == 4);
-    for (size_t z = 0; z < exact.size(); ++z) {
-        CHECK(exact[z].begin == 0);
-        CHECK(exact[z].end == SIZE_MAX);
-        CHECK(exact[z].scope.extruder == EXTRUDER_ID_UNKNOWN);
-        CHECK(exact[z].scope.printing_catalog_id == SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE);
-        CHECK(exact[z].scope.support_travels_only);
-        REQUIRE(exact[z].area.front().contour.points == between[z].area.front().contour.points);
-        const Slic3r::Polygon &expected = layer.lslices()[z % 2].contour;
-        const c_point instance_shift = owner.print_view.object(0).instance_shift(z / 2);
-        REQUIRE(exact[z].area.front().contour.points.size() == expected.size());
-        for (size_t p = 0; p < expected.size(); ++p) {
-            CHECK(exact[z].area.front().contour.points[p].x() == expected.points[p].x() + instance_shift.x);
-            CHECK(exact[z].area.front().contour.points[p].y() == expected.points[p].y() + instance_shift.y);
-        }
-    }
-    input.print_z = layer.scaled_print_z();
     const Slic3r::Point minimum = Slic3r::get_extents(layer.lslices()).min;
     const c_point shift = owner.print_view.object(0).instance_shift(0);
     const bool target_object = GENERATE(false, true);
@@ -3334,10 +3368,10 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
     }
     FixedZones domain_contributor;
     if (target_object)
-        for (const zones::TravelZone &zone : exact)
-            if (zone.area.front().contains({gap.target.position.x, gap.target.position.y}))
+        for (const work::ExPolygon &piece : exact)
+            if (piece.contains({gap.target.position.x, gap.target.position.y}))
                 domain_contributor.areas.push_back({zones::ZoneRole::Attractor,
-                    slic3r_api::PluginCommon::clipper::offset_ex(owner.context.plugin_storage, zone.area, -double(Slic3r::scale_i(0.4))),
+                    slic3r_api::PluginCommon::clipper::offset_ex(owner.context.plugin_storage, {piece}, -double(Slic3r::scale_i(0.4))),
                     0, SIZE_MAX, {}});
     for (zones::TravelZone &zone : domain_contributor.areas) {
         zone.source_layer = gap.target.region_island.region(0).layer().handle();
@@ -3349,9 +3383,9 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
         std::swap(gap.source, gap.target);
         std::swap(gap.source_extrusion, gap.target_extrusion);
     }
-    zones::TravelZoneView view({std::cref(contributor), std::cref(domain_contributor)}, input);
+    zones::TravelZoneView view({std::cref(domain_contributor)}, owner.input());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
-    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 1, layer.scaled_print_z());
     REQUIRE(planner.eligible(gap.source, gap.target));
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(result.size() > 2);
@@ -3359,26 +3393,25 @@ TEST_CASE("Support obstacles retain other components and catalog instances", "[p
     // The platter exit wins because the score counts travel through the endpoint piece three times.
     CHECK(planner.domain_routes() == 0);
     work::ExPolygons obstacles;
-    for (const zones::TravelZone &zone : exact)
-        if (!zone.area.front().contains({gap.target.position.x, gap.target.position.y}) &&
-            !zone.area.front().contains({gap.source.position.x, gap.source.position.y}))
-            obstacles.push_back(zone.area.front());
+    for (const work::ExPolygon &piece : exact)
+        if (!piece.contains({gap.target.position.x, gap.target.position.y}, true) &&
+            !piece.contains({gap.source.position.x, gap.source.position.y}, true))
+            obstacles.push_back(piece);
     REQUIRE(obstacles.size() == (target_object ? 3 : 4));
     check_clear(result, obstacles, owner.storage);
-    gap.source_extrusion = gap.target_extrusion = slic3r_api::PrintingExtrusion(nullptr);
-    CHECK(view.query(1, gap).forbidden_indexes.empty());
-    const std::vector<c_point> platter_only = planner.path(1, gap);
-    REQUIRE(platter_only.size() > 2);
-    CHECK(planner.fallbacks() == 0);
-    check_clear(platter_only, obstacles, owner.storage);
-    // Removing a catalog entry must not create zones for its still-existing object instance.
-    REQUIRE(plan.object_instances.size() == 2);
-    plan.object_instances.pop_back();
-    std::vector<zones::TravelZone> catalog_only;
-    contributor.contribute(input, catalog_only);
-    CHECK(catalog_only.size() == 2);
+    // The warm layer and zone caches leave the third check for the fresh platter collection.
+    zones::ZonePlanner fresh(compatibility, view, owner.settings(), true, &owner.context, owner.print_view,
+        owner.cache, owner.plan, 1, layer.scaled_print_z());
     owner.checks = 0;
-    owner.cancel_at = 2;
-    CHECK_THROWS_AS(contributor.contribute(input, catalog_only), slic3r_api::PluginCancelled);
+    owner.cancel_at = 3;
+    std::vector<c_point> resumed;
+    CHECK_THROWS_AS(resumed = fresh.path(1, gap), slic3r_api::PluginCancelled);
+    CHECK(resumed.empty());
+    owner.cancel_at = 0;
+    resumed = fresh.path(1, gap);
+    REQUIRE(resumed.size() == result.size());
+    for (size_t i = 0; i < result.size(); ++i)
+        CHECK(work::Point(resumed[i]) == work::Point(result[i]));
+    CHECK(fresh.fallbacks() == 0);
 }
 } // namespace

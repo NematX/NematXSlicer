@@ -66,9 +66,7 @@ containment in sliced material, and publication of those detours in G-code.
 The one-perimeter advanced variation also replays published XY gaps and checks
 source-layer, instance and raw-slice provenance, accepted domain routes and zero
 planner fallbacks. This replay is restricted to the ring scene with top
-avoidance and support disabled; no forbidden-top or support contributors can apply.
-Outside-part support avoidance also runs with the optional support contributor
-disabled: both activations must retain the same platter detours and publish them.
+avoidance and support disabled; no forbidden-top contributor can apply.
 Those bridge assertions apply only to gaps with a source extrusion, identified
 by the provider's ordered-scope traversal. Layer-entry travels have no source
 extrusion and stay straight by design; they are exempt, regardless of Z or point count.
@@ -85,15 +83,11 @@ Contributor activation cases keep the advanced planner selected and round-trip a
 reference with both members and each member disabled independently.
 The printed-top case activates its opt-in member separately, checks its plugin
 declaration, and compares both static-top activation states through STL export.
-The support-obstacle case explicitly selects an overhanging roof with a separate
+The support travel case explicitly selects an overhanging roof with a separate
 post and two instances. It identifies real support travel phases whose endpoint
 chords cross an object slice component containing neither endpoint. Slice copies
-are shifted using the plan catalog. With other contributors disabled, built-in
-platter blockers retain the same support detours with the optional support member
-enabled or disabled; intermediate vertices must occur in both published outputs.
-The contributor's actual zone output is covered only by the unit test
-"Support obstacles retain other components and catalog instances" in test_zone_planner.cpp;
-this E2E comparison does not establish that the enabled contributor emitted zones.
+are shifted using the plan catalog. With the zone contributors disabled,
+the advanced planner uses platter blockers and publishes support detours in G-code.
 The support-crossing matrix selects the compatible provider and independently
 varies crossing-only wipe and avoidance settings. It
 counts support wipe leaves, checks straight versus deviated routes and preserves
@@ -535,25 +529,13 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     CHECK(host.blocked_plugin_activations().count(id) == 1);
 }
 
-// Check optional contributor activation while built-in platter blockers preserve support detours in both activation states and published G-code.
-TEST_CASE("Support platter avoidance persists without the optional support contributor", "[plugins][plugin-e2e][travel-zones]")
+// Check that advanced platter routing publishes support detours and preserves the legacy extrusion volume.
+TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plugin-e2e][travel-zones]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    const char *id = "layer_extrusion_edit.travel.advanced.zones.support_obstacles";
-    const Plugin *plugin = host.get_plugin(id);
-    REQUIRE(plugin != nullptr);
-    CHECK(plugin->get_id() == id);
-    CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
-    CHECK(plugin->get_priority() == -50);
-    CHECK(plugin->get_exclusive_group().empty());
-    CHECK(plugin->get_used_config_keys().empty());
-    CHECK(plugin->get_defined_config_keys().empty());
-    CHECK(plugin->get_dependencies() == std::vector<std::string>{"layer_extrusion_edit.travel.advanced"});
-    CHECK_FALSE(host.is_plugin_active(id));
-    REQUIRE(host.set_plugin_active(id, true));
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     const std::string selector = Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel");
@@ -569,27 +551,21 @@ TEST_CASE("Support platter avoidance persists without the optional support contr
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false));
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
-    const Result enabled = run_case(config, "support-obstacles-enabled", Scene::Support);
-    REQUIRE(enabled.support_travels > 0);
-    CHECK(enabled.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
-    REQUIRE(host.set_plugin_active(id, false));
-    const Result disabled = run_case(config, "support-obstacles-disabled", Scene::Support);
-    CHECK(disabled.support_travels == enabled.support_travels);
-    CHECK(disabled.volume == Approx(enabled.volume).margin(0.01));
-    REQUIRE(disabled.support_crossings == enabled.support_crossings);
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", false));
+    const Result advanced = run_case(config, "support-platter-advanced", Scene::Support);
+    REQUIRE(advanced.support_travels > 0);
+    CHECK(advanced.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
     size_t observed_detours = 0;
-    for (const std::vector<coord_t> &route : enabled.support_crossings) {
+    for (const std::vector<coord_t> &route : advanced.support_crossings) {
         if (route.size() <= 6) continue;
-        REQUIRE(std::find(enabled.published_detours.begin(), enabled.published_detours.end(), route) != enabled.published_detours.end());
-        REQUIRE(std::find(disabled.published_detours.begin(), disabled.published_detours.end(), route) != disabled.published_detours.end());
+        REQUIRE(std::find(advanced.published_detours.begin(), advanced.published_detours.end(), route) != advanced.published_detours.end());
         ++observed_detours;
     }
     REQUIRE(observed_detours > 0);
-    REQUIRE(host.set_plugin_active(id, true));
     config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-    const Result legacy = run_case(config, "support-obstacles-legacy", Scene::Support);
+    const Result legacy = run_case(config, "support-platter-legacy", Scene::Support);
     CHECK(legacy.support_travels > 0);
-    CHECK(legacy.volume == Approx(enabled.volume).margin(0.01));
+    CHECK(legacy.volume == Approx(advanced.volume).margin(0.01));
 }
 
 // Validate setting coverage and default route parity through text export; ironing is coupled with top avoidance.
@@ -1152,7 +1128,7 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
             traversal.process(view);
             ac::CompatibilityPlanner compatibility(print_view, plan_view, &context, group, view.print_z());
             ac::LayerInputCache cache;
-            const zones::ZoneContributorInput input{print_view, plan_view, context, view.print_z(), cache, chronology.travels};
+            const zones::ZoneContributorInput input{print_view, plan_view, context, cache, chronology.travels};
             zones::DefaultAttractorContributor attractors;
             zones::DefaultForbiddenTopsContributor tops;
             zones::PrintedTopsContributor printed_tops;

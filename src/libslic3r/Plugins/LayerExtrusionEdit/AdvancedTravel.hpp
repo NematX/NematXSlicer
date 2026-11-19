@@ -10,20 +10,21 @@ The layer_extrusion_edit.travel selector honours explicit active provider IDs. I
 ScopeTravelConnector (TravelConnectionHelpers.hpp) to record ordered extrusion
 gaps, then fills them with XY routes from the selected advanced planner.
 Legacy is the planner group's default and the fallback for absent or unknown planner choices.
-The opt-in advanced planner collects active island attractors, forbidden tops and support obstacles.
+The opt-in advanced planner collects active island attractors and forbidden tops.
 Active means present in the host activation set, configured by activated.ini.
 Collection occurs only when the chronology contains an eligible travel after layer entry. The
 layer-entry travel stays straight. The legacy planner owns its worker-local input
 cache; the three boundary contributors share a second cache owned by advanced
-travel, so layer geometry may be copied twice. Support obstacles read slices directly.
+travel, so layer geometry may be copied twice.
 The permanent contributor plugins are non-exclusive no-op members, dependent on
 advanced travel. Its private implementation checks each ID with
 orchestrator_find_plugin before passing its borrowed worker-local computation.
-The four members are island_attractors, forbidden_tops, printed_tops and support_obstacles. When active,
+The three members are island_attractors, forbidden_tops and printed_tops. When active,
 printed_tops replaces forbidden_tops, starting each top after the last arrival
 in its original island rather than at the beginning of the layer.
-Support obstacles forbid separate object components at or below travel Z only
-for travels touching support, using the instances in the plan catalog.
+When an endpoint is outside the part, the planner also collects platter obstacles
+from the current and earlier groups, uniting translated slices before grouping
+the endpoint obstacles.
 Disabling a member
 removes only its zones. The advanced planner groups original endpoint obstacles,
 forms M_a/W_a and M_p/W_p from original and offset masks, and expands only the initial
@@ -54,7 +55,7 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register the two no-op planner choices and declare their exclusive selection group.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
-// Register four independently activated no-op contributors: island_attractors, forbidden_tops, printed_tops and support_obstacles.
+// Register three independently activated no-op contributors: island_attractors, forbidden_tops and printed_tops.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 }}}

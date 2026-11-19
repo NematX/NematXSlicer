@@ -31,7 +31,7 @@ three times and keeping the first route on ties.
 The view owns zones and cached unions; returned references remain valid until
 its destruction. Ids identify applicable zone-index sets within this view only.
 Keep run_context and its storage alive for queries; use one view per worker.
-    ZoneContributorInput input{print, plan, context, z, cache, chronology.travels};
+    ZoneContributorInput input{print, plan, context, cache, chronology.travels};
     TravelZoneView zones(contributors, input);
     const ActiveZones &active = zones.query(t, chronology.travels[t]);
 */
@@ -64,8 +64,6 @@ struct ZoneScope
     extruder_index_t extruder = EXTRUDER_ID_UNKNOWN;
     // SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE matches any instance; otherwise either endpoint must match.
     uint32_t printing_catalog_id = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
-    // When true, at least one endpoint PE must have a support role.
-    bool support_travels_only = false;
 };
 
 struct TravelZone
@@ -88,7 +86,6 @@ struct ZoneContributorInput
     const Print &print;
     const PrintingPlan &plan;
     const plugin_run_context &run_context;
-    coord_t print_z;
     AvoidCrossing::LayerInputCache &layer_inputs;
     const std::vector<PendingTravel> &travels;
 };

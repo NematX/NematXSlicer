@@ -786,8 +786,8 @@ Planner members expose selection; the advanced provider performs the routing its
 A dated zone has an attractor or forbidden role, polygon geometry in platter XY
 coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
 means an open end for the rest of the layer. Scope can restrict the tool, require
-either endpoint to match an instance in the plan catalog, or require either
-endpoint extrusion to be support. An attractor is an original source slice;
+either endpoint to match an instance in the plan catalog, or do both.
+An attractor is an original source slice;
 the planner later removes Z3 from the active attractor union to build M_a, then
 builds one withdrawn W_a component for each M_a component. A fixed bed_shape
 contour supplies M_p and W_p. M_a and M_p control endpoint admission and
@@ -824,10 +824,6 @@ Contributors are independently activated plugins under
 - `printed_tops` is opt-in and replaces `forbidden_tops` when active. It uses the
   same top components, but starts each after the last target arrival in its
   original island; a top without such an arrival is omitted.
-- `support_obstacles` is opt-in. It copies separate object slice components from
-  the layer at the group's Z or just below it, shifted for every instance in the
-  plan catalog. These whole-layer forbidden zones apply only to travels touching
-  support, regardless of endpoint instance or tool.
 
 Activation is global through the plugin activation set, configured by
 `activated.ini`, not a per-region contributor setting. The provider checks each
@@ -858,8 +854,11 @@ on a border.
    layer is in-part. Regionless endpoints and auxiliary layers (support, raft,
     skirt, brim, tower) are outside-part. Keep the active original forbidden
     components and, when either endpoint is outside-part, the translated
-    `platter_blockers` components of the union of translated slices at the
-    layer-group Z or below as separate pieces. The
+    `platter_blockers` components as separate pieces. This collection reads only
+    groups 0 through the current group, never future groups. It selects each
+    instance's last normal layer strictly below the group Z plus `SCALED_EPSILON`,
+    translates the slices to platter coordinates and unites them before deciding
+    which obstacles contain travel endpoints. The
     synthetic wipe tower is not a blocker. For each endpoint, group the pieces
     containing it (including their borders) with all pieces joined transitively
     by overlap or contact. Try omitting neither group, the source group, the

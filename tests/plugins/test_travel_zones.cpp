@@ -82,7 +82,7 @@ struct ZoneTestInput
     // Return borrowed input valid while this local owner remains alive.
     zones::ZoneContributorInput input()
     {
-        return {print_view, plan_view, context, Slic3r::scale_i(0.2), cache,
+        return {print_view, plan_view, context, cache,
                 chronology.travels};
     }
 };
@@ -366,7 +366,6 @@ TEST_CASE("Default travel zones publish raw slices and excluded tops", "[plugins
         CHECK(zone.end == SIZE_MAX);
         CHECK(zone.role == zones::ZoneRole::Forbidden);
         CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
-        CHECK_FALSE(zone.scope.support_travels_only);
         check_shifted_area(zone.area, {top}, shifts[instance]);
     }
     // Keep valid layer/instance targets but move them outside every original island.
@@ -381,11 +380,9 @@ TEST_CASE("Default travel zones publish raw slices and excluded tops", "[plugins
     REQUIRE(excluded.size() == 2 * expected.to_avoid.size());
     for (const zones::TravelZone &zone : masks) {
         CHECK(zone.role == zones::ZoneRole::Attractor);
-        CHECK_FALSE(zone.scope.support_travels_only);
     }
     for (const zones::TravelZone &zone : excluded) {
         CHECK(zone.role == zones::ZoneRole::Forbidden);
-        CHECK_FALSE(zone.scope.support_travels_only);
     }
     for (size_t instance = 0; instance < 2; ++instance) {
         const uint32_t id = owner.chronology.travels[instance * 5].target.printing_catalog_id;
@@ -396,7 +393,6 @@ TEST_CASE("Default travel zones publish raw slices and excluded tops", "[plugins
             const zones::TravelZone &zone = masks[instance * slices.size() + slice];
             CHECK(zone.scope.extruder == EXTRUDER_ID_UNKNOWN);
             CHECK(zone.scope.printing_catalog_id == id);
-            CHECK_FALSE(zone.scope.support_travels_only);
             const travel::TravelEndpoint &first_target = owner.chronology.travels[instance * 5].target;
             const bool first = slices[slice].contains({first_target.position.x - shifts[instance].x,
                                                       first_target.position.y - shifts[instance].y});
@@ -497,15 +493,11 @@ TEST_CASE("Travel zone scope changes ids without a date event", "[plugins][trave
     ZoneTestInput owner;
     FixedContributor contributor;
     contributor.zones.push_back({zones::ZoneRole::Attractor, rectangle(0, 100), 0, SIZE_MAX,
-                                 {1, 42, true}});
+                                 {1, 42}});
     zones::TravelZoneView view({std::cref(contributor)}, owner.input());
-    Slic3r::Printing::PrintingExtrusion support;
-    support.sregion_island_role = Slic3r::ExtrusionRole::SupportMaterial;
     travel::PendingTravel pending;
     pending.extruder_id = 1;
     pending.source.printing_catalog_id = 42;
-    pending.source_extrusion = slic3r_api::PrintingExtrusion(
-        reinterpret_cast<printing_extrusion_handle *>(&support));
     const zones::ActiveZones &matching = view.query(0, pending);
     REQUIRE_FALSE(matching.attractors.empty());
     pending.extruder_id = 0;
@@ -516,11 +508,6 @@ TEST_CASE("Travel zone scope changes ids without a date event", "[plugins][trave
     pending.source.printing_catalog_id = 8;
     CHECK(&view.query(1, pending) == &not_matching);
     pending.target.printing_catalog_id = 42;
-    CHECK(&view.query(1, pending) == &matching);
-    pending.source_extrusion = slic3r_api::PrintingExtrusion(nullptr);
-    CHECK(&view.query(1, pending) == &not_matching);
-    pending.target_extrusion = slic3r_api::PrintingExtrusion(
-        reinterpret_cast<printing_extrusion_handle *>(&support));
     CHECK(&view.query(1, pending) == &matching);
     CHECK(view.union_builds() == 1);
 }

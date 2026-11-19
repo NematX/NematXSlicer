@@ -18,21 +18,21 @@ collection. The view keeps the run context for cancellation and storage-backed
 polygon operations.
 
 Dates and scope are separate: crossing an event changes the dated active set,
-while tool, instance and support filtering can change the applicable set even
+while tool and instance filtering can change the applicable set even
 without an event. Sorted applicable indexes key stable cached unions of attractors
 and ids; forbidden indexes remain available for the planner's later selection.
 Only a completed attractor union is published, so cancellation cannot cache partial areas.
 
     TravelZoneView: collect zones, validate dates and sort start/end events
     query: advance events, filter scopes, reuse or build the union of attractors
-        applies: match tool, either instance and either support endpoint
+        applies: match the tool and either endpoint instance
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
 
 namespace {
 
-// Test scope against borrowed endpoint identities and PE roles without inspecting or changing geometry.
+// Test scope against the travel tool and endpoint instances without inspecting geometry.
 bool applies(const ZoneScope &scope, const PendingTravel &travel);
 
 bool applies(const ZoneScope &scope, const PendingTravel &travel)
@@ -43,12 +43,7 @@ bool applies(const ZoneScope &scope, const PendingTravel &travel)
         scope.printing_catalog_id != travel.source.printing_catalog_id &&
         scope.printing_catalog_id != travel.target.printing_catalog_id)
         return false;
-    if (!scope.support_travels_only)
-        return true;
-    return (travel.source_extrusion.valid() &&
-            RAW_EXTRUSION_ROLE_IS_SUPPORT(travel.source_extrusion.role())) ||
-           (travel.target_extrusion.valid() &&
-            RAW_EXTRUSION_ROLE_IS_SUPPORT(travel.target_extrusion.role()));
+    return true;
 }
 
 } // namespace

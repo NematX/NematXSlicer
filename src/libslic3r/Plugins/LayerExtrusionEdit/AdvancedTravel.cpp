@@ -52,15 +52,13 @@ combination competes by length, with length inside any endpoint group counted
 three times. On ties the first combination wins. The planner counts only the
 winning route, or counts a straight fallback if none passes.
 The planner borrows this layer group's plan, index and Z to cache those slices.
-Support obstacles are opt-in whole-layer object components for travels touching
-support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
 selection and global contributor activation. Active means present in the host
 activation set, configured by activated.ini. Computation objects are worker-local;
 the legacy planner owns its input cache. The private implementation checks each ID
 with orchestrator_find_plugin. Active contributors share
 a second input cache owned by advanced travel for boundary geometry and routing settings, so a layer
-can be copied twice. Support obstacles copy slices directly without that cache.
+can be copied twice.
 The incoming layer-entry travel has no source extrusion and remains straight.
 The connector inserts travels, interpolates Z and updates flags and progress.
 The plan owns all borrowed extrusions throughout both phases; no chronology or
@@ -68,14 +66,14 @@ planner survives the callback. Cancellation and routing errors propagate.
 
     register_advanced_travel_plugin: register the permanent provider
     register_advanced_travel_planners: register two no-op selection members and their group
-    register_advanced_travel_contributors: register four non-exclusive no-op zone members
+    register_advanced_travel_contributors: register three non-exclusive no-op zone members
     setup_impl: reset and allocate connector summaries
     setup_run_impl: publish this layer group's summary
     run_impl: own the chronology and planner for one worker callback
         |-- ScopeTravelConnector::prepare: record ordered gaps and snap seams
         |-- orchestrator_select_plugin: resolve the selected planner
         |-- eligibility guard: evaluate ZonePlanner::eligible without building zones
-        |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
+        |-- TravelZoneView: collect active attractors and forbidden tops when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
             `-- ZonePlanner::path: group endpoint obstacles and score accepted routes
@@ -92,7 +90,7 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register permanent no-op planner choices and their selector; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
-// Register four permanent no-op zone contributors, including support obstacles; allocation errors propagate and host rejections are logged.
+// Register three permanent no-op zone contributors; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 namespace {
@@ -105,7 +103,6 @@ const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.adv
 const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
-const char *const k_support_obstacles_id = "layer_extrusion_edit.travel.advanced.zones.support_obstacles";
 const char *const k_planner_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
 
 class ContributorChoice : public PluginBase
@@ -342,12 +339,11 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     }
     // The contributors share this cache; the legacy planner owns its separate cache.
     AvoidCrossing::LayerInputCache inputs;
-    const zones::ZoneContributorInput input{print, plan, *run_ctx, layer_group.print_z(),
+    const zones::ZoneContributorInput input{print, plan, *run_ctx,
                                           inputs, chronology.travels};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
     const zones::PrintedTopsContributor printed_tops;
-    const zones::SupportObstacleContributor support_obstacles;
     std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
     if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
         active.push_back(std::cref(attractors));
@@ -355,8 +351,6 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
         active.push_back(std::cref(printed_tops));
     else if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
         active.push_back(std::cref(tops));
-    if (orchestrator_find_plugin(m_orchestrator, k_support_obstacles_id) != nullptr)
-        active.push_back(std::cref(support_obstacles));
     zones::TravelZoneView view(active, input);
     zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
         plan, ctx->group_idx, layer_group.print_z());
@@ -404,8 +398,5 @@ void register_advanced_travel_contributors(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, attractors.c_instance());
     orchestrator_register_plugin(orchestrator, tops.c_instance());
     orchestrator_register_plugin(orchestrator, printed_tops.c_instance());
-    static ContributorChoice support_obstacles(orchestrator, k_support_obstacles_id, "Object obstacles for support travels",
-        "Avoids separate object slice components at or below travel Z for travels touching support.");
-    orchestrator_register_plugin(orchestrator, support_obstacles.c_instance());
 }
 }}} // namespace slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin

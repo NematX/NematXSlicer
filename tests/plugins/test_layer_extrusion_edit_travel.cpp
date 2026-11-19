@@ -982,7 +982,7 @@ NarrowBridgeResult narrow_bridge_scene()
     REQUIRE(pending.target.position.x == result.target.x());
     REQUIRE(pending.target.position.y == result.target.y());
     avoidance::LayerInputCache cache;
-    const zones::ZoneContributorInput input{print_view, plan_view, context, current.print_z, cache, chronology.travels};
+    const zones::ZoneContributorInput input{print_view, plan_view, context, cache, chronology.travels};
     zones::DefaultAttractorContributor attractors;
     zones::DefaultForbiddenTopsContributor tops;
     zones::TravelZoneView zone_view({std::cref(attractors), std::cref(tops)}, input);
