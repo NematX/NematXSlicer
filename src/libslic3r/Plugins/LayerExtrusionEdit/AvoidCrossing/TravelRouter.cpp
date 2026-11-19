@@ -521,14 +521,14 @@ static bool brute_force_jump(Intersection &first, Intersection &last, const Line
     if (distance < squared) {
         distance = std::sqrt(distance);
         distance += line.a.distance_to(first.point) * weight + point.distance_to(line.b) * weight;
-        if (distance < shortest) { assert(distance > 0); shortest = distance; squared = shortest * shortest; set_intersection(last, b, last.line_idx, point); }
+        if (distance < shortest) { assert(distance >= 0); shortest = distance; squared = shortest * shortest; set_intersection(last, b, last.line_idx, point); }
     }
     distance = Line(a.points[first.line_idx], a.points[(first.line_idx + 1) % a.size()]).distance_to_squared(saved_last.point, &point);
     if (distance < squared) {
         distance = std::sqrt(distance);
         distance += line.a.distance_to(point) * weight + saved_last.point.distance_to(line.b) * weight;
         if (distance < shortest) {
-            last = saved_last; assert(distance > 0); shortest = distance; squared = shortest * shortest;
+            last = saved_last; assert(distance >= 0); shortest = distance; squared = shortest * shortest;
             set_intersection(first, a, first.line_idx, point);
         }
     }
@@ -539,7 +539,7 @@ static bool brute_force_jump(Intersection &first, Intersection &last, const Line
                 distance = std::sqrt(distance);
                 distance += line.a.distance_to(a.points[i]) * weight + point.distance_to(line.b) * weight;
                 if (distance < shortest) {
-                    assert(distance > 0); shortest = distance; squared = shortest * shortest;
+                    assert(distance >= 0); shortest = distance; squared = shortest * shortest;
                     set_intersection(first, a, i, a.points[i]); set_intersection(last, b, j, point);
                 }
             }
@@ -548,7 +548,7 @@ static bool brute_force_jump(Intersection &first, Intersection &last, const Line
                 distance = std::sqrt(distance);
                 distance += line.a.distance_to(point) * weight + b.points[j].distance_to(line.b) * weight;
                 if (distance < shortest) {
-                    assert(distance > 0); shortest = distance; squared = shortest * shortest;
+                    assert(distance >= 0); shortest = distance; squared = shortest * shortest;
                     set_intersection(first, a, i, point); set_intersection(last, b, j, b.points[j]);
                 }
             }
@@ -660,10 +660,10 @@ std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t star
         double distance_end = Line(a.points[first.line_idx], a.points[(first.line_idx + 1) % a.size()]).distance_to_squared(last.point, &from_end);
         distance_end = start.distance_to(from_end) * weight + std::sqrt(distance_end) + last.point.distance_to(end) * weight;
         if (distance_start <= distance_end) {
-            assert(distance_start > 0); shortest = distance_start; squared = shortest * shortest;
+            assert(distance_start >= 0); shortest = distance_start; squared = shortest * shortest;
             set_intersection(last, b, last.line_idx, from_start);
         } else {
-            assert(distance_end > 0); shortest = distance_end; squared = shortest * shortest;
+            assert(distance_end >= 0); shortest = distance_end; squared = shortest * shortest;
             set_intersection(first, a, first.line_idx, from_end);
         }
         // Prune cell pairs by the current score bound before comparing vertex-to-edge bridges.
@@ -692,7 +692,7 @@ std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t star
                                     distance = std::sqrt(distance);
                                     distance += start.distance_to(start_line.a) * weight + point.distance_to(end) * weight;
                                     if (distance < shortest) {
-                                        assert(distance > 0); shortest = distance; squared = shortest * shortest;
+                                        assert(distance >= 0); shortest = distance; squared = shortest * shortest;
                                         cell_distance = size_t(1 + shortest / start_grid.resolution());
                                         set_intersection(first, a, si->second, start_line.a);
                                         set_intersection(last, b, ei->second, point);
@@ -703,7 +703,7 @@ std::optional<IslandBridge> select_island_bridge(Boundary &boundary, size_t star
                                     distance = std::sqrt(distance);
                                     distance += start.distance_to(point) * weight + end_line.a.distance_to(end) * weight;
                                     if (distance < shortest) {
-                                        assert(distance > 0); shortest = distance; squared = shortest * shortest;
+                                        assert(distance >= 0); shortest = distance; squared = shortest * shortest;
                                         cell_distance = size_t(1 + shortest / start_grid.resolution());
                                         set_intersection(first, a, si->second, point);
                                         set_intersection(last, b, ei->second, end_line.a);

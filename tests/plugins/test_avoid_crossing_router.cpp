@@ -55,7 +55,7 @@ failure for endpoints just outside the facing edges, without approach routing.
     |-- epsilon/threshold case: compare near projections and measured budgets
     |-- endpoint-projection case: compare unmatched start and end edge scans
     |-- top-shortcut case: compare fallback routing across retained tops
-    |-- direct bridge cases: build_boundary and select_island_bridge with inside and outside endpoints
+    |-- direct bridge cases: build_boundary and select_island_bridge with inside and outside endpoints and touching islands
     `-- direct boundary cases: build_boundary and route_on_boundary without a router
 
 Successful queries report aggregate counts. Catch retains endpoint context for
@@ -220,6 +220,30 @@ TEST_CASE("Direct island bridge selection handles outside endpoints", "[plugins]
         CHECK(bridge->from == work::Point(scale_i(10.), scale_i(5.)));
         CHECK(bridge->to == work::Point(scale_i(11.), scale_i(5.)));
     }
+}
+
+TEST_CASE("Island bridge fallback joins touching islands at their common point", "[plugins][avoid-crossing-router]")
+{
+    namespace pw = slic3r_api::PluginCommon::polygon_work;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PluginStorage storage;
+    pw::ExPolygons islands;
+    for (const double x : {0., -1.}) {
+        pw::ExPolygon square;
+        square.contour.points = {{scale_i(x), scale_i(x)}, {scale_i(x + 1.), scale_i(x)},
+            {scale_i(x + 1.), scale_i(x + 1.)}, {scale_i(x), scale_i(x + 1.)}};
+        islands.push_back(std::move(square));
+    }
+    port::Boundary boundary;
+    port::build_boundary(reinterpret_cast<storage_handle *>(&storage), std::move(islands), scale_i(0.8), boundary);
+    work::Point start(scale_i(0.2), scale_i(0.2)), end(scale_i(-0.4), scale_i(0.1));
+    port::RouterCounts counts;
+    const std::optional<port::IslandBridge> bridge = port::select_island_bridge(
+        boundary, 0, 1, start, end, 0., counts, []() {});
+    CHECK(counts.brute_force == 1);
+    REQUIRE(bridge.has_value());
+    CHECK(bridge->from == work::Point(0, 0));
+    CHECK(bridge->to == bridge->from);
 }
 
 // Index disjoint islands directly and exercise both weighted bridging and ordinary ring following.
