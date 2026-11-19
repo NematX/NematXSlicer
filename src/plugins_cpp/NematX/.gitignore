@@ -1,0 +1,35 @@
+# ===== Build & packaging =====
+BUILD*
+Build*
+build*
+_build
+blib
+releases/
+/.build/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+
+# ===== Miscellaneous =====
+/src/TAGS
+CMakeUserPresets.json
+**/bad_*
+AGENT*
+Agent*
+agent*
+
+# ===== Resources (plugins) =====
+resources/plugins/*.zip
+resources/plugins/descriptions/
+
+# ===== Hidden files =====
+# Ignore dotfiles and hidden directories, then allow the required files back.
+# Keep this block LAST so the exceptions follow the .* rule.
+.*
+!.github/
+!.github/**
+!.gitignore
+!.gitattributes
+!.gitmodules
+!.clang-format
