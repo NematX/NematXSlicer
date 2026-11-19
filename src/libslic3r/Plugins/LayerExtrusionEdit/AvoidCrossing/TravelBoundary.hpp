@@ -8,9 +8,10 @@
 Travel boundaries for one layer and one tool
 ==========================================
 TravelRouter (TravelRouter.hpp) owns one TravelBoundary to obtain rings along
-which it can detour instead of crossing perimeters. The travel provider in
-AvoidCrossingPerimetersTravel.cpp keeps
-one router per layer and tool. This component builds geometry, not travel paths.
+which it can detour instead of crossing perimeters. Advanced travel's top
+contributors (AdvancedTravel/DefaultZoneContributors.cpp) build one internal
+boundary per layer to read its excluded tops and island growth masks.
+This component builds geometry, not travel paths.
 Tool clipping unions the selected tool's perimeter, sparse fill and solid fill areas.
 The internal boundary follows inner perimeters in one object's coordinates.
 The external boundary follows holes of all objects, placed per instance in print

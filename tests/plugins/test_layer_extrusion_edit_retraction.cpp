@@ -12,6 +12,9 @@ after, while the target owns Unretract in before. Physical tool selection is
 tested separately through CreateToolChange because it belongs to the target
 PrintingToolGroup rather than to a compact scope. Plan-terminal retraction is
 checked separately because it belongs to STEP_EXTRUSION_EDIT.
+Crossing suppression applies to gaps the selected provider keeps direct: every
+straight-travel gap, and advanced-travel gaps outside perimeter avoidance.
+Advanced gaps routed by its zone planner keep their retraction.
 Fixture replacements acquire canonical nodes when they enter the plan, before
 the production stage validates them; plugin execution never repairs these trees.
 */
@@ -43,6 +46,8 @@ using slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope;
 constexpr const char *ENTRY_STATE_PLUGIN =
     "layer_extrusion_edit.entry_state.default";
 constexpr const char *TRAVEL_PLUGIN = "layer_extrusion_edit.travel.default";
+constexpr const char *ADVANCED_TRAVEL_PLUGIN = "layer_extrusion_edit.travel.advanced";
+constexpr const char *ATTRACTORS_PLUGIN = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 
 TEST_CASE("CreateRetraction declares the settings used by crossing decisions",
           "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
@@ -67,14 +72,17 @@ TEST_CASE("CreateRetraction honors interior crossing suppression and its first-l
     const bool crossing_only = GENERATE(false, true);
     const bool first_layer = GENERATE(false, true);
     const bool enforce_first_layer = GENERATE(false, true);
-    CAPTURE(crossing_only, first_layer, enforce_first_layer);
+    // 0: straight travel; 1: advanced travel without avoidance; 2: advanced travel routing the gap.
+    const int travel_mode = GENERATE(0, 1, 2);
+    CAPTURE(crossing_only, first_layer, enforce_first_layer, travel_mode);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         {"only_retract_when_crossing_perimeters", crossing_only ? "1" : "0"},
         {"enforce_retract_first_layer", enforce_first_layer ? "1" : "0"},
         {"retract_before_travel", "0.5"}, {"retract_layer_change", "0"},
-        {"retract_length", "2"}, {"fill_density", "20%"}
+        {"retract_length", "2"}, {"fill_density", "20%"},
+        {"avoid_crossing_perimeters", travel_mode == 2 ? "1" : "0"}, {"avoid_crossing_not_first_layer", "0"}
     });
     Print print;
     Model model;
@@ -110,7 +118,8 @@ TEST_CASE("CreateRetraction honors interior crossing suppression and its first-l
         tool.extrusions.back().printing_catalog_id = catalog_id;
     }
 
-    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN,
+        travel_mode == 0 ? TRAVEL_PLUGIN : ADVANCED_TRAVEL_PLUGIN});
     const OrderedExtrusionScope source(
         find_scope(entity_view(*tool.extrusions.front().root)), scope_property_key());
     const OrderedExtrusionScope target(
@@ -119,12 +128,12 @@ TEST_CASE("CreateRetraction honors interior crossing suppression and its first-l
     std::vector<std::string> incoming;
     collect_transition_events(source.after().readonly(), outgoing);
     collect_transition_events(target.before().readonly(), incoming);
-    const bool expected = !crossing_only || (first_layer && enforce_first_layer);
+    const bool expected = travel_mode == 2 || !crossing_only || (first_layer && enforce_first_layer);
     CHECK(outgoing == (expected ? std::vector<std::string>{"retract"} : std::vector<std::string>{}));
     CHECK(incoming == (expected ? std::vector<std::string>{"unretract"} : std::vector<std::string>{}));
 }
 
-TEST_CASE("CreateRetraction classifies a routed hole crossing without bypassing thresholds or modifiers",
+TEST_CASE("CreateRetraction keeps zone-routed hole crossings without bypassing thresholds or modifiers",
           "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -176,15 +185,19 @@ TEST_CASE("CreateRetraction classifies a routed hole crossing without bypassing 
         tool.extrusions.back().region_island = &region;
         tool.extrusions.back().printing_catalog_id = catalog;
     }
-    const char *travel = avoiding ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN;
-    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, travel});
+    if (avoiding)
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN,
+            ADVANCED_TRAVEL_PLUGIN, ATTRACTORS_PLUGIN});
+    else
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
     const OrderedExtrusionScope source(find_scope(entity_view(*tool.extrusions.front().root)), scope_property_key());
     const OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions.back().root)), scope_property_key());
     std::vector<std::string> outgoing;
     std::vector<std::string> incoming;
     collect_transition_events(source.after().readonly(), outgoing);
     collect_transition_events(target.before().readonly(), incoming);
-    const bool expected = mode == 2 || (mode == 0 && !avoiding);
+    // The direct gap crosses the hole; a zone route keeps its retraction because it is not previewed.
+    const bool expected = mode == 2 || mode == 0;
     CHECK(outgoing == (expected ? std::vector<std::string>{"retract"} : std::vector<std::string>{}));
     CHECK(incoming == (expected ? std::vector<std::string>{"unretract"} : std::vector<std::string>{}));
     if (avoiding)

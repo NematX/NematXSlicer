@@ -421,8 +421,6 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelBoundary.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelRouter.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossing/TravelRouter.hpp
-	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.cpp
-	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp
 	Plugins/LayerExtrusionEdit/CoolingSlowdown.cpp
 	Plugins/LayerExtrusionEdit/CoolingSlowdown.hpp
 	Plugins/LayerExtrusionEdit/CreateRetraction.cpp
@@ -463,7 +461,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/FirstLayerFan.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.hpp
-	Plugins/LayerExtrusionEdit/PerimeterTravelPlanner.hpp
+	Plugins/LayerExtrusionEdit/NoTravelRouting.cpp
+	Plugins/LayerExtrusionEdit/NoTravelRouting.hpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.hpp
 	Plugins/LayerExtrusionEdit/SlowdownSolver.cpp

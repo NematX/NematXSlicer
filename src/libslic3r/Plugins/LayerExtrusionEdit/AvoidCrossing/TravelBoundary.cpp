@@ -20,9 +20,8 @@ it does no routing. Construction must reproduce
 the core AvoidCrossingPerimeters exactly: tests compare rings, lengths and grid
 cells. Float lengths, operation order and truncated coordinates preserve that equality.
 
-The travel provider in AvoidCrossingPerimetersTravel.cpp keeps one router per layer
-and tool. Each router owns one TravelBoundary and builds either boundary lazily
-when a route first needs it:
+Each TravelRouter owns one TravelBoundary for one layer and tool and builds
+either boundary lazily when a route first needs it:
 - Internal: travels within one object instance use object coordinates. Rings lie
   up to 1.5 perimeter spacings inside each island so detours follow inner perimeters.
 - External: travels between objects or instances use print coordinates. Only holes
@@ -108,8 +107,7 @@ and therefore TravelBoundary cannot be copied or moved, and their owners keep st
 addresses. Clipper calls allocate temporary geometry results in the storage passed
 by the caller. Construction retains no handle to print data and does not retain
 the caller's storage pointer. Each worker,
-the provider thread processing one layer group in AvoidCrossingPerimetersTravel.cpp,
-owns its TravelBoundary. Workers may share allocation storage; the plugin host
+such as the Advanced travel thread processing one layer group, owns its TravelBoundary. Workers may share allocation storage; the plugin host
 synchronizes its allocation bookkeeping.
 */
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AvoidCrossing {

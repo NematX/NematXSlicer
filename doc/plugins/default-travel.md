@@ -4,7 +4,14 @@
 layer-extrusion-edit step. It belongs to the `layer_extrusion_edit.travel`
 exclusive group with priority -50 and depends on
 `layer_extrusion_edit.transition_scope.default` and
-`layer_extrusion_edit.entry_state.default`.
+`layer_extrusion_edit.entry_state.default`. It is disabled in the default
+activation set; `layer_extrusion_edit.travel.advanced` is the default provider.
+
+The NoTravel policy below lives in `NoTravelRouting.hpp` and is shared with
+advanced travel, which applies it to every gap outside perimeter avoidance and
+to every zone route that ends in a straight fallback. Inside perimeter avoidance,
+advanced travel's zone planner receives the same sections as forbidden zones
+(see [Advanced travel](extrusions.md#advanced-travel)).
 
 The provider chooses a two-dimensional path for each ordered gap between
 compact extrusion scopes. `ScopeTravelConnector` resolves the endpoints, snaps
@@ -56,8 +63,8 @@ receives repeated consecutive points.
 - NoTravel avoidance is independent of `avoid_crossing_perimeters`. The simple
   provider does not avoid printed perimeters, its detour can cross them, and no
   detour budget applies.
-- Selecting another travel provider keeps that provider's paths unchanged.
-  AdvancedTravel has its own policy and is not used here.
+- Advanced travel applies this same policy outside perimeter avoidance, so
+  both providers avoid NoTravel volumes when `avoid_crossing_perimeters` is off.
 
 When the provider exempts an endpoint component or rejects a candidate, it
 reports one warning per layer-edit execution with both counts. No per-gap
@@ -70,7 +77,8 @@ changes as it does for any other helper volume.
 ## Verification
 
 `[no-travel-routing]` covers simple avoidance, holes, inactive height, endpoint
-components, transformed instances, a rejected candidate, another provider,
-independence from the perimeter setting, G-code publication and replay after
-helper edits. `[plugins][layer-extrusion-edit]`, `[travel-zones]`,
+components, transformed instances and a rejected candidate for both providers,
+independence from the perimeter setting, and G-code publication and replay after
+helper edits for straight travel and for advanced travel with and without
+perimeter avoidance. `[plugins][layer-extrusion-edit]`, `[travel-zones]`,
 `[zone-planner]` and `[clipper-detour]` keep the surrounding behavior checked.

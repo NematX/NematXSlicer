@@ -1611,7 +1611,7 @@ private:
     {
         static const std::vector<const char *> plugin_ids = {
             "layer_extrusion_edit.wipe.default", "layer_extrusion_edit.travel.default",
-            "layer_extrusion_edit.travel.avoid_crossing_perimeters",
+            "layer_extrusion_edit.travel.advanced",
             "extrusion_edit.terminal_retraction.default"};
         return plugin_ids;
     }

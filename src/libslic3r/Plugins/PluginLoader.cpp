@@ -127,7 +127,6 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/SimpleInfillPatterns.hpp"
 #include "libslic3r/Plugins/Infill/SmoothPattern.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel.hpp"
-#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetraction.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CoolingSlowdown.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionLift.hpp"
@@ -842,13 +841,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::LayerExtrusionEdit::DefaultLayerEntryStatePlugin::register_default_layer_entry_state_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.default",
         slic3r_api::LayerExtrusionEdit::DefaultTravelPlugin::register_default_travel_plugin);
-    register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters",
-        slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin::
-            register_avoid_crossing_perimeters_travel_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.advanced",
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_plugin);
-    register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.advanced.planner",
-        slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_planners);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel.advanced.zones",
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::register_advanced_travel_contributors);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.first_layer_flow",

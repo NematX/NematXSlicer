@@ -204,7 +204,7 @@ static const constexpr std::array<std::pair<const char *, const char *>, 15> ADD
     {L("Add support column"),    "support_column"},      // ~ModelVolumeType::SUPPORT_COLUMN
     {L("Add no support zone"),   "no_support_zone"},     // ~ModelVolumeType::NO_SUPPORT_ZONE
     {L("Add support interface column"), "support_interface_column"}, // ~ModelVolumeType::SUPPORT_INTERFACE_COLUMN
-    {L("Add no-travel modifier (routing pending)"), "add_modifier"}, // ~ModelVolumeType::NO_TRAVEL
+    {L("Add no-travel modifier"), "add_modifier"}, // ~ModelVolumeType::NO_TRAVEL
 }};
 static_assert(ADD_VOLUME_MENU_ITEMS.size() == size_t(ModelVolumeType::NO_TRAVEL) + 1,
               "ADD_VOLUME_MENU_ITEMS has one entry per volume type, in enum order");

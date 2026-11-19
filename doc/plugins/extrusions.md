@@ -666,28 +666,33 @@ mutation for the same reasons as in C++.
 ## Travel provider selection
 
 The exclusive group `layer_extrusion_edit.travel` selects how gaps between
-ordered extrusion leaves become travels. The three bundled providers are enabled:
-`layer_extrusion_edit.travel.advanced` (group priority -2, the default),
-`layer_extrusion_edit.travel.avoid_crossing_perimeters` (-1), and
-`layer_extrusion_edit.travel.default` (0, straight lines). Group priority orders
-selector choices independently of execution priority. Presets keep their stored
-provider IDs without migration; storing `layer_extrusion_edit.travel.default`
-keeps straight travel. The advanced default applies when the selector is absent;
-newly initialized configurations receive that ID from the generated definition.
+ordered extrusion leaves become travels. Two providers are bundled:
+`layer_extrusion_edit.travel.advanced` (group priority -2, enabled, the default)
+and `layer_extrusion_edit.travel.default` (0, straight lines, disabled in the
+default activation set). Group priority orders selector choices independently
+of execution priority. Presets keep their stored provider IDs without migration;
+storing `layer_extrusion_edit.travel.default` keeps straight travel. A stored ID
+that names no active provider, such as the removed
+`layer_extrusion_edit.travel.avoid_crossing_perimeters`, selects the active
+provider with the lowest group priority. The advanced default applies when the selector
+is absent; newly initialized configurations receive that ID from the generated
+definition.
 
-The avoidance provider checks `avoid_crossing_perimeters` at both regional
-endpoints. When an endpoint lies on a region boundary, the lookup can miss
-because the point may belong to two regions; the provider then retries at a
-point just inside the leaf, if that point is available. It keeps
-straight travel if either endpoint disables avoidance, has no regional data,
-or has no valid object instance (including global skirt and brim paths).
-With `avoid_crossing_not_first_layer` enabled, it also excludes the target's
-first object layer and every layer at that print Z, including support layers.
-Both points are translated by the target instance shift for routing, and the
-returned route restores the shift and exact original endpoints. The shared
-connector handles insertion, epsilon snapping, Z interpolation and travel flags.
+Advanced travel routes a gap with its zone planner only where perimeter
+avoidance applies; every other gap keeps the direct path, apart from the
+best-effort NoTravel detour of [Default straight travel](default-travel.md).
+`avoid_crossing_perimeters` is read at both regional endpoints by
+`AvoidCrossing::CompatibilityPlanner`. When an endpoint lies on a region boundary,
+the lookup can miss because the point may belong to two regions; the planner then
+retries at a point just inside the leaf, if that point is available. An endpoint
+with a valid object instance that disables avoidance, or has no regional data,
+keeps the gap direct. With `avoid_crossing_not_first_layer` enabled, the target's
+first object layer and every layer at that print Z, including support layers, are
+excluded. The shared connector handles insertion, epsilon snapping, Z
+interpolation and travel flags.
 
-Before routing, `PerimeterCrossing` tests the direct segment against prepared
+Retraction planning uses the same planner to ask whether a direct gap crosses a
+perimeter. `PerimeterCrossing` tests the segment against prepared
 interior boundaries, not extrusion centerlines. When region settings assign
 perimeters or infill to a tool other than the current one, object interiors are
 clipped to the current tool so its material does not ooze over another tool's
@@ -700,68 +705,42 @@ that area. When infill and solid infill share a tool, that tool receives the
 whole, unrestricted `fill_expolygons()` area instead. When the three
 roles agree, the region contributes `raw_slices` to that tool instead.
 Preparation keeps a base version and a copy inset by 1.5 nozzle radii,
-then removes top surfaces from both. The provider tests the inset version.
+then removes top surfaces from both. The crossing test uses the inset version.
 Off-object targets use slices from each object's last normal layer strictly below
 the query Z plus `SCALED_EPSILON`, expanded by 1.5 radii without tool clipping or
 top removal. A target is off object when it has no region or its layer is not a
 normal object layer: support, raft, skirt, brim and wipe-tower geometry qualify.
 The wipe queries at the higher of the layer group's print Z and that Z plus the
-target's inherited Z offset. The legacy planner queries its off-object targets
-with a region (support and per-object brim) at the layer-group Z.
+target's inherited Z offset.
 Real catalog instances in the current and earlier
 printing groups count; later groups and synthetic entries such as wipe towers
 do not supply blockers. These queries use platter coordinates, without removing
 the target's shift. No object below means no crossing. Auxiliary geometry itself
 is not a blocker. A path that does not
-cross those boundaries remains straight.
-
-Within one object instance, the router uses internal rings around inset object
-interiors. Between objects or instances, it uses external rings: holes placed
-at instance positions, rather than outer obstacle outlines. The support boundary
-uses object slices at or below the target height; its purpose is undocumented,
-and it does not route support travels around objects. Detection can see another
-instance while the support routing boundary still belongs to the owner; such a
-crossing may remain straight when no detour is available. Object areas are translated
-by each instance's XY shift; differently rotated instances have separate sliced
-objects. Detection includes finished instances in earlier groups, using their
-last normal layer below the query Z rather than a full height history.
-The compatible planner uses this detection for off-object targets with a region
-and real instance, including support and per-object brim. Its router still uses
-the owner's local geometry. Regionless and global targets keep straight routes,
-but the wipe gate also tests their generated travels against platter blockers.
-The router places endpoints near usable rings, follows
-ring arcs and tries shortcuts. It may keep a direct path and does not guarantee
-a shortest path or the removal of every crossing.
+cross those boundaries is classified as not crossing.
 
 Top surfaces come from `LayerRegionIsland`; shared islands' tops are clipped to
 each region's raw slices. Support has no tops. Crossing preparation removes all
-tops regardless of `avoid_crossing_top`. Routing removes the tops selected by
-that setting after insetting them by half a perimeter spacing, and retains those
-inset areas in `to_avoid` to compare candidate paths. A top band is kept only where there are perimeters and no
-ironing: a detour can follow the top perimeter, while ironing passes over its
-edge. Perimeter spacing is averaged over regions with nonempty raw slices;
-external spacing includes objects at that print Z. Missing spacing falls back
-to the mean nozzle diameter. Departure and arrival placement use the same
-search for a nearby point inside the island.
+tops regardless of `avoid_crossing_top`. The internal `TravelBoundary` removes
+the tops selected by that setting after insetting them by half a perimeter
+spacing, and retains those inset areas in `to_avoid`; advanced travel's top
+contributors publish them as forbidden zones. A top band is kept only where there
+are perimeters and no ironing: a detour can follow the top perimeter, while
+ironing passes over its edge. Perimeter spacing is averaged over regions with
+nonempty raw slices; missing spacing falls back to the mean nozzle diameter.
 
-`avoid_crossing_perimeters_max_detour` limits extra length beyond the direct
-distance, in millimetres or as a percentage of that distance. Zero is unlimited.
-An over-budget route keeps straight travel.
+`avoid_crossing_perimeters_max_detour` limits the extra length of a zone route
+beyond the direct distance, in millimetres or as a percentage of that distance.
+Zero is unlimited. An over-budget route keeps the direct gap.
 
 The implementation is internal to the host, under
-`src/libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/`, not a third-party API.
-Each layer-group worker owns its copied inputs, routers and crossing caches;
-inputs outlive routers, and temporary geometry uses run-context plugin storage.
-
-```text
-AvoidCrossingPerimetersTravel: choose a route for each eligible gap
-|-- LayerInputCache::get: retain target geometry, settings and spacing
-|   `-- build_input: copy public Print, Object and Layer views
-|-- PerimeterCrossing: prepare interiors and test the direct path
-`-- TravelRouter: build boundaries and choose a detour
-    |-- TravelBoundary: retain rings and their search grids
-    `-- build_external_input: copy other objects only when needed
-```
+`src/libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/` and
+`src/libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/`, not a third-party API.
+Each layer-group worker owns its copied inputs and crossing caches, and
+temporary geometry uses run-context plugin storage. `TravelRouter` keeps the
+ring-following operations (`route_on_boundary`, `select_island_bridge`) that the
+zone planner uses; its own `travel_to` reproduces the core router for parity
+tests only and no provider calls it.
 
 ### Advanced travel
 
@@ -774,14 +753,15 @@ index. The chronology also retains the target extrusion owner and tool for
 every traversed pair, including pairs without a new gap. Advanced travel uses
 the chronology directly; it does not keep a second chronology map.
 
-The exclusive group `layer_extrusion_edit.travel.advanced.planner` selects
-`.legacy` (Legacy, priority -1, the default) or `.advanced` (Advanced, 0), using those suffixes
-after the group ID. Legacy uses the same routes as
-`travel.avoid_crossing_perimeters`. The host resolves the selector among active
-members; if only Advanced is active, it selects Advanced. The advanced provider uses
-Legacy when the resolved plugin is null or is not the Advanced member, or when
-Advanced is selected but no gap after layer entry is eligible.
-Planner members expose selection; the advanced provider performs the routing itself.
+Advanced travel always routes with its zone planner; there is no planner
+selector. Each worker slices the layer's NoTravel volumes once. A gap after
+layer entry that perimeter avoidance covers goes to the zone planner. Every other
+gap, and every gap whose zone routing ends in a counted straight fallback, takes
+the shared NoTravel path of `NoTravelRouting.hpp`: the direct gap, or one
+best-effort detour around the NoTravel sections. NoTravel volumes are therefore
+avoided whether `avoid_crossing_perimeters` is on or off. The exemptions and
+rejected detours of that path are reported once per execution, as for straight
+travel.
 
 A dated zone has an attractor or forbidden role, polygon geometry in platter XY
 coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
@@ -800,7 +780,12 @@ applicable zone-index set. The individual attractor and forbidden indexes stay
 available to the planner; no forbidden union is built by the view. Zone
 construction is skipped if there is no eligible gap after layer entry.
 
-Contributors are independently activated plugins under
+NoTravel sections are always published as forbidden zones for the whole layer,
+one per connected section, for every tool and instance; a NoTravel volume is
+their only switch. A section containing an endpoint belongs to that endpoint's
+group, so the planner may omit it like any other endpoint obstacle.
+
+The other contributors are independently activated plugins under
 `layer_extrusion_edit.travel.advanced.zones.`:
 
 - `island_attractors` is active by default. It publishes each original perimeter
@@ -832,7 +817,7 @@ contributor with `orchestrator_find_plugin`. It checks `forbidden_tops` only whe
 `forbidden_tops` is active, while disabling `forbidden_tops` changes nothing when
 `printed_tops` is active. Otherwise, disabling a contributor removes only its
 zones. With `printed_tops` inactive, disabling `forbidden_tops` removes top
-avoidance from Advanced. Legacy routing and its own top avoidance are unchanged.
+avoidance from advanced travel.
 Platter blockers for outside-part travels apply independently of these contributor
 activation switches.
 
@@ -892,8 +877,7 @@ on a border.
    link to the `W_a` point nearest the free endpoint's `W_p` point, then uses a
    platter connector and the reversed platter link. A platter pair connects its
    two reached `W_p` points with the same ring-detour operation. Estimates and
-   construction share all selected attachment points. ZonePlanner never delegates
-   to Legacy.
+   construction share all selected attachment points.
 4. **Validate, then fall back.** Constructed routes retain exact endpoints, stay
    in the `SCALED_EPSILON`-expanded initial platter with `diff_pl` up to
    `SCALED_EPSILON`, and respect the complete-path detour budget. Before attaching
@@ -933,16 +917,17 @@ millimetres or as a percentage of chord length; zero is unlimited. Routing is
 heuristic, not shortest-path search; `blocked` checks obstacles shrunk by
 `SCALED_EPSILON`. Walls thinner than twice that inset can disappear from the
 check. Domains, detours, the reference and the score use original obstacle geometry.
-Platter containment uses the cached expanded contour, and the final fallback remains straight.
+Platter containment uses the cached expanded contour. The planner's final fallback is
+the direct gap; advanced travel then replaces it with the shared NoTravel path.
 
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- ScopeTravelConnector::prepare: record chronology and snap seams
-|-- orchestrator_select_plugin: choose Legacy or Advanced
-|-- eligibility guard: test whether at least one gap can use Advanced
-|-- TravelZoneView: collect active contributors and cache dated unions of attractors
+|-- NoTravel::sections: slice NoTravel volumes at the layer print_z
+|-- eligibility guard: test whether at least one gap can use the zone planner
+|-- TravelZoneView: collect active contributors and NoTravel zones, cache dated unions of attractors
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
-    |-- CompatibilityPlanner::path: use perimeter routing
+    |-- NoTravel::path: ineligible gaps and zone fallbacks
     `-- ZonePlanner::path: group endpoint obstacles and score admissible routes
         |-- is_off_object_layer / platter_blockers: resolve outside-part geometry
         |-- touches: group original pieces by overlap or contact

@@ -105,7 +105,6 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/SimpleInfillPatterns.hpp"
 #include "libslic3r/Plugins/Infill/SmoothPattern.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel.hpp"
-#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetraction.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionLift.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionWipe.hpp"
@@ -913,12 +912,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultTravelPlugin::register_default_travel_plugin(
             orchestrator_handle_value);
-        slic3r_api::LayerExtrusionEdit::AvoidCrossingPerimetersTravelPlugin::
-            register_avoid_crossing_perimeters_travel_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
             register_advanced_travel_plugin(orchestrator_handle_value);
-        slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
-            register_advanced_travel_planners(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin::
             register_advanced_travel_contributors(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::FirstLayerFlowPlugin::register_first_layer_flow_plugin(
@@ -1110,10 +1105,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.first_layer_flow");
         // Register the travel selector before typed configs cache its default; individual tests choose their editor chain.
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.default");
-        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced");
-        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.legacy");
-        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.planner.advanced");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.island_attractors");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel.advanced.zones.forbidden_tops");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.default");
@@ -1262,10 +1254,7 @@ void ensure_plugin_test_runtime_initialized()
         }
         register_exclusive_step_group_ui_fragments(orchestrator);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.default", false);
-        orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false);
-        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.legacy", false);
-        orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.advanced", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false);
         orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false);
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);

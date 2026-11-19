@@ -29,6 +29,8 @@ AdvancedTravel performs thin-wall withdrawal later, after forbidden material is
 removed, so one M component receives one W.
 Support domains include the lower object layer and have no forbidden tops.
 The tops contributor appends Forbidden zones. No contributor replaces out.
+The NoTravel contributor copies sections that its caller already sliced in
+platter coordinates; it reads no layer input and its zones match every instance.
 Static excluded tops apply throughout the layer, one zone per connected ExPolygon so
 endpoint membership ignores only that top. Scope is per instance, not per object.
 Printed tops use the same components, but start after the last target in the
@@ -47,6 +49,7 @@ separate borrowed lower-layer handle.
         |-- LayerInputCache::get: borrow immutable worker-local layer input
         |-- TravelBoundary::init_layer / build_internal: build temporary geometry
         `-- shifted_area: copy local areas into platter coordinates
+    NoTravelContributor::contribute: copy the borrowed NoTravel sections as whole-layer zones
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravel {
@@ -176,6 +179,14 @@ void DefaultForbiddenTopsContributor::contribute(const ZoneContributorInput &inp
 void PrintedTopsContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
 {
     contribute_zones(input, out, true);
+}
+
+void NoTravelContributor::contribute(const ZoneContributorInput &input, std::vector<TravelZone> &out) const
+{
+    for (const polygon_work::ExPolygon &section : m_sections) {
+        throw_if_cancelled(&input.run_context);
+        out.push_back({ZoneRole::Forbidden, {section}, 0, SIZE_MAX, ZoneScope{}});
+    }
 }
 
 }}}

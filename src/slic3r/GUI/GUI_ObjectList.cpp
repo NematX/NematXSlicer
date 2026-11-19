@@ -4381,7 +4381,7 @@ void ObjectList::change_part_type()
         types.emplace_back(ModelVolumeType::BRIM_PATCH);
         names.Add(_L("Brim Blocker"));
         types.emplace_back(ModelVolumeType::BRIM_NEGATIVE);
-        names.Add(_L("NoTravel (routing pending)"));
+        names.Add(_L("NoTravel"));
         types.emplace_back(ModelVolumeType::NO_TRAVEL);
     }
     int selection = 0;

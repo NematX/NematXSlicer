@@ -844,10 +844,13 @@ TEST_CASE("Crossing wipes preserve generated travel starts and absolute retracti
     if (certain)
         run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
             WIPE_PLUGIN, CROSSING_WIPE_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
+    else if (routed)
+        run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
+            WIPE_PLUGIN, ENTRY_STATE_PLUGIN, "layer_extrusion_edit.travel.advanced",
+            "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
     else
         run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, TOOLCHANGE_PLUGIN, RETRACTION_PLUGIN,
-            WIPE_PLUGIN, ENTRY_STATE_PLUGIN, routed ?
-                "layer_extrusion_edit.travel.avoid_crossing_perimeters" : TRAVEL_PLUGIN});
+            WIPE_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
     const slic3r_api::MutableExtrusionEntity source_root = find_scope(entity_view(
         *plan.groups.front().layers.front().tool_groups.front().extrusions.front().root));
     const slic3r_api::MutableExtrusionEntity target_root = find_scope(entity_view(*target_tool.extrusions.back().root));

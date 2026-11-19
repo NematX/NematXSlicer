@@ -51,6 +51,11 @@ prepare's ordered gaps and seam edits before apply writes paths and flags.
 All borrowed views remain within the lifetime of their unchanged plan structure.
 Eligibility checks slice a cube and attach controlled paths to its real region
 island, then evaluate prepared gaps with the compatibility planner's predicate.
+NoTravel checks attach controlled gaps in platter coordinates without regional
+context and run them through straight travel and through advanced travel, whose
+gaps outside perimeter avoidance take the same best-effort NoTravel path.
+The ring scene routes a gap across a hole with advanced travel and its island
+attractors, and checks that the published route stays out of the hole.
 The controlled three-island scene toggles contributor activation with either
 advanced or straight travel selected. Advanced travel may detour its inter-island
 gap because of attractors or forbidden tops; layer entry stays straight in every case.
@@ -78,8 +83,7 @@ constexpr const char *ENTRY_STATE_PLUGIN = "layer_extrusion_edit.entry_state.def
 constexpr const char *TRANSITION_SCOPE_PLUGIN =
     "layer_extrusion_edit.transition_scope.default";
 constexpr const char *TRAVEL_PLUGIN = "layer_extrusion_edit.travel.default";
-constexpr const char *AVOID_CROSSING_TRAVEL_PLUGIN =
-    "layer_extrusion_edit.travel.avoid_crossing_perimeters";
+constexpr const char *ADVANCED_TRAVEL_PLUGIN = "layer_extrusion_edit.travel.advanced";
 
 /* Publish all connector summaries before direct preparation; views borrow the unchanged plan and invalid setup throws. */
 void setup_connector(Print &print,
@@ -261,7 +265,7 @@ void setup_connector(Print &print,
     }
 }
 
-TEST_CASE("Avoid-crossing travel keeps the straight fallback without regional context",
+TEST_CASE("Advanced travel keeps the straight fallback without regional context",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -280,7 +284,7 @@ TEST_CASE("Avoid-crossing travel keeps the straight fallback without regional co
     append_extrusion(tool, make_path(
         Point(scale_i(3.), 0), Point(scale_i(4.), 0)));
 
-    run_travel_plugins(print, AVOID_CROSSING_TRAVEL_PLUGIN);
+    run_travel_plugins(print, ADVANCED_TRAVEL_PLUGIN);
 
     REQUIRE(travel_count(print) == 1);
     const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope scope(
@@ -342,7 +346,7 @@ NoTravelResult controlled_no_travel(Print &print, const Points &endpoints,
         result.routes.push_back(std::move(route));
     }
     for (const auto &message : Orchestrator::instance().consume_plugin_messages())
-        if (message.plugin_id == TRAVEL_PLUGIN) result.warnings.push_back(message.message);
+        if (message.plugin_id == provider) result.warnings.push_back(message.message);
     return result;
 }
 
@@ -375,10 +379,11 @@ TriangleMesh no_travel_frame(double size, double width, double height)
 }
 } // namespace
 
-TEST_CASE("Simple travel avoids NoTravel sections without perimeter settings", "[plugins][travel][no-travel-routing]")
+TEST_CASE("Travel avoids NoTravel sections without perimeter settings", "[plugins][travel][no-travel-routing]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool avoid_perimeters = GENERATE(false, true);
+    const char *provider = GENERATE(TRAVEL_PLUGIN, ADVANCED_TRAVEL_PLUGIN);
     Model model;
     auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
     object->add_instance();
@@ -388,7 +393,7 @@ TEST_CASE("Simple travel avoids NoTravel sections without perimeter settings", "
     Print print;
     print.apply(model, config);
     const Points endpoints{Point::new_scale(2., 10.), Point::new_scale(22., 10.)};
-    const auto result = controlled_no_travel(print, endpoints);
+    const auto result = controlled_no_travel(print, endpoints, provider);
     REQUIRE(result.routes.size() == 1);
     const auto &path = result.routes.front();
     REQUIRE(path.size() > 2);
@@ -396,15 +401,12 @@ TEST_CASE("Simple travel avoids NoTravel sections without perimeter settings", "
     CHECK(path.last_point() == endpoints.back());
     CHECK(intersection_pl(path, ExPolygon(rectangle(10.001, 4.001, 3.998, 11.998))).empty());
     CHECK(result.warnings.empty());
-
-    // A different explicitly chosen provider is not wrapped or replaced.
-    const auto other = controlled_no_travel(print, endpoints, AVOID_CROSSING_TRAVEL_PLUGIN);
-    CHECK(other.routes.front().points == endpoints);
 }
 
-TEST_CASE("Simple travel keeps direct paths without an applicable section", "[plugins][travel][no-travel-routing]")
+TEST_CASE("Travel keeps direct paths without an applicable NoTravel section", "[plugins][travel][no-travel-routing]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *provider = GENERATE(TRAVEL_PLUGIN, ADVANCED_TRAVEL_PLUGIN);
     Model model;
     auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
     object->add_instance();
@@ -417,14 +419,15 @@ TEST_CASE("Simple travel keeps direct paths without an applicable section", "[pl
     Print print;
     print.apply(model, DynamicPrintConfig::full_print_config());
     const Points endpoints{Point::new_scale(3., 10.), Point::new_scale(17., 10.)};
-    const auto result = controlled_no_travel(print, endpoints);
+    const auto result = controlled_no_travel(print, endpoints, provider);
     CHECK(result.routes.front().points == endpoints);
     CHECK(result.warnings.empty());
 }
 
-TEST_CASE("Simple travel exempts endpoint components but still avoids other components", "[plugins][travel][no-travel-routing]")
+TEST_CASE("Travel exempts endpoint NoTravel components but still avoids other components", "[plugins][travel][no-travel-routing]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *provider = GENERATE(TRAVEL_PLUGIN, ADVANCED_TRAVEL_PLUGIN);
     Model model;
     auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
     object->add_instance();
@@ -435,7 +438,7 @@ TEST_CASE("Simple travel exempts endpoint components but still avoids other comp
     print.apply(model, DynamicPrintConfig::full_print_config());
     const Points endpoints{Point::new_scale(2., 10.), Point::new_scale(22., 10.),
                           Point::new_scale(2., 10.), Point::new_scale(22., 10.)};
-    const auto result = controlled_no_travel(print, endpoints);
+    const auto result = controlled_no_travel(print, endpoints, provider);
     REQUIRE(result.warnings.size() == 1); // One summary for both parallel layer runs.
     CHECK(result.warnings.front().find("2 travels exempted") != std::string::npos);
     for (const auto &path : result.routes) {
@@ -444,9 +447,10 @@ TEST_CASE("Simple travel exempts endpoint components but still avoids other comp
     }
 }
 
-TEST_CASE("Simple travel uses transformed volumes and every real instance", "[plugins][travel][no-travel-routing]")
+TEST_CASE("Travel uses transformed NoTravel volumes and every real instance", "[plugins][travel][no-travel-routing]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *provider = GENERATE(TRAVEL_PLUGIN, ADVANCED_TRAVEL_PLUGIN);
     Model model;
     auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
     // Volume rotation makes its XY section [10,14] x [4,16].
@@ -459,7 +463,7 @@ TEST_CASE("Simple travel uses transformed volumes and every real instance", "[pl
     Print print;
     print.apply(model, DynamicPrintConfig::full_print_config());
     const auto result = controlled_no_travel(print, {Point::new_scale(30., 32.), Point::new_scale(30., 52.),
-                                                    Point::new_scale(80., 62.), Point::new_scale(80., 82.)});
+                                                    Point::new_scale(80., 62.), Point::new_scale(80., 82.)}, provider);
     REQUIRE(result.routes.size() == 2);
     for (size_t i = 0; i < 2; ++i) {
         const auto &path = result.routes[i];
@@ -470,9 +474,10 @@ TEST_CASE("Simple travel uses transformed volumes and every real instance", "[pl
     CHECK(result.warnings.empty());
 }
 
-TEST_CASE("Simple travel reports an inadmissible single detour and retains its direct path", "[plugins][travel][no-travel-routing]")
+TEST_CASE("Travel reports an inadmissible NoTravel detour and retains its direct path", "[plugins][travel][no-travel-routing]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *provider = GENERATE(TRAVEL_PLUGIN, ADVANCED_TRAVEL_PLUGIN);
     Model model;
     auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
     object->add_instance();
@@ -482,7 +487,7 @@ TEST_CASE("Simple travel reports an inadmissible single detour and retains its d
     Print print;
     print.apply(model, DynamicPrintConfig::full_print_config());
     const Points endpoints{Point::new_scale(10., 10.), Point::new_scale(22., 10.)};
-    const auto result = controlled_no_travel(print, endpoints);
+    const auto result = controlled_no_travel(print, endpoints, provider);
     CHECK(result.routes.front().points == endpoints);
     REQUIRE(result.warnings.size() == 1);
     CHECK(result.warnings.front().find("1 inadmissible detours") != std::string::npos);
@@ -503,44 +508,23 @@ TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
     CHECK(plugin->get_used_config_keys().empty());
 }
 
-TEST_CASE("Avoid-crossing travel ranks second in the travel group",
-          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
-{
-    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Plugin *plugin = Orchestrator::instance().get_plugin(AVOID_CROSSING_TRAVEL_PLUGIN);
-    REQUIRE(plugin != nullptr);
-    CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
-    CHECK(plugin->get_priority() == -50);
-    CHECK(plugin->get_exclusive_group_priority() == -1);
-    CHECK(plugin->get_exclusive_group() == "layer_extrusion_edit.travel");
-    REQUIRE(plugin->get_dependencies().size() == 2);
-    CHECK(plugin->get_dependencies()[0] == TRANSITION_SCOPE_PLUGIN);
-    CHECK(plugin->get_dependencies()[1] == ENTRY_STATE_PLUGIN);
-
-    const std::vector<Plugin::UsedConfigKey> keys = plugin->get_used_config_keys();
-    REQUIRE(keys.size() == 12);
-    CHECK(std::any_of(keys.begin(), keys.end(), [](const Plugin::UsedConfigKey &key) {
-        return key.key == "avoid_crossing_perimeters" && key.type == RAW_CO_BOOL;
-    }));
-}
-
-// Compare the advanced provider's compatibility settings and its fixed-bed setting with the legacy provider.
+// The advanced provider reads the compatibility planner's routing settings and the fixed bed shape.
 TEST_CASE("Advanced travel exposes routing settings and bed shape",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Plugin *advanced = Orchestrator::instance().get_plugin("layer_extrusion_edit.travel.advanced");
-    Plugin *avoidance = Orchestrator::instance().get_plugin(AVOID_CROSSING_TRAVEL_PLUGIN);
+    Plugin *advanced = Orchestrator::instance().get_plugin(ADVANCED_TRAVEL_PLUGIN);
     REQUIRE(advanced != nullptr);
-    REQUIRE(avoidance != nullptr);
-    CHECK(advanced->get_id() == "layer_extrusion_edit.travel.advanced");
+    CHECK(advanced->get_id() == ADVANCED_TRAVEL_PLUGIN);
     CHECK(advanced->get_step() == STEP_LAYER_EXTRUSION_EDIT);
     CHECK(advanced->get_priority() == -50);
     CHECK(advanced->get_exclusive_group_priority() == -2);
     CHECK(advanced->get_exclusive_group() == "layer_extrusion_edit.travel");
-    CHECK(advanced->get_dependencies() == avoidance->get_dependencies());
+    CHECK(advanced->get_dependencies() == std::vector<std::string>{TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN});
     const std::vector<Plugin::UsedConfigKey> actual = advanced->get_used_config_keys();
-    const std::vector<Plugin::UsedConfigKey> expected = avoidance->get_used_config_keys();
+    namespace avoidance = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
+    std::vector<raw_used_config_key> expected(size_t(avoidance::CompatibilityPlanner::used_config_keys(nullptr)));
+    avoidance::CompatibilityPlanner::used_config_keys(expected.data());
     REQUIRE(actual.size() == expected.size() + 1);
     for (size_t idx = 0; idx < expected.size(); ++idx) {
         CHECK(actual[idx].key == expected[idx].key);
@@ -548,6 +532,9 @@ TEST_CASE("Advanced travel exposes routing settings and bed shape",
         CHECK(actual[idx].container_type == expected[idx].container_type);
         CHECK(actual[idx].option_preset_type == expected[idx].option_preset_type);
     }
+    CHECK(std::any_of(actual.begin(), actual.end(), [](const Plugin::UsedConfigKey &key) {
+        return key.key == "avoid_crossing_perimeters" && key.type == RAW_CO_BOOL;
+    }));
     CHECK(actual.back().key == "bed_shape");
     CHECK(actual.back().type == RAW_CO_VECTOR_POINT);
     CHECK(actual.back().container_type == RAW_CONTAINER_TYPE_NONE);
@@ -610,7 +597,7 @@ TEST_CASE("AvoidCrossingPerimeters crossing test rejects contained travels",
     CHECK(detector.can_cross_perimeter(leaving, true));
 }
 
-TEST_CASE("Avoid-crossing travel routes around a hole between enabled endpoints",
+TEST_CASE("Advanced travel routes around a hole between enabled endpoints",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -677,7 +664,8 @@ TEST_CASE("Avoid-crossing travel routes around a hole between enabled endpoints"
     append_extrusion(tool, make_path(
         target, Point(target.x() + scale_i(1.), target.y())), region_island, catalog_id);
 
-    run_travel_plugins(print, AVOID_CROSSING_TRAVEL_PLUGIN);
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN, ADVANCED_TRAVEL_PLUGIN,
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
 
     REQUIRE(travel_count(print) == 1);
     const ExtrusionEntity &scope = *tool.extrusions[snap_closed_source ? 2 : 1].root;
@@ -687,17 +675,14 @@ TEST_CASE("Avoid-crossing travel routes around a hole between enabled endpoints"
     CHECK(travel.polyline_ref().size() > 2);
     CHECK(travel.first_point() == source);
     CHECK(travel.last_point() == target);
-    AvoidCrossingPerimeters oracle;
-    oracle.init_layer(*built_layer);
-    Polyline expected = oracle.travel_to(
-        {*built_layer, source - shift, shift, extruder_index_t(0), 0., false}, target - shift);
-    for (Point &point : expected.points)
-        point += shift;
-    expected.points.front() = source;
-    expected.points.back() = target;
-    REQUIRE(travel.polyline_ref().size() == expected.size());
-    for (size_t idx = 0; idx < expected.size(); ++idx)
-        CHECK(travel.polyline_ref().get_point(idx) == expected.points[idx]);
+    // The hole spans [10, 20] in both axes of the object; the route must stay out of its interior.
+    const ExPolygon hole(Polygon(Points{box.min + Point(scale_i(10.1), scale_i(10.1)) + shift,
+        box.min + Point(scale_i(19.9), scale_i(10.1)) + shift, box.min + Point(scale_i(19.9), scale_i(19.9)) + shift,
+        box.min + Point(scale_i(10.1), scale_i(19.9)) + shift}));
+    Polyline route;
+    for (size_t idx = 0; idx < travel.polyline_ref().size(); ++idx)
+        route.points.push_back(travel.polyline_ref().get_point(idx));
+    CHECK(intersection_pl(route, hole).empty());
     if (snap_closed_source) {
         const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope snapped =
             ordered_scope(*tool.extrusions[1].root);
@@ -1079,8 +1064,6 @@ NarrowBridgeResult narrow_bridge_scene()
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "1"},
@@ -1184,7 +1167,7 @@ NarrowBridgeResult narrow_bridge_scene()
 
     print.pipeline_progress().reset();
     run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
+        "layer_extrusion_edit.travel.advanced",
         "layer_extrusion_edit.travel.advanced.zones.island_attractors",
         "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
     const slic3r_api::ExtrusionEntity route = ordered_scope(*tool.extrusions[1].root).travel();
@@ -1240,8 +1223,6 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), advanced ? "layer_extrusion_edit.travel.advanced" : TRAVEL_PLUGIN);
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -1297,7 +1278,7 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     print.pipeline_progress().reset();
     ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
         TRAVEL_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
+        "layer_extrusion_edit.travel.advanced",
         "layer_extrusion_edit.travel.advanced.zones.island_attractors",
         "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", (contributors & 1) != 0));
@@ -1327,8 +1308,6 @@ TEST_CASE("Printed tops start avoiding a third island only after its last arriva
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -1384,7 +1363,7 @@ TEST_CASE("Printed tops start avoiding a third island only after its last arriva
     }
     print.pipeline_progress().reset();
     ScopedActivePlugins active({TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN,
-        "layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.travel.advanced.planner.advanced",
+        "layer_extrusion_edit.travel.advanced",
         "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", static_tops));
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", printed_tops));

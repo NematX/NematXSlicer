@@ -4,8 +4,10 @@
 #include "AdvancedTravel.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
 #include <stdexcept>
+#include <string>
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -13,6 +15,7 @@
 #include "AvoidCrossing/CompatibilityPlanner.hpp"
 #include "AdvancedTravel/DefaultZoneContributors.hpp"
 #include "AdvancedTravel/ZonePlanner.hpp"
+#include "NoTravelRouting.hpp"
 #include "TravelConnectionHelpers.hpp"
 
 /*
@@ -20,13 +23,18 @@ Advanced travel supplies XY routes between ordered extrusions to the layer
 editor. Setup allocates connector summaries, and setup_run fills one summary per
 layer group before the host's worker barrier. Each run first prepares a chronology:
 an ordered record of borrowed extrusion gaps with their seams already snapped.
-It selects a planner through the advanced planner group, falling back to
-legacy for absent or unknown selections. Legacy preserves perimeter
-routing. The opt-in advanced planner checks whether any gap is eligible, then
-collects active attractors and forbidden tops and routes in chronology order.
+It then slices the layer's NoTravel volumes once (NoTravelRouting.hpp).
+A gap is routed by the zone planner when perimeter avoidance applies to it
+(ZonePlanner::eligible); every other gap, and every zone route that ends in a
+straight fallback, takes the shared NoTravel path: direct, or one best-effort
+detour around the NoTravel sections. Disabling avoid_crossing_perimeters therefore
+keeps NoTravel avoidance.
+The zone planner first checks whether any gap is eligible, then collects active
+attractors, forbidden tops and the NoTravel sections, and routes in chronology order.
 Printed tops are opt-in and replace static forbidden tops when active; their dates
 start after the last arrival in each original island. Attractors publish raw
-perimeter slices dated by source-or-target membership. The planner builds a fixed
+perimeter slices dated by source-or-target membership. NoTravel sections are
+forbidden for the whole layer, for every tool and instance. The planner builds a fixed
 initial platter from the scaled bed_shape contour, groups endpoint-containing
 original forbidden and outside-part pieces transitively by overlap or contact.
 For each combination of keeping or ignoring these groups, it unions the remaining
@@ -52,44 +60,44 @@ combination competes by length, with length inside any endpoint group counted
 three times. On ties the first combination wins. The planner counts only the
 winning route, or counts a straight fallback if none passes.
 The planner borrows this layer group's plan, index and Z to cache those slices.
-Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
-selection and global contributor activation. Active means present in the host
-activation set, configured by activated.ini. Computation objects are worker-local;
-the legacy planner owns its input cache. The private implementation checks each ID
-with orchestrator_find_plugin. Active contributors share
-a second input cache owned by advanced travel for boundary geometry and routing settings, so a layer
-can be copied twice.
+Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose
+global contributor activation. Active means present in the host activation set,
+configured by activated.ini. Computation objects are worker-local. The private
+implementation checks each contributor ID with orchestrator_find_plugin. Active
+contributors share an input cache owned by advanced travel for boundary geometry
+and routing settings; the compatibility planner, used only for regional eligibility,
+keeps its own cache, so a layer can be copied twice.
 The incoming layer-entry travel has no source extrusion and remains straight.
 The connector inserts travels, interpolates Z and updates flags and progress.
 The plan owns all borrowed extrusions throughout both phases; no chronology or
 planner survives the callback. Cancellation and routing errors propagate.
+NoTravel exemptions and rejected detours are added to execution-wide counters; the
+last finished layer reports them in one warning.
 
     register_advanced_travel_plugin: register the permanent provider
-    register_advanced_travel_planners: register two no-op selection members and their group
     register_advanced_travel_contributors: register three non-exclusive no-op zone members
-    setup_impl: reset and allocate connector summaries
+    setup_impl: reset counters, then reset and allocate connector summaries
     setup_run_impl: publish this layer group's summary
-    run_impl: own the chronology and planner for one worker callback
+    run_impl: own the chronology and planners for one worker callback
         |-- ScopeTravelConnector::prepare: record ordered gaps and snap seams
-        |-- orchestrator_select_plugin: resolve the selected planner
+        |-- NoTravel::sections: slice NoTravel volumes at print_z
         |-- eligibility guard: evaluate ZonePlanner::eligible without building zones
-        |-- TravelZoneView: collect active attractors and forbidden tops when eligible
-        `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
-            |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: group endpoint obstacles and score accepted routes
-                |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
-                |-- touches: group original pieces by overlap or contact
-                `-- route: use cached domains for one combination and try ranked hypotheses
-                    |-- endpoint_candidates / exit_candidates: attach endpoints to W
-                    |-- detour: route connectors on W_p rings with the public Clipper operation
-                    `-- blocked: check exits and the remaining path against their respective obstacle masks
+        |-- TravelZoneView: collect active attractors, forbidden tops and NoTravel zones when eligible
+        |-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
+        |   |-- ZonePlanner::path: group endpoint obstacles and score accepted routes
+        |   |   |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
+        |   |   |-- touches: group original pieces by overlap or contact
+        |   |   `-- route: use cached domains for one combination and try ranked hypotheses
+        |   |       |-- endpoint_candidates / exit_candidates: attach endpoints to W
+        |   |       |-- detour: route connectors on W_p rings with the public Clipper operation
+        |   |       `-- blocked: check exits and the remaining path against their respective obstacle masks
+        |   `-- NoTravel::path: ineligible gaps and zone fallbacks
+        `-- report_warning: NoTravel summary from the last finished layer
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {
 // Register a permanent provider borrowing the orchestrator; allocation errors propagate and registration rejections are logged by the host.
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
-// Register permanent no-op planner choices and their selector; allocation errors propagate and host rejections are logged.
-void register_advanced_travel_planners(orchestrator_handle *orchestrator);
 // Register three permanent no-op zone contributors; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
@@ -97,13 +105,10 @@ namespace {
 using namespace TravelConnection;
 namespace zones = slic3r_api::LayerExtrusionEdit::AdvancedTravel;
 
-const char *const k_planner_group = "layer_extrusion_edit.travel.advanced.planner";
-const char *const k_compatibility_id = "layer_extrusion_edit.travel.advanced.planner.legacy";
-const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.advanced";
 const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
-const char *const k_planner_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
+const char *const k_contributor_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
 
 class ContributorChoice : public PluginBase
 {
@@ -124,7 +129,7 @@ private:
     // Participate in layer editing alongside the provider.
     slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
     // Require the provider that collects these zones.
-    const char *const *dependencies_impl() const noexcept override { return k_planner_dependencies; }
+    const char *const *dependencies_impl() const noexcept override { return k_contributor_dependencies; }
     // Keep the provider's step priority.
     int32_t priority_impl() const noexcept override { return -50; }
     // Leave geometry unchanged; only AdvancedTravel calls the contributor computation.
@@ -132,36 +137,6 @@ private:
     const char *m_id;
     const char *m_name;
     const char *m_description;
-};
-
-class PlannerChoice : public PluginBase
-{
-public:
-    // Borrow the orchestrator and retain static identity strings for this permanent selection member.
-    PlannerChoice(orchestrator_handle *orchestrator, const char *id, const char *name, int32_t priority) :
-        PluginBase(orchestrator), m_id(id), m_name(name), m_priority(priority) {}
-private:
-    // Return the static selection identity without changing state.
-    const char *id_impl() const noexcept override { return m_id; }
-    // Return the static display name without changing state.
-    const char *name_impl() const noexcept override { return m_name; }
-    // Explain why the member itself performs no geometry work.
-    const char *description_impl() const noexcept override { return "Selects the planner called by Advanced travel."; }
-    // Return the advanced planner selection group.
-    const char *exclusive_group_impl() const noexcept override { return k_planner_group; }
-    // Participate in layer editing alongside the travel provider.
-    slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
-    // Require the provider that executes the selected planner.
-    const char *const *dependencies_impl() const noexcept override { return k_planner_dependencies; }
-    // Keep the same step priority as advanced travel.
-    int32_t priority_impl() const noexcept override { return -50; }
-    // Prefer Legacy unless a configuration selects Advanced.
-    int32_t exclusive_group_priority_impl() const noexcept override { return m_priority; }
-    // Leave the plan unchanged; AdvancedTravel performs routing once for the layer.
-    void run_impl(const plugin_run_context *) const override {}
-    const char *m_id;
-    const char *m_name;
-    int32_t m_priority;
 };
 
 const char *const k_dependencies[] = {
@@ -190,21 +165,25 @@ private:
     const char *const *dependencies_impl() const noexcept override;
     // Run after the default wipe (-80), before the crossing wipe (-45) and lift (-40).
     int32_t priority_impl() const noexcept override;
-    // Select advanced travel before avoidance (-1) and straight travel (0) when no ID is stored.
+    // Select advanced travel before straight travel (0) when no ID is stored.
     int32_t exclusive_group_priority_impl() const noexcept override;
     // Return the count, and copy static key descriptions when the caller supplies an array of that size.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     // Return the static progress format.
     const char *progress_message_format_impl() const noexcept override;
-    // Reset summaries and allocate them for a valid print and plan; allocation errors propagate.
+    // Reset counters and summaries, then allocate summaries for a valid print and plan; allocation errors propagate.
     void setup_impl(const plugin_run_context *run_ctx, uint32_t run_count) const override;
     // Fill this layer group's summary for a valid setup and layer; connector errors propagate.
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
-    // Prepare gaps then apply worker-local routes; invalid contexts do nothing and cancellation or errors propagate.
+    // Prepare gaps, apply worker-local zone or NoTravel routes and publish the NoTravel summary from the last
+    // layer; invalid contexts do nothing and cancellation or errors propagate.
     void run_impl(const plugin_run_context *run_ctx) const override;
 
     mutable ScopeTravelConnector m_connector;
     mutable bool m_setup_valid = false;
+    // Remaining layer runs and execution-wide NoTravel counts for the final summary.
+    mutable std::atomic<uint32_t> m_remaining{0};
+    mutable std::atomic<uint64_t> m_exemptions{0}, m_fallbacks{0};
 };
 
 AdvancedTravel::AdvancedTravel(orchestrator_handle *orchestrator) :
@@ -223,7 +202,8 @@ const char *AdvancedTravel::name_impl() const noexcept
 
 const char *AdvancedTravel::description_impl() const noexcept
 {
-    return "Connects travels using the Legacy planner or the opt-in Advanced planner.";
+    return "Routes travels around perimeters, tops and other islands where avoid_crossing_perimeters applies, "
+           "and around NoTravel volumes everywhere (best effort).";
 }
 
 const char *AdvancedTravel::exclusive_group_impl() const noexcept
@@ -282,6 +262,9 @@ const char *AdvancedTravel::progress_message_format_impl() const noexcept
 void AdvancedTravel::setup_impl(const plugin_run_context *run_ctx, const uint32_t run_count) const
 {
     m_connector.reset();
+    m_remaining.store(run_count);
+    m_exemptions.store(0);
+    m_fallbacks.store(0);
     const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
     m_setup_valid = ctx != nullptr && ctx->print != nullptr && ctx->plan != nullptr;
     if (m_setup_valid)
@@ -311,19 +294,15 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     PrintingPlan plan(ctx->plan);
     const Print print(ctx->print);
     const Config config = print.config();
-    AvoidCrossing::CompatibilityPlanner planner(print, plan, run_ctx, ctx->group_idx, layer_group.print_z());
-    const TravelPathPlanner route = [&planner](const TravelEndpoint &source,
-                                               const TravelEndpoint &target,
-                                               const extruder_index_t extruder_id) {
-        return planner.path(source, target, extruder_id);
+    const coord_t print_z = layer_group.print_z();
+    const PluginCommon::polygon_work::ExPolygons no_travel =
+        NoTravel::sections(ConstPrintingPlan(ctx->plan), print_z, run_ctx);
+    NoTravel::Counts counts;
+    const auto no_travel_path = [&](const PendingTravel &travel) {
+        return NoTravel::path(travel.source, travel.target, travel.extruder_id,
+                              travel.source_extrusion.handle() == nullptr, print_z, no_travel, run_ctx, counts);
     };
-    const orchestrator_plugin_handle *selected = orchestrator_select_plugin(
-        m_orchestrator, config.handle(), STEP_LAYER_EXTRUSION_EDIT, k_planner_group);
-    const orchestrator_plugin_handle *zones_plugin = orchestrator_find_plugin(m_orchestrator, k_zones_id);
-    if (selected == nullptr || selected != zones_plugin) {
-        m_connector.apply(chronology, route, progress());
-        return;
-    }
+    AvoidCrossing::CompatibilityPlanner planner(print, plan, run_ctx, ctx->group_idx, print_z);
     const Config region_defaults(print_get_default_region_config(ctx->print));
     const bool auxiliary_avoidance = region_defaults.bool_or_default("avoid_crossing_perimeters", false);
     bool any_avoidance_active = false;
@@ -333,40 +312,56 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
             any_avoidance_active = true;
             break;
         }
-    if (!any_avoidance_active) {
-        m_connector.apply(chronology, route, progress());
-        return;
-    }
-    // The contributors share this cache; the legacy planner owns its separate cache.
-    AvoidCrossing::LayerInputCache inputs;
-    const zones::ZoneContributorInput input{print, plan, *run_ctx,
-                                          inputs, chronology.travels};
-    const zones::DefaultAttractorContributor attractors;
-    const zones::DefaultForbiddenTopsContributor tops;
-    const zones::PrintedTopsContributor printed_tops;
-    std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
-    if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
-        active.push_back(std::cref(attractors));
-    if (orchestrator_find_plugin(m_orchestrator, k_printed_tops_id) != nullptr)
-        active.push_back(std::cref(printed_tops));
-    else if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
-        active.push_back(std::cref(tops));
-    zones::TravelZoneView view(active, input);
-    zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
-        plan, ctx->group_idx, layer_group.print_z());
     size_t t = 0;
-    // apply calls this exactly once per PendingTravel, in chronology order.
-    const TravelPathPlanner zone_route = [&zone_planner, &chronology, &t](
-        const TravelEndpoint &, const TravelEndpoint &, extruder_index_t) {
-        const size_t current = t++;
-        const PendingTravel &travel = chronology.travels.at(current);
-        if (travel.source_extrusion.handle() == nullptr)
-            return straight_path(travel.source, travel.target, travel.extruder_id);
-        return zone_planner.path(current, travel);
-    };
-    m_connector.apply(chronology, zone_route, progress());
+    if (!any_avoidance_active) {
+        m_connector.apply(chronology, [&no_travel_path, &chronology, &t](
+            const TravelEndpoint &, const TravelEndpoint &, extruder_index_t) {
+            return no_travel_path(chronology.travels.at(t++));
+        }, progress());
+    } else {
+        // The contributors share this cache; the compatibility planner owns its separate cache.
+        AvoidCrossing::LayerInputCache inputs;
+        const zones::ZoneContributorInput input{print, plan, *run_ctx,
+                                              inputs, chronology.travels};
+        const zones::DefaultAttractorContributor attractors;
+        const zones::DefaultForbiddenTopsContributor tops;
+        const zones::PrintedTopsContributor printed_tops;
+        const zones::NoTravelContributor no_travel_zones(no_travel);
+        std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
+        if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
+            active.push_back(std::cref(attractors));
+        if (orchestrator_find_plugin(m_orchestrator, k_printed_tops_id) != nullptr)
+            active.push_back(std::cref(printed_tops));
+        else if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
+            active.push_back(std::cref(tops));
+        active.push_back(std::cref(no_travel_zones));
+        zones::TravelZoneView view(active, input);
+        zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
+            plan, ctx->group_idx, print_z);
+        // apply calls this exactly once per PendingTravel, in chronology order.
+        m_connector.apply(chronology, [&zone_planner, &no_travel_path, &chronology, &t](
+            const TravelEndpoint &, const TravelEndpoint &, extruder_index_t) {
+            const size_t current = t++;
+            const PendingTravel &travel = chronology.travels.at(current);
+            if (travel.source_extrusion.handle() == nullptr || !zone_planner.eligible(travel.source, travel.target))
+                return no_travel_path(travel);
+            // A counted fallback is the zone planner's direct gap; NoTravel may still detour it.
+            const size_t fallbacks = zone_planner.fallbacks();
+            std::vector<c_point> route = zone_planner.path(current, travel);
+            return zone_planner.fallbacks() == fallbacks ? route : no_travel_path(travel);
+        }, progress());
+    }
     if (t != chronology.travels.size())
         throw std::logic_error("Advanced travel did not consume every pending travel.");
+    m_exemptions.fetch_add(counts.exemptions, std::memory_order_relaxed);
+    m_fallbacks.fetch_add(counts.fallbacks, std::memory_order_relaxed);
+    // The last completed layer reports one execution-wide summary, not one
+    // warning per segment. Failed/cancelled executions never publish success.
+    if (m_remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        const std::string message = NoTravel::warning_message(m_exemptions.load(), m_fallbacks.load());
+        if (!message.empty())
+            report_warning(run_ctx, message.c_str());
+    }
 }
 } // namespace
 
@@ -374,19 +369,6 @@ void register_advanced_travel_plugin(orchestrator_handle *orchestrator)
 {
     static AdvancedTravel plugin(orchestrator);
     orchestrator_register_plugin(orchestrator, plugin.c_instance());
-}
-
-void register_advanced_travel_planners(orchestrator_handle *orchestrator)
-{
-    static PlannerChoice compatibility(orchestrator, k_compatibility_id, "Legacy", -1);
-    static PlannerChoice zones(orchestrator, k_zones_id, "Advanced", 0);
-    orchestrator_register_plugin(orchestrator, compatibility.c_instance());
-    orchestrator_register_plugin(orchestrator, zones.c_instance());
-    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = k_planner_group;
-    definition.label = "Advanced travel planner";
-    definition.tooltip = "Selects Legacy perimeter routing or Advanced forbidden-zone routing for Advanced travel.";
-    compatibility.register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator)

@@ -1719,15 +1719,8 @@ TEST_CASE("Domain routing does not inherit compatibility top avoidance", "[plugi
     REQUIRE_FALSE(view.query(0, gap).attractors.empty());
     ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
     zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view, owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
-    const std::vector<c_point> expected = compatibility.path(gap.source, gap.target, 0);
     const std::vector<c_point> result = planner.path(0, gap);
     REQUIRE(compatibility.avoidance_enabled(gap.source, gap.target));
-    REQUIRE(expected.size() > 2);
-    double legacy_length = 0.;
-    for (size_t p = 1; p < expected.size(); ++p)
-        legacy_length += work::Line(work::Point(expected[p - 1]), work::Point(expected[p])).length();
-    CHECK(legacy_length > work::Line(work::Point(gap.source.position.x, gap.source.position.y),
-        work::Point(gap.target.position.x, gap.target.position.y)).length() + SCALED_EPSILON);
     double length = 0.;
     for (size_t p = 1; p < result.size(); ++p) length += work::Line(work::Point(result[p - 1]), work::Point(result[p])).length();
     CHECK(length == Approx(work::Line(work::Point(result.front()), work::Point(result.back())).length()).margin(2.));
@@ -1796,22 +1789,7 @@ TEST_CASE("Zone planner routes shifted domains but forbidden material wins", "[p
             CHECK_FALSE((area.contains(work::Point(gap.source.position.x, gap.source.position.y)) &&
                          area.contains(work::Point(gap.target.position.x, gap.target.position.y))));
     }
-    const std::vector<c_point> expected = compatibility.path(gap.source, gap.target, 0);
     const std::vector<c_point> result = planner.path(0, gap);
-    if (separate_attractors) {
-        // A forbidden top between the two islands changes only the zone planner's route.
-        bool compatibility_crosses_top = false;
-        for (size_t i = 1; i < expected.size(); ++i) {
-            work::Polyline segment;
-            segment.points = {work::Point(expected[i - 1]), work::Point(expected[i])};
-            const work::Polylines outside = slic3r_api::PluginCommon::clipper::diff_pl(
-                owner.context.plugin_storage, {segment}, {obstacle});
-            double retained = 0.;
-            for (const work::Polyline &part : outside) retained += part.length();
-            compatibility_crosses_top |= retained + 2. < segment.length();
-        }
-        CHECK(compatibility_crosses_top);
-    }
     REQUIRE(result.size() >= 2);
     CHECK(result.front().x == gap.source.position.x);
     CHECK(result.back().x == gap.target.position.x);

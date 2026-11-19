@@ -30,7 +30,7 @@
 #include "libslic3r/Plugins/LayerExtrusionEdit/AdvancedTravel/DefaultZoneContributors.hpp"
 
 /*
-This end-to-end gate checks that compatible and zone-based travel providers' settings
+This end-to-end gate checks that advanced travel settings
 affect a processed printing plan and the text G-code published by the production
 exporter. The scene is a 0.6 mm-high square ring with a separate central island,
 so travels can stay on one island or cross between the two.
@@ -53,14 +53,11 @@ Routes with fewer than two vertices are ignored. The Print owns the plan; the
 routes copied into Result outlive it. A route is counted as deviated when it has more
 than two vertices; this is not a geometric test of departure from a straight line.
 
-For the avoid-crossing baseline, the gate compares disabled avoidance with the
-straight-travel provider; the advanced baseline instead varies the selector toward
-the avoid-crossing provider. The advanced matrix runs with both Legacy
-and Advanced selected. One additional run omits the travel selector and verifies that
-the implicit advanced provider preserves the explicit avoid-crossing baseline routes.
-For every baseline, the gate checks
-that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
-and checks that island weights change both planners' routes while keeping their
+The settings matrix compares disabled avoidance with the straight-travel provider
+and varies the selector toward it. One additional run omits the travel selector and
+verifies that the implicit advanced provider preserves the explicit baseline routes.
+The gate checks that the first-layer exemption and a 5 mm detour limit reduce
+deviation counts, and that island weights change the routes while keeping their
 endpoints. A separate dumbbell scene checks real travels through its thin bridge, segment
 containment in sliced material, and publication of those detours in G-code.
 The one-perimeter advanced variation also replays published XY gaps and checks
@@ -79,7 +76,7 @@ integration, not general routing correctness.
 The activation guard saves and restores the active plugin set, including the
 exporter, after the case-local Prints are destroyed. Output removal is attempted
 only on the normal return path, and removal errors are ignored.
-Contributor activation cases keep the advanced planner selected and round-trip a
+Contributor activation cases select advanced travel and round-trip a
 reference with both members and each member disabled independently.
 The printed-top case activates its opt-in member separately, checks its plugin
 declaration, and compares both static-top activation states through STL export.
@@ -88,11 +85,11 @@ post and two instances. It identifies real support travel phases whose endpoint
 chords cross an object slice component containing neither endpoint. Slice copies
 are shifted using the plan catalog. With the zone contributors disabled,
 the advanced planner uses platter blockers and publishes support detours in G-code.
-The support-crossing matrix selects the compatible provider and independently
+The support-crossing matrix selects advanced travel and independently
 varies crossing-only wipe and avoidance settings. It
 counts support wipe leaves, checks straight versus deviated routes and preserves
 deposited volume for settings that do not change extrusion geometry. It validates
-the declarations of both travel providers and crossing wipe against independent
+the declarations of advanced travel and crossing wipe against independent
 variation domains, so a newly read setting requires an effective variation.
 Within a support extrusion, successive scopes identify support-to-support gaps.
 previous_support also pairs the last scope of the preceding support extrusion
@@ -118,6 +115,11 @@ advanced routing and requires outside-part tower gaps crossing a non-containing
 part to detour, with every travel segment clear of its original slices. All three
 runs preserve deposited volume. Diagnostics name both endpoint kinds and their XY.
 
+The NoTravel scene prints two islands with a NoTravel box between them. Straight
+travel, advanced travel with avoidance disabled and advanced travel with avoidance
+enabled must keep every detour out of the box, replay model edits like a fresh
+Print, and publish the detours as consecutive G-code travel moves.
+
     TEST_CASE: validate setting coverage and compare the resulting cases
     |-- TravelActivation: enable travel providers and export, then restore the saved set
     `-- run_case: process the ring and central island, publish text, copy observations
@@ -133,8 +135,8 @@ namespace {
 using namespace Slic3r;
 enum class Scene { Ring, Support, SupportCrossing, Dumbbell, Tower };
 struct Result {
-    // Planner selected by the host before processing; empty when no member is active.
-    std::string selected_planner;
+    // Travel provider selected by the host before processing.
+    std::string provider;
     // Each route contains consecutive scaled X, Y, Z-offset triples in execution order.
     std::vector<std::vector<coord_t>> travels;
     // For each route, whether the provider's ordered-scope traversal supplies a source extrusion.
@@ -181,10 +183,7 @@ struct TravelActivation {
         for (Plugin *plugin : host.active_plugins())
             previous.push_back(plugin);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.default", true);
-        success &= host.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced", true);
-        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.legacy", true);
-        success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.planner.advanced", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", true);
         success &= host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", true);
         success &= host.set_plugin_active(k_default_gcode_exporter_id, true);
@@ -248,13 +247,22 @@ Result no_travel_export(Print &print, const DynamicPrintConfig &config)
     REQUIRE(result.volume > 0.);
     for (const auto &route : result.travels) {
         if (route.size() <= 6) continue;
+        // A point within the 0.001 mm output resolution of the previous one publishes no move.
+        std::vector<Point> moves;
+        Point last(route[0], route[1]);
+        for (size_t p = 3; p < route.size(); p += 3) {
+            const Point point(route[p], route[p+1]);
+            if (std::abs(point.x() - last.x()) <= scale_i(0.001) && std::abs(point.y() - last.y()) <= scale_i(0.001))
+                continue;
+            moves.push_back(point);
+            last = point;
+        }
         bool found = false;
-        const size_t count = route.size()/3 - 1;
-        for (size_t begin = 0; begin + count <= emitted.size() && !found; ++begin) {
+        for (size_t begin = 0; begin + moves.size() <= emitted.size() && !found; ++begin) {
             bool matches = true;
-            for (size_t p = 1; p <= count; ++p)
-                if (std::abs(double(emitted[begin+p-1].x()) - route[3*p]) > scale_i(0.001) ||
-                    std::abs(double(emitted[begin+p-1].y()) - route[3*p+1]) > scale_i(0.001)) {
+            for (size_t p = 0; p < moves.size(); ++p)
+                if (std::abs(double(emitted[begin+p].x()) - moves[p].x()) > scale_i(0.001) ||
+                    std::abs(double(emitted[begin+p].y()) - moves[p].y()) > scale_i(0.001)) {
                     matches = false; break;
                 }
             found = matches;
@@ -266,18 +274,24 @@ Result no_travel_export(Print &print, const DynamicPrintConfig &config)
     return result;
 }
 
-TEST_CASE("Simple NoTravel routing reaches G-code and replays model edits", "[plugins][plugin-e2e][no-travel-routing]")
+TEST_CASE("NoTravel routing reaches G-code and replays model edits", "[plugins][plugin-e2e][no-travel-routing]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     auto &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
+    // Straight travel, and advanced travel outside and inside perimeter avoidance.
+    const std::string mode = GENERATE(std::string("straight"), std::string("advanced"), std::string("advanced-avoiding"));
+    const bool avoiding = mode == "advanced-avoiding";
+    CAPTURE(mode);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.default");
+        "layer_extrusion_edit.travel"), mode == "straight" ? "layer_extrusion_edit.travel.default" :
+                                                            "layer_extrusion_edit.travel.advanced");
     config.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "1"},
         {"skirts", "0"}, {"brim_width", "0"}, {"fill_density", "0"}, {"top_solid_layers", "1"},
-        {"bottom_solid_layers", "1"}, {"avoid_crossing_perimeters", "0"}, {"retract_lift", "0"}});
+        {"bottom_solid_layers", "1"}, {"avoid_crossing_perimeters", avoiding ? "1" : "0"},
+        {"avoid_crossing_not_first_layer", "0"}, {"retract_lift", "0"}});
     TriangleMesh mesh = make_cube(4., 4., 0.6);
     TriangleMesh right = make_cube(4., 4., 0.6);
     right.translate(20., 0., 0.); mesh.merge(right);
@@ -287,7 +301,7 @@ TEST_CASE("Simple NoTravel routing reaches G-code and replays model edits", "[pl
     Print replay;
     replay.apply(model, config);
     const auto baseline = no_travel_export(replay, config);
-    CHECK(baseline.deviated == 0);
+    if (!avoiding) CHECK(baseline.deviated == 0);
     auto *helper = object->add_volume(make_cube(4., 8., 1.), ModelVolumeType::NO_TRAVEL, false);
     helper->set_offset(Vec3d(10., -2., 0.));
     for (int edit = 0; edit < 5; ++edit) {
@@ -315,7 +329,7 @@ TEST_CASE("Simple NoTravel routing reaches G-code and replays model edits", "[pl
                 for (size_t p = 0; p < route.size(); p += 3) path.points.emplace_back(route[p], route[p+1]);
                 CHECK(intersection_pl(Polylines{path}, core).empty());
             }
-        } else CHECK(changed.deviated == 0);
+        } else if (!avoiding) CHECK(changed.deviated == 0);
         if (edit == 4) CHECK(changed.travels == baseline.travels);
     }
 }
@@ -331,7 +345,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.wipe.crossing", true));
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.avoid_crossing_perimeters");
+        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
     baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_top", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"}, {"fill_density", "20%"},
@@ -371,8 +385,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {{"retract_before_wipe"}, {{"before-wipe", {{"retract_before_wipe", "100%"}}}}}
     };
     const std::vector<Test::PluginE2E::Case> cases = Test::PluginE2E::linear_cases(host,
-        {"layer_extrusion_edit.travel.avoid_crossing_perimeters", "layer_extrusion_edit.travel.advanced",
-         "layer_extrusion_edit.wipe.crossing"}, baseline, domains);
+        {"layer_extrusion_edit.travel.advanced", "layer_extrusion_edit.wipe.crossing"}, baseline, domains);
     double volume = 0.;
     size_t baseline_wipes = 0;
     for (const Test::PluginE2E::Case &test : cases) {
@@ -444,8 +457,6 @@ TEST_CASE("Off-object tower gaps reach production crossing wipes", "[plugins][pl
     CHECK(all.volume == Approx(crossing.volume).margin(0.01));
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_perimeters_max_detour", "0"}, {"wipe_tower_x", "-25"}, {"wipe_tower_y", "4"},
         {"bed_shape", "-40x-40,140x-40,140x140,-40x140"}});
@@ -454,67 +465,6 @@ TEST_CASE("Off-object tower gaps reach production crossing wipes", "[plugins][pl
     CHECK(routed.tower_routed_crossings > 0);
     CHECK(routed.volume == Approx(crossing.volume).margin(0.01));
     std::cout << "advanced tower: scopes=" << routed.tower_scopes << " routed crossings=" << routed.tower_routed_crossings << '\n';
-}
-
-// Compare explicit planner selection and activation fallbacks through STL, slicing and exported G-code.
-TEST_CASE("Advanced travel honours planner selection and inactive fallbacks", "[plugins][plugin-e2e][travel][travel-zones]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Orchestrator &host = Orchestrator::instance();
-    TravelActivation active(host);
-    REQUIRE(active.success);
-    for (const char *id : {"layer_extrusion_edit.travel.advanced.planner.legacy",
-                           "layer_extrusion_edit.travel.advanced.planner.advanced"}) {
-        const Plugin *planner = host.get_plugin(id);
-        REQUIRE(planner != nullptr);
-        CHECK(planner->get_used_config_keys().empty());
-        CHECK(planner->get_defined_config_keys().empty());
-    }
-    const std::string selector = Steps::plugin_exclusive_group_option_key(
-        host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
-    const std::string planner_selector = Steps::plugin_exclusive_group_option_key(
-        host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner");
-    const char *compatibility = "layer_extrusion_edit.travel.advanced.planner.legacy";
-    const char *zones = "layer_extrusion_edit.travel.advanced.planner.advanced";
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
-        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
-        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
-        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
-        {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"}, {"ironing", "0"},
-        {"binary_gcode", "0"}, {"use_relative_e_distances", "0"},
-        {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
-    const Result baseline = run_case(config, "planner-default");
-    CHECK(baseline.selected_planner == compatibility);
-    REQUIRE(baseline.deviated > 0);
-    bool expect_zones = false;
-    std::string expected = compatibility;
-    SECTION("Explicit Legacy") { config.set_deserialize_strict(planner_selector, compatibility); }
-    SECTION("Explicit Advanced") {
-        config.set_deserialize_strict(planner_selector, zones);
-        expected = zones;
-        expect_zones = true;
-    }
-    SECTION("Both inactive") {
-        REQUIRE(host.set_plugin_active(compatibility, false));
-        REQUIRE(host.set_plugin_active(zones, false));
-        expected.clear();
-    }
-    SECTION("Only Legacy active") { REQUIRE(host.set_plugin_active(zones, false)); }
-    SECTION("Only Advanced active") {
-        REQUIRE(host.set_plugin_active(compatibility, false));
-        expected = zones;
-        expect_zones = true;
-    }
-    const Result result = run_case(config, "planner-selection");
-    CHECK(result.selected_planner == expected);
-    CHECK(result.volume == Approx(baseline.volume).margin(0.01));
-    CHECK(result.deviated > 0);
-    if (expect_zones)
-        CHECK(result.travels != baseline.travels);
-    else
-        CHECK(result.travels == baseline.travels);
 }
 
 // Check non-exclusive declarations and dependency blocking when the advanced provider is inactive.
@@ -557,8 +507,6 @@ TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -573,7 +521,7 @@ TEST_CASE("Advanced contributor activation reaches production G-code", "[plugins
         INFO(id);
         REQUIRE(host.set_plugin_active(id, false));
         const Result result = run_case(config, "contributor-disabled");
-        CHECK(result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
+        CHECK(result.provider == "layer_extrusion_edit.travel.advanced");
         CHECK(result.volume == Approx(reference.volume).margin(0.01));
         CHECK_FALSE(result.travels.empty());
         REQUIRE(host.set_plugin_active(id, true));
@@ -602,8 +550,6 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -614,7 +560,7 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     const Result both = run_case(config, "printed-tops-both");
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
     const Result dated = run_case(config, "printed-tops-only");
-    CHECK(dated.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
+    CHECK(dated.provider == "layer_extrusion_edit.travel.advanced");
     CHECK(dated.travels == both.travels);
     CHECK(dated.volume == Approx(both.volume).margin(0.01));
     CHECK(dated.volume > 0.);
@@ -625,18 +571,13 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     CHECK(dated.travels != static_only.travels);
     CHECK(dated.volume == Approx(static_only.volume).margin(0.01));
     REQUIRE(host.set_plugin_active(id, true));
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-    const Result legacy = run_case(config, "printed-tops-legacy-provider");
-    CHECK(legacy.volume == Approx(dated.volume).margin(0.01));
-    REQUIRE_FALSE(legacy.travels.empty());
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced", false));
     host.block_unsatisfied_plugin_dependencies();
     CHECK_FALSE(host.is_plugin_active(id));
     CHECK(host.blocked_plugin_activations().count(id) == 1);
 }
 
-// Check that advanced platter routing publishes support detours and preserves the legacy extrusion volume.
+// Check that advanced platter routing publishes support detours and preserves the straight-travel extrusion volume.
 TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plugin-e2e][travel-zones]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -647,8 +588,6 @@ TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plu
     const std::string selector = Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel");
     config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_perimeters_max_detour", "0"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"perimeters", "2"}, {"fill_density", "20%"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
@@ -661,7 +600,7 @@ TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plu
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", false));
     const Result advanced = run_case(config, "support-platter-advanced", Scene::Support);
     REQUIRE(advanced.support_travels > 0);
-    CHECK(advanced.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
+    CHECK(advanced.provider == "layer_extrusion_edit.travel.advanced");
     size_t observed_detours = 0;
     for (const std::vector<coord_t> &route : advanced.support_crossings) {
         if (route.size() <= 6) continue;
@@ -669,10 +608,10 @@ TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plu
         ++observed_detours;
     }
     REQUIRE(observed_detours > 0);
-    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-    const Result legacy = run_case(config, "support-platter-legacy", Scene::Support);
-    CHECK(legacy.support_travels > 0);
-    CHECK(legacy.volume == Approx(advanced.volume).margin(0.01));
+    config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.default");
+    const Result straight = run_case(config, "support-platter-straight", Scene::Support);
+    CHECK(straight.support_travels > 0);
+    CHECK(straight.volume == Approx(advanced.volume).margin(0.01));
 }
 
 // Validate setting coverage and default route parity through text export; ironing is coupled with top avoidance.
@@ -682,10 +621,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    const std::string mode = GENERATE(std::string("avoid-crossing"), std::string("legacy"), std::string("advanced"));
-    const bool use_zones = mode == "advanced";
-    const char *provider = mode == "avoid-crossing" ? "layer_extrusion_edit.travel.avoid_crossing_perimeters" :
-                                                    "layer_extrusion_edit.travel.advanced";
+    const char *provider = "layer_extrusion_edit.travel.advanced";
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     std::map<std::string, std::vector<std::string>> domains{
@@ -698,11 +634,9 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"avoid_travel_island", {"0"}},
         {"avoid_travel_island_weight", {"0", "2"}},
         {"nozzle_diameter", {"0.6"}},
-        {selector, {std::string(provider) == "layer_extrusion_edit.travel.advanced" ?
-            "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default"}}
+        {"bed_shape", {"-40x-40,140x-40,140x140,-40x140"}},
+        {selector, {"layer_extrusion_edit.travel.default"}}
     };
-    if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
-        domains.emplace("bed_shape", std::vector<std::string>{"-40x-40,140x-40,140x140,-40x140"});
     // Tool-dependent boundary partitioning is covered by the crossing and boundary tests.
     const std::map<std::string, std::string> exclusions{
         {"perimeter_extruder", "Partitions boundaries by perimeter tool; covered by crossing/boundary tests."},
@@ -721,9 +655,6 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
     }
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict(selector, provider);
-    if (use_zones)
-        baseline.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-            "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     baseline.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"avoid_travel_island", "1"}, {"avoid_travel_island_weight", "1"},
@@ -732,25 +663,20 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
-    if (use_zones)
-        baseline.set_deserialize_strict("bed_shape", "-50x-50,150x-50,150x150,-50x150");
+    baseline.set_deserialize_strict("bed_shape", "-50x-50,150x-50,150x150,-50x150");
     const Result enabled = run_case(baseline, "baseline");
-    std::cout << mode << " baseline: travels=" << enabled.travels.size() << " deviated=" << enabled.deviated << '\n';
-    if (mode == "avoid-crossing") {
-        DynamicPrintConfig implicit = baseline;
-        implicit.erase(selector);
-        REQUIRE(implicit.option(selector) == nullptr);
-        const Plugin *selected = Steps::selected_active_plugin_from_group(host,
-            STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &implicit);
-        REQUIRE(selected != nullptr);
-        REQUIRE(selected->get_id() == "layer_extrusion_edit.travel.advanced");
-        const Result default_routes = run_case(implicit, "implicit-default");
-        CHECK(default_routes.selected_planner == "layer_extrusion_edit.travel.advanced.planner.legacy");
-        CHECK(default_routes.travels == enabled.travels);
-    }
-    if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
-        REQUIRE(enabled.selected_planner == (use_zones ? "layer_extrusion_edit.travel.advanced.planner.advanced" :
-                                                        "layer_extrusion_edit.travel.advanced.planner.legacy"));
+    std::cout << "advanced baseline: travels=" << enabled.travels.size() << " deviated=" << enabled.deviated << '\n';
+    DynamicPrintConfig implicit = baseline;
+    implicit.erase(selector);
+    REQUIRE(implicit.option(selector) == nullptr);
+    const Plugin *selected = Steps::selected_active_plugin_from_group(host,
+        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &implicit);
+    REQUIRE(selected != nullptr);
+    REQUIRE(selected->get_id() == "layer_extrusion_edit.travel.advanced");
+    const Result default_routes = run_case(implicit, "implicit-default");
+    CHECK(default_routes.provider == "layer_extrusion_edit.travel.advanced");
+    CHECK(default_routes.travels == enabled.travels);
+    REQUIRE(enabled.provider == "layer_extrusion_edit.travel.advanced");
     REQUIRE(enabled.deviated > 0);
     Result disabled, straight, weight_zero, weight_two;
     for (const auto &domain : domains)
@@ -783,8 +709,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
             std::cout << domain_name << "=" << value << ": travels=" << result.travels.size()
                       << " deviated=" << result.deviated << " volume=" << result.volume << '\n';
         }
-    if (std::string(provider) != "layer_extrusion_edit.travel.advanced")
-        CHECK(disabled.travels == straight.travels);
+    // Without avoidance, advanced travel keeps the direct gaps of straight travel.
+    CHECK(disabled.travels == straight.travels);
     REQUIRE_FALSE(weight_zero.inter_island.empty());
     REQUIRE(weight_zero.inter_island.size() == weight_two.inter_island.size());
     // Fixed endpoints distinguish a changed detour from a change in which extrusions the travel connects.
@@ -807,8 +733,6 @@ TEST_CASE("Advanced domain bridge travels reach production G-code", "[plugins][p
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel"), "layer_extrusion_edit.travel.advanced");
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
-        "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
@@ -881,8 +805,6 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     REQUIRE(selected != nullptr);
     REQUIRE(selected->get_id() == (config.option(selector) == nullptr ?
         "layer_extrusion_edit.travel.advanced" : config.opt_serialize(selector)));
-    Plugin *selected_planner = Steps::selected_active_plugin_from_group(orchestrator,
-        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel.advanced.planner", &print.config());
     print.set_status_silent();
     print.process();
     REQUIRE_FALSE(Orchestrator::instance().is_plugin_cancelled());
@@ -922,7 +844,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     const Printing::PrintingLayerGroup *previous_support_layer = nullptr;
     uint32_t previous_support_catalog = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
     extruder_index_t previous_support_tool = EXTRUDER_ID_UNKNOWN;
-    if (selected_planner != nullptr) result.selected_planner = selected_planner->get_id();
+    result.provider = selected->get_id();
     for (const Printing::PrintingGroup &group : print.printing_plan()->groups)
         for (const Printing::PrintingLayerGroup &layer : group.layers)
             for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
@@ -965,7 +887,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
                                         printed.push_back(std::move(area));
                                     }
                                 }
-                                if (result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced") {
+                                if (result.provider == "layer_extrusion_edit.travel.advanced") {
                                     // Outside-to-outside gaps retain no domain; only components containing an endpoint may be crossed.
                                     ExPolygons blockers = union_ex(printed);
                                     blockers.erase(std::remove_if(blockers.begin(), blockers.end(), [&path](const ExPolygon &area) {
@@ -1181,7 +1103,7 @@ Result run_case(const DynamicPrintConfig &config, const std::string &name, const
     Test::GCode::remove_output_pair(path);
     Test::GCode::remove_output_pair(exported);
     if (scene == Scene::Ring && config.opt_int("perimeters") == 1 &&
-        result.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced")
+        result.provider == "layer_extrusion_edit.travel.advanced")
         check_one_perimeter_routes(print, result, config, scene);
     return result;
 }

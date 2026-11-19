@@ -1333,7 +1333,8 @@ TEST_CASE("Deposits select regional process values without splitting their volum
     // Run the remaining consumers with real non-uniform source provenance.
     REQUIRE_NOTHROW(run_editors(prepared, {
         DEFAULT_TRANSITION_SCOPE_PLUGIN, "layer_extrusion_edit.retraction.default",
-        DEFAULT_ENTRY_STATE_PLUGIN, "layer_extrusion_edit.travel.avoid_crossing_perimeters",
+        DEFAULT_ENTRY_STATE_PLUGIN, "layer_extrusion_edit.travel.advanced",
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors",
     }));
     const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope scope(
         Slic3r::Test::TransitionPipeline::find_scope(

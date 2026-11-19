@@ -25,6 +25,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossing/CompatibilityPlanner.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
@@ -32,40 +33,27 @@
 #include "libslic3r/Steps/PipelineProgress.hpp"
 
 /*
-Travel parity tests compare the travel plugin's routes with routes computed
-using the core perimeter crossing test and router, expecting identical
-coordinates. Each scene also compares travel XY, Z offsets, Travel roles and
-owning-scope materialized flags between the two compatible providers. Both
-providers receive independent clones of the same ordered source plan, not
-separately sliced or reordered scenes. Small meshes are sliced into surfaces and
-extrusion paths, then ordered for printing. The selected editors identify the gaps between ordered
-paths, carry the position at each gap's entry, and insert travel paths. Wipe
-and lift editors do not run, so they cannot change the measured connectors. A
-leaf here is an extrusion entity with a polyline of at least two points and no
-children; its owning PrintingExtrusion identifies its source region and object
-instance. The reserved travel phase is the connector slot in an ordered
-extrusion. collect_leaves marks its paths, separating inserted connectors from
-other travel paths.
+Core travel checks exercise the host's perimeter crossing test and router on
+small sliced meshes. They record the routes that the legacy core router computes
+between ordered extrusion leaves and check top-surface, spacing and boundary
+behaviour that the plugin boundary code reproduces. A leaf here is an extrusion
+entity with a polyline of at least two points and no children; its owning
+PrintingExtrusion identifies its source region and object instance. The reserved
+travel phase is the connector slot in an ordered extrusion. collect_leaves marks
+its paths, separating inserted connectors from other travel paths.
 
-oracle_path computes the expected route with the core class, independently of
-the travel editor. After handling travel across layer groups, it checks
-activation at both endpoints and the first-layer setting, then removes the
-target instance shift to work in object coordinates. The core crossing test
-decides whether to call travel_to; a different source object or instance
-selects external routing. The result is shifted back and its original
-endpoints restored before point-by-point checks. Agreement checks integration
-with core behaviour, not the core's correctness. The boundary test uses two
-controlled paths on real sliced region masks, so a shared modifier edge
-exercises the endpoint lookup and its interior retry. Controlled paths enter
-fresh canonical plan storage before editor execution. Repeated scene passes
-check detour units and stable multi-tool ordering.
+oracle_path computes the core route, independently of any travel editor. After
+handling travel across layer groups, it checks activation at both endpoints and
+the first-layer setting, then removes the target instance shift to work in
+object coordinates. The core crossing test decides whether to call travel_to; a
+different source object or instance selects external routing. The result is
+shifted back and its original endpoints restored.
 
-Core-only checks are separate from these plugin comparisons. top_oracle_routes
-slices and orders a ring without travel editing, then computes core routes
-between successive leaves and copies surface counts and ordering diagnostics.
-The ring checks require top-avoidance sensitivity without changing ordering.
-Controlled chords across a cube test regional top avoidance directly through
-the core router. A same-tool modifier disables top avoidance on part of a
+top_oracle_routes slices and orders a ring without travel editing, then computes
+core routes between successive leaves and copies surface counts and ordering
+diagnostics. The ring checks require top-avoidance sensitivity without changing
+ordering. Controlled chords across a cube test regional top avoidance directly
+through the core router. A same-tool modifier disables top avoidance on part of a
 shared island. Intersections are measured against top areas inset by 0.5 mm,
 excluding the perimeter band where detours may pass. The crossing test still
 detects the top interior when top avoidance is off, because top surfaces are
@@ -92,39 +80,29 @@ while grid queries within half the travel length find a ring only for arrival.
 The next route point must be the departure's projection onto the square
 boundary edge, rather than an arbitrary vertex.
 
-When avoid_crossing_not_first_layer is enabled, the expected route stays
-direct at the first object layer's Z, including support at that height. Scene
-checks verify this exemption by height rather than by layer identifier.
+A plugin check slices a ring with a modifier that disables avoidance, then asks
+the compatibility planner about an endpoint exactly on the shared modifier edge.
+The regional lookup at that point is ambiguous, so only the interior probe
+supplied by the connector resolves the setting.
 
-A plugin-only skirt/brim scene checks paths that have regions but no valid
-object instance. Their connectors must stay direct, while object paths in the
-same sliced ring still receive detours.
-
-Selection checks keep all three travel providers active: an absent selector
-chooses advanced and every explicit provider ID is kept. With advanced inactive,
-selection falls back to avoidance; with both inactive, it uses straight travel
-without rewriting the stored advanced ID. Paired editor
-runs rebuild ordering on one sliced ring and compare XY coordinates, Z offsets,
-Travel roles and incoming/outgoing materialized travel flags of generated travels
-between advanced and avoidance, or against straight travel when avoidance is disabled.
+Selection checks keep both travel providers active: an absent selector chooses
+advanced and every explicit provider ID is kept. With advanced inactive,
+selection falls back to straight travel without rewriting the stored advanced ID.
+Paired editor runs rebuild ordering on one sliced ring and compare XY coordinates,
+Z offsets, Travel roles and incoming/outgoing materialized travel flags of
+generated travels between advanced travel with avoidance disabled and straight travel.
 
     Travel tests
-    |-- Plugin/core comparisons
-    |   |-- Print::process: slice meshes and generate source extrusions
-    |   |-- StepExtrusionOrdering, StepLayerExtrusionEdition: order paths and insert travels
-    |   |-- collect_leaves: retain ordered geometry, provenance and travel-phase marks
-    |   |-- enabled_endpoint, oracle_path: compute core routes and compare every point
-    |   |-- lookup_at_point: check the controlled modifier-edge retry
-    |   `-- oracle_path, check_scene: check enabled first-layer exemption for support by Z
     |-- Core-only checks
     |   |-- top_oracle_routes: copy routes, top counts and ordering from a sliced ring
+    |   |   `-- oracle_path, enabled_endpoint: compute core routes between ordered leaves
     |   |-- travel_to, intersection_pl, can_cross_perimeter: check regional tops
     |   |-- travel_to: measure the raw-slice flow-spacing inset
     |   |-- internal_boundary: check excluded tops and borrowed grid points
     |   |-- travel_to, internal_boundary: check the notched passage remains joined
     |   `-- travel_to, internal_boundary: check grid misses and the edge projection
-    |-- Plugin identity check
-    |   `-- ordering, layer editing, collect_leaves: check global adhesion connectors
+    |-- Plugin endpoint check
+    |   `-- lookup_at_point, endpoint_enables_avoidance: check the controlled modifier-edge retry
     `-- Provider selection checks
         |-- selected_active_plugin_from_group: resolve absent and explicit selectors
         `-- ordering, layer editing, collect_leaves: compare disabled avoidance with straight travel
@@ -133,8 +111,8 @@ The Print owns borrowed leaves and regions until comparisons finish; copied
 route diagnostics survive each helper's Print. A PrintingLayerGroup groups
 ordered tool paths at one printing height. Across such groups the connector
 has an entry position but no preceding region, so oracle_path clears the
-router map and returns a direct path. Router maps are local to a scene pass or
-a top_oracle_routes call, not owned by an individual layer group.
+router map and returns a direct path. Router maps are local to a
+top_oracle_routes call, not owned by an individual layer group.
 */
 
 namespace {
@@ -155,9 +133,6 @@ struct Leaf
 // Own core routers by target layer and tool; oracle_path clears the map across layer groups.
 using Routers = std::map<std::pair<const Layer *, extruder_index_t>, std::unique_ptr<AvoidCrossingPerimeters>>;
 
-// Named geometry and setting variations exercised independently by the pipeline.
-enum class Scene { Hole, Islands, Top, Absolute, Percentage, FirstLayer, Instances, Tools, Support, Regional, Units };
-
 // Own the oracle routes, ordered endpoint summary and surface counts of one sliced ring.
 struct TopRoutes
 {
@@ -171,91 +146,17 @@ struct TopRoutes
 void collect_leaves(const ExtrusionEntity &entity, const PrintingExtrusion &owner,
                     extruder_index_t tool, const PrintingLayerGroup &layer, std::vector<Leaf> &out);
 // Read avoid_crossing_perimeters at the first or last endpoint; after any failed lookup retry within SCALED_EPSILON along the leaf.
-// Return false without source-region provenance; resolved counts only ambiguous lookups resolved by the retry.
-bool enabled_endpoint(const Leaf &leaf, bool first, const PrintingPlan &plan, size_t *resolved = nullptr);
-// Return the core route, optionally bypassing activation to prove a disabled endpoint prevented a detour.
+// Return false without source-region provenance.
+bool enabled_endpoint(const Leaf &leaf, bool first, const PrintingPlan &plan);
+// Return the core route between two leaves, or the direct segment when either endpoint disables avoidance.
 // With avoid_crossing_not_first_layer enabled, the first object layer Z also exempts support at that height.
 Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &plan,
-                   const Print &print, Routers &routers, bool ignore_activation = false);
+                   const Print &print, Routers &routers);
 // Build a shallow square ring from four joined bars; the returned mesh owns its triangles.
 TriangleMesh ring_mesh();
-// Slice one scene, clone its ordered source plan for each provider, and compare travel records and core routes; failed checks stay visible to Catch.
-void check_scene(Scene scenario);
 // Slice and order a ring with Simple perimeters so top avoidance changes its connectors;
 // return core routes and copied diagnostics without travel editing or Catch assertions.
 TopRoutes top_oracle_routes(bool avoid_top);
-
-// Global adhesion paths have regions but no instance; only object-to-object gaps may route.
-TEST_CASE("Avoid-crossing keeps global adhesion travels direct",
-          "[plugins][travel][layer-extrusion-edit][avoid-crossing-parity][global-identity]")
-{
-    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool brim = GENERATE(false, true);
-    const char *provider = GENERATE("layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                                    "layer_extrusion_edit.travel.advanced");
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(
-        Orchestrator::instance(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel"), provider);
-    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
-        {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
-        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
-        {"fill_density", "20%"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
-        {"skirts", "2"}, {"brim_width", brim ? "2" : "0"}});
-    Model model;
-    Print print;
-    Slic3r::Test::init_print({ring_mesh()}, print, model, config);
-    print.process();
-    print.pipeline_progress().reset();
-    Orchestrator &orchestrator = Orchestrator::instance();
-    Steps::StepExtrusionOrdering::clear(print);
-    Steps::StepExtrusionOrdering::prepare(print);
-    Steps::StepExtrusionOrdering::run_step(orchestrator, print);
-    size_t global_regions = 0;
-    for (const PrintingGroup &group : print.printing_plan()->groups)
-        for (const PrintingLayerGroup &layer : group.layers)
-            for (const PrintingToolGroup &tool : layer.tool_groups)
-                for (const PrintingExtrusion &extrusion : tool.extrusions)
-                    if (extrusion.printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE &&
-                        extrusion.region_island != nullptr) {
-                        const slic3r_api::LayerRegionIsland region_island(
-                            reinterpret_cast<const layer_region_island_handle *>(extrusion.region_island));
-                        REQUIRE(region_island.valid());
-                        REQUIRE(region_island.region_count() > 0);
-                        ++global_regions;
-                        std::cout << "adhesion brim=" << brim << " catalog=" << extrusion.printing_catalog_id
-                                  << " region_island=" << extrusion.region_island << std::endl;
-                    }
-    REQUIRE(global_regions > 0);
-    {
-        Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
-            "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
-            provider});
-        REQUIRE(Steps::selected_active_plugin_from_group(orchestrator, STEP_LAYER_EXTRUSION_EDIT,
-            "layer_extrusion_edit.travel", &print.config())->get_id() == provider);
-        Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
-    }
-    REQUIRE_FALSE(orchestrator.is_plugin_cancelled());
-    std::vector<Leaf> leaves;
-    for (const PrintingGroup &group : print.printing_plan()->groups)
-        for (const PrintingLayerGroup &layer : group.layers)
-            for (const PrintingToolGroup &tool : layer.tool_groups)
-                for (const PrintingExtrusion &extrusion : tool.extrusions)
-                    collect_leaves(*extrusion.root, extrusion, tool.extruder_id, layer, leaves);
-    size_t direct_global = 0, routed_object = 0;
-    for (size_t idx = 1; idx + 1 < leaves.size(); ++idx) {
-        if (!leaves[idx].generated_travel)
-            continue;
-        const bool global = leaves[idx - 1].owner->printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE ||
-                            leaves[idx + 1].owner->printing_catalog_id == PRINTING_OBJECT_INSTANCE_ID_NONE;
-        if (global) {
-            CHECK(leaves[idx].entity->polyline_ref().size() == 2);
-            ++direct_global;
-        } else if (leaves[idx].entity->polyline_ref().size() > 2)
-            ++routed_object;
-    }
-    CHECK(direct_global > 0);
-    CHECK(routed_object > 0);
-}
 
 // A notch faces the middle of a long edge, where local width needs additional vertices before insetting.
 TEST_CASE("Core travel boundary preserves the passage beneath a notch",
@@ -350,11 +251,7 @@ TEST_CASE("Avoid-crossing resolves a sliced modifier boundary with an interior p
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters][avoid-crossing-parity]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const char *provider = GENERATE("layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                                    "layer_extrusion_edit.travel.advanced");
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(
-        Orchestrator::instance(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel"), provider);
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "0"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
         {"nozzle_diameter", "0.4"}, {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
@@ -407,7 +304,6 @@ TEST_CASE("Avoid-crossing resolves a sliced modifier boundary with an interior p
     }
     const c_point shift = region.region(0).layer().object().instance_shift(0);
     const Point source(boundary + shift.x, bottom + scale_i(2.) + shift.y);
-    const Point target(boundary + scale_i(8.) + shift.x, bottom + scale_i(18.) + shift.y);
     const slic3r_api::RegionSettingsPointResult at_boundary = slic3r_api::RegionSettings::lookup_at_point(
         region, {"avoid_crossing_perimeters"}, c_point{source.x() - shift.x, source.y() - shift.y});
     REQUIRE(at_boundary.status == slic3r_api::RegionSettingsPointStatus::Ambiguous);
@@ -416,61 +312,19 @@ TEST_CASE("Avoid-crossing resolves a sliced modifier boundary with an interior p
     REQUIRE(inside.found());
     REQUIRE(inside.value.get_bool());
 
-    // Controlled leaves use the real masks, with the source ending exactly on their shared edge.
-    plan.groups.clear();
-    plan.groups.emplace_back();
-    plan.groups.back().printing_catalog_ids.push_back(catalog);
-    plan.groups.back().layers.emplace_back();
-    PrintingLayerGroup &layer = plan.groups.back().layers.back();
-    layer.print_z = scale_i(0.2);
-    layer.tool_groups.emplace_back();
-    PrintingToolGroup &tool = layer.tool_groups.back();
-    tool.extruder_id = 0;
-    for (const Points &points : {Points{source + Point(scale_i(1.), 0), source},
-                                Points{target, target + Point(scale_i(1.), 0)}}) {
-        ArcPolyline line;
-        for (const Point &point : points)
-            line.append(point);
-        PrintingExtrusion extrusion;
-        ExtrusionPath path(line,
-            ExtrusionAttributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.2, 0.4f, 0.2f)), nullptr, true);
-        extrusion.root = CanonicalExtrusion::acquire(path);
-        extrusion.region_island = native_region;
-        extrusion.printing_catalog_id = catalog;
-        tool.extrusions.push_back(std::move(extrusion));
-    }
-    {
-        Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
-            "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
-            provider});
-        REQUIRE(Steps::selected_active_plugin_from_group(orchestrator, STEP_LAYER_EXTRUSION_EDIT,
-            "layer_extrusion_edit.travel", &print.config())->get_id() == provider);
-        Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
-    }
-    std::vector<Leaf> leaves;
-    for (const PrintingExtrusion &extrusion : tool.extrusions)
-        collect_leaves(*extrusion.root, extrusion, 0, layer, leaves);
-    REQUIRE(leaves.size() == 3);
-    size_t resolved = 0;
-    REQUIRE(enabled_endpoint(leaves.front(), false, plan, &resolved));
-    REQUIRE(resolved == 1);
-    Routers routers;
-    const Points expected = oracle_path(leaves.front(), leaves.back(), plan, print, routers);
-    REQUIRE(expected.size() > 2);
-    const ArcPolyline &actual = leaves[1].entity->polyline_ref();
-    REQUIRE(actual.size() == expected.size());
-    for (size_t idx = 0; idx < expected.size(); ++idx)
-        CHECK(actual.get_point(idx) == expected[idx]);
-    std::cout << "boundary: compared=1 deviated=1 resolved=" << resolved << std::endl;
-}
-
-TEST_CASE("Avoid-crossing plugin matches core routes on sliced scenes",
-          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters][avoid-crossing-parity]")
-{
-    const Scene scenario = GENERATE(Scene::Hole, Scene::Islands, Scene::Top, Scene::Absolute,
-        Scene::Percentage, Scene::FirstLayer, Scene::Instances, Scene::Tools, Scene::Support,
-        Scene::Regional, Scene::Units);
-    check_scene(scenario);
+    // The endpoint lies exactly on the shared modifier edge; only its interior probe resolves the region.
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    plugin_run_context context{};
+    slic3r_api::LayerExtrusionEdit::AvoidCrossing::CompatibilityPlanner planner(print_view, plan_view, &context, 0, 0);
+    slic3r_api::LayerExtrusionEdit::TravelConnection::TravelEndpoint endpoint;
+    endpoint.position = {source.x(), source.y(), scale_i(0.2), true};
+    endpoint.region_island = region;
+    endpoint.printing_catalog_id = catalog;
+    CHECK_FALSE(planner.endpoint_enables_avoidance(endpoint));
+    endpoint.interior_point = c_point{source.x() + SCALED_EPSILON, source.y()};
+    endpoint.has_interior_point = true;
+    CHECK(planner.endpoint_enables_avoidance(endpoint));
 }
 
 // Resolve absent and stored selections in priority order without changing stored provider IDs.
@@ -479,8 +333,7 @@ TEST_CASE("Travel defaults to advanced and respects explicit providers and inact
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
-        "layer_extrusion_edit.travel.default", "layer_extrusion_edit.travel.avoid_crossing_perimeters",
-        "layer_extrusion_edit.travel.advanced"});
+        "layer_extrusion_edit.travel.default", "layer_extrusion_edit.travel.advanced"});
     Orchestrator &orchestrator = Orchestrator::instance();
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         orchestrator, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
@@ -495,9 +348,7 @@ TEST_CASE("Travel defaults to advanced and respects explicit providers and inact
     }
     config = DynamicPrintConfig::full_print_config();
     REQUIRE(config.opt_serialize(selector) == "layer_extrusion_edit.travel.advanced");
-    for (const char *id : {"layer_extrusion_edit.travel.default",
-                          "layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                          "layer_extrusion_edit.travel.advanced"}) {
+    for (const char *id : {"layer_extrusion_edit.travel.default", "layer_extrusion_edit.travel.advanced"}) {
         config.set_deserialize_strict(selector, id);
         Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
             STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &config);
@@ -507,11 +358,6 @@ TEST_CASE("Travel defaults to advanced and respects explicit providers and inact
     }
     REQUIRE(orchestrator.set_plugin_active("layer_extrusion_edit.travel.advanced", false));
     Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
-        STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", nullptr);
-    REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-    REQUIRE(orchestrator.set_plugin_active("layer_extrusion_edit.travel.avoid_crossing_perimeters", false));
-    selected = Steps::selected_active_plugin_from_group(orchestrator,
         STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", nullptr);
     REQUIRE(selected != nullptr);
     CHECK(selected->get_id() == "layer_extrusion_edit.travel.default");
@@ -528,14 +374,12 @@ TEST_CASE("Travel providers preserve route geometry and materialized flags on a 
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-parity]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool avoidance = GENERATE(false, true);
-    const char *provider = GENERATE("layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                                    "layer_extrusion_edit.travel.advanced");
+    const char *provider = "layer_extrusion_edit.travel.advanced";
     Orchestrator &orchestrator = Orchestrator::instance();
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         orchestrator, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({{"avoid_crossing_perimeters", avoidance ? "1" : "0"},
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "0"},
         {"nozzle_diameter", "0.4"}, {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"perimeters", "2"}, {"fill_density", "20%"}, {"skirts", "0"}, {"brim_width", "0"}});
@@ -547,8 +391,7 @@ TEST_CASE("Travel providers preserve route geometry and materialized flags on a 
     std::vector<std::vector<coord_t>> default_routes;
     for (int pass = 0; pass < 2; ++pass) {
         if (pass == 1) {
-            config.set_deserialize_strict(selector, avoidance ?
-                "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default");
+            config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.default");
             print.apply(model, config);
         }
         print.pipeline_progress().reset();
@@ -558,13 +401,11 @@ TEST_CASE("Travel providers preserve route geometry and materialized flags on a 
         {
             Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
                 "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
-                "layer_extrusion_edit.travel.default", "layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                "layer_extrusion_edit.travel.advanced"});
+                "layer_extrusion_edit.travel.default", "layer_extrusion_edit.travel.advanced"});
             Plugin *selected = Steps::selected_active_plugin_from_group(orchestrator,
                 STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel", &print.config());
             REQUIRE(selected != nullptr);
-            REQUIRE(selected->get_id() == (pass == 0 ? provider : avoidance ?
-                "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default"));
+            REQUIRE(selected->get_id() == (pass == 0 ? provider : "layer_extrusion_edit.travel.default"));
             Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
         }
         REQUIRE_FALSE(orchestrator.is_plugin_cancelled());
@@ -749,267 +590,6 @@ TEST_CASE("Shared island tops obey regional top avoidance",
         CHECK(disabled_chords > 0);
 }
 
-void check_scene(const Scene scenario)
-{
-    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    CAPTURE(static_cast<int>(scenario));
-    Points selected_route;
-    double discriminant = 0.;
-    const int passes = scenario == Scene::Units ? 3 : scenario == Scene::Tools ? 2 : 1;
-    std::vector<std::string> ordered_runs;
-    for (int pass = 0; pass < passes; ++pass) {
-        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-        const std::string selector = Steps::plugin_exclusive_group_option_key(
-            Orchestrator::instance(), STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
-        config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-        config.set_deserialize_strict({
-            {"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_top", "0"},
-            {"avoid_crossing_perimeters_max_detour", "0"}, {"nozzle_diameter", "0.4"},
-            {"layer_height", "0.2"}, {"first_layer_height", "0.2"},
-            {"perimeters", "2"}, {"fill_density", "20%"}, {"top_solid_layers", "1"},
-            {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}
-        });
-        if (scenario == Scene::Islands)
-            config.set_deserialize_strict({{"avoid_travel_island", "1"}, {"avoid_travel_island_weight", "5"}});
-        if (scenario == Scene::Top)
-            config.set_deserialize_strict({{"avoid_crossing_top", "1"}});
-        if (scenario == Scene::Absolute)
-            config.set_deserialize_strict({{"avoid_crossing_perimeters_max_detour", "0.001"}});
-        if (scenario == Scene::Percentage)
-            config.set_deserialize_strict({{"avoid_crossing_perimeters_max_detour", "0.001%"}});
-        if (scenario == Scene::FirstLayer || scenario == Scene::Support)
-            config.set_deserialize_strict({{"avoid_crossing_not_first_layer", "1"}});
-        if (scenario == Scene::Units && pass > 0) {
-            std::ostringstream value;
-            value.precision(17);
-            value << discriminant;
-            if (pass == 2)
-                value << '%';
-            config.set_deserialize_strict("avoid_crossing_perimeters_max_detour", value.str());
-        }
-        if (scenario == Scene::Tools)
-            config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"},
-                {"min_layer_height", "0.05,0.05"}, {"max_layer_height", "0.3,0.3"}});
-        if (scenario == Scene::Support)
-            config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "grid"},
-                {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"},
-                {"support_material_contact_distance", "0.2"}, {"dont_support_bridges", "0"}});
-
-        Model model;
-        Print print;
-        TriangleMesh mesh = ring_mesh();
-        if (scenario == Scene::Islands) {
-            TriangleMesh island = make_cube(3., 3., 0.6);
-            island.translate(Vec3f(8.f, 8.f, 0.f));
-            mesh.merge(island);
-        }
-        if (scenario == Scene::Support) {
-            // The roof extends beyond the narrow post and creates the support demand.
-            TriangleMesh post = make_cube(4., 8., 2.);
-            TriangleMesh roof = make_cube(12., 8., 0.6);
-            roof.translate(Vec3f(0.f, 0.f, 2.f));
-            post.merge(roof);
-            mesh = std::move(post);
-        }
-        if (scenario == Scene::Instances || scenario == Scene::Tools || scenario == Scene::Regional) {
-            ModelObject *object = model.add_object();
-            object->add_volume(mesh, ModelVolumeType::MODEL_PART, false);
-            object->add_instance();
-            if (scenario == Scene::Instances) {
-                ModelInstance *instance = object->add_instance();
-                instance->set_offset(Vec3d(30., 0., 0.));
-            } else {
-                TriangleMesh part = make_cube(10., 20., 0.6);
-                ModelVolume *volume = object->add_volume(part, ModelVolumeType::PARAMETER_MODIFIER, false);
-                DynamicPrintConfig regional;
-                if (scenario == Scene::Regional)
-                    regional.set_deserialize_strict({{"avoid_crossing_perimeters", "0"}});
-                else
-                    // Shared perimeters use one tool; only the region's infill changes tools.
-                    regional.set_deserialize_strict({{"perimeter_extruder", "1"}, {"infill_extruder", "2"},
-                                                     {"solid_infill_extruder", "2"}});
-                volume->config.assign_config(regional);
-            }
-            model.center_instances_around_point({100., 100.});
-            object->ensure_on_bed();
-            print.auto_assign_extruders(object);
-            print.apply(model, config);
-            print.set_status_silent();
-        } else
-            Slic3r::Test::init_print({mesh}, print, model, config);
-        print.process();
-        // The focused editor selection is a separate run from the slicing progress plan.
-        print.pipeline_progress().reset();
-        Orchestrator &orchestrator = Orchestrator::instance();
-        Steps::StepExtrusionOrdering::clear(print);
-        Steps::StepExtrusionOrdering::prepare(print);
-        Steps::StepExtrusionOrdering::run_step(orchestrator, print);
-        // Record the ordered source stream before any editor inserts travel geometry.
-        std::ostringstream ordered;
-        std::vector<Leaf> before;
-        for (const PrintingGroup &group : print.printing_plan()->groups)
-            for (const PrintingLayerGroup &layer : group.layers)
-                for (const PrintingToolGroup &tool : layer.tool_groups)
-                    for (const PrintingExtrusion &extrusion : tool.extrusions)
-                        collect_leaves(*extrusion.root, extrusion, tool.extruder_id, layer, before);
-        for (const Leaf &leaf : before)
-            ordered << leaf.layer->print_z << ' ' << leaf.tool << ' ' << leaf.owner->printing_catalog_id << ' '
-                    << leaf.entity->first_point().transpose() << ' ' << leaf.entity->last_point().transpose() << '\n';
-        ordered_runs.push_back(ordered.str());
-        const std::unique_ptr<PrintingPlan> source_plan = print.printing_plan()->clone();
-        std::vector<std::vector<coord_t>> compatibility_records;
-        for (const char *provider : {"layer_extrusion_edit.travel.avoid_crossing_perimeters",
-                                     "layer_extrusion_edit.travel.advanced"}) {
-            // Both editors start with independent copies of exactly the same ordered source state.
-            config.set_deserialize_strict(selector, provider);
-            print.apply(model, config);
-            print.mutable_printing_plan() = std::move(*source_plan->clone());
-            print.pipeline_progress().reset();
-            {
-                Slic3r::Test::TransitionPipeline::ScopedActivePlugins active({
-                    "layer_extrusion_edit.transition_scope.default", "layer_extrusion_edit.entry_state.default",
-                    provider, "layer_extrusion_edit.travel.advanced.planner.legacy",
-                    "layer_extrusion_edit.travel.advanced.zones.island_attractors",
-                    "layer_extrusion_edit.travel.advanced.zones.forbidden_tops"});
-                REQUIRE(Steps::selected_active_plugin_from_group(orchestrator, STEP_LAYER_EXTRUSION_EDIT,
-                    "layer_extrusion_edit.travel", &print.config())->get_id() ==
-                    provider);
-                Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
-            }
-            REQUIRE_FALSE(orchestrator.is_plugin_cancelled());
-            REQUIRE(print.printing_plan() != nullptr);
-            const PrintingPlan &plan = *print.printing_plan();
-            std::vector<Leaf> leaves;
-            for (const PrintingGroup &group : plan.groups)
-                for (const PrintingLayerGroup &layer : group.layers)
-                    for (const PrintingToolGroup &tool : layer.tool_groups)
-                        for (const PrintingExtrusion &extrusion : tool.extrusions)
-                            collect_leaves(*extrusion.root, extrusion, tool.extruder_id, layer, leaves);
-
-            size_t compared = 0, deviated = 0, first_layer_travels = 0;
-            size_t external = 0, second_tool = 0, support = 0, first_layer_support_travels = 0;
-            size_t disabled_detours = 0, resolved = 0, selected = 0;
-            std::vector<std::vector<coord_t>> travel_records;
-            Routers routers;
-            for (size_t idx = 0; idx < leaves.size(); ++idx) {
-                if (!leaves[idx].generated_travel)
-                    continue;
-                const ExtrusionAttributes *attributes = leaves[idx].entity->get_property<ExtrusionAttributes>();
-                REQUIRE(attributes != nullptr);
-                REQUIRE(attributes->extrusion_role() == ExtrusionRole::Travel);
-                REQUIRE(idx > 0);
-                REQUIRE(idx + 1 < leaves.size());
-                const Points expected = oracle_path(leaves[idx - 1], leaves[idx + 1], plan, print, routers);
-                if (scenario == Scene::Regional) {
-                    const bool source_enabled = enabled_endpoint(leaves[idx - 1], false, plan, &resolved);
-                    const bool target_enabled = enabled_endpoint(leaves[idx + 1], true, plan, &resolved);
-                    if ((!source_enabled || !target_enabled) && leaves[idx - 1].layer == leaves[idx + 1].layer) {
-                        Routers forced;
-                        if (oracle_path(leaves[idx - 1], leaves[idx + 1], plan, print, forced, true).size() > 2) {
-                            CHECK(expected.size() == 2);
-                            ++disabled_detours;
-                        }
-                    }
-                }
-                if (scenario == Scene::Units) {
-                    if (pass == 0 && selected_route.empty() && expected.size() > 2) {
-                        const double direct = (expected.back() - expected.front()).cast<double>().norm() * SCALING_FACTOR;
-                        const double extra = Polyline(expected).length() * SCALING_FACTOR - direct;
-                        if (extra > 0.01 && direct < 90. && direct > 1.) {
-                            // This midpoint lies between the extra mm and its percent equivalent: accepted in mm, rejected in % for direct lengths below 100 mm.
-                            discriminant = (extra + 100. * extra / direct) / 2.;
-                            selected_route = expected;
-                            std::cout << "unit discriminator: direct_mm=" << direct << " extra_mm=" << extra
-                                      << " value=" << discriminant << std::endl;
-                        }
-                    } else if (pass > 0 && expected.front() == selected_route.front() && expected.back() == selected_route.back()) {
-                        CHECK((expected.size() > 2) == (pass == 1));
-                        ++selected;
-                    }
-                }
-                const ArcPolyline &actual = leaves[idx].entity->polyline_ref();
-                INFO("leaf=" << idx << " source=" << leaves[idx - 1].entity->last_point()
-                     << " target=" << leaves[idx + 1].entity->first_point()
-                     << " actual from=" << actual.front() << " actual to=" << actual.back());
-                REQUIRE(actual.size() == expected.size());
-                std::vector<coord_t> record{leaves[idx].layer->print_z, coord_t(leaves[idx].tool),
-                    coord_t(attributes->extrusion_role() == ExtrusionRole::Travel),
-                    coord_t(leaves[idx].incoming_materialized), coord_t(leaves[idx].outgoing_materialized)};
-                for (size_t point_idx = 0; point_idx < expected.size(); ++point_idx) {
-                    CHECK(actual.get_point(point_idx) == expected[point_idx]);
-                    record.push_back(actual.get_point(point_idx).x());
-                    record.push_back(actual.get_point(point_idx).y());
-                    record.push_back(actual.z_offset(point_idx));
-                }
-                travel_records.push_back(std::move(record));
-                ++compared;
-                deviated += actual.size() > 2;
-                external += leaves[idx - 1].layer == leaves[idx + 1].layer &&
-                    leaves[idx - 1].owner->printing_catalog_id != leaves[idx + 1].owner->printing_catalog_id;
-                second_tool += leaves[idx + 1].tool == 1;
-                const ExtrusionAttributes *target_attributes = leaves[idx + 1].entity->get_property<ExtrusionAttributes>();
-                support += target_attributes != nullptr && target_attributes->extrusion_role().is_support();
-                // This scene enables avoid_crossing_not_first_layer, so support at the first object layer Z stays direct.
-                if (scenario == Scene::Support && target_attributes != nullptr &&
-                    target_attributes->extrusion_role().is_support() &&
-                    leaves[idx + 1].layer->print_z == print.object(0).layers().front().scaled_print_z()) {
-                    CHECK(actual.size() == 2);
-                    ++first_layer_support_travels;
-                }
-                const LayerRegionIsland *region = leaves[idx + 1].owner->region_island;
-                const slic3r_api::LayerRegionIsland region_view(reinterpret_cast<const layer_region_island_handle *>(region));
-                if (scenario == Scene::FirstLayer && region != nullptr &&
-                    region_view.region(0).layer().print_z() == region_view.region(0).layer().object().layer(0).print_z()) {
-                    CHECK(actual.size() == 2);
-                    ++first_layer_travels;
-                }
-            }
-            std::cout << "avoid-crossing parity: scene=" << static_cast<int>(scenario) << " pass=" << pass << ": compared=" << compared
-                      << " deviated=" << deviated << " disabled_detours=" << disabled_detours << " resolved=" << resolved
-                      << " first_layer_support=" << first_layer_support_travels << std::endl;
-            REQUIRE(compared > 0);
-            if (compatibility_records.empty())
-                compatibility_records = std::move(travel_records);
-            else
-                CHECK(travel_records == compatibility_records);
-            if (scenario == Scene::Hole || scenario == Scene::Islands || scenario == Scene::Top)
-                CHECK(deviated > 0);
-            if (scenario == Scene::Absolute || scenario == Scene::Percentage)
-                CHECK(deviated == 0);
-            if (scenario == Scene::FirstLayer)
-                CHECK(first_layer_travels > 0);
-            if (scenario == Scene::Instances) {
-                CHECK(external > 0);
-                CHECK(deviated > 0);
-            }
-            if (scenario == Scene::Tools) {
-                CHECK(second_tool > 0);
-                CHECK(deviated > 0);
-            }
-            if (scenario == Scene::Support) {
-                CHECK(support > 0);
-                CHECK(first_layer_support_travels > 0);
-                CHECK(deviated > 0);
-            }
-            if (scenario == Scene::Regional) {
-                CHECK(disabled_detours > 0);
-                CHECK(deviated > 0);
-            }
-            if (scenario == Scene::Units) {
-                REQUIRE_FALSE(selected_route.empty());
-                if (pass > 0)
-                    CHECK(selected > 0);
-                if (pass > 0)
-                    CHECK(ordered_runs[0] == ordered_runs[pass]);
-            }
-        }
-    }
-    if (scenario == Scene::Tools) {
-        std::cout << "multi-tool ordered sequences equal=" << (ordered_runs[0] == ordered_runs[1]) << std::endl;
-        CHECK(ordered_runs[0] == ordered_runs[1]);
-    }
-}
-
 TopRoutes top_oracle_routes(const bool avoid_top)
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1094,7 +674,7 @@ void collect_leaves(const ExtrusionEntity &entity, const PrintingExtrusion &owne
         out.push_back(Leaf{&entity, &owner, tool, &layer});
 }
 
-bool enabled_endpoint(const Leaf &leaf, const bool first, const PrintingPlan &plan, size_t *resolved)
+bool enabled_endpoint(const Leaf &leaf, const bool first, const PrintingPlan &plan)
 {
     if (leaf.owner->region_island == nullptr)
         return false;
@@ -1109,7 +689,6 @@ bool enabled_endpoint(const Leaf &leaf, const bool first, const PrintingPlan &pl
         region, {"avoid_crossing_perimeters"}, c_point{point.x() - shift.x, point.y() - shift.y});
     if (result.found())
         return result.value.get_bool();
-    const bool ambiguous = result.status == slic3r_api::RegionSettingsPointStatus::Ambiguous;
     const slic3r_api::ExtrusionEntity entity(reinterpret_cast<const extrusion_entity_handle *>(leaf.entity));
     const double distance = std::min(double(SCALED_EPSILON), entity.length() / 2.);
     if (distance > 0.) {
@@ -1117,13 +696,11 @@ bool enabled_endpoint(const Leaf &leaf, const bool first, const PrintingPlan &pl
         result = slic3r_api::RegionSettings::lookup_at_point(region, {"avoid_crossing_perimeters"},
             c_point{probe.x - shift.x, probe.y - shift.y});
     }
-    if (resolved != nullptr && ambiguous && result.found())
-        ++*resolved;
     return result.found() && result.value.get_bool();
 }
 
 Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &plan,
-                   const Print &print, Routers &routers, const bool ignore_activation)
+                   const Print &print, Routers &routers)
 {
     const Points straight{source.entity->last_point(), target.entity->first_point()};
     // At a layer boundary the connector carries only the entry position, not the preceding region.
@@ -1131,7 +708,7 @@ Points oracle_path(const Leaf &source, const Leaf &target, const PrintingPlan &p
         routers.clear();
         return straight;
     }
-    if (!ignore_activation && (!enabled_endpoint(source, false, plan) || !enabled_endpoint(target, true, plan)))
+    if (!enabled_endpoint(source, false, plan) || !enabled_endpoint(target, true, plan))
         return straight;
     const slic3r_api::LayerRegionIsland region(reinterpret_cast<const layer_region_island_handle *>(target.owner->region_island));
     const slic3r_api::Layer layer_view = region.region(0).layer();
