@@ -323,6 +323,12 @@ endforeach()
 
 target_link_libraries(${_TEST_NAME}_tests test_common test_common_data libslic3r)
 
+# Tests that request Marlin 2 must opt in without changing the app defaults.
+set(_marlin2_activation_fixture "${CMAKE_CURRENT_BINARY_DIR}/marlin2_activated.ini")
+file(READ "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini" _marlin2_activations)
+string(REGEX REPLACE "\nmarlin2 = 0\r?\n" "\nmarlin2 = 1\n" _marlin2_activations "${_marlin2_activations}")
+file(GENERATE OUTPUT "${_marlin2_activation_fixture}" CONTENT "${_marlin2_activations}")
+
 # A fresh production runtime keeps packaged seam providers out of the shared test registry.
 if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/seam/tests/host_tests.cpp")
     add_executable(nematx_seam_host_tests "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/seam/tests/host_tests.cpp")
@@ -352,13 +358,13 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS AND EXISTS "${NEMATX_PLUGINS_SOURCE_DIR}/plugin
     add_test(NAME nematx_support_interface_host
         COMMAND nematx_support_interface_host_tests
             "${CMAKE_BINARY_DIR}/temp/support-interface-host-data"
-            "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+            "${_marlin2_activation_fixture}"
             "${CMAKE_SOURCE_DIR}/resources")
     set_tests_properties(nematx_support_interface_host PROPERTIES LABELS "support-interface" TIMEOUT 180)
     add_test(NAME nematx_support_interface_export
         COMMAND nematx_support_interface_host_tests
             "${CMAKE_BINARY_DIR}/temp/support-interface-export-data"
-            "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+            "${_marlin2_activation_fixture}"
             "${CMAKE_SOURCE_DIR}/resources" --export-only)
     set_tests_properties(nematx_support_interface_export PROPERTIES LABELS "support-interface;plugin-e2e" TIMEOUT 120)
 endif()
@@ -552,7 +558,7 @@ if(SLIC3R_NEMATX_BUILTIN_PLUGINS)
     endif()
     add_test(NAME top_surface_retraction_replay COMMAND nematx_top_surface_retraction_host_tests
         "${CMAKE_BINARY_DIR}/temp/f21/replay"
-        "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+        "${_marlin2_activation_fixture}"
         "${CMAKE_SOURCE_DIR}/resources")
     set_tests_properties(top_surface_retraction_replay PROPERTIES LABELS "retraction" TIMEOUT 180)
     add_test(NAME top_surface_retraction_policy COMMAND ${_TEST_NAME}_tests "[plugins][top-surface-retraction]")
@@ -561,21 +567,21 @@ endif()
 add_test(NAME retraction_crossing_policy COMMAND ${_TEST_NAME}_tests "[plugins][layer-extrusion-edit][retraction][crossing-policy]")
 set_tests_properties(retraction_crossing_policy PROPERTIES LABELS "retraction" TIMEOUT 180)
 
-# The export gate uses the production registry and the host's default plugins.
+# The export gate uses the production registry with Marlin 2 enabled for its fixtures.
 if(TARGET Slic3r_app_console)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME infill_gap_fill_export
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_post_infill_gap_fill_export.py"
                 --host "$<TARGET_FILE:Slic3r_app_console>"
-                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --defaults "${_marlin2_activation_fixture}"
                 --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
                 --output "${CMAKE_BINARY_DIR}/temp/infill-gap-fill-export")
         set_tests_properties(infill_gap_fill_export PROPERTIES LABELS "infill;gap-fill;plugin-e2e" TIMEOUT 300)
         add_test(NAME retraction_crossing_export
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_retraction_crossing_export.py"
                 --host "$<TARGET_FILE:Slic3r_app_console>"
-                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --defaults "${_marlin2_activation_fixture}"
                 --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
                 --output "${CMAKE_BINARY_DIR}/temp/f21/retraction-exports")
         set_tests_properties(retraction_crossing_export PROPERTIES LABELS "retraction;plugin-e2e" TIMEOUT 900)
@@ -583,7 +589,7 @@ if(TARGET Slic3r_app_console)
             COMMAND "${Python3_EXECUTABLE}" -B
                 "${NEMATX_PLUGINS_SOURCE_DIR}/plugins/top_surface_retraction/tests/test_exports.py"
                 --host "$<TARGET_FILE:Slic3r_app_console>"
-                --defaults "${CMAKE_BINARY_DIR}/src/generated-resources/plugins/default_activated.ini"
+                --defaults "${_marlin2_activation_fixture}"
                 --runtime-path "$<TARGET_FILE_DIR:${_TEST_NAME}_tests>"
                 --output "${CMAKE_BINARY_DIR}/temp/f21/top-surface-exports")
         set_tests_properties(top_surface_retraction_export PROPERTIES LABELS "retraction;plugin-e2e" TIMEOUT 900)

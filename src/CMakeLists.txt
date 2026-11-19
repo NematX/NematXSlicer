@@ -201,8 +201,16 @@ foreach(_bundled_exact_plugin_package IN LISTS _bundled_exact_plugin_packages)
 endforeach()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated-resources/plugins")
 get_property(SLIC3R_NEMATX_DEFAULT_ACTIVATIONS GLOBAL PROPERTY SLIC3R_NEMATX_DEFAULT_ACTIVATIONS)
+# Keep a default firmware available when NematX is not built into the app.
+set(SLIC3R_STANDARD_FIRMWARE_DEFAULT 1)
+if(SLIC3R_APP_KEY STREQUAL "NematXSlicer" AND SLIC3R_NEMATX_BUILTIN_PLUGINS)
+    set(SLIC3R_STANDARD_FIRMWARE_DEFAULT 0)
+endif()
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/plugins/default_activated.ini.in"
                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}" @ONLY)
+# Refresh the build's defaults even when the executable does not relink.
+file(GENERATE OUTPUT "${SLIC3R_BUILD_RESOURCES_DIR}/plugins/default_activated.ini"
+     INPUT "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}")
 
 if (SLIC3R_BUILD_REST_SERVER)
     add_subdirectory(rest_server)
