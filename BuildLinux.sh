@@ -254,15 +254,6 @@ then
        echo " done"
     fi
 
-	echo -n "Updating submodules ..."
-	{
-		# update submodule profiles
-		pushd resources/profiles
-		git submodule update --init
-		popd
-	} #> $ROOT/build/Build.log # Capture all command output
-	echo " done"
-
 	if [[ -n $VERSION_DATE ]]
     then
 		echo -n "Changing date in version ..."
@@ -316,29 +307,18 @@ then
 
     popd  > /dev/null
     echo -e "\n ... done"
-
-    # Give proper permissions to script
-    chmod 755 $ROOT/build/src/BuildLinuxImage.sh
-
-    pushd build  > /dev/null
-    $ROOT/build/src/BuildLinuxImage.sh -a $FORCE_GTK2
-    popd  > /dev/null
-    echo "> ls ROOT"
-    ls -al $ROOT
-    echo "> ls ROOT/build"
-    ls -al $ROOT/build
-    echo "> ls -al ROOT/build/bin"
-    ls -al $ROOT/build/bin
-    echo "> ls -al ROOT/build/src"
-    ls -al $ROOT/build/src
 fi
 
-if [[ -n "$BUILD_IMAGE" ]]
+if [[ -n "$BUILD_SLIC3R" || -n "$BUILD_IMAGE" ]]
 then
-    # Give proper permissions to script
-    chmod 755 $ROOT/build/src/BuildLinuxImage.sh
-    pushd build  > /dev/null
-    $ROOT/build/src/BuildLinuxImage.sh -i $FORCE_GTK2
+    # Use one profile revision for the app and both archives.
+    image_args=()
+    [[ -n "$BUILD_SLIC3R" ]] && image_args+=(-a)
+    [[ -n "$BUILD_IMAGE" ]] && image_args+=(-i)
+    [[ -n "$FORCE_GTK2" ]] && image_args+=("$FORCE_GTK2")
+    chmod 755 "$ROOT/build/src/BuildLinuxImage.sh" || exit 1
+    pushd build > /dev/null || exit 1
+    "$ROOT/build/src/BuildLinuxImage.sh" "${image_args[@]}" || exit 1
     popd  > /dev/null
     echo "> ls ROOT"
     ls -al $ROOT

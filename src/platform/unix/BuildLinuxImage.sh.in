@@ -63,7 +63,6 @@ then
     # copy Resources
     cp -rf ../resources/ package/resources
     cp -f "@SLIC3R_BUILD_RESOURCES_DIR@/plugins/default_activated.ini" package/resources/plugins/ || exit 1
-    rm -f package/resources/profiles/.git
     cp -f bin/@SLIC3R_APP_CMD@ package/bin/@SLIC3R_APP_CMD@
     cp -f src/OCCTWrapper.so package/bin    
     ln -rs package/bin/@SLIC3R_APP_CMD@ package/bin/@GCODEVIEWER_APP_CMD@
@@ -77,9 +76,6 @@ then
     find package/resources/localization -name "*database*" -type f -delete
     find package/resources/localization -name "Slic3r.mo" -type f -delete
     
-    #copy distant profiles
-    python ../src/platform/download_vendor_bundles.py package/resources
-
     # copy occtwrapper
     cp src/OCCTWrapper.so package/bin/OCCTWrapper.so
 
@@ -89,6 +85,11 @@ then
     echo -e '#!/bin/bash\nDIR=$(readlink -f "$0" | xargs dirname)\nexport LD_LIBRARY_PATH="$DIR/bin"\nexec "$DIR/bin/@GCODEVIEWER_APP_CMD@" "$@"' > package/@GCODEVIEWER_APP_CMD@
     chmod ug+x package/@GCODEVIEWER_APP_CMD@
     echo -e "\n... done\n"
+fi
+
+if [[ -n "$BUILD_APP" || -n "$BUILD_IMAGE" ]]
+then
+    python3 ../src/platform/download_vendor_bundles.py package/resources || exit 1
 fi
 
 if [[ -n "$BUILD_IMAGE" ]]

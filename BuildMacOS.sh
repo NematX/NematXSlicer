@@ -213,16 +213,6 @@ brew --prefix zstd
 export $BUILD_ARCH
 export LIBRARY_PATH=$LIBRARY_PATH:$(brew --prefix zstd)/lib/
 
-echo -n "[1/8] Updating submodules..."
-{
-    # update submodule profiles
-    pushd resources/profiles
-    git submodule update --init
-    popd
-} #> $ROOT/build/Build.log # Capture all command output
-echo "done"
-
-
 if [[ -n "$VERSION_DATE" ]]
 then
     echo -n "[2/8] Changing date in version ... "
@@ -477,7 +467,7 @@ then
         echo -e "\n BuildMacOSImage done\n"
     else
         echo -e "\n BuildMacOSImage fail\n"
-#        exit 1 # terminate and indicate error
+        exit 1
     fi
     popd  > /dev/null
     echo "> ls ROOT"

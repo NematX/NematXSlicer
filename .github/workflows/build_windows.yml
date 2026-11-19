@@ -102,7 +102,6 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ inputs.checkout_ref || github.sha }}
-        submodules: true
     - uses: ilammy/msvc-dev-cmd@v1
     - name: Setup sccache
       uses: mozilla-actions/sccache-action@v0.0.11
@@ -207,7 +206,7 @@ jobs:
           throw 'The package is missing the generated NematX plugin activations.'
         }
         python ..\src\platform\download_vendor_bundles.py package/resources
-        if ($LASTEXITCODE -ne 0) { throw 'Preparing vendor bundles failed.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Preparing the NematX profile failed.' }
     - name: Upload package artifact
       uses: actions/upload-artifact@v4
       with:

@@ -20,9 +20,10 @@ AGENT*
 Agent*
 agent*
 
-# ===== Resources (plugins) =====
+# ===== Resources =====
 resources/plugins/*.zip
 resources/plugins/descriptions/
+/resources/profiles/
 
 # ===== Hidden files =====
 # Ignorer tout dot-file / dot-dossier, puis ré-autoriser l'utile.

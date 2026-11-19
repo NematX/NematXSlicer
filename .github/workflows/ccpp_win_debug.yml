@@ -39,9 +39,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: ilammy/msvc-dev-cmd@v1
-    - name: update submodule profiles
-      working-directory: ./resources/profiles
-      run: git submodule update --init
     - uses: shogo82148/actions-setup-perl@v1
       with:
         perl-version: "5.42"
@@ -87,9 +84,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: ilammy/msvc-dev-cmd@v1
-    - name: update submodule profiles
-      working-directory: ./resources/profiles
-      run: git submodule update --init
     - name: change date in version
       shell: powershell
       run: |
@@ -160,11 +154,9 @@ jobs:
       working-directory: ./build
       shell: cmd
       run: xcopy /RCYIE ..\resources package\resources
-    - name: copy profiles from registered github repositories
+    - name: Stage the NematX profile
       working-directory: ./build
-      shell: cmd
-      run: |
-        python ..\src\platform\download_vendor_bundles.py package/resources
+      run: python ..\src\platform\download_vendor_bundles.py package/resources
     - name: copy dll & exe
       working-directory: ./build
       shell: cmd
