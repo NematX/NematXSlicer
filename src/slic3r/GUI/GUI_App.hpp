@@ -459,6 +459,8 @@ private:
     // that the operation was cancelled or snapshot creation failed.
     std::string     create_configuration_snapshot(wxWindow *parent);
 
+    // Start the setup flow when needed. NematXSlicer installs its cached bundle
+    // before opening the first-run wizard. Return true if startup handles setup.
     bool            config_wizard_startup();
     // Returns true if the configuration is fine. 
     // Returns true if the configuration is not compatible and the user decided to rather close the slicer instead of reconfiguring.

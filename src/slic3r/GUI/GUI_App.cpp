@@ -4570,7 +4570,31 @@ void GUI_App::window_pos_sanitize(wxTopLevelWindow* window)
 bool GUI_App::config_wizard_startup()
 {
     if (!m_app_conf_exists || preset_bundle->printers.only_default_printers()) {
-        run_wizard(ConfigWizard::RR_DATA_EMPTY);
+        if constexpr (std::string_view(SLIC3R_APP_KEY) == "NematXSlicer") {
+            // Fill the cache from the bundle so setup does not wait for a sync.
+            preset_updater->reload_all_vendors();
+            if (preset_updater->count_installed() == 0) {
+                constexpr char vendor_id[] = "NematX";
+                const std::optional<VendorSync> vendor = preset_updater->vendor(vendor_id);
+                const VendorAvailable *version = vendor ? vendor->best_available() : nullptr;
+                if (version != nullptr && !version->local_file.empty()) {
+                    // Wait for the installer to reload presets before opening the wizard.
+                    preset_updater->install_vendor(vendor_id, *version, [this](const std::string &error) {
+                        if (mainframe == nullptr)
+                            return;
+                        if (!error.empty())
+                            show_error(mainframe, _L("Could not install the NematX profile from the local cache.") +
+                                "\n\n" + from_u8(error));
+                        run_wizard(ConfigWizard::RR_DATA_EMPTY, ConfigWizard::SP_WELCOME, RVBM_NEVER);
+                    });
+                    return true;
+                }
+                show_error(mainframe, _L("No compatible NematX profile was found in the local cache."));
+            }
+            run_wizard(ConfigWizard::RR_DATA_EMPTY, ConfigWizard::SP_WELCOME, RVBM_NEVER);
+        } else {
+            run_wizard(ConfigWizard::RR_DATA_EMPTY);
+        }
         return true;
     } else if (get_app_config()->legacy_datadir()) {
         // Looks like user has legacy pre-vendorbundle data directory,
