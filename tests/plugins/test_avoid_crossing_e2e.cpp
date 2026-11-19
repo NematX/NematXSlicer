@@ -251,6 +251,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {{"avoid_crossing_not_first_layer"}, {{"skip-first", {{"avoid_crossing_not_first_layer", "1"}}}}},
         {{"avoid_crossing_perimeters_max_detour"}, {{"detour-limit", {{"avoid_crossing_perimeters_max_detour", "5"}}}}},
         {{"nozzle_diameter"}, {{"nozzle", {{"nozzle_diameter", "0.6,0.4"}}}}},
+        {{"bed_shape"}, {{"bed-shape", {{"bed_shape", "-40x-40,140x-40,140x140,-40x140"}}}}},
         {{"avoid_crossing_top"}, {{"tops", {{"avoid_crossing_top", "1"}}}}},
         {{"avoid_travel_island"}, {{"island", {{"avoid_travel_island", "1"}}}}},
         {{"avoid_travel_island_weight"}, {{"island-weight", {{"avoid_travel_island_weight", "2"}}}}},
@@ -345,7 +346,8 @@ TEST_CASE("Off-object tower gaps reach production crossing wipes", "[plugins][pl
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
-        {"avoid_crossing_perimeters_max_detour", "0"}, {"wipe_tower_x", "-25"}, {"wipe_tower_y", "4"}});
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"wipe_tower_x", "-25"}, {"wipe_tower_y", "4"},
+        {"bed_shape", "-40x-40,140x-40,140x140,-40x140"}});
     const Result routed = run_case(config, "off-object-tower-routed", Scene::Tower);
     CHECK(routed.tower_scopes == crossing.tower_scopes);
     CHECK(routed.tower_routed_crossings > 0);
@@ -603,7 +605,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
                                                     "layer_extrusion_edit.travel.advanced";
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
-    const std::map<std::string, std::vector<std::string>> domains{
+    std::map<std::string, std::vector<std::string>> domains{
         {"avoid_crossing_perimeters", {"0"}},
         {"avoid_crossing_not_first_layer", {"1"}},
         {"avoid_crossing_perimeters_max_detour", {"5", "200%"}},
@@ -616,6 +618,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {selector, {std::string(provider) == "layer_extrusion_edit.travel.advanced" ?
             "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default"}}
     };
+    if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
+        domains.emplace("bed_shape", std::vector<std::string>{"-40x-40,140x-40,140x140,-40x140"});
     // Tool-dependent boundary partitioning is covered by the crossing and boundary tests.
     const std::map<std::string, std::string> exclusions{
         {"perimeter_extruder", "Partitions boundaries by perimeter tool; covered by crossing/boundary tests."},
@@ -645,6 +649,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    if (use_zones)
+        baseline.set_deserialize_strict("bed_shape", "-50x-50,150x-50,150x150,-50x150");
     const Result enabled = run_case(baseline, "baseline");
     std::cout << mode << " baseline: travels=" << enabled.travels.size() << " deviated=" << enabled.deviated << '\n';
     if (mode == "avoid-crossing") {

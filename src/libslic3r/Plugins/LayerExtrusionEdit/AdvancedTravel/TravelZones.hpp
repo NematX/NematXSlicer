@@ -15,9 +15,13 @@ then construct TravelZoneView with the contributors in execution order. They
 run immediately; query() lazily unions the applicable attractors.
 T must not decrease between queries.
 Attractors publish original perimeter slices, dated by source-or-target membership
-in those slices. The planner subtracts selected expanded forbidden material from
-their union to form M, then withdraws each M component into W for ring routing.
-M controls membership, admission and validation; W is not a replacement for M.
+in those slices. The planner leaves each transitive group seeded by an original
+forbidden component containing an endpoint out of Z3; overlap or boundary contact
+joins further components. It subtracts Z3 from the union of active attractor slices
+to form M_a, and withdraws
+each M_a component into W_a for ring routing. A fixed bed_shape contour supplies M_p and W_p
+for platter routes. M_a and M_p control membership and admission; W_a and W_p are
+only their routing domains.
 The view owns zones and cached unions; returned references remain valid until
 its destruction. Ids identify applicable zone-index sets within this view only.
 Keep run_context and its storage alive for queries; use one view per worker.

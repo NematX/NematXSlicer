@@ -26,20 +26,26 @@ routing. The opt-in advanced planner checks whether any gap is eligible, then
 collects active attractors and forbidden tops and routes in chronology order.
 Printed tops are opt-in and replace static forbidden tops when active; their dates
 start after the last arrival in each original island. Attractors publish raw
-perimeter slices dated by source-or-target membership. The planner subtracts
-expanded forbidden zones to form M, withdraws each M component into W, and
-validates against the original forbidden zones.
-Domain and obstacle-only hypotheses are ranked by estimated outside length plus
-weighted inside length. Construction retains exact endpoints; validation checks
-forbidden material, the budget and, when a usable obstacle-only reference exists,
-actual outside length against that reference. Rejected hypotheses
+perimeter slices dated by source-or-target membership. The planner builds a fixed
+initial platter from the scaled bed_shape contour, groups endpoint-containing
+original forbidden and outside-part pieces transitively by overlap or contact, then
+unions the remaining pieces as Z3 and forms M_a/W_a and M_p/W_p from the original and
+offset masks separately. It expands only the initial platter by SCALED_EPSILON for
+containment checks because diff_pl has no reliable side for a path exactly on a border.
+Attractor and platter hypotheses are ranked by estimated outside length plus weighted
+inside length. Construction retains exact endpoints; validation checks the expanded
+initial platter, forbidden material, the budget and, when a usable platter-only reference
+exists, actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
-Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
-connectors follow expanded forbidden rings, including holes, between their selected points.
-Endpoints without a region or on auxiliary layers offer no domain attachment.
+Each chosen component supplies its own route along crossed W_a rings; bridges and
+connectors detour on W_p rings, including obstacle-facing Z4 rings and the platter
+border, between their selected points.
+Endpoints without a region or on auxiliary layers offer only a platter attachment
+when W_p is nonempty.
 Travels touching such endpoints include slices of the plan's objects as forbidden
-components, not the synthetic wipe tower. Endpoint-containing components are excluded
-so mixed travels can reach their in-part endpoint. The first hypothesis that passes
+components, not the synthetic wipe tower. Pieces containing an endpoint, and pieces
+touching them transitively, are excluded so mixed travels can reach their in-part
+endpoint. The first hypothesis that passes
 validation is accepted; when all hypotheses fail, the planner returns and counts a
 straight fallback without changing the blocker set.
 The planner borrows this layer group's plan, index and Z to cache those slices.
@@ -69,9 +75,10 @@ planner survives the callback. Cancellation and routing errors propagate.
         |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: rank hypotheses, accept the first validated route or count a straight fallback
+            `-- ZonePlanner::path: group endpoint obstacles, build Z3/Z4/M_a/W_a/M_p/W_p and rank hypotheses
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
-                `-- detour: extend a chord and call the public Clipper ring-detour operation
+                |-- touches / union / diff / offset: group pieces and build cached geometry
+                `-- detour: extend a connector chord and call the public Clipper operation on W_p rings
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {
@@ -255,7 +262,9 @@ int32_t AdvancedTravel::used_config_keys(raw_used_config_key *keys) const noexce
         {"ironing", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"perimeter_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"perimeters", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+        {"solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        // Advanced routes use the fixed printable contour as their initial platter.
+        {"bed_shape", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
     };
     if (keys != nullptr)
         std::copy(std::begin(used_keys), std::end(used_keys), keys);

@@ -788,10 +788,10 @@ coordinates, a half-open interval `[begin, end)` in T, and a scope. `SIZE_MAX`
 means an open end for the rest of the layer. Scope can restrict the tool, require
 either endpoint to match an instance in the plan catalog, or require either
 endpoint extrusion to be support. An attractor is an original source slice;
-the planner later builds M from the active attractor union and selected
-expanded blockers, then builds one withdrawn W component for each M component.
-M controls endpoint admission and validation, while W supplies the rings used for
-routing.
+the planner later removes Z3 from the active attractor union to build M_a, then
+builds one withdrawn W_a component for each M_a component. A fixed bed_shape
+contour supplies M_p and W_p. M_a and M_p control endpoint admission and
+validation, while W_a and W_p supply the rings used for routing.
 
 `TravelZoneView` collects contributor geometry once per worker, rejects reversed
 dates and drops empty areas and intervals. Queries advance through dated events
@@ -814,8 +814,11 @@ Contributors are independently activated plugins under
   The planner performs the late withdrawal after forbidden material is removed:
   each M component is passed separately to `elephant_foot_compensation` with a
   minimum width of `min(0.01 mm, nozzle_diameter / 10)` and a requested
-  withdrawal of `1.5 * perimeter_spacing`. The resulting W components are used
-  only for ring routing and retain one non-empty result per valid M component.
+   withdrawal of `1.5 * perimeter_spacing`. The resulting W components are used
+   only for ring routing and retain one non-empty result per valid M component.
+   If a component is too narrow for the withdrawal, the compensation can leave
+   `W_a = M_a`; a route may then follow an obstacle at zero clearance, but it still
+   may not cross the original `Z3` material.
 - `forbidden_tops` is active by default. It copies the boundary's excluded top
   components as separate forbidden zones for the whole layer, scoped per instance.
 - `printed_tops` is opt-in and replaces `forbidden_tops` when active. It uses the
@@ -844,74 +847,79 @@ an instance, the default region configuration's
 The incoming layer-entry travel has no source extrusion and stays straight.
 
 Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
+The planner copies the configured `bed_shape` once when its worker-local instance is
+constructed. Its points are converted from millimetres with `scale_i`; the initial
+platter has no holes and remains the original geometry for endpoint guards and for
+building `M_p` and `W_p`. A copy expanded by `SCALED_EPSILON` is cached only for
+inside/outside validation, because `diff_pl` has no reliable side for a path exactly
+on a border.
 
 1. **Classify and collect obstacles.** An endpoint with a region on a normal object
    layer is in-part. Regionless endpoints and auxiliary layers (support, raft,
-   skirt, brim, tower) are outside-part. For every travel, ignore individual original
-   forbidden zones containing either endpoint. If either endpoint is outside, also
-   add `platter_blockers`: translated normal slices of the plan's objects at the
-   layer-group Z or below, from printing groups up to the current one. The synthetic
-   wipe tower is not a blocker. Ignore endpoint-containing components of these
-   object slices too, then union and expand all remaining forbidden material by the
-   tool's nozzle radius. This leaves the in-part endpoint's own component reachable
-   on a mixed travel. Subtract the expanded
-    obstacles from active attractors to form M components. Each M component keeps
-    every active raw slice that contributes filled area to it; W is then built
-    separately from each component for ring routing.
-2. **Rank hypotheses.** An in-part endpoint offers only the M component that
-   contains it when its source layer, instance and original attractor slice all
-   match; otherwise it offers no attractor candidate. There is no nearest-domain
-   fallback. Outside-part endpoints offer only the option without a domain, even near a domain. An
-   endpoint in M but outside W is connected to its nearest W ring point by a
-   connector that must remain in M. At most four pairs are ranked stably, domain
-   choices first on equal costs. Same-component ring and connector estimates
-   cost `w * length`; bridges and other connectors cost outside-domain length plus
-   `w * inside-domain length`, measured across all M components. Every outside
-   segment uses that same formula, including a segment adjacent to an
-   outside-part endpoint. Here `w` is `avoid_travel_island_weight` when island
-   avoidance is active, otherwise zero. For an in-part travel whose candidates
-   share one M component, admit the option without a domain at both ends only when its chord stays in that M
-   component, allowing `SCALED_EPSILON` outside. This is an M-membership rule,
-   not a withdrawn-material or nearest-domain proxy.
-3. **Construct the candidate.** Within one component, join the attachments by a
-   chord that follows W's rings only where it crosses them. Between components,
-   select bridge points with the legacy weighted jump search on the combined W
-   boundary, route within each component to those points and contour expanded
-   obstacles along the bridge. A mixed domain/option-without-a-domain choice uses the M component's
-   nearest W ring exit or entry, then contours expanded obstacles to the free
-   endpoint. A candidate with the option without a domain at both ends contours obstacles on the original chord.
-   Estimates and construction share all selected bridge/entry/exit points.
-   ZonePlanner never delegates to Legacy.
-4. **Validate, then fall back.** Constructed routes retain the exact endpoints,
-   avoid original forbidden material and respect the complete-path detour budget.
-   The material check compares the complete path length with the length left by
-   Clipper's difference from the original forbidden areas; a loss greater than
-   `SCALED_EPSILON` rejects the route. Actual outside-domain length must not
-   exceed that of one obstacle-only reference detour by more than
-   `SCALED_EPSILON`; when the source or target is strictly inside expanded
-   forbidden material, triple the reference outside length. Compute that
-   reference once before trying hypotheses. If it crosses original material,
-   the option without a domain is unavailable and domain hypotheses are tried
-   without this bound. Rejection tries the next ranked hypothesis without
-   changing the blocker set. If none passes, return and count the straight path.
-   No blocker is removed or counted as disabled. An accepted route using the
-   option without a domain is not a fallback. `domain_routes` counts accepted
-   domain paths, `bridges` accepted inter-component bridges, and `detours`
-   accepted paths longer than the chord by more than `SCALED_EPSILON`.
+    skirt, brim, tower) are outside-part. Keep the active original forbidden
+    components and, when either endpoint is outside-part, the translated
+    `platter_blockers` slices at the layer-group Z or below as separate pieces. The
+    synthetic wipe tower is not a blocker. A piece containing either endpoint is
+    ignored together with every piece joined to it by overlap or boundary contact;
+    this grouping is transitive and does not first union the pieces. At cache
+    construction, `Z3` is the union of the remaining pieces, and its nozzle offset
+    is `Z4`. The cache key retains the
+   sorted source/component identities that were ignored. `Z3` is subtracted from
+   the active attractor union to form `M_a`, while the fixed initial platter gives
+   `M_p = platter - Z3` and `W_p = platter - Z4`. Each `M_a` component is withdrawn
+   separately into `W_a` for ring routing.
+2. **Rank hypotheses.** An in-part endpoint offers the `M_a` component that contains
+   it when its source layer, instance and original attractor slice all match. An
+   endpoint in `M_a` but outside `W_a` reaches its nearest `W_a` point through a
+   link that stays in `M_a`. Every endpoint also offers the nearest reachable
+   `W_p` component when `W_p` is nonempty; the platter link stays in `M_p`.
+   Attractor identities precede platter identities on stable ties. Platter pairs
+   with different component indexes are discarded. When both endpoints share one
+   `M_a` component but their chord leaves it, all platter
+   candidates are discarded. Estimates use `w * length` for inside attractor
+   segments and outside length plus `w * inside length` for platter, bridge and
+   connector segments, measured against all `M_a` components. Here `w` is
+   `avoid_travel_island_weight` when island avoidance is active, otherwise zero.
+3. **Construct the candidate.** Same-attractor routes follow `W_a`; different
+   attractors select bridge points on their combined `W_a` boundary and use the
+   final `W_p` rings for the connector. A mixed route follows the attractor
+   link to the `W_a` point nearest the free endpoint's `W_p` point, then uses a
+   platter connector and the reversed platter link. A platter pair connects its
+   two reached `W_p` points with the same ring-detour operation. Estimates and
+   construction share all selected attachment points. ZonePlanner never delegates
+   to Legacy.
+4. **Validate, then fall back.** Constructed routes retain exact endpoints, stay
+   in the `SCALED_EPSILON`-expanded initial platter with `diff_pl` up to
+   `SCALED_EPSILON`, avoid original `Z3` material and respect the complete-path
+   detour budget. Links are checked against their original `M_a` or `M_p`
+   component; estimates, the reference bound and `blocked` retain the original
+   domains. The platter-only
+   reference uses the two platter links and connector even when normal platter
+   candidates were removed by the same-component rule or by different indexes. If
+   `W_p` is empty or the reference is invalid, the outside-length bound is absent;
+   otherwise a route's length outside `M_a` may exceed the reference by at most
+   `SCALED_EPSILON`. Rejection tries the next ranked hypothesis without changing
+   the blocker set. If none passes, return and count the straight path. An accepted
+   platter route is not a fallback. `domain_routes` counts accepted routes using an
+   attractor, `bridges` accepted inter-attractor bridges, and `detours` accepted
+   paths longer than the chord by more than `SCALED_EPSILON`.
 
 Spacing and island settings come from the target layer input, then the source
 when the target has no region, with nozzle diameter as the spacing fallback.
-The worker caches M, W and component rings by active zones, tool, ignored zones
-and spacing. Travels using platter blockers additionally key group, Z and ignored
-platter components; the plan catalog and object slices remain unchanged during use.
-Obstacle-only references and external connectors use the public Clipper detour
-operation in Shortest mode. ZonePlanner extends only those external connector
-chords by `SCALED_EPSILON` so an endpoint contact can be seen as a crossing; the
-M-to-W link is not extended. Holes are followed like other rings.
+The worker caches `M_a`, `W_a`, `M_p` and `W_p` by active zones, tool, ignored source
+components and spacing. It caches the expanded initial platter once when the worker-local planner is constructed. Travels
+using platter blockers additionally key the group and Z; the plan catalog and object
+slices remain unchanged during use. Platter references and external connectors use the public Clipper detour operation in
+Shortest mode on `W_p` rings; their obstacle-facing rings are the `Z4` boundary
+and their outer ring is the initial platter border. M-to-W links are not
+extended, and their original `M_a`/`M_p` rings are passed to Clipper. Holes are followed
+like other rings. `W_p` is empty when the expanded blockers cover the complete
+initial platter, so no platter candidate is created.
 `avoid_crossing_perimeters_max_detour` limits extra length in
 millimetres or as a percentage of chord length; zero is unlimited. Routing is
-heuristic, not shortest-path search; validation checks original material, not the
-nozzle margin, and the final fallback remains straight.
+heuristic, not shortest-path search; `blocked` checks original material while
+initial-platter containment uses its cached expanded copy, and the final fallback
+remains straight.
 
 ```text
 AdvancedTravel::run_impl: prepare and fill one layer's gaps
@@ -921,12 +929,13 @@ AdvancedTravel::run_impl: prepare and fill one layer's gaps
 |-- TravelZoneView: collect active contributors and cache dated unions of attractors
 `-- ScopeTravelConnector::apply: request routes in T order and insert travels
     |-- CompatibilityPlanner::path: use perimeter routing
-    `-- ZonePlanner::path: classify endpoints, cache geometry and rank hypotheses
+    `-- ZonePlanner::path: group endpoint obstacles, cache geometry and rank hypotheses
         |-- is_off_object_layer / platter_blockers: resolve outside-part geometry
+        |-- touches / union / diff / offset: group pieces and build Z3/Z4/M_a/W_a/M_p/W_p
         |-- build_boundary / endpoint_candidates: index components and choose attachments
         |-- select_island_bridge / estimate_cost: retain shared points and rank estimates
-        |-- append_component_path / route_on_boundary: follow each chosen component
-        |-- detour: extend connectors and call the public Clipper ring-detour operation
+        |-- append_component_path / route_on_boundary: follow each chosen W_a component
+        |-- detour: extend connectors and call the public Clipper operation on W_p rings
         |-- detour_in_component: build an unextended M-to-W link
         `-- validate all segments: accept the first passing hypothesis or count a straight fallback
 ```

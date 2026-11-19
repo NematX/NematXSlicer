@@ -25,16 +25,18 @@ in its original island rather than at the beginning of the layer.
 Support obstacles forbid separate object components at or below travel Z only
 for travels touching support, using the instances in the plan catalog.
 Disabling a member
-removes only its zones. The advanced planner routes on withdrawn attractors minus
-expanded forbidden zones, validating all segments against original forbidden
-material; it does not inherit the legacy planner's own top avoidance. Its spacing
-and island-jump settings come from the shared worker layer-input cache.
-Normal object-layer endpoints may attach to a domain. Regionless and auxiliary-layer
-endpoints offer no domain attachment; travels touching them include slices of the
-plan's objects as blockers independently of contributor activation. The synthetic
-wipe tower is not a blocker. The worker borrows the
-plan, group index and Z for that geometry, excluding components containing an endpoint
-so mixed travels can enter or leave their in-part endpoint's component.
+removes only its zones. The advanced planner groups original endpoint obstacles,
+forms M_a/W_a and M_p/W_p from original and offset masks, and expands only the initial
+platter for complete-route containment; it validates all segments against original
+forbidden material and does not inherit the legacy planner's own top avoidance. Its
+spacing and island-jump settings come from the shared worker layer-input cache.
+Normal object-layer endpoints may attach to an attractor or platter domain. Regionless
+and auxiliary-layer endpoints offer only the platter attachment; travels touching them
+include slices of the plan's objects as blockers independently of contributor activation.
+The synthetic wipe tower is not a blocker. The worker borrows the
+plan, group index and Z for that geometry, excluding endpoint-containing components
+and every component that touches them, transitively, so mixed travels can enter or
+leave their in-part endpoint's component.
 An inactive advanced provider blocks its dependent members even when
 their IDs are enabled in the profile.
 The connector owns insertion, Z interpolation and materialized travel flags.

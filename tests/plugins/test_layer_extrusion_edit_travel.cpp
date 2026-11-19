@@ -15,6 +15,7 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionEntityCanonical.hpp"
@@ -329,8 +330,8 @@ TEST_CASE("Avoid-crossing travel ranks second in the travel group",
     }));
 }
 
-// Compare the advanced provider's public scheduling and setting descriptions with its compatibility provider.
-TEST_CASE("Advanced travel exposes the compatibility routing settings",
+// Compare the advanced provider's compatibility settings and its fixed-bed setting with the legacy provider.
+TEST_CASE("Advanced travel exposes routing settings and bed shape",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -346,13 +347,18 @@ TEST_CASE("Advanced travel exposes the compatibility routing settings",
     CHECK(advanced->get_dependencies() == avoidance->get_dependencies());
     const std::vector<Plugin::UsedConfigKey> actual = advanced->get_used_config_keys();
     const std::vector<Plugin::UsedConfigKey> expected = avoidance->get_used_config_keys();
-    REQUIRE(actual.size() == expected.size());
-    for (size_t idx = 0; idx < actual.size(); ++idx) {
+    REQUIRE(actual.size() == expected.size() + 1);
+    for (size_t idx = 0; idx < expected.size(); ++idx) {
         CHECK(actual[idx].key == expected[idx].key);
         CHECK(actual[idx].type == expected[idx].type);
         CHECK(actual[idx].container_type == expected[idx].container_type);
         CHECK(actual[idx].option_preset_type == expected[idx].option_preset_type);
     }
+    CHECK(actual.back().key == "bed_shape");
+    CHECK(actual.back().type == RAW_CO_VECTOR_POINT);
+    CHECK(actual.back().container_type == RAW_CONTAINER_TYPE_NONE);
+    CHECK(actual.back().option_preset_type == RAW_PRESET_TYPE_NONE);
+    CHECK(PrintConfigDef::instance().option_keys(RAW_PRESET_TYPE_FFF_PRINTER).count("bed_shape") == 1);
 }
 
 TEST_CASE("AvoidCrossingPerimeters crossing test rejects contained travels",

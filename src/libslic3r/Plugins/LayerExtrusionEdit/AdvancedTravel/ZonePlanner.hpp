@@ -9,15 +9,17 @@ print_get_default_region_config(). This flag governs travels whose endpoints hav
 valid object instance, such as skirt and brim. Call the static eligible(...) guard
 before constructing TravelZoneView and ZonePlanner, then call path(T, travel) in
 nondecreasing T order.
-Attractors publish original slices. The planner subtracts expanded forbidden material
-to form M, withdraws each M component into W rings, and caches M/W plus optional
-printed platter components by active zones, tool, endpoint exclusions and spacing.
-Endpoint provenance selects an attractor component; regionless and auxiliary endpoints
-use only the obstacle-only choice. Candidate pairs are ranked by typed inside/outside
-estimates and built with their selected attachment points. Construction retains exact
-endpoints; validation checks original-material crossings, the complete-path detour
-budget and the obstacle-only reference bound. If no candidate passes, path returns and
-counts the straight line.
+Attractors publish original slices. The planner groups original forbidden pieces that
+contain an endpoint or touch such a piece, excludes that group from Z3, then
+subtracts Z3 from the attractor union to form M_a and from a fixed bed_shape contour
+to form M_p; Z4 is the nozzle offset of Z3 and W_a/W_p are the two routing domains.
+It caches these domains by active zones, tool, ignored source components, spacing and
+platter context. Endpoint provenance selects an attractor component when it matches;
+every endpoint may also select a platter component when W_p is nonempty. Candidate
+pairs are ranked by typed inside/outside estimates and built from their exact W
+points. Validation checks the SCALED_EPSILON-expanded initial platter copy, original material, detour budget and
+platter-only reference bound. If no candidate passes, path returns and counts the
+straight line.
 */
 #ifndef slic3r_plugins_advanced_zone_planner_hpp_
 #define slic3r_plugins_advanced_zone_planner_hpp_
@@ -34,10 +36,14 @@ namespace slic3r_api { namespace LayerExtrusionEdit {
 namespace AvoidCrossing { class LayerInputCache; }
 namespace AdvancedTravel {
 
+// Identify one original obstacle piece: the first flag is true for a platter piece
+// and false for a forbidden zone, followed by its source and component indexes.
+using ObstacleIdentity = std::tuple<bool, size_t, size_t>;
+
 class ZonePlanner
 {
 public:
-    // Copy the Config view, the auxiliary flag and layer-group identity/Z; borrow its configuration, the print, plan, worker-local planners, cache, zones and run context.
+    // Copy the Config view, the auxiliary flag and layer-group identity/Z, and cache an expanded bed_shape copy for route containment; borrow its configuration, the print, plan, worker-local planners, cache, zones and run context.
     // Borrowed dependencies outlive this planner; the plan catalog and object slices stay unchanged while cached platter blockers are used.
     ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
                 const Config &print_config, bool auxiliary_avoidance, const plugin_run_context *context,
@@ -54,13 +60,13 @@ public:
     // A direct result, a domain route or the counted straight fallback may be returned.
     // Cancellation and geometry errors propagate.
     std::vector<c_point> path(size_t t, const PendingTravel &travel);
-    // Count accepted paths constructed with at least one component's attachment or ring route, including interior chords.
+    // Count accepted paths that use an attractor attachment or ring route; platter-only paths do not count.
     size_t domain_routes() const { return m_domain_routes; }
     // Count accepted paths connecting two distinct components through selected bridge points.
     size_t bridges() const { return m_bridges; }
     // Return cumulative ring-routing diagnostics; advanced routing does not update island_jumps.
     const AvoidCrossing::RouterCounts &router_counts() const { return m_router_counts; }
-    // Return the number of accepted domain or obstacle paths longer than their chord by more than SCALED_EPSILON.
+    // Return the number of accepted routes longer than their chord by more than SCALED_EPSILON.
     size_t detours() const { return m_detours; }
     // Return the number of straight fallbacks after all ranked hypotheses fail.
     size_t fallbacks() const { return m_fallbacks; }
@@ -68,23 +74,27 @@ public:
 private:
     struct Obstacles {
         polygon_work::ExPolygons original;
-        polygon_work::ExPolygons expanded;
-        // Unioned attractor components after subtracting expanded forbidden material.
+        // Unioned attractor components after subtracting original Z3 material.
         polygon_work::ExPolygons components;
-        // One W component per M component, used only for ring routing.
+        // One W_a component per M_a component, used only for attractor ring routing.
         polygon_work::ExPolygons withdrawn_components;
-        // Every active raw attractor index contributing filled area to each M component.
+        // Every active raw attractor index contributing filled area to each M_a component.
         std::vector<std::vector<size_t>> component_sources;
-        // Independently indexed W rings for each component, in components order.
+        // Independently indexed W_a rings for each component, in components order.
         std::vector<std::unique_ptr<AvoidCrossing::Boundary>> component_boundaries;
         // First ring index of each component in the combined domain boundary.
         std::vector<size_t> component_rings;
         std::unique_ptr<AvoidCrossing::Boundary> domain;
+        // M_p is the initial bed contour minus Z3; W_p is the same contour minus Z4.
+        polygon_work::ExPolygons platter_components;
+        polygon_work::ExPolygons platter_free_components;
+        // Map each W_p component to the M_p component containing it.
+        std::vector<size_t> platter_component_sources;
     };
-    // Present only for travels using slices of the immutable plan's objects; retain group, Z and ignored component identities.
-    using PlatterKey = std::tuple<uint32_t, coord_t, std::vector<size_t>>;
-    // Cache entries use active zones, tool, endpoint exclusions, spacing and optional platter context.
-    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<size_t>, coord_t, std::optional<PlatterKey>>;
+    // Present only for travels using slices of the immutable plan's objects.
+    using PlatterKey = std::tuple<uint32_t, coord_t>;
+    // Cache entries use active zones, tool, ignored source components, spacing and platter context.
+    using CacheKey = std::tuple<size_t, extruder_index_t, std::vector<ObstacleIdentity>, coord_t, std::optional<PlatterKey>>;
     AvoidCrossing::CompatibilityPlanner &m_compatibility;
     TravelZoneView &m_zones;
     Config m_config;
@@ -96,9 +106,13 @@ private:
     const PrintingPlan &m_plan;
     uint32_t m_group_idx;
     coord_t m_print_z;
-    // Original object-slice components are collected once and shared by the tool-specific expanded cache entries.
+    // Original object-slice components are collected once and shared by the cache entries that use them.
     bool m_platter_ready = false;
     polygon_work::ExPolygons m_platter_blockers;
+    // Fixed bed_shape contour copied to scaled coordinates when this planner is constructed.
+    polygon_work::ExPolygon m_platter_initial;
+    // Fixed bed_shape contour expanded by SCALED_EPSILON for inside/outside checks.
+    polygon_work::ExPolygons m_platter_expanded;
     std::map<CacheKey, Obstacles> m_obstacles;
     size_t m_domain_routes = 0;
     size_t m_bridges = 0;
