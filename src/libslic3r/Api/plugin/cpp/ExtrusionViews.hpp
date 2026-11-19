@@ -772,30 +772,10 @@ public:
     }
 
     /* First point of the first non-empty descendant, or the local front point. */
-    c_point front() const {
-        assert(!empty());
-        if (self().point_count() > 0)
-            return self().local_front();
-        for (uint32_t idx = 0; idx < child_count(); ++idx) {
-            ExtrusionEntity candidate = child(idx);
-            if (!candidate.empty())
-                return candidate.front();
-        }
-        return {};
-    }
+    c_point front() const;
 
     /* Last point of the last non-empty descendant, or the local back point. */
-    c_point back() const {
-        assert(!empty());
-        if (self().point_count() > 0)
-            return self().local_back();
-        for (uint32_t idx = child_count(); idx > 0; --idx) {
-            ExtrusionEntity candidate = child(idx - 1);
-            if (!candidate.empty())
-                return candidate.back();
-        }
-        return {};
-    }
+    c_point back() const;
 
     /*
     Representative point near the middle of the entity tree.
@@ -803,17 +783,7 @@ public:
     This is not an arclength midpoint. It is a cheap stable point for UI/debug
     and simple heuristics that only need something inside the entity.
     */
-    c_point middle() const {
-        assert(!empty());
-        if (self().point_count() > 0)
-            return self().local_middle();
-        for (uint32_t idx = child_count() / 2; idx < child_count(); ++idx) {
-            ExtrusionEntity candidate = child(idx);
-            if (!candidate.empty())
-                return candidate.middle();
-        }
-        return front();
-    }
+    c_point middle() const;
 
     /* Sum local path length recursively through all descendants. */
     distf_t length() const {
@@ -1362,6 +1332,48 @@ inline ExtrusionEntity ExtrusionEntityReadApi<Derived>::child(uint32_t idx) cons
     const extrusion_entity_handle *child_handle = extrusion_child(self().handle(), idx);
     assert(child_handle != nullptr);
     return ExtrusionEntity(child_handle);
+}
+
+template<class Derived>
+inline c_point ExtrusionEntityReadApi<Derived>::front() const
+{
+    assert(!empty());
+    if (self().point_count() > 0)
+        return self().local_front();
+    for (uint32_t idx = 0; idx < child_count(); ++idx) {
+        ExtrusionEntity candidate = child(idx);
+        if (!candidate.empty())
+            return candidate.front();
+    }
+    return {};
+}
+
+template<class Derived>
+inline c_point ExtrusionEntityReadApi<Derived>::back() const
+{
+    assert(!empty());
+    if (self().point_count() > 0)
+        return self().local_back();
+    for (uint32_t idx = child_count(); idx > 0; --idx) {
+        ExtrusionEntity candidate = child(idx - 1);
+        if (!candidate.empty())
+            return candidate.back();
+    }
+    return {};
+}
+
+template<class Derived>
+inline c_point ExtrusionEntityReadApi<Derived>::middle() const
+{
+    assert(!empty());
+    if (self().point_count() > 0)
+        return self().local_middle();
+    for (uint32_t idx = child_count() / 2; idx < child_count(); ++idx) {
+        ExtrusionEntity candidate = child(idx);
+        if (!candidate.empty())
+            return candidate.middle();
+    }
+    return front();
 }
 
 template<class Derived>
