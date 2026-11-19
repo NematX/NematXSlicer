@@ -21,6 +21,9 @@ plugin. setup() allocates a small summary slot per PrintingLayerGroup,
 setup_run() publishes each layer's first-boundary decision independently, and
 run() connects the layer's scopes.
 The host barrier makes summaries immutable before any run reads another layer.
+annotate() may then add one G-code comment per travel, for verbose output; it
+places the comment first in the target scope's before phase, right after the
+inserted travel, so it leaves the travel phase a single geometric leaf.
 
 run() has two phases. prepare() records local pairs through
 PrintingEntityPropertyTraversal and snaps nearby seams immediately, so later
@@ -45,6 +48,7 @@ its outgoing flag from the next non-empty layer summary.
 */
 
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
@@ -160,6 +164,11 @@ public:
        Invalid paths, lost markers or inter-layer disagreement throw; use the same connector before reset() or setup(). */
     void apply(LayerTravelChronology &chronology,
                const TravelPathPlanner &planner, PluginProgress &progress) const;
+
+    /* Insert each non-empty comment as a comment event first in its target scope's before phase. comments is
+       indexed like chronology.travels; call it after apply() on the same chronology. A size mismatch or a
+       target without a before phase throws. */
+    void annotate(const LayerTravelChronology &chronology, const std::vector<std::string> &comments) const;
 
     /* Prepare and apply consecutive scopes with a non-empty planner; either phase may throw after local edits. */
     void run(PrintingLayerGroup &layer,

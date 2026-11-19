@@ -33,6 +33,7 @@ to update its own final outgoing flag without mutating the next layer.
             planner: choose each planar path in pair order
             define_travel_leaf: validate endpoints and interpolate Z
             next_nonempty_layer: resolve the final outgoing flag
+    annotate: prepend optional comment events to the targets' before phases
 */
 
 #include "TravelConnectionHelpers.hpp"
@@ -726,6 +727,31 @@ void ScopeTravelConnector::apply(LayerTravelChronology &chronology,
     printing_extrusion_scope_set_flag(*source,
         PRINTING_EXTRUSION_SCOPE_OUTGOING_TRAVEL_MATERIALIZED,
         following != nullptr ? following->first_travel_materialized_after_run : false);
+}
+
+void ScopeTravelConnector::annotate(const LayerTravelChronology &chronology,
+                                   const std::vector<std::string> &comments) const
+{
+    if (comments.size() != chronology.travels.size())
+        throw std::invalid_argument("Travel comments must match the chronology's travels.");
+    for (size_t travel_idx = 0; travel_idx < comments.size(); ++travel_idx) {
+        if (comments[travel_idx].empty())
+            continue;
+        const ExtrusionScope::OrderedExtrusionScope scope(
+            chronology.roots.at(chronology.travels[travel_idx].pair_index), m_scope_property);
+        MutableExtrusionEntity before = scope.before();
+        if (!before.valid())
+            throw std::runtime_error("A travel target has no before phase for its comment.");
+        before.set_can_rotate(false);
+        // An empty phase becomes the event itself; otherwise a new first leaf keeps existing events after it.
+        MutableExtrusionEntity event = before;
+        if (before.segment_count() != 0 || before.child_count() != 0 || before.property_count() != 0)
+            event = before.emplace_ordered_leaf(OrderedLeafPosition::Before, before.child_count() == 0 ?
+                ExistingPropertyPlacement::MoveWithExistingContent : ExistingPropertyPlacement::KeepOnParent);
+        if (!event.valid())
+            throw std::runtime_error("Unable to insert a travel comment.");
+        event.custom_gcode(comments[travel_idx], C_EXTRUSION_CUSTOM_GCODE_COMMENT);
+    }
 }
 
 /* Return the direct path used by the simple provider and advanced fallbacks. */

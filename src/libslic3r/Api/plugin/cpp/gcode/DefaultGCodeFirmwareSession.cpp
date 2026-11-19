@@ -1902,7 +1902,9 @@ std::string DefaultGCodeFirmwareSession::write_custom_gcode(
         custom_gcode.processing_extruder_id != EXTRUDER_ID_UNKNOWN)
         throw std::invalid_argument("Raw G-code and comments cannot carry script metadata.");
     const std::string output = encode_custom_gcode(custom_gcode.kind, text);
-    synchronize_after_custom_gcode(output);
+    // A comment cannot change the machine, so replaying it would only forget known state.
+    if (custom_gcode.kind != C_EXTRUSION_CUSTOM_GCODE_COMMENT)
+        synchronize_after_custom_gcode(output);
     return output;
 }
 

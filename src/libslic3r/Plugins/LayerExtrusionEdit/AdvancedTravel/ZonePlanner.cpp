@@ -202,15 +202,21 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
 {
     throw_if_cancelled(m_context);
     const std::vector<c_point> direct = travel::straight_path(pending.source, pending.target, pending.extruder_id);
+    m_last = Decision{};
     if (!eligible(pending.source, pending.target)) return direct;
     const work::Point source(pending.source.position.x, pending.source.position.y);
     const work::Point target(pending.target.position.x, pending.target.position.y);
-    if (source.coincides_with_epsilon(target)) return direct;
+    if (source.coincides_with_epsilon(target)) {
+        m_last.outcome = Decision::Outcome::NoMotion;
+        return direct;
+    }
     if (!m_platter_initial.contains(source, true) || !m_platter_initial.contains(target, true)) {
+        m_last.outcome = Decision::Outcome::OutsideBed;
         ++m_fallbacks;
         return direct;
     }
     const bool source_outside = outside_part(pending.source), target_outside = outside_part(pending.target);
+    m_last.outside_part = source_outside || target_outside;
     const bool use_platter = source_outside || target_outside;
     const double nozzle_diameter = m_config.vector_float_or_default("nozzle_diameter", pending.extruder_id, 0.4);
     coord_t spacing = scale_i(nozzle_diameter);
@@ -276,7 +282,10 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         endpoint_obstacles = clipper::union_ex(m_context->plugin_storage, endpoint_obstacles);
 
     std::optional<Route> best;
+    unsigned best_combination = 0;
     double best_score = 0.;
+    m_last.source_in_obstacle = !source_group.empty();
+    m_last.target_in_obstacle = !target_group.empty();
     // The low bit omits the source group, the high bit the distinct target group.
     for (unsigned combination = 0; combination < 4; ++combination) {
         if ((combination & 1) && source_group.empty()) continue;
@@ -291,21 +300,35 @@ std::vector<c_point> ZonePlanner::path(const size_t t, const PendingTravel &pend
         if (!candidate) continue;
         if (endpoint_obstacles.empty()) {
             best = std::move(candidate);
+            best_combination = combination;
             break;
         }
         const double outside = outside_length(candidate->points, endpoint_obstacles, m_context);
         const double score = outside + 3 * (candidate->length - outside);
         if (!best || score < best_score) {
             best = std::move(candidate);
+            best_combination = combination;
             best_score = score;
         }
     }
     if (!best) {
+        m_last.outcome = Decision::Outcome::Exhausted;
         ++m_fallbacks;
         return direct;
     }
     if (best->domain_route) ++m_domain_routes;
     if (best->bridge) ++m_bridges;
+    m_last.outcome = Decision::Outcome::Routed;
+    // A shared source and target group is omitted by the low bit alone.
+    m_last.source_obstacle_ignored = (best_combination & 1) != 0;
+    m_last.target_obstacle_ignored = (best_combination & 2) != 0 || (!distinct_target && m_last.source_obstacle_ignored);
+    m_last.source_island = best->source_island;
+    m_last.target_island = best->target_island;
+    m_last.source_exit = best->source_exit;
+    m_last.target_exit = best->target_exit;
+    m_last.source_link = best->source_link;
+    m_last.target_link = best->target_link;
+    m_last.bridge = best->bridge;
     std::vector<c_point> result;
     for (const work::Point &point : best->points) result.push_back({point.x(), point.y()});
     return result;
@@ -586,7 +609,9 @@ std::optional<ZonePlanner::Route> ZonePlanner::route(const PendingTravel &pendin
         if (reference_usable && outside_length(points, obstacles.components, m_context) >
             reference_outside + SCALED_EPSILON) continue;
         return Route{std::move(points), length, domain_route,
-            from_attractor && to_attractor && from.component != to.component};
+            from_attractor && to_attractor && from.component != to.component,
+            from_attractor, to_attractor, from.exit, to.exit,
+            !from.exit && !from.link.empty(), !to.exit && !to.link.empty()};
     }
     return std::nullopt;
 }

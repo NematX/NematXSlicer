@@ -3640,7 +3640,8 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("gcode_comments", coBool, ptFFF);
     def->label = L("Verbose G-code");
     def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
+    // Advanced travel adds its route comments while editing layer extrusions.
+    def->invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
     def->tooltip = L("Enable this to get a commented G-code file, with each line explained by descriptive text. "
         "If you print from an SD card, the additional weight of the file could make your firmware "
         "slow down.");

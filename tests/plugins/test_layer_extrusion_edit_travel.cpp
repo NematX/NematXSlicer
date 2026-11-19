@@ -55,7 +55,10 @@ NoTravel checks attach controlled gaps in platter coordinates without regional
 context and run them through straight travel and through advanced travel, whose
 gaps outside perimeter avoidance take the same best-effort NoTravel path.
 The ring scene routes a gap across a hole with advanced travel and its island
-attractors, and checks that the published route stays out of the hole.
+attractors, and checks that the published route stays out of the hole. With
+Verbose G-code, it also checks the zone-route comment placed first in the
+target's before phase; the NoTravel scene checks the comments of a layer entry
+and of a gap outside perimeter avoidance, and their absence without verbose output.
 The controlled three-island scene toggles contributor activation with either
 advanced or straight travel selected. Advanced travel may detour its inter-island
 gap because of attractors or forbidden tops; layer entry stays straight in every case.
@@ -299,14 +302,16 @@ TEST_CASE("Advanced travel keeps the straight fallback without regional context"
 } // namespace
 
 namespace {
-// Copied travel routes and host warnings from one controlled run.
-struct NoTravelResult { std::vector<Polyline> routes; std::vector<std::string> warnings; };
+// Copied travel routes, verbose travel comments and host warnings from one controlled run.
+struct NoTravelResult { std::vector<Polyline> routes; std::vector<std::string> comments; std::vector<std::string> warnings; };
 
 // Run the real layer-edit host on controlled platter-space gaps. The model is
 // applied normally, so NoTravel reads the same transformed helper volumes as a
 // sliced print. Multiple layers exercise the worker-local sections and summary.
 NoTravelResult controlled_no_travel(Print &print, const Points &endpoints,
                                    const char *provider = TRAVEL_PLUGIN);
+// Return the text of a comment event first in the scope's before phase, or an empty string.
+std::string travel_comment(const ExtrusionEntity &root);
 // Add one NoTravel box of the given XY size and offset to an object.
 ModelVolume *no_travel_box(ModelObject &object, double x, double y, double width, double depth, double z = 0.);
 // Return the axis-aligned rectangle (x, y, width, depth) in scaled coordinates.
@@ -344,10 +349,26 @@ NoTravelResult controlled_no_travel(Print &print, const Points &endpoints,
         for (uint32_t i = 0; i < path.point_count(); ++i)
             route.points.emplace_back(path.point(i).x, path.point(i).y);
         result.routes.push_back(std::move(route));
+        result.comments.push_back(travel_comment(*layer.tool_groups[0].extrusions[1].root));
     }
     for (const auto &message : Orchestrator::instance().consume_plugin_messages())
         if (message.plugin_id == provider) result.warnings.push_back(message.message);
     return result;
+}
+
+std::string travel_comment(const ExtrusionEntity &root)
+{
+    const slic3r_api::MutableExtrusionEntity phase = ordered_scope(const_cast<ExtrusionEntity &>(root)).before();
+    if (!phase.valid())
+        return {};
+    slic3r_api::ExtrusionEntity before = phase.readonly();
+    while (before.valid() && before.child_count() != 0)
+        before = before.child(0);
+    const slic3r_api::EPropertyCustomGcode *comment =
+        before.valid() ? before.get(slic3r_api::EPropertyCustomGcode::key) : nullptr;
+    if (comment == nullptr || comment->kind != C_EXTRUSION_CUSTOM_GCODE_COMMENT)
+        return {};
+    return before.stored_string(comment->text_id);
 }
 
 ModelVolume *no_travel_box(ModelObject &object, double x, double y, double width, double depth, double z)
@@ -401,6 +422,30 @@ TEST_CASE("Travel avoids NoTravel sections without perimeter settings", "[plugin
     CHECK(path.last_point() == endpoints.back());
     CHECK(intersection_pl(path, ExPolygon(rectangle(10.001, 4.001, 3.998, 11.998))).empty());
     CHECK(result.warnings.empty());
+    CHECK(result.comments.front().empty());
+}
+
+// Controlled gaps have no regional context, so advanced travel names them outside perimeter avoidance.
+TEST_CASE("Verbose advanced travel names layer-entry and NoTravel routes", "[plugins][travel][no-travel-routing]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    auto *object = model.add_object("part", "part.stl", make_cube(24., 20., 1.));
+    object->add_instance();
+    no_travel_box(*object, 10., 4., 4., 12.);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("gcode_comments", "1");
+    Print print;
+    print.apply(model, config);
+    const Points endpoints{Point::new_scale(2., 10.), Point::new_scale(22., 10.),
+                          Point::new_scale(2., 10.), Point::new_scale(22., 10.)};
+    const auto result = controlled_no_travel(print, endpoints, ADVANCED_TRAVEL_PLUGIN);
+    REQUIRE(result.routes.size() == 2);
+    REQUIRE(result.routes.front().size() > 2);
+    CHECK(result.comments.front() == "advanced travel: outside perimeter avoidance; NoTravel detour");
+    // The second layer starts with a travel from the first layer's end.
+    const PrintingLayerGroup &layer = print.printing_plan()->groups[0].layers[1];
+    CHECK(travel_comment(*layer.tool_groups[0].extrusions[0].root) == "advanced travel: layer entry; straight");
 }
 
 TEST_CASE("Travel keeps direct paths without an applicable NoTravel section", "[plugins][travel][no-travel-routing]")
@@ -609,7 +654,8 @@ TEST_CASE("Advanced travel routes around a hole between enabled endpoints",
         {"avoid_crossing_perimeters", "1"},
         {"avoid_crossing_not_first_layer", "0"},
         {"avoid_crossing_perimeters_max_detour", "0"},
-        {"nozzle_diameter", "0.4"}
+        {"nozzle_diameter", "0.4"},
+        {"gcode_comments", "1"}
     });
     Print print;
     Model model;
@@ -671,6 +717,7 @@ TEST_CASE("Advanced travel routes around a hole between enabled endpoints",
 
     REQUIRE(travel_count(print) == 1);
     const ExtrusionEntity &scope = *tool.extrusions[snap_closed_source ? 2 : 1].root;
+    CHECK(travel_comment(scope).rfind("advanced travel: zone route; start: island ring", 0) == 0);
     REQUIRE(scope.child_count() == 3);
     const ExtrusionEntity &travel = scope.child(0);
     REQUIRE(travel.has_polyline());

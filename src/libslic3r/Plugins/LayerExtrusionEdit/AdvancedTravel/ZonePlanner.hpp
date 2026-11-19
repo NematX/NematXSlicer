@@ -23,6 +23,8 @@ then checks the assembled route against the expanded bed, budget and platter-onl
 reference. It compares the first admissible route from each combination by length,
 counting length inside endpoint groups three times and keeping the first on ties.
 It publishes only the winner's counts or returns and counts the straight fallback.
+last_decision() describes how the latest path() call chose its result, for verbose
+G-code annotations; it does not influence routing.
 */
 #ifndef slic3r_plugins_advanced_zone_planner_hpp_
 #define slic3r_plugins_advanced_zone_planner_hpp_
@@ -46,6 +48,36 @@ using ObstacleIdentity = std::tuple<bool, size_t, size_t>;
 class ZonePlanner
 {
 public:
+    // How one path() call produced its result.
+    struct Decision {
+        enum class Outcome {
+            // Perimeter avoidance does not apply to this travel.
+            Ineligible,
+            // The endpoints coincide within SCALED_EPSILON.
+            NoMotion,
+            // An endpoint lies outside the configured bed contour.
+            OutsideBed,
+            // No combination produced an admissible route.
+            Exhausted,
+            // A route was admitted.
+            Routed
+        };
+        Outcome outcome = Outcome::Ineligible;
+        // Either endpoint is outside the part: no region, or support, raft, skirt, brim or tower geometry.
+        bool outside_part = false;
+        // The endpoint lies in a forbidden or platter obstacle group, and the admitted route ignored that group.
+        bool source_in_obstacle = false, target_in_obstacle = false;
+        bool source_obstacle_ignored = false, target_obstacle_ignored = false;
+        // The admitted route attaches the endpoint to an island ring; otherwise to the free platter.
+        bool source_island = false, target_island = false;
+        // A straight exit leaves a kept obstacle group to reach the ring.
+        bool source_exit = false, target_exit = false;
+        // A link moves the endpoint from the island band, between the outline and its withdrawn ring, to that ring.
+        bool source_link = false, target_link = false;
+        // The admitted route joins two distinct island components.
+        bool bridge = false;
+    };
+
     // Copy the Config view, the auxiliary flag and layer-group identity/Z, and cache an expanded bed_shape copy for route containment; borrow its configuration, the print, plan, worker-local planners, cache, zones and run context.
     // Borrowed dependencies outlive this planner; the plan catalog and object slices stay unchanged while cached platter blockers are used.
     ZonePlanner(AvoidCrossing::CompatibilityPlanner &compatibility, TravelZoneView &zones,
@@ -70,6 +102,8 @@ public:
     size_t bridges() const { return m_bridges; }
     // Return the number of straight fallbacks when no admissible route was found.
     size_t fallbacks() const { return m_fallbacks; }
+    // Describe the latest path() call; the value is replaced by the next call.
+    const Decision &last_decision() const { return m_last; }
 
 private:
     // The geometry of one obstacle piece and its stable identity for cache keys.
@@ -82,6 +116,8 @@ private:
         polygon_work::Points points;
         double length;
         bool domain_route, bridge;
+        // Attachment kind of each endpoint, as reported by Decision.
+        bool source_island, target_island, source_exit, target_exit, source_link, target_link;
     };
     struct Obstacles {
         polygon_work::ExPolygons original;
@@ -135,6 +171,7 @@ private:
     size_t m_domain_routes = 0;
     size_t m_bridges = 0;
     size_t m_fallbacks = 0;
+    Decision m_last;
 };
 
 }}}

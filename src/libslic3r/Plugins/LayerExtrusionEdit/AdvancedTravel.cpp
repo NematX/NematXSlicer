@@ -73,6 +73,12 @@ The plan owns all borrowed extrusions throughout both phases; no chronology or
 planner survives the callback. Cancellation and routing errors propagate.
 NoTravel exemptions and rejected detours are added to execution-wide counters; the
 last finished layer reports them in one warning.
+With gcode_comments (Verbose G-code), each travel also receives one comment that
+names its route: layer entry, outside perimeter avoidance, zone route with the
+attachment of each end (island ring or platter, straight exit from an obstacle,
+link from the island band, obstacle crossed), inter-island bridge, outside-part
+endpoint, the zone planner's fallback reason, and the NoTravel outcome. The
+connector writes these comments after apply(), in the targets' before phases.
 
     register_advanced_travel_plugin: register the permanent provider
     register_advanced_travel_contributors: register three non-exclusive no-op zone members
@@ -92,6 +98,8 @@ last finished layer reports them in one warning.
         |   |       |-- detour: route connectors on W_p rings with the public Clipper operation
         |   |       `-- blocked: check exits and the remaining path against their respective obstacle masks
         |   `-- NoTravel::path: ineligible gaps and zone fallbacks
+        |-- describe_zone_route / describe_no_travel: verbose travel comments
+        |-- ScopeTravelConnector::annotate: insert the verbose comments
         `-- report_warning: NoTravel summary from the last finished layer
 */
 
@@ -109,6 +117,13 @@ const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
 const char *const k_contributor_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
+
+// Describe the zone planner's latest decision for a verbose comment, without the NoTravel outcome.
+std::string describe_zone_route(const zones::ZonePlanner::Decision &decision);
+// Describe one endpoint attachment of an admitted zone route.
+std::string describe_attachment(bool island, bool in_obstacle, bool obstacle_ignored, bool exit, bool link);
+// Describe the NoTravel outcome of one gap from the counters before and after NoTravel::path and its point count.
+std::string describe_no_travel(const NoTravel::Counts &before, const NoTravel::Counts &after, size_t points);
 
 class ContributorChoice : public PluginBase
 {
@@ -300,9 +315,17 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     const PluginCommon::polygon_work::ExPolygons no_travel =
         NoTravel::sections(ConstPrintingPlan(ctx->plan), print_z, run_ctx);
     NoTravel::Counts counts;
-    const auto no_travel_path = [&](const PendingTravel &travel) {
-        return NoTravel::path(travel.source, travel.target, travel.extruder_id,
-                              travel.source_extrusion.handle() == nullptr, print_z, no_travel, run_ctx, counts);
+    // Verbose output names every travel's route; comments stay empty otherwise.
+    const bool verbose = config.bool_or_default("gcode_comments", false);
+    std::vector<std::string> comments(verbose ? chronology.travels.size() : 0);
+    const auto no_travel_path = [&](const size_t index, const std::string &reason) {
+        const PendingTravel &travel = chronology.travels.at(index);
+        const NoTravel::Counts before = counts;
+        std::vector<c_point> route = NoTravel::path(travel.source, travel.target, travel.extruder_id,
+            travel.source_extrusion.handle() == nullptr, print_z, no_travel, run_ctx, counts);
+        if (verbose)
+            comments[index] = "advanced travel: " + reason + "; " + describe_no_travel(before, counts, route.size());
+        return route;
     };
     AvoidCrossing::CompatibilityPlanner planner(print, plan, run_ctx, ctx->group_idx, print_z);
     const Config region_defaults(print_get_default_region_config(ctx->print));
@@ -318,7 +341,9 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     if (!any_avoidance_active) {
         m_connector.apply(chronology, [&no_travel_path, &chronology, &t](
             const TravelEndpoint &, const TravelEndpoint &, extruder_index_t) {
-            return no_travel_path(chronology.travels.at(t++));
+            const size_t current = t++;
+            return no_travel_path(current, chronology.travels[current].source_extrusion.handle() == nullptr ?
+                "layer entry" : "outside perimeter avoidance");
         }, progress());
     } else {
         // The contributors share this cache; the compatibility planner owns its separate cache.
@@ -341,20 +366,28 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
         zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
             plan, ctx->group_idx, print_z);
         // apply calls this exactly once per PendingTravel, in chronology order.
-        m_connector.apply(chronology, [&zone_planner, &no_travel_path, &chronology, &t](
+        m_connector.apply(chronology, [&zone_planner, &no_travel_path, &chronology, &t, &comments, verbose](
             const TravelEndpoint &, const TravelEndpoint &, extruder_index_t) {
             const size_t current = t++;
             const PendingTravel &travel = chronology.travels.at(current);
-            if (travel.source_extrusion.handle() == nullptr || !zone_planner.eligible(travel.source, travel.target))
-                return no_travel_path(travel);
+            if (travel.source_extrusion.handle() == nullptr)
+                return no_travel_path(current, "layer entry");
+            if (!zone_planner.eligible(travel.source, travel.target))
+                return no_travel_path(current, "outside perimeter avoidance");
             // A counted fallback is the zone planner's direct gap; NoTravel may still detour it.
             const size_t fallbacks = zone_planner.fallbacks();
             std::vector<c_point> route = zone_planner.path(current, travel);
-            return zone_planner.fallbacks() == fallbacks ? route : no_travel_path(travel);
+            if (zone_planner.fallbacks() != fallbacks)
+                return no_travel_path(current, describe_zone_route(zone_planner.last_decision()));
+            if (verbose)
+                comments[current] = "advanced travel: " + describe_zone_route(zone_planner.last_decision());
+            return route;
         }, progress());
     }
     if (t != chronology.travels.size())
         throw std::logic_error("Advanced travel did not consume every pending travel.");
+    if (verbose)
+        m_connector.annotate(chronology, comments);
     m_exemptions.fetch_add(counts.exemptions, std::memory_order_relaxed);
     m_fallbacks.fetch_add(counts.fallbacks, std::memory_order_relaxed);
     // The last completed layer reports one execution-wide summary, not one
@@ -364,6 +397,45 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
         if (!message.empty())
             report_warning(run_ctx, message.c_str());
     }
+}
+
+std::string describe_zone_route(const zones::ZonePlanner::Decision &decision)
+{
+    using Outcome = zones::ZonePlanner::Decision::Outcome;
+    switch (decision.outcome) {
+    case Outcome::Ineligible: return "outside perimeter avoidance";
+    case Outcome::NoMotion: return "zone planner, no planar motion";
+    case Outcome::OutsideBed: return "zone planner fallback, endpoint outside the bed";
+    case Outcome::Exhausted: return "zone planner fallback, no admissible route";
+    case Outcome::Routed: break;
+    }
+    std::string text = "zone route; start: " +
+        describe_attachment(decision.source_island, decision.source_in_obstacle, decision.source_obstacle_ignored,
+                            decision.source_exit, decision.source_link) +
+        "; end: " +
+        describe_attachment(decision.target_island, decision.target_in_obstacle, decision.target_obstacle_ignored,
+                            decision.target_exit, decision.target_link);
+    if (decision.bridge) text += "; inter-island bridge";
+    if (decision.outside_part) text += "; endpoint outside the part";
+    return text;
+}
+
+std::string describe_attachment(const bool island, const bool in_obstacle, const bool obstacle_ignored,
+                                const bool exit, const bool link)
+{
+    std::string text = island ? "island ring" : "platter";
+    if (in_obstacle)
+        text += obstacle_ignored ? ", inside an obstacle crossed by the route" : ", inside an obstacle";
+    if (exit) text += ", straight exit from the obstacle";
+    if (link) text += ", link from the island band to its ring";
+    return text;
+}
+
+std::string describe_no_travel(const NoTravel::Counts &before, const NoTravel::Counts &after, const size_t points)
+{
+    std::string text = after.exemptions != before.exemptions ? "endpoint in a NoTravel volume, volume ignored; " : "";
+    if (after.fallbacks != before.fallbacks) return text + "NoTravel detour rejected, straight";
+    return text + (points > 2 ? "NoTravel detour" : "straight");
 }
 } // namespace
 
