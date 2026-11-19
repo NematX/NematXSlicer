@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -64,12 +63,10 @@ that the first-layer exemption and a 5 mm detour limit reduce deviation counts,
 and checks that island weights change both planners' routes while keeping their
 endpoints. A separate dumbbell scene checks real travels through its thin bridge, segment
 containment in sliced material, and publication of those detours in G-code.
-The one-perimeter advanced variation also replays published XY gaps with their
-scope provenance to check reachable domain attachments, accepted domain routes
-and zero planner fallbacks. This replay is restricted to the ring scene with top
-avoidance and support disabled; no forbidden-top or support contributors can apply.
-Outside-part support avoidance also runs with the optional support contributor
-disabled: both activations must retain the same platter detours and publish them.
+The one-perimeter advanced variation also replays published XY gaps and checks
+source-layer, instance and raw-slice provenance, accepted domain routes and zero
+planner fallbacks. This replay is restricted to the ring scene with top
+avoidance and support disabled; no forbidden-top contributor can apply.
 Those bridge assertions apply only to gaps with a source extrusion, identified
 by the provider's ordered-scope traversal. Layer-entry travels have no source
 extrusion and stay straight by design; they are exempt, regardless of Z or point count.
@@ -86,15 +83,11 @@ Contributor activation cases keep the advanced planner selected and round-trip a
 reference with both members and each member disabled independently.
 The printed-top case activates its opt-in member separately, checks its plugin
 declaration, and compares both static-top activation states through STL export.
-The support-obstacle case explicitly selects an overhanging roof with a separate
+The support travel case explicitly selects an overhanging roof with a separate
 post and two instances. It identifies real support travel phases whose endpoint
 chords cross an object slice component containing neither endpoint. Slice copies
-are shifted using the plan catalog. With other contributors disabled, built-in
-platter blockers retain the same support detours with the optional support member
-enabled or disabled; intermediate vertices must occur in both published outputs.
-The contributor's actual zone output is covered only by the unit test
-"Support obstacles retain other components and catalog instances" in test_zone_planner.cpp;
-this E2E comparison does not establish that the enabled contributor emitted zones.
+are shifted using the plan catalog. With the zone contributors disabled,
+the advanced planner uses platter blockers and publishes support detours in G-code.
 The support-crossing matrix selects the compatible provider and independently
 varies crossing-only wipe and avoidance settings. It
 counts support wipe leaves, checks straight versus deviated routes and preserves
@@ -208,7 +201,7 @@ struct TravelActivation {
 // and return copied routes, support/tower crossing-wipe witnesses, published detour matches and deposited volume.
 // Pipeline or export errors remain failures; remove both output pairs only on the normal return path, ignoring removal errors.
 Result run_case(const DynamicPrintConfig &config, const std::string &name, Scene scene = Scene::Ring);
-// Require the one-perimeter ring scene with top avoidance and support disabled; replay without writing travels and compare XY paths, domain reachability and fallback counts.
+// Require the one-perimeter ring scene with top avoidance and support disabled; replay without writing travels and compare XY paths, source provenance and fallback counts.
 void check_one_perimeter_routes(Print &print, const Result &result, const DynamicPrintConfig &config, Scene scene);
 // Copy reserved travel phases and their source provenance without changing the plan; skip routes below two vertices and count those above two.
 void collect_travels(const ExtrusionEntity &entity, const std::set<const extrusion_entity_handle *> &scopes_with_source, Result &result);
@@ -359,6 +352,7 @@ TEST_CASE("Support crossing settings reach production G-code", "[plugins][plugin
         {{"avoid_crossing_not_first_layer"}, {{"skip-first", {{"avoid_crossing_not_first_layer", "1"}}}}},
         {{"avoid_crossing_perimeters_max_detour"}, {{"detour-limit", {{"avoid_crossing_perimeters_max_detour", "5"}}}}},
         {{"nozzle_diameter"}, {{"nozzle", {{"nozzle_diameter", "0.6,0.4"}}}}},
+        {{"bed_shape"}, {{"bed-shape", {{"bed_shape", "-40x-40,140x-40,140x140,-40x140"}}}}},
         {{"avoid_crossing_top"}, {{"tops", {{"avoid_crossing_top", "1"}}}}},
         {{"avoid_travel_island"}, {{"island", {{"avoid_travel_island", "1"}}}}},
         {{"avoid_travel_island_weight"}, {{"island-weight", {{"avoid_travel_island_weight", "2"}}}}},
@@ -453,7 +447,8 @@ TEST_CASE("Off-object tower gaps reach production crossing wipes", "[plugins][pl
     config.set_deserialize_strict(Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel.advanced.planner"), "layer_extrusion_edit.travel.advanced.planner.advanced");
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
-        {"avoid_crossing_perimeters_max_detour", "0"}, {"wipe_tower_x", "-25"}, {"wipe_tower_y", "4"}});
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"wipe_tower_x", "-25"}, {"wipe_tower_y", "4"},
+        {"bed_shape", "-40x-40,140x-40,140x140,-40x140"}});
     const Result routed = run_case(config, "off-object-tower-routed", Scene::Tower);
     CHECK(routed.tower_scopes == crossing.tower_scopes);
     CHECK(routed.tower_routed_crossings > 0);
@@ -641,25 +636,13 @@ TEST_CASE("Printed tops are opt-in and replace static tops through G-code", "[pl
     CHECK(host.blocked_plugin_activations().count(id) == 1);
 }
 
-// Check optional contributor activation while built-in platter blockers preserve support detours in both activation states and published G-code.
-TEST_CASE("Support platter avoidance persists without the optional support contributor", "[plugins][plugin-e2e][travel-zones]")
+// Check that advanced platter routing publishes support detours and preserves the legacy extrusion volume.
+TEST_CASE("Advanced platter avoidance publishes support detours", "[plugins][plugin-e2e][travel-zones]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &host = Orchestrator::instance();
     TravelActivation active(host);
     REQUIRE(active.success);
-    const char *id = "layer_extrusion_edit.travel.advanced.zones.support_obstacles";
-    const Plugin *plugin = host.get_plugin(id);
-    REQUIRE(plugin != nullptr);
-    CHECK(plugin->get_id() == id);
-    CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
-    CHECK(plugin->get_priority() == -50);
-    CHECK(plugin->get_exclusive_group().empty());
-    CHECK(plugin->get_used_config_keys().empty());
-    CHECK(plugin->get_defined_config_keys().empty());
-    CHECK(plugin->get_dependencies() == std::vector<std::string>{"layer_extrusion_edit.travel.advanced"});
-    CHECK_FALSE(host.is_plugin_active(id));
-    REQUIRE(host.set_plugin_active(id, true));
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     const std::string selector = Steps::plugin_exclusive_group_option_key(host, STEP_LAYER_EXTRUSION_EDIT,
         "layer_extrusion_edit.travel");
@@ -675,27 +658,21 @@ TEST_CASE("Support platter avoidance persists without the optional support contr
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.island_attractors", false));
     REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.forbidden_tops", false));
-    const Result enabled = run_case(config, "support-obstacles-enabled", Scene::Support);
-    REQUIRE(enabled.support_travels > 0);
-    CHECK(enabled.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
-    REQUIRE(host.set_plugin_active(id, false));
-    const Result disabled = run_case(config, "support-obstacles-disabled", Scene::Support);
-    CHECK(disabled.support_travels == enabled.support_travels);
-    CHECK(disabled.volume == Approx(enabled.volume).margin(0.01));
-    REQUIRE(disabled.support_crossings == enabled.support_crossings);
+    REQUIRE(host.set_plugin_active("layer_extrusion_edit.travel.advanced.zones.printed_tops", false));
+    const Result advanced = run_case(config, "support-platter-advanced", Scene::Support);
+    REQUIRE(advanced.support_travels > 0);
+    CHECK(advanced.selected_planner == "layer_extrusion_edit.travel.advanced.planner.advanced");
     size_t observed_detours = 0;
-    for (const std::vector<coord_t> &route : enabled.support_crossings) {
+    for (const std::vector<coord_t> &route : advanced.support_crossings) {
         if (route.size() <= 6) continue;
-        REQUIRE(std::find(enabled.published_detours.begin(), enabled.published_detours.end(), route) != enabled.published_detours.end());
-        REQUIRE(std::find(disabled.published_detours.begin(), disabled.published_detours.end(), route) != disabled.published_detours.end());
+        REQUIRE(std::find(advanced.published_detours.begin(), advanced.published_detours.end(), route) != advanced.published_detours.end());
         ++observed_detours;
     }
     REQUIRE(observed_detours > 0);
-    REQUIRE(host.set_plugin_active(id, true));
     config.set_deserialize_strict(selector, "layer_extrusion_edit.travel.avoid_crossing_perimeters");
-    const Result legacy = run_case(config, "support-obstacles-legacy", Scene::Support);
+    const Result legacy = run_case(config, "support-platter-legacy", Scene::Support);
     CHECK(legacy.support_travels > 0);
-    CHECK(legacy.volume == Approx(enabled.volume).margin(0.01));
+    CHECK(legacy.volume == Approx(advanced.volume).margin(0.01));
 }
 
 // Validate setting coverage and default route parity through text export; ironing is coupled with top avoidance.
@@ -711,7 +688,7 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
                                                     "layer_extrusion_edit.travel.advanced";
     const std::string selector = Steps::plugin_exclusive_group_option_key(
         host, STEP_LAYER_EXTRUSION_EDIT, "layer_extrusion_edit.travel");
-    const std::map<std::string, std::vector<std::string>> domains{
+    std::map<std::string, std::vector<std::string>> domains{
         {"avoid_crossing_perimeters", {"0"}},
         {"avoid_crossing_not_first_layer", {"1"}},
         {"avoid_crossing_perimeters_max_detour", {"5", "200%"}},
@@ -724,6 +701,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {selector, {std::string(provider) == "layer_extrusion_edit.travel.advanced" ?
             "layer_extrusion_edit.travel.avoid_crossing_perimeters" : "layer_extrusion_edit.travel.default"}}
     };
+    if (std::string(provider) == "layer_extrusion_edit.travel.advanced")
+        domains.emplace("bed_shape", std::vector<std::string>{"-40x-40,140x-40,140x140,-40x140"});
     // Tool-dependent boundary partitioning is covered by the crossing and boundary tests.
     const std::map<std::string, std::string> exclusions{
         {"perimeter_extruder", "Partitions boundaries by perimeter tool; covered by crossing/boundary tests."},
@@ -753,6 +732,8 @@ TEST_CASE("Avoid-crossing settings reach production G-code", "[plugins][plugin-e
         {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}, {"wipe", "0"},
         {"ironing", "0"}, {"use_relative_e_distances", "0"}, {"binary_gcode", "0"}, {"filament_diameter", "1.75"},
         {"gcode_exporter_plugin", k_default_gcode_exporter_id}});
+    if (use_zones)
+        baseline.set_deserialize_strict("bed_shape", "-50x-50,150x-50,150x150,-50x150");
     const Result enabled = run_case(baseline, "baseline");
     std::cout << mode << " baseline: travels=" << enabled.travels.size() << " deviated=" << enabled.deviated << '\n';
     if (mode == "avoid-crossing") {
@@ -1223,9 +1204,8 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
     PluginStorage storage;
     plugin_run_context context{};
     context.plugin_storage = reinterpret_cast<storage_handle *>(&storage);
-    size_t checked = 0, fallbacks = 0, domains = 0, candidates = 0, chords_outside_material = 0;
-    size_t attachments_off_chord = 0;
-    double minimum_ratio = std::numeric_limits<double>::max(), maximum_ratio = 0.;
+    size_t checked = 0, fallbacks = 0, domains = 0, provenance_matches = 0, provenance_mismatches = 0,
+        chords_outside_material = 0;
     for (uint32_t group = 0; group < plan.groups.size(); ++group)
         for (uint32_t layer = 0; layer < plan.groups[group].layers.size(); ++layer) {
             slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&plan.groups[group].layers[layer]));
@@ -1254,13 +1234,8 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
                 }, slic3r_api::MatchingEntityDescendants::Skip);
             traversal.process(view);
             ac::CompatibilityPlanner compatibility(print_view, plan_view, &context, group, view.print_z());
-            const zones::ChronologySummary summary = zones::summarize(chronology,
-                [&compatibility, &print_view](const travel::PendingTravel &gap) {
-                    return gap.source_extrusion.handle() != nullptr && zones::ZonePlanner::eligible(
-                        compatibility, print_view.config(), true, gap.source, gap.target);
-                });
             ac::LayerInputCache cache;
-            const zones::ZoneContributorInput input{print_view, plan_view, context, view.print_z(), cache, chronology.travels, summary};
+            const zones::ZoneContributorInput input{print_view, plan_view, context, cache, chronology.travels};
             zones::DefaultAttractorContributor attractors;
             zones::DefaultForbiddenTopsContributor tops;
             zones::PrintedTopsContributor printed_tops;
@@ -1285,35 +1260,26 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
                 ++checked;
                 const zones::ActiveZones &active = zone_view.query(t, gap);
                 CHECK(active.forbidden_indexes.empty());
-                const work::ExPolygons &areas = active.attractors;
                 const slic3r_api::Layer endpoint_layer = gap.target.region_island.region(0).layer();
                 const ac::LayerInput &layer_input = *cache.get(print_view, endpoint_layer, &context).target;
-                const coord_t spacing = layer_input.perimeter_spacing;
                 REQUIRE_FALSE(layer_input.regions.empty());
                 CHECK(layer_input.regions.front().avoid_travel_island);
                 CHECK(layer_input.regions.front().avoid_travel_island_weight == Approx(1.));
                 for (const travel::TravelEndpoint *endpoint : {&gap.source, &gap.target}) {
                     const work::Point point(endpoint->position.x, endpoint->position.y);
-                    work::Point attachment = point;
-                    double distance = std::numeric_limits<double>::max();
-                    for (const work::ExPolygon &area : areas) {
-                        if (area.contains(point)) { distance = 0.; attachment = point; break; }
-                        for (size_t index = 0; index <= area.holes.size(); ++index) {
-                            const work::Polygon &ring = index == 0 ? area.contour : area.holes[index - 1];
-                            for (size_t edge = 0; edge < ring.size(); ++edge) {
-                                work::Point nearest;
-                                const double squared = work::Line(ring.points[edge], ring.points[(edge + 1) % ring.size()]).distance_to_squared(point, &nearest);
-                                if (std::sqrt(squared) < distance) { distance = std::sqrt(squared); attachment = nearest; }
-                            }
+                    bool provenance_match = false;
+                    for (const size_t index : active.attractor_indexes) {
+                        const zones::TravelZone &zone = zone_view.zone(index);
+                        if (zone.source_layer == endpoint->region_island.region(0).layer().handle() &&
+                            zone.scope.printing_catalog_id == endpoint->printing_catalog_id &&
+                            zone_view.zone_area(index).front().contains(point, true)) {
+                            provenance_match = true;
+                            break;
                         }
                     }
-                    if (distance < 1.5 * spacing) ++candidates;
-                    minimum_ratio = std::min(minimum_ratio, distance / spacing);
-                    maximum_ratio = std::max(maximum_ratio, distance / spacing);
-                    const work::Point from(route.front()), to(route.back());
-                    if (from.distance_to(attachment) + attachment.distance_to(to) > from.distance_to(to) + SCALED_EPSILON) {
-                        ++attachments_off_chord;
-                    }
+                    CHECK(provenance_match);
+                    if (provenance_match) ++provenance_matches;
+                    else ++provenance_mismatches;
                 }
                 const Layer &material_layer = *reinterpret_cast<const Layer *>(endpoint_layer.handle());
                 ExPolygons material = material_layer.lslices();
@@ -1329,13 +1295,12 @@ void check_one_perimeter_routes(Print &print, const Result &result, const Dynami
     CHECK(checked > 0);
     CHECK(fallbacks == 0);
     CHECK(domains > 0);
-    CHECK(attachments_off_chord > 0);
-    CHECK(candidates == 2 * checked);
-    CHECK(maximum_ratio < 1.5);
+    CHECK(provenance_mismatches == 0);
+    CHECK(provenance_matches == 2 * checked);
     CHECK(chords_outside_material > 0);
     std::cout << "one-perimeter replay: checked=" << checked << " fallbacks=" << fallbacks << " domain_routes=" << domains
-        << " endpoint_candidates=" << candidates << " attachment/spacing=" << minimum_ratio << ".." << maximum_ratio
-        << " attachments_off_chord=" << attachments_off_chord << " chords_outside_material=" << chords_outside_material << '\n';
+        << " provenance_matches=" << provenance_matches << " provenance_mismatches=" << provenance_mismatches
+        << " chords_outside_material=" << chords_outside_material << '\n';
 }
 
 size_t count_wipes(const slic3r_api::ExtrusionEntity &entity, raw_extrusion_role role)

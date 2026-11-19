@@ -5,26 +5,33 @@
 TravelZones supplies dated platter-space areas to layer-local travel planners.
 T is an index into LayerTravelChronology::travels, not a printable-scope index.
 A PE is a PrintingExtrusion, the plan owner of one or more printable scopes.
-summarize() maps every printed PE and tool into half-open T intervals, even
-when the PE has no new gap. Its views borrow the unchanged PrintingPlan.
-Eligibility means the caller's decision that avoidance is active for a travel;
-the summary records this decision without selecting or invoking a planner.
+The views borrow the unchanged PrintingPlan. Eligibility is checked by the
+AdvancedTravel provider before this view is constructed, so the view retains
+no extra chronology state.
 
 Construct a ZoneContributorInput with a LayerInputCache owned by the
 orchestrator for this worker, never shared between workers,
 then construct TravelZoneView with the contributors in execution order. They
-run immediately; query() lazily unions the applicable active areas by role.
+run immediately; query() lazily unions the applicable attractors.
 T must not decrease between queries.
-Attractors are routing domains; the planner may use straight endpoint attachments
-or island jumps outside them. Default attractors are dated by source-or-target
-membership in their original perimeter slice, not in the withdrawn domain.
+Attractors publish original perimeter slices, dated by source-or-target membership
+in those slices. The planner tries keeping or omitting each group of original
+obstacle pieces containing an endpoint. Overlap or boundary contact joins pieces
+transitively, including the object slices used as obstacles for outside-part travel.
+For each combination the remaining pieces form Z3. The planner subtracts Z3 from the union of active attractor slices
+to form M_a, and withdraws
+each M_a component into W_a for ring routing. A fixed bed_shape contour supplies M_p and W_p
+for platter routes. M_a and M_p control membership and admission; W_a and W_p are
+only their routing domains. An endpoint in a kept group can reach W by a straight
+exit checked against the inset of other kept obstacles; the rest of the route is
+checked against the inset of Z3. Only these material checks shrink the obstacles
+by SCALED_EPSILON; domains, detours, the reference and the score use the original geometry.
+The planner compares admissible routes, counting length inside endpoint groups
+three times and keeping the first route on ties.
 The view owns zones and cached unions; returned references remain valid until
 its destruction. Ids identify applicable zone-index sets within this view only.
 Keep run_context and its storage alive for queries; use one view per worker.
-    // This example disables avoidance for every travel.
-    ChronologySummary summary = summarize(chronology,
-        [](const PendingTravel &) { return false; });
-    ZoneContributorInput input{print, plan, context, z, cache, chronology.travels, summary};
+    ZoneContributorInput input{print, plan, context, cache, chronology.travels};
     TravelZoneView zones(contributors, input);
     const ActiveZones &active = zones.query(t, chronology.travels[t]);
 */
@@ -57,8 +64,6 @@ struct ZoneScope
     extruder_index_t extruder = EXTRUDER_ID_UNKNOWN;
     // SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE matches any instance; otherwise either endpoint must match.
     uint32_t printing_catalog_id = SLIC3R_PRINTING_OBJECT_INSTANCE_ID_NONE;
-    // When true, at least one endpoint PE must have a support role.
-    bool support_travels_only = false;
 };
 
 struct TravelZone
@@ -69,46 +74,20 @@ struct TravelZone
     size_t begin = 0;
     size_t end = (std::numeric_limits<size_t>::max)();
     ZoneScope scope;
+    // Layer associated with the source geometry; ordinary attractor slices borrow their original layer from the
+    // print, while support-derived slices use the support target layer because LayerInput exposes no lower-layer handle.
+    // The print and plan keep the handle alive during routing; support endpoints never receive attractor candidates,
+    // so the support exception has no routing effect.
+    const layer_handle *source_layer = nullptr;
 };
-
-// For a consecutive pair run p..q, bounds are the first T with pair_index >= p and the first T with pair_index > q.
-// The incoming travel is included and the outgoing travel excluded; a run without a new gap is retained with an empty interval.
-struct TravelInterval { size_t begin = 0; size_t end = 0; };
-struct ExtrusionInterval
-{
-    PrintingExtrusion extrusion{nullptr};
-    extruder_index_t extruder = EXTRUDER_ID_UNKNOWN;
-    TravelInterval interval;
-};
-struct ToolInterval
-{
-    extruder_index_t extruder = EXTRUDER_ID_UNKNOWN;
-    TravelInterval interval;
-};
-struct ChronologySummary
-{
-    size_t travel_count = 0;
-    std::vector<ExtrusionInterval> extrusions;
-    std::vector<ToolInterval> tools;
-    // Caller-supplied eligibility for each T in the detailed travel list.
-    std::vector<bool> avoidance_active;
-    // True exactly when at least one entry of avoidance_active is true.
-    bool any_avoidance_active = false;
-};
-
-// Map consecutive pair-owner and tool runs to half-open T intervals and evaluate eligibility once per gap.
-ChronologySummary summarize(const TravelConnection::LayerTravelChronology &chronology,
-    const std::function<bool(const PendingTravel &)> &avoidance_enabled);
 
 struct ZoneContributorInput
 {
     const Print &print;
     const PrintingPlan &plan;
     const plugin_run_context &run_context;
-    coord_t print_z;
     AvoidCrossing::LayerInputCache &layer_inputs;
     const std::vector<PendingTravel> &travels;
-    const ChronologySummary &summary;
 };
 
 class ZoneContributor
@@ -124,8 +103,9 @@ struct ActiveZones
 {
     size_t id = 0;
     polygon_work::ExPolygons attractors;
-    polygon_work::ExPolygons forbidden;
-    // Individual applicable forbidden zones, before union or expansion; indexes refer to TravelZoneView::zone_area().
+    // Individual applicable attractor zones before union; indexes refer to TravelZoneView::zone_area().
+    std::vector<size_t> attractor_indexes;
+    // Individual applicable forbidden zones before expansion; indexes refer to TravelZoneView::zone_area().
     std::vector<size_t> forbidden_indexes;
 };
 
@@ -135,14 +115,16 @@ public:
     // Collect owned areas once, reject reversed dates and drop empty areas or date intervals before sorting events; errors and cancellation propagate.
     TravelZoneView(const std::vector<std::reference_wrapper<const ZoneContributor>> &contributors,
                   const ZoneContributorInput &input);
-    // Return cached role unions for the dated, scope-matching set using the borrowed context's valid storage; T must not decrease (logic_error).
+    // Return the cached attractor union for the dated, scope-matching set using the borrowed context's valid storage; T must not decrease (logic_error).
     // Cancellation and geometry failures propagate without caching partial areas.
     const ActiveZones &query(size_t t, const PendingTravel &travel);
-    // Borrow one collected zone's unchanged area for an index returned by query(); valid until view destruction.
+    // Borrow one collected zone's unchanged geometry for an index returned by query(); valid until view destruction.
     const polygon_work::ExPolygons &zone_area(size_t index) const { return m_zones.at(index).area; }
+    // Borrow one collected zone's scope and source-layer provenance for an index returned by query().
+    const TravelZone &zone(size_t index) const { return m_zones.at(index); }
     // Return the number of contributor calls completed at construction.
     size_t contributor_calls() const { return m_contributor_calls; }
-    // Return the number of completed nonempty role-union constructions, including work later discarded by cancellation; empty sets add nothing.
+    // Return the number of completed nonempty attractor-union constructions; empty sets add nothing.
     size_t union_builds() const { return m_union_builds; }
 
 private:

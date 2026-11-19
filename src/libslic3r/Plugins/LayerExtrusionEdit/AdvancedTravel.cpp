@@ -22,36 +22,43 @@ layer group before the host's worker barrier. Each run first prepares a chronolo
 an ordered record of borrowed extrusion gaps with their seams already snapped.
 It selects a planner through the advanced planner group, falling back to
 legacy for absent or unknown selections. Legacy preserves perimeter
-routing. The opt-in advanced planner summarizes eligible gaps, collects active
-attractors and forbidden tops, and routes in chronology order. Printed tops are
-opt-in and replace static forbidden tops when active; their dates start after
-the last arrival in each original island. Attractors are withdrawn perimeter slices
-dated by source-or-target membership. The advanced planner routes on their union
-minus expanded forbidden zones and validates against the original forbidden zones.
-Domain and obstacle-only hypotheses are ranked by estimated outside length plus
-weighted inside length. Validation checks forbidden material, endpoints, the budget
-and, when a usable obstacle-only reference exists, actual outside length against that reference. Rejected hypotheses
+routing. The opt-in advanced planner checks whether any gap is eligible, then
+collects active attractors and forbidden tops and routes in chronology order.
+Printed tops are opt-in and replace static forbidden tops when active; their dates
+start after the last arrival in each original island. Attractors publish raw
+perimeter slices dated by source-or-target membership. The planner builds a fixed
+initial platter from the scaled bed_shape contour, groups endpoint-containing
+original forbidden and outside-part pieces transitively by overlap or contact.
+For each combination of keeping or ignoring these groups, it unions the remaining
+pieces as Z3 and forms the attractor and platter routing domains described in
+ZonePlanner.hpp. It expands only the initial platter by SCALED_EPSILON for
+containment checks because diff_pl has no reliable side for a path exactly on a border.
+Attractor and platter hypotheses are ranked by estimated outside length plus weighted
+inside length. Construction retains exact endpoints; validation checks the expanded
+initial platter and the budget. Straight exits are checked against the inset of other
+kept obstacles; the rest is checked against the inset of Z3. Only material checks
+shrink obstacles by SCALED_EPSILON; domains, detours, the reference and the score use
+the original geometry. When a usable platter-only reference
+exists, validation compares actual outside length against that reference. Rejected hypotheses
 leave the next choice available; only exhaustion counts a straight fallback.
-Each chosen component supplies its own route along crossed rings; bridges and free-endpoint
-connectors follow expanded forbidden contours between their selected points.
-Endpoints without a region or on auxiliary layers offer no domain attachment.
+Each chosen component supplies its own route along crossed W_a rings; bridges and
+connectors detour on W_p rings, including obstacle-facing Z4 rings and the platter
+border, between their selected points.
+Endpoints without a region or on auxiliary layers offer only a platter attachment
+when W_p is nonempty.
 Travels touching such endpoints include slices of the plan's objects as forbidden
-components, not the synthetic wipe tower. Endpoint-containing components are excluded
-so mixed travels can reach their in-part endpoint. Geometrically exhausted hypotheses
-retry after disabling the first original component crossed by the chord, or, if the
-chord is clear, by the initial best estimate (attachments and bridge). The cap is
-fixed on the components crossed by these two polylines; budget and
-outside-length rejection alone never disables material.
+components, not the synthetic wipe tower. The first passing hypothesis per
+combination competes by length, with length inside any endpoint group counted
+three times. On ties the first combination wins. The planner counts only the
+winning route, or counts a straight fallback if none passes.
 The planner borrows this layer group's plan, index and Z to cache those slices.
-Support obstacles are opt-in whole-layer object components for travels touching
-support, taken at the group's Z or below for plan-catalog instances.
 Layers without eligible gaps bypass zone construction. Permanent no-op plugins expose planner
 selection and global contributor activation. Active means present in the host
 activation set, configured by activated.ini. Computation objects are worker-local;
 the legacy planner owns its input cache. The private implementation checks each ID
 with orchestrator_find_plugin. Active contributors share
 a second input cache owned by advanced travel for boundary geometry and routing settings, so a layer
-can be copied twice. Support obstacles copy slices directly without that cache.
+can be copied twice.
 The incoming layer-entry travel has no source extrusion and remains straight.
 The connector inserts travels, interpolates Z and updates flags and progress.
 The plan owns all borrowed extrusions throughout both phases; no chronology or
@@ -59,19 +66,23 @@ planner survives the callback. Cancellation and routing errors propagate.
 
     register_advanced_travel_plugin: register the permanent provider
     register_advanced_travel_planners: register two no-op selection members and their group
-    register_advanced_travel_contributors: register four non-exclusive no-op zone members
+    register_advanced_travel_contributors: register three non-exclusive no-op zone members
     setup_impl: reset and allocate connector summaries
     setup_run_impl: publish this layer group's summary
     run_impl: own the chronology and planner for one worker callback
         |-- ScopeTravelConnector::prepare: record ordered gaps and snap seams
         |-- orchestrator_select_plugin: resolve the selected planner
-        |-- summarize: evaluate ZonePlanner::eligible without building zones
-        |-- TravelZoneView: collect active attractors, forbidden tops and support object obstacles when eligible
+        |-- eligibility guard: evaluate ZonePlanner::eligible without building zones
+        |-- TravelZoneView: collect active attractors and forbidden tops when eligible
         `-- ScopeTravelConnector::apply: call the planner once per gap in order and insert routes
             |-- CompatibilityPlanner::path: choose straight travel or a perimeter detour
-            `-- ZonePlanner::path: rank hypotheses, retry with bounded blocker removal, accept a validated route
+            `-- ZonePlanner::path: group endpoint obstacles and score accepted routes
                 |-- outside_part / platter_blockers: classify endpoints and collect outside-part geometry
-                `-- detour_around_forbidden: connect the chord along expanded obstacle contours
+                |-- touches: group original pieces by overlap or contact
+                `-- route: use cached domains for one combination and try ranked hypotheses
+                    |-- endpoint_candidates / exit_candidates: attach endpoints to W
+                    |-- detour: route connectors on W_p rings with the public Clipper operation
+                    `-- blocked: check exits and the remaining path against their respective obstacle masks
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPlugin {
@@ -79,7 +90,7 @@ namespace slic3r_api { namespace LayerExtrusionEdit { namespace AdvancedTravelPl
 void register_advanced_travel_plugin(orchestrator_handle *orchestrator);
 // Register permanent no-op planner choices and their selector; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_planners(orchestrator_handle *orchestrator);
-// Register four permanent no-op zone contributors, including support obstacles; allocation errors propagate and host rejections are logged.
+// Register three permanent no-op zone contributors; allocation errors propagate and host rejections are logged.
 void register_advanced_travel_contributors(orchestrator_handle *orchestrator);
 
 namespace {
@@ -92,7 +103,6 @@ const char *const k_zones_id = "layer_extrusion_edit.travel.advanced.planner.adv
 const char *const k_attractors_id = "layer_extrusion_edit.travel.advanced.zones.island_attractors";
 const char *const k_tops_id = "layer_extrusion_edit.travel.advanced.zones.forbidden_tops";
 const char *const k_printed_tops_id = "layer_extrusion_edit.travel.advanced.zones.printed_tops";
-const char *const k_support_obstacles_id = "layer_extrusion_edit.travel.advanced.zones.support_obstacles";
 const char *const k_planner_dependencies[] = {"layer_extrusion_edit.travel.advanced", nullptr};
 
 class ContributorChoice : public PluginBase
@@ -255,7 +265,9 @@ int32_t AdvancedTravel::used_config_keys(raw_used_config_key *keys) const noexce
         {"ironing", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"perimeter_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
         {"perimeters", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+        {"solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+        // Advanced routes use the fixed printable contour as their initial platter.
+        {"bed_shape", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
     };
     if (keys != nullptr)
         std::copy(std::begin(used_keys), std::end(used_keys), keys);
@@ -314,23 +326,24 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     }
     const Config region_defaults(print_get_default_region_config(ctx->print));
     const bool auxiliary_avoidance = region_defaults.bool_or_default("avoid_crossing_perimeters", false);
-    const zones::ChronologySummary summary = zones::summarize(chronology,
-        [&planner, &config, auxiliary_avoidance](const PendingTravel &travel) {
-            return travel.source_extrusion.handle() != nullptr &&
-                zones::ZonePlanner::eligible(planner, config, auxiliary_avoidance, travel.source, travel.target);
-        });
-    if (!summary.any_avoidance_active) {
+    bool any_avoidance_active = false;
+    for (const PendingTravel &travel : chronology.travels)
+        if (travel.source_extrusion.handle() != nullptr &&
+            zones::ZonePlanner::eligible(planner, config, auxiliary_avoidance, travel.source, travel.target)) {
+            any_avoidance_active = true;
+            break;
+        }
+    if (!any_avoidance_active) {
         m_connector.apply(chronology, route, progress());
         return;
     }
     // The contributors share this cache; the legacy planner owns its separate cache.
     AvoidCrossing::LayerInputCache inputs;
-    const zones::ZoneContributorInput input{print, plan, *run_ctx, layer_group.print_z(),
-                                          inputs, chronology.travels, summary};
+    const zones::ZoneContributorInput input{print, plan, *run_ctx,
+                                          inputs, chronology.travels};
     const zones::DefaultAttractorContributor attractors;
     const zones::DefaultForbiddenTopsContributor tops;
     const zones::PrintedTopsContributor printed_tops;
-    const zones::SupportObstacleContributor support_obstacles;
     std::vector<std::reference_wrapper<const zones::ZoneContributor>> active;
     if (orchestrator_find_plugin(m_orchestrator, k_attractors_id) != nullptr)
         active.push_back(std::cref(attractors));
@@ -338,8 +351,6 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
         active.push_back(std::cref(printed_tops));
     else if (orchestrator_find_plugin(m_orchestrator, k_tops_id) != nullptr)
         active.push_back(std::cref(tops));
-    if (orchestrator_find_plugin(m_orchestrator, k_support_obstacles_id) != nullptr)
-        active.push_back(std::cref(support_obstacles));
     zones::TravelZoneView view(active, input);
     zones::ZonePlanner zone_planner(planner, view, config, auxiliary_avoidance, run_ctx, print, inputs,
         plan, ctx->group_idx, layer_group.print_z());
@@ -387,8 +398,5 @@ void register_advanced_travel_contributors(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, attractors.c_instance());
     orchestrator_register_plugin(orchestrator, tops.c_instance());
     orchestrator_register_plugin(orchestrator, printed_tops.c_instance());
-    static ContributorChoice support_obstacles(orchestrator, k_support_obstacles_id, "Object obstacles for support travels",
-        "Avoids separate object slice components at or below travel Z for travels touching support.");
-    orchestrator_register_plugin(orchestrator, support_obstacles.c_instance());
 }
 }}} // namespace slic3r_api::LayerExtrusionEdit::AdvancedTravelPlugin

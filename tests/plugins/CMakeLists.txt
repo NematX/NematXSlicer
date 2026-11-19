@@ -186,6 +186,7 @@ test_support_tree_family.cpp
     test_print_status_queue.cpp
     test_retraction_wipe_e2e.cpp
     test_skirt_brim_default_generator.cpp
+    test_elephant_foot_thin_bands.cpp
     test_hole_size_compensation.cpp
     test_slice_volume.cpp
     test_xy_size_compensation_geometry.cpp
