@@ -12,7 +12,7 @@ set(SLIC3R_APP_PROG_ID "NematXSlicer.1")
 # windows guid to identify the app, can begenerated via powershell running [guid]::NewGuid()
 set(SLIC3R_GUID "ee58a199-3c77-4865-bbe9-52b9cbb2bc32")
 # versions
-set(SLIC3R_VERSION_TAG "-alpha+UNKNOWN")
+set(SLIC3R_VERSION_TAG "-beta")
 set(SLIC3R_RC_VERSION "3,0,0,0")
 set(SLIC3R_RC_VERSION_DOTS "3.0.0.0")
 set(SLIC3R_VERSION "3.0.0${SLIC3R_VERSION_TAG}")
