@@ -1,8 +1,9 @@
 # nematx-wipetower
 
-Wipe tower manager of the NematX printers. It is selected by
-`step_wipetower_plugin = nematx_wipetower`; the host's default manager stays the
-default choice.
+Wipe tower manager of the NematX printers. Find the selector under
+**Multiple extruders → Wipe tower**. When active, NematX is the default unless
+the profile names a manager with `step_wipetower_plugin`. The host's manager
+remains available and is used if NematX is inactive and no other manager is selected.
 
 Without a NematX setting, it builds the same tower as the host's default manager
 (`wipe_tower.manager.default`): same towers (global and per instance), same purge

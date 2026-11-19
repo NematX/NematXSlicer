@@ -224,7 +224,7 @@ private:
     int32_t priority_impl() const noexcept override;
     // Join the wipe-tower step's exclusive selector.
     const char *exclusive_group_impl() const noexcept override;
-    // Rank after the host's default manager, so that only an explicit choice selects this one.
+    // Prefer this manager when the profile does not name one.
     int32_t exclusive_group_priority_impl() const noexcept override;
     // Copy typed configuration dependencies into the optional caller array.
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
@@ -315,7 +315,7 @@ slicing_step_t WipeTowerManager::step_impl() const noexcept { return STEP_WIPETO
 const char *const *WipeTowerManager::dependencies_impl() const noexcept { return k_no_dependencies; }
 int32_t WipeTowerManager::priority_impl() const noexcept { return 0; }
 const char *WipeTowerManager::exclusive_group_impl() const noexcept { return "step_wipetower_plugin"; }
-int32_t WipeTowerManager::exclusive_group_priority_impl() const noexcept { return 200; }
+int32_t WipeTowerManager::exclusive_group_priority_impl() const noexcept { return 0; }
 int32_t WipeTowerManager::used_config_keys(raw_used_config_key *keys) const noexcept
 {
     const int32_t count = static_cast<int32_t>(sizeof(k_used_keys) / sizeof(k_used_keys[0]));

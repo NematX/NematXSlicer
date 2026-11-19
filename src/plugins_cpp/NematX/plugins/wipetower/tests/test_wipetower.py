@@ -299,6 +299,30 @@ class WipeTowerParity(unittest.TestCase):
                     diff = "\n".join(list(difflib.unified_diff(expected, actual, "default", "nematx", lineterm="", n=2))[:40])
                     self.fail(f"{name}: the G-code differs from the default manager:\n{diff}")
 
+    def test_implicit_selection_prefers_nematx(self) -> None:
+        """Without a saved choice, add the same contours as with NematX selected explicitly."""
+        options = self.extruders + ("wipe_tower_perimeters = 3",)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            implicit = pool.submit(run_export, "implicit-manager", options, self.model)
+            nematx = pool.submit(run_export, "explicit-nematx", options +
+                                 (f"step_wipetower_plugin = {NEMATX_MANAGER}",), self.model)
+            standard = pool.submit(run_export, "explicit-standard", options +
+                                   (f"step_wipetower_plugin = {DEFAULT_MANAGER}",), self.model)
+            (implicit_gcode, implicit_log), (nematx_gcode, nematx_log), (standard_gcode, standard_log) = (
+                implicit.result(), nematx.result(), standard.result())
+        exports = ((implicit_gcode, implicit_log, NEMATX_MANAGER),
+                   (nematx_gcode, nematx_log, NEMATX_MANAGER),
+                   (standard_gcode, standard_log, DEFAULT_MANAGER))
+        moves = []
+        for gcode, log, manager in exports:
+            self.assertNotIn(REFUSED_SELECTION, log)
+            self.assertIn(f"; step_wipetower_plugin = {manager}", gcode.splitlines())
+            self.assertIn(";TYPE:Wipe tower", gcode.splitlines())
+            moves.append(re.findall(r"^(?:N\d+\s+)?(G[0123][ \t].*)$", gcode, re.MULTILINE))
+        self.assertTrue(moves[0])
+        self.assertEqual(moves[0], moves[1])
+        self.assertNotEqual(moves[0], moves[2])
+
     def test_perimeters_add_or_remove_loops(self) -> None:
         # Compare one layer above the first one, which has no brim: three perimeters keep every default
         # segment and add two loops outside; zero perimeters remove the band rectangle and nothing else.

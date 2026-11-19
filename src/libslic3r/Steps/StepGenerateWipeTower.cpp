@@ -26,9 +26,11 @@ void register_selector_traits(Orchestrator &orchestrator);
 void register_selector_traits(Orchestrator &orchestrator)
 {
     StepSelectorTraits tower;
-    tower.category = RAW_OPTION_CATEGORY_OUTPUT;
+    tower.category = RAW_OPTION_CATEGORY_MMSETUP;
     tower.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
     tower.invalidates_step = STEP_WIPETOWER;
+    tower.ui_page = "Multiple extruders";
+    tower.ui_group = "Wipe tower";
     tower.show_with_one_provider = false;
     const int32_t tower_registered = orchestrator.register_builtin_step_selector(STEP_WIPETOWER, std::move(tower));
     assert(tower_registered == 1);
