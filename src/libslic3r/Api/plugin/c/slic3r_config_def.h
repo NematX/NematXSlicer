@@ -589,9 +589,10 @@ typedef struct raw_option_def_patch {
     uint64_t reserved[4];
 } raw_option_def_patch;
 
+/* Return an empty patch with no borrowed data. */
 static inline raw_option_def_patch raw_option_def_patch_init()
 {
-    raw_option_def_patch patch = {0};
+    raw_option_def_patch patch = {RAW_OPTION_DEF_PATCH_NONE};
     return patch;
 }
 
