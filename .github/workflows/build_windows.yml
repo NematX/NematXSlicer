@@ -74,7 +74,7 @@ jobs:
         $maxAttempts = 3
         for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
           Write-Host "Building dependencies (attempt $attempt of $maxAttempts)."
-          msbuild /m ALL_BUILD.vcxproj
+          msbuild /m:8 ALL_BUILD.vcxproj
           if ($LASTEXITCODE -eq 0) {
             break
           }
@@ -102,6 +102,7 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ inputs.checkout_ref || github.sha }}
+        submodules: true
     - uses: ilammy/msvc-dev-cmd@v1
     - name: Setup sccache
       uses: mozilla-actions/sccache-action@v0.0.11
@@ -145,28 +146,21 @@ jobs:
     - name: Add msgfmt to path
       shell: powershell
       working-directory: msgfmt_bin
-      run: echo "$pwd;" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      run: |
+        "$pwd" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     - name: Create build directory
       shell: powershell
       run: New-Item -ItemType Directory -Force build | Out-Null
     - name: Configure build
       working-directory: ./build
       run: |
-        cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:GITHUB_WORKSPACE\deps\build\destdir\usr\local" -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
-    - name: Build slicer
-      working-directory: ./build
-      run: msbuild /m /P:Configuration=Release INSTALL.vcxproj
+        cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:GITHUB_WORKSPACE\deps\build\destdir\usr\local" -DSLIC3R_NEMATX_BUILTIN_PLUGINS=ON -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
     - name: Build translations
       working-directory: ./build
-      run: |
-        msbuild /m /P:Configuration=Release gettext_po_to_mo.vcxproj
-        msbuild /m /P:Configuration=Release gettext_make_pot.vcxproj
-    - name: Build OCCT wrapper
+      run: msbuild /m:8 /nr:false /P:Configuration=Release gettext_po_to_mo.vcxproj
+    - name: Build slicer
       working-directory: ./build
-      run: msbuild /m /P:Configuration=Release src\occt_wrapper\OCCTWrapper.vcxproj
-    - name: Copy runtime DLLs
-      working-directory: ./build
-      run: msbuild /m /P:Configuration=Release src\slic3rDllsCopy.vcxproj
+      run: msbuild /m:8 /nr:false /P:BuildInParallel=false /P:Configuration=Release ALL_BUILD.vcxproj
     - name: Create package directory
       working-directory: ./build
       shell: powershell
@@ -174,41 +168,62 @@ jobs:
     - name: Download legacy DLL package
       working-directory: ./build
       shell: powershell
-      run: '(new-object System.Net.WebClient).DownloadFile("https://github.com/supermerill/SuperSlicer_deps/releases/download/1.8/Slic3r_win_build.zip", "Slic3r_win_build.zip")'
+      run: |
+        (New-Object System.Net.WebClient).DownloadFile("https://github.com/supermerill/SuperSlicer_deps/releases/download/1.8/Slic3r_win_build.zip", "Slic3r_win_build.zip")
+        if ((Get-FileHash Slic3r_win_build.zip -Algorithm SHA256).Hash -ne '66650178BB136BA0C2268F1C3A7C377293F0CC2FAFCB308A77F94D283279EE6C') {
+          throw 'The Mesa archive does not match the expected SHA-256.'
+        }
     - name: Extract legacy DLL package
       working-directory: ./build
       shell: cmd
       run: '"C:/Program Files/7-Zip/7z.exe" x Slic3r_win_build.zip'
     - name: Copy legacy DLL content
       working-directory: ./build
-      shell: cmd
+      shell: powershell
       run: |
-        xcopy /RCYIE Slic3r_win_build\local-settings.bat package\${{ github.event.repository.name }}_local-settings.bat
-        xcopy /RCYIE Slic3r_win_build\mesa package\
-    - name: Copy resources and profiles
+        Copy-Item Slic3r_win_build\local-settings.bat "package\$($env:GITHUB_REPOSITORY.Split('/')[1])_local-settings.bat"
+        Copy-Item Slic3r_win_build\mesa package -Recurse
+    - name: Stage and check the Windows package
       working-directory: ./build
-      shell: cmd
+      shell: powershell
       run: |
-        xcopy /RCYIE ..\resources package\resources
-        del /S /Q package\resources\localization\*.so
+        $ErrorActionPreference = 'Stop'
+        robocopy src\Release\resources package\resources /E /XF .git /XD .git
+        if ($LASTEXITCODE -ge 8) { throw 'Copying built resources failed.' }
+        Copy-Item ..\LICENSE package
+        $binaries = @('nematxslicer.exe', 'nematxslicer_console.exe', 'nematxslicer-gcodeviewer.exe',
+                      'Slic3r.dll', 'OCCTWrapper.dll', 'libgmp-10.dll', 'libmpfr-4.dll')
+        foreach ($name in $binaries) { Copy-Item "src\Release\$name" package }
+        if (!$env:VCToolsRedistDir) { throw 'Visual C++ redistributables were not located.' }
+        Copy-Item "$env:VCToolsRedistDir\x64\Microsoft.VC143.CRT\*.dll" package
+        foreach ($name in @('mesa\opengl32.dll', 'msvcp140.dll', 'msvcp140_2.dll',
+                            'msvcp140_codecvt_ids.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+          if (!(Test-Path "package\$name" -PathType Leaf)) { throw "Missing package file: $name" }
+        }
+        $pluginDir = 'package\resources\plugins'
+        $unexpected = Get-ChildItem $pluginDir -Force | Where-Object { $_.Name -notin 'README.md', 'default_activated.ini' }
+        if ($unexpected) { throw 'The package contains external plugins.' }
+        if (!(Select-String -Path "$pluginDir\default_activated.ini" -Pattern '^nematx = 1$' -Quiet)) {
+          throw 'The package is missing the generated NematX plugin activations.'
+        }
         python ..\src\platform\download_vendor_bundles.py package/resources
-    - name: Copy executables and libraries
-      working-directory: ./build
-      shell: cmd
-      run: |
-        xcopy /RCYIE src\release\*.dll package\
-        xcopy /RCYIE src\release\*.exe package\
-        xcopy /RCYIE c:\windows\system32\VCRUNTIME140* package\
-        xcopy /RCYIE c:\windows\system32\msvcp140* package\
-        del package\opengl32.dll
+        if ($LASTEXITCODE -ne 0) { throw 'Preparing vendor bundles failed.' }
     - name: Upload package artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.package_artifact_name }}
         path: build/package/
-    - name: Install WiX Toolset
+        if-no-files-found: error
+    - name: Add WiX 3 to path
       if: inputs.create_unsigned_msi
-      run: choco install wixtoolset -y
+      shell: powershell
+      run: |
+        if (!$env:WIX) { throw 'WiX 3 was not found on the Windows runner.' }
+        $bin = Join-Path $env:WIX 'bin'
+        foreach ($name in @('heat.exe', 'candle.exe', 'light.exe')) {
+          if (!(Test-Path (Join-Path $bin $name) -PathType Leaf)) { throw "Missing WiX tool: $name" }
+        }
+        $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     - name: Prepare license file for MSI
       if: inputs.create_unsigned_msi
       shell: powershell
@@ -254,6 +269,7 @@ jobs:
       with:
         name: ${{ inputs.msi_artifact_name }}
         path: build/${{ inputs.msi_file_name }}
+        if-no-files-found: error
     - name: Report sccache statistics
       if: always()
       run: sccache --show-stats
