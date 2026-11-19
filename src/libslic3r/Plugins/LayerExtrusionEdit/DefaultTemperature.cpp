@@ -850,12 +850,16 @@ void register_default_temperature_plugins(orchestrator_handle *orchestrator)
     startup.exclusive_group = k_startup_group_id;
     startup.label = "Startup temperatures";
     startup.tooltip = "Selects how automatic startup heater requests are added after start G-code.";
+    startup.ui_page = "Multiple extruders";
+    startup.ui_group = "Temperatures";
     StartupTemperature::instance(orchestrator).register_exclusive_group(STEP_EXTRUSION_EDIT, startup);
 
     raw_exclusive_group_def layer = raw_exclusive_group_def_init();
     layer.exclusive_group = "layer_extrusion_edit.temperature";
     layer.label = "Layer temperatures";
     layer.tooltip = "Selects automatic nozzle, tool-change, second-layer, and bed requests.";
+    layer.ui_page = "Multiple extruders";
+    layer.ui_group = "Temperatures";
     LayerTemperature::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, layer);
 }
 
