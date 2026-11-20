@@ -15,6 +15,8 @@
 #include <string_view>
 #include <vector>
 
+#include <fast_float/fast_float.h>
+
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 
 /*
@@ -106,14 +108,14 @@ KlipperToolResolution klipper_tool_id(const run_ctx_gcode_reader &context,
     return {KlipperToolResolution::Status::Unknown, 0};
 }
 
-// Parse an optional named argument with std::from_chars; empty, non-finite or partially consumed values return no result and do not throw.
+// Parse an optional named argument with fast_float, because macOS libc++ has no std::from_chars for double; empty, non-finite or partially consumed values return no result and do not throw.
 std::optional<double> parse_klipper_named_value(
     const std::optional<std::string_view> &text)
 {
     if (!text || text->empty())
         return std::nullopt;
     double value = 0.0;
-    const std::from_chars_result parsed = std::from_chars(
+    const fast_float::from_chars_result parsed = fast_float::from_chars(
         text->data(), text->data() + text->size(), value);
     if (parsed.ec != std::errc() ||
         parsed.ptr != text->data() + text->size() || !std::isfinite(value))

@@ -48,15 +48,21 @@ Representative direct calls (branches are not a timeline):
 
 #include <cassert>
 #include <cfloat>
+#include <charconv>
+#include <chrono>
 #include <cmath>
+#include <type_traits>
+#include <utility>
 
 #include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/fstream.hpp>
+#include <fast_float/fast_float.h>
 
 #include "libslic3r/format.hpp"
 #include "libslic3r/GCode/GCodeWriter.hpp"
@@ -65,13 +71,6 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Utils.hpp"
-
-#if __has_include(<charconv>)
-    #include <charconv>
-    #include <utility>
-#endif
-
-#include <chrono>
 
 static const float DEFAULT_TOOLPATH_WIDTH = 0.4f;
 static const float DEFAULT_TOOLPATH_HEIGHT = 0.2f;
@@ -2177,48 +2176,19 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
     }
 }
 
-#if __has_include(<charconv>)
-    template <typename T, typename = void>
-    struct is_from_chars_convertible : std::false_type {};
-    template <typename T>
-    struct is_from_chars_convertible<T, std::void_t<decltype(std::from_chars(std::declval<const char*>(), std::declval<const char*>(), std::declval<T&>()))>> : std::true_type {};
-#endif
-
 // Returns true if the number was parsed correctly into out and the number spanned the whole input string.
+// Floating-point values use fast_float, because macOS libc++ has std::from_chars only for integers.
+// Both parsers ignore the C locale, so a decimal comma setting cannot change the result.
 template<typename T>
 [[nodiscard]] static inline bool parse_number(const std::string_view sv, T &out)
 {
-    // https://www.bfilipek.com/2019/07/detect-overload-from-chars.html#example-stdfromchars
-#if __has_include(<charconv>)
-    // Visual Studio 19 supports from_chars all right.
-    // OSX compiler that we use only implements std::from_chars just for ints.
-    // GCC that we compile on does not provide <charconv> at all.
-    if constexpr (is_from_chars_convertible<T>::value) {
-        auto str_end = sv.data() + sv.size();
-        auto [end_ptr, error_code] = std::from_chars(sv.data(), str_end, out);
-        return error_code == std::errc() && end_ptr == str_end;
-    } 
-    else
-#endif
-    {
-        // Legacy conversion, which is costly due to having to make a copy of the string before conversion.
-        try {
-            assert(sv.size() < 1024);
-	    assert(sv.data() != nullptr);
-            std::string str { sv };
-            size_t read = 0;
-            if constexpr (std::is_same_v<T, int>)
-                out = std::stoi(str, &read);
-            else if constexpr (std::is_same_v<T, long>)
-                out = std::stol(str, &read);
-            else if constexpr (std::is_same_v<T, float>)
-                out = string_to_double_decimal_point(str, &read);
-            else if constexpr (std::is_same_v<T, double>)
-                out = string_to_double_decimal_point(str, &read);
-            return str.size() == read;
-        } catch (...) {
-            return false;
-        }
+    const char *str_end = sv.data() + sv.size();
+    if constexpr (std::is_floating_point_v<T>) {
+        const fast_float::from_chars_result parsed = fast_float::from_chars(sv.data(), str_end, out);
+        return parsed.ec == std::errc() && parsed.ptr == str_end;
+    } else {
+        const std::from_chars_result parsed = std::from_chars(sv.data(), str_end, out);
+        return parsed.ec == std::errc() && parsed.ptr == str_end;
     }
 }
 

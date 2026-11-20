@@ -15,6 +15,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -306,6 +307,18 @@ void test_object_metadata()
                 "\"outline\":[[97.500,97.500],[102.500,97.500],[102.500,102.500],[97.500,102.500]]}\n"
                 "\n",
             "cube metadata, same text as the legacy slicer");
+
+    // Use a comma without relying on an installed system locale.
+    struct CommaDecimal : std::numpunct<char> {
+        char do_decimal_point() const override { return ','; }
+    };
+    const std::locale previous = std::locale::global(std::locale(std::locale::classic(), new CommaDecimal));
+    ObjectMetadata localized = cube_metadata();
+    localized.center = { -1.2346, 2.3454 };
+    const std::string localized_text = format_object_metadata(localized);
+    std::locale::global(previous);
+    require(localized_text.find("\"object_center\":[-1.235,2.345,0.000]") != std::string::npos,
+            "metadata rounds to three decimals and uses a dot even in a comma locale");
 
     // A second cube: the plater covers both, its outline is their convex hull.
     ObjectMetadata second = cube_metadata();

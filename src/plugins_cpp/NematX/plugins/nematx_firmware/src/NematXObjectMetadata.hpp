@@ -27,8 +27,10 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cstddef>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -85,23 +87,19 @@ constexpr size_t k_plater_line_limit = 4000;
 
 namespace metadata_detail {
 
-inline void append_number(std::string &out, double value)
-{
-    char buffer[64];
-    // to_chars ignores the locale: the decimal separator is always '.'.
-    const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::fixed, 3);
-    out.append(buffer, result.ptr);
-}
-
+// JSON needs a decimal point regardless of the system locale.
 inline void append_list(std::string &out, const double *values, size_t count)
 {
-    out += '[';
+    std::ostringstream list;
+    list.imbue(std::locale::classic());
+    list << std::fixed << std::setprecision(3) << '[';
     for (size_t i = 0; i < count; ++i) {
         if (i)
-            out += ',';
-        append_number(out, values[i]);
+            list << ',';
+        list << values[i];
     }
-    out += ']';
+    list << ']';
+    out += list.str();
 }
 
 // Write a name as a JSON string; the slicer names contain no quote, but a

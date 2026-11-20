@@ -3,12 +3,22 @@
 #include "PressureRewrite.hpp"
 
 #include <algorithm>
-#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <optional>
 #include <string_view>
 #include <utility>
+
+#ifdef __APPLE__
+#include <iomanip>
+#include <limits>
+#include <locale>
+#include <sstream>
+
+#include <fast_float/fast_float.h>
+#else
+#include <charconv>
+#endif
 
 #include "PressureExtrusion.hpp"
 #include "PressureGeometry.hpp"
@@ -79,7 +89,7 @@ std::string number(double value, int digits);
 // nonfinite arithmetic. Precision is independent of the output axis grid.
 std::string annotation(const GeometryGroup &group, const ExtrusionResult &e,
                        double k, std::uint32_t tool);
-// Returns a shortest round-trip C-locale double; rejects nonfinite metadata.
+// Formats with enough digits to recover the original double; rejects nonfinite metadata.
 std::string metadata_number(double value);
 } // namespace
 
@@ -440,11 +450,28 @@ std::string metadata_number(double value)
         throw std::invalid_argument("Nonfinite pressure annotation value.");
     if (value == 0)
         value = 0;
+#ifdef __APPLE__
+    // Floating-point to_chars requires a newer macOS than the deployment target.
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+    for (int precision = 1; precision <= std::numeric_limits<double>::max_digits10; ++precision) {
+        stream.str(std::string{});
+        stream << std::setprecision(precision) << value;
+        const std::string text = stream.str();
+        double restored = 0;
+        const char *end = text.data() + text.size();
+        const fast_float::from_chars_result parsed = fast_float::from_chars(text.data(), end, restored);
+        if (parsed.ec == std::errc{} && parsed.ptr == end && restored == value)
+            return text;
+    }
+    throw std::invalid_argument("Pressure annotation number could not be encoded.");
+#else
     char buffer[64];
     const std::to_chars_result encoded = std::to_chars(buffer, buffer + sizeof(buffer), value);
     if (encoded.ec != std::errc())
         throw std::invalid_argument("Pressure annotation number could not be encoded.");
     return std::string(buffer, encoded.ptr);
+#endif
 }
 } // namespace
 } // namespace nematx_pressure

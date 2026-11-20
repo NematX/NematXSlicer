@@ -10,7 +10,14 @@
 #include <type_traits>
 #include <vector>
 
+#ifdef __APPLE__
+#include <iomanip>
+#include <locale>
+#include <sstream>
+#endif
+
 #include <boost/filesystem/path.hpp>
+#include <fast_float/fast_float.h>
 
 namespace Slic3r::Rest {
 
@@ -86,18 +93,35 @@ double shortest_float(float value)
         return value;
     // Preserve the 6..9 significant-digit projection, without constructing
     // locale-aware streams for every coordinate/property of every move.
-    // charconv is locale-independent and uses only this small stack buffer.
+    // charconv and fast_float are locale-independent; fast_float parses
+    // because macOS libc++ has std::from_chars only for integers.
     char text[64];
+#ifdef __APPLE__
+    // Floating-point to_chars requires a newer macOS than the deployment target.
+    std::ostringstream stream;
+    stream.imbue(std::locale::classic());
+#endif
     for (int precision = 6; precision <= 9; ++precision) {
+#ifdef __APPLE__
+        stream.str(std::string{});
+        stream << std::setprecision(precision) << value;
+        const std::string formatted_text = stream.str();
+        if (formatted_text.size() >= sizeof(text))
+            throw std::logic_error("Cannot format viewer float.");
+        std::copy(formatted_text.begin(), formatted_text.end(), text);
+        const char *formatted_end = text + formatted_text.size();
+#else
         const std::to_chars_result formatted = std::to_chars(text, text + sizeof(text), value,
             std::chars_format::general, precision);
         if (formatted.ec != std::errc{})
             throw std::logic_error("Cannot format viewer float.");
+        const char *formatted_end = formatted.ptr;
+#endif
         float restored = 0;
-        const std::from_chars_result parsed = std::from_chars(text, formatted.ptr, restored);
+        const fast_float::from_chars_result parsed = fast_float::from_chars(text, formatted_end, restored);
         if ((parsed.ec == std::errc{} && restored == value) || precision == 9) {
             double projected = 0;
-            if (std::from_chars(text, formatted.ptr, projected).ec != std::errc{})
+            if (fast_float::from_chars(text, formatted_end, projected).ec != std::errc{})
                 throw std::logic_error("Cannot parse viewer decimal.");
             return projected;
         }
