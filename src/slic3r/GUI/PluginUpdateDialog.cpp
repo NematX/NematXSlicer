@@ -49,6 +49,7 @@
 #include "Plater.hpp"
 #include "slic3r/Utils/Process.hpp"
 #include "UpdaterErrorMessages.hpp"
+#include "format.hpp"
 #include "wxExtensions.hpp"
 
 namespace Slic3r::GUI {
