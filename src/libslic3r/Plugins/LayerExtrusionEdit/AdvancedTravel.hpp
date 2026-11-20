@@ -15,8 +15,10 @@ volumes are therefore avoided whatever the avoidance settings.
 The zone planner collects active island attractors, forbidden tops and the
 layer's NoTravel sections, which are forbidden for every tool and instance.
 Active means present in the host activation set, configured by activated.ini.
-Collection occurs only when the chronology contains an eligible travel after layer entry. The
-layer-entry travel stays straight. The compatibility planner, used for regional
+Collection occurs only when the chronology contains an eligible travel. The layer-entry
+travel stays straight unless avoid_crossing_layer_entry is routed; it then starts in the
+island of the previous layer's last printed object when that island is within four nozzle
+diameters, otherwise from outside the part. The compatibility planner, used for regional
 eligibility, owns its worker-local input cache; the three boundary contributors share
 a second cache owned by advanced travel, so layer geometry may be copied twice.
 The permanent contributor plugins are non-exclusive no-op members, dependent on

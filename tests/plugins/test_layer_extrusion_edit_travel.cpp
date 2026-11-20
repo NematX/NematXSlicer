@@ -59,6 +59,11 @@ attractors, and checks that the published route stays out of the hole. With
 Verbose G-code, it also checks the zone-route comment placed first in the
 target's before phase; the NoTravel scene checks the comments of a layer entry
 and of a gap outside perimeter avoidance, and their absence without verbose output.
+The layer-entry scene prints two layers of the same ring: the second layer's entry
+starts where the first ended, across the hole from its target. A straight entry
+keeps the direct travel; a routed entry starts in piece, on the island ring, when the
+first layer ended on the ring or 1 mm outside it, and from outside when it ended more
+than four nozzle diameters away.
 The controlled three-island scene toggles contributor activation with either
 advanced or straight travel selected. Advanced travel may detour its inter-island
 gap because of attractors or forbidden tops; layer entry stays straight in every case.
@@ -553,7 +558,8 @@ TEST_CASE("Straight travel plugin exposes its ordered-layer contract",
     CHECK(plugin->get_used_config_keys().empty());
 }
 
-// The advanced provider reads the compatibility planner's routing settings, its attractor inset and the fixed bed shape.
+// The advanced provider reads the compatibility planner's routing settings, its attractor inset, its layer-entry choice
+// and the fixed bed shape.
 TEST_CASE("Advanced travel exposes routing settings and bed shape",
           "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
 {
@@ -570,7 +576,7 @@ TEST_CASE("Advanced travel exposes routing settings and bed shape",
     namespace avoidance = slic3r_api::LayerExtrusionEdit::AvoidCrossing;
     std::vector<raw_used_config_key> expected(size_t(avoidance::CompatibilityPlanner::used_config_keys(nullptr)));
     avoidance::CompatibilityPlanner::used_config_keys(expected.data());
-    REQUIRE(actual.size() == expected.size() + 2);
+    REQUIRE(actual.size() == expected.size() + 3);
     for (size_t idx = 0; idx < expected.size(); ++idx) {
         CHECK(actual[idx].key == expected[idx].key);
         CHECK(actual[idx].type == expected[idx].type);
@@ -582,6 +588,8 @@ TEST_CASE("Advanced travel exposes routing settings and bed shape",
     }));
     CHECK(actual[expected.size()].key == "avoid_crossing_perimeters_inset");
     CHECK(actual[expected.size()].type == RAW_CO_FLOAT_OR_PERCENT);
+    CHECK(actual[expected.size() + 1].key == "avoid_crossing_layer_entry");
+    CHECK(actual[expected.size() + 1].type == RAW_CO_ENUM);
     CHECK(actual.back().key == "bed_shape");
     CHECK(actual.back().type == RAW_CO_VECTOR_POINT);
     CHECK(actual.back().container_type == RAW_CONTAINER_TYPE_NONE);
@@ -739,6 +747,100 @@ TEST_CASE("Advanced travel routes around a hole between enabled endpoints",
         CHECK(snapped.content().point(snapped.content().point_count() - 1).x == source.x());
         CHECK(travel.polyline_ref().z_offset(0) == scale_i(0.03));
         CHECK(travel.polyline_ref().z_offset(travel.polyline_ref().size() - 1) == 0);
+    }
+}
+
+// Two layers of a ring; the entry of the second crosses the hole unless it is routed.
+TEST_CASE("Advanced travel routes a layer entry in piece or from outside",
+          "[plugins][layer-extrusion-edit][travel][avoid-crossing-perimeters]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool routed = GENERATE(false, true);
+    // The first layer ends on the left bar, 1 mm left of the ring, or 3 mm left of it.
+    const double start_x = GENERATE(5., -1., -3.);
+    const bool far = start_x < -2.;
+    CAPTURE(routed, start_x);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"nozzle_diameter", "0.4"}, {"gcode_comments", "1"},
+        {"avoid_crossing_layer_entry", routed ? "routed" : "straight"},
+        {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "0"}, {"brim_width", "0"},
+        {"top_solid_layers", "0"}, {"bottom_solid_layers", "0"}});
+    TriangleMesh mesh = make_cube(30., 10., 0.6);
+    TriangleMesh upper = make_cube(30., 10., 0.6);
+    upper.translate(0., 20., 0.);
+    mesh.merge(upper);
+    TriangleMesh left = make_cube(10., 10., 0.6);
+    left.translate(0., 10., 0.);
+    mesh.merge(left);
+    TriangleMesh right = make_cube(10., 10., 0.6);
+    right.translate(20., 10., 0.);
+    mesh.merge(right);
+    Print print;
+    Model model;
+    Slic3r::Test::init_print({mesh}, print, model, config);
+    print.set_status_silent();
+    print.process();
+    print.pipeline_progress().reset();
+    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&print.object(0)));
+    REQUIRE(print.object(0).layer_count() >= 3);
+    const c_point instance_shift = object_view.instance_shift(0);
+    const Point shift(instance_shift.x, instance_shift.y);
+    const BoundingBox box = get_extents(print.object(0).layer(1).lslices());
+    // The second layer starts on the right bar.
+    const Point source = box.min + Point(scale_i(start_x), scale_i(15.)) + shift;
+    const Point target = box.min + Point(scale_i(25.), scale_i(15.)) + shift;
+
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.clear();
+    const PrintingObjectInstanceId catalog_id = plan.find_or_add_object_instance(print.object(0), 0);
+    plan.groups.emplace_back();
+    plan.groups.back().printing_catalog_ids.push_back(catalog_id);
+    for (const uint32_t object_layer : {1u, 2u}) {
+        const slic3r_api::LayerRegionIsland region_view = object_view.layer(object_layer).island(0).region_island(0);
+        REQUIRE(region_view.valid());
+        const LayerRegionIsland *region_island = reinterpret_cast<const LayerRegionIsland *>(region_view.handle());
+        plan.groups.back().layers.emplace_back();
+        PrintingLayerGroup &plan_layer = plan.groups.back().layers.back();
+        plan_layer.print_z = print.object(0).layer(object_layer).scaled_print_z();
+        plan_layer.tool_groups.emplace_back();
+        PrintingToolGroup &tool = plan_layer.tool_groups.back();
+        tool.extruder_id = 0;
+        if (object_layer == 1)
+            append_extrusion(tool, make_path(Point(source.x() - scale_i(1.), source.y()), source), region_island, catalog_id);
+        else
+            append_extrusion(tool, make_path(target, Point(target.x() + scale_i(1.), target.y())), region_island, catalog_id);
+    }
+
+    run_layer_edit_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN, ADVANCED_TRAVEL_PLUGIN,
+        "layer_extrusion_edit.travel.advanced.zones.island_attractors"});
+
+    const ExtrusionEntity &scope = *plan.groups.back().layers.back().tool_groups.back().extrusions.back().root;
+    const slic3r_api::ExtrusionEntity travel = ordered_scope(const_cast<ExtrusionEntity &>(scope)).travel().readonly();
+    REQUIRE(travel.point_count() >= 2);
+    CHECK(travel.point(0).x == source.x());
+    CHECK(travel.point(0).y == source.y());
+    CHECK(travel.point(travel.point_count() - 1).x == target.x());
+    const std::string comment = travel_comment(scope);
+    if (!routed) {
+        CHECK(travel.point_count() == 2);
+        CHECK(comment == "advanced travel: layer entry; straight");
+        return;
+    }
+    CHECK(travel.point_count() > 2);
+    CHECK(comment.rfind(far ? "advanced travel: layer entry from outside, zone route; start: platter" :
+                              "advanced travel: layer entry in piece, zone route; start: island ring", 0) == 0);
+    if (!far)
+        CHECK(comment.find("end: island ring") != std::string::npos);
+    if (!far) {
+        // The hole spans [10, 20] in both axes of the object; the in-piece route must stay out of its interior.
+        const ExPolygon hole(Polygon(Points{box.min + Point(scale_i(10.1), scale_i(10.1)) + shift,
+            box.min + Point(scale_i(19.9), scale_i(10.1)) + shift, box.min + Point(scale_i(19.9), scale_i(19.9)) + shift,
+            box.min + Point(scale_i(10.1), scale_i(19.9)) + shift}));
+        Polyline route;
+        for (uint32_t idx = 0; idx < travel.point_count(); ++idx)
+            route.points.emplace_back(travel.point(idx).x, travel.point(idx).y);
+        CHECK(intersection_pl(route, hole).empty());
     }
 }
 

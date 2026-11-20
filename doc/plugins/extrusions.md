@@ -826,7 +826,18 @@ The advanced planner uses the regional check described above, but an endpoint
 without an object instance does not veto the other endpoint. When neither has
 an instance, the default region configuration's
 `avoid_crossing_perimeters` value governs eligibility (false if unavailable).
-The incoming layer-entry travel has no source extrusion and stays straight.
+The incoming layer-entry travel has no source extrusion. It stays straight unless
+the provider-owned setting `avoid_crossing_layer_entry` is `routed` (the default is
+`straight`). A routed entry is planned from a synthesized start. Each layer group
+records, before the host barrier, the last plan instance of a real object printed in
+it. The next layer looks for an island of that instance's normal layer at its own
+print Z that contains the entry point or lies within four nozzle diameters of it;
+the nearest wins. The entry then starts in piece, from a point just inside that
+island with its regional provenance, after a straight approach when the point was
+outside. Without such an island it starts from outside the part, as a regionless
+endpoint that only attaches to the platter. Z rises along the whole route, as for
+the straight entry. Retraction planning previews a routed entry only when its target
+is outside perimeter avoidance.
 
 Eligible XY gaps use a ranked candidate pipeline; Z-only moves stay straight.
 The planner copies the configured `bed_shape` once when its worker-local instance is

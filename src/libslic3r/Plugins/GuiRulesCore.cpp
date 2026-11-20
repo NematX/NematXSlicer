@@ -482,7 +482,8 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     // ----- avoid crossing -----------------------------------------------
     add_rule({ "avoid_crossing_curled_overhangs" }, false_("avoid_crossing_perimeters"));
     add_rule({ "avoid_crossing_perimeters" }, false_("avoid_crossing_curled_overhangs"));
-    add_rule({ "avoid_crossing_perimeters_max_detour", "avoid_crossing_perimeters_inset", "avoid_crossing_not_first_layer",
+    add_rule({ "avoid_crossing_perimeters_max_detour", "avoid_crossing_perimeters_inset", "avoid_crossing_layer_entry",
+               "avoid_crossing_not_first_layer",
                "avoid_crossing_top", "avoid_travel_island" },
              true_("avoid_crossing_perimeters"));
     add_rule({ "avoid_travel_island_weight" }, all_of({

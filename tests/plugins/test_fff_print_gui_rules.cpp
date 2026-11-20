@@ -358,6 +358,7 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     set("avoid_crossing_perimeters", !b("avoid_crossing_curled_overhangs"));
     set("avoid_crossing_perimeters_max_detour", avoid);
     set("avoid_crossing_perimeters_inset", avoid);
+    set("avoid_crossing_layer_entry", avoid);
     set("avoid_crossing_not_first_layer", avoid);
     set("avoid_crossing_top", avoid);
     set("avoid_travel_island", avoid);
