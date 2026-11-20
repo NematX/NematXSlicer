@@ -329,7 +329,8 @@ void AdvancedTravel::inilialize_impl(storage_handle *) const
     def.invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
     def.category = RAW_OPTION_CATEGORY_PERIMETER;
     def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.label = "Avoid crossing perimeters - Layer entry";
+    def.label = "Layer entry";
+    def.full_label = "Avoid crossing perimeters - Layer entry";
     def.tooltip = "How the first travel of a layer, from where the previous layer ended, avoids crossing perimeters."
         "\nStraight: keep the direct travel."
         "\nRouted: route it like the other travels. It starts inside the island of the last object printed on the "

@@ -1617,7 +1617,8 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloatOrPercent(0., false));
 
     def = definition.add("avoid_crossing_perimeters_inset", coFloatOrPercent, ptFFF);
-    def->label = L("Avoid crossing perimeters - Travel inset");
+    def->label = L("Travel inset");
+    def->full_label = L("Avoid crossing perimeters - Travel inset");
     def->category = OptionCategory::perimeter;
     def->invalidates_step = STEP_GCODE;
     def->tooltip = L("Distance between the outline of an island and the paths that travels follow inside it "
