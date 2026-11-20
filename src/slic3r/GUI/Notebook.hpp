@@ -427,7 +427,7 @@ public:
     // sets/returns item's image index in the current image list
     virtual bool SetPageImage(size_t n, int imageId) override
     {
-        wxCHECK_MSG(n < GetBtSize(), wxString(), wxS("Invalid page"));
+        wxCHECK_MSG(n < GetBtSize(), false, wxS("Invalid page"));
         assert(n < GetBtSize());
         return GetBtnsListCtrl()->SetPageImage(n, this->GetImageList()->GetBitmap(imageId));
     }
@@ -439,7 +439,7 @@ public:
 
     bool SetPageImage(size_t n, const std::string& bmp_name, const int bmp_size)
     {
-        wxCHECK_MSG(n < GetBtSize(), wxString(), wxS("Invalid page"));
+        wxCHECK_MSG(n < GetBtSize(), false, wxS("Invalid page"));
         assert(n < GetBtSize());
         return GetBtnsListCtrl()->SetPageImage(n, bmp_name, bmp_size);
     }
