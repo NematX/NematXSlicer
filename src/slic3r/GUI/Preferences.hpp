@@ -58,6 +58,7 @@ class PreferencesDialog : public DPIDialog
     //ConfigOptionDef def_combobox_auto_switch_preview; //is this useful here?
 	wxSizer*                            m_icon_size_sizer {nullptr};
 	wxSlider*							m_icon_size_slider {nullptr};
+	wxRadioButton*						m_rb_tab_settings_layout_mode {nullptr};
 	wxRadioButton*						m_rb_old_settings_layout_mode {nullptr};
 	wxRadioButton*						m_rb_new_settings_layout_mode {nullptr};
 	wxRadioButton*						m_rb_dlg_settings_layout_mode {nullptr};
@@ -104,6 +105,9 @@ protected:
 	void refresh_og(std::shared_ptr<ConfigOptionsGroup> og);
     void create_icon_size_slider(wxWindow* tab, std::shared_ptr<ConfigOptionsGroup> opt_grp);
     void create_settings_mode_widget(wxWindow* tab, std::shared_ptr<ConfigOptionsGroup> opt_grp);
+	// Enable the single preview tab option only while the layout with the tab bar is selected; does nothing
+	// before both controls exist.
+	void update_single_preview_tab_state();
 	void create_options_tab(const wxString& title);
     std::shared_ptr<ConfigOptionsGroup> create_options_group(const wxString& title, wxBookCtrlBase* tabs, int page_idx);
     void create_settings_text_color_widget(wxWindow* tab, std::shared_ptr<ConfigOptionsGroup> opt_grp);

@@ -181,6 +181,14 @@ public:
 private:
     
     ESettingsLayout m_layout{ ESettingsLayout::Unknown };
+    // True when the tab bar layout shows one preview tab instead of the sliced and G-code preview tabs.
+    bool m_single_preview_tab{ false };
+
+    // Return the plater button that shows tab, which must be a plater view before ETabType::LastPlater.
+    size_t      plater_button(ETabType tab) const;
+    // Show the 3D view or the preview of a plater view; other tab values change nothing. Separate preview
+    // tabs force the sliced layers or the G-code; the single preview tab shows the G-code once it is ready.
+    void        show_plater_view(ETabType tab);
 
 protected:
     virtual void on_dpi_changed(const wxRect &suggested_rect) override;
@@ -221,6 +229,10 @@ public:
     bool        is_loaded() const { return m_loaded; }
     bool        is_last_input_file() const  { return !m_qs_last_input_file.IsEmpty(); }
     ESettingsLayout get_layout() const { return m_layout; }
+    // Number of plater buttons before the settings tabs: 2 with the single preview tab, otherwise 3.
+    size_t      plater_tab_count() const;
+    // Return the plater view shown by a plater button, or ETabType::Any for an index beyond the plater buttons.
+    ETabType    plater_tab_at(size_t button) const;
 
     void        reslice_now();
     void        repair_stl();

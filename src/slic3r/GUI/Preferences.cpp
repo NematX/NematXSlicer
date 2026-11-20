@@ -945,6 +945,14 @@ void PreferencesDialog::build()
 		L("If your custom texture (in png format) is displayed black, then disable this option to remove the problematic optimisation."),
 		app_config->get_bool("compress_png_texture"));
 
+	// First line of the Preview group, just below the layout choice placed before this group.
+	if (is_editor)
+		append_bool_option(view_preview, "single_preview_tab",
+			L("Single preview tab"),
+			L("With the layout with the tab bar, show one preview tab instead of the sliced preview and G-code preview tabs. "
+			  "It shows the sliced layers until the G-code is ready, then the G-code."),
+			app_config->get_bool("single_preview_tab"));
+
 	append_bool_option(view_preview, "seq_top_layer_only",
 		L("Sequential slider applied only to top layer"),
 		L("If enabled, changes made using the sequential slider, in preview, apply only to gcode top layer. "
@@ -1297,8 +1305,6 @@ void PreferencesDialog::build()
     activate_options_group(presets_updates);
 
     activate_options_group(interface_layout);
-    if (is_editor)
-        create_settings_mode_widget(tabs->GetPage(interface_tab), interface_layout);
     activate_options_group(interface_controls);
     activate_options_group(interface_accessibility);
     if (is_editor) {
@@ -1314,7 +1320,11 @@ void PreferencesDialog::build()
 
     activate_options_group(view_camera_and_navigation);
     activate_options_group(view_rendering);
+    // The layout choice sits just above the Preview group, whose first line is the single preview tab option.
+    if (is_editor)
+        create_settings_mode_widget(tabs->GetPage(view_tab), view_preview);
     activate_options_group(view_preview);
+    update_single_preview_tab_state();
     activate_options_group(startup);
     activate_options_group(integrations);
     if (is_editor)
@@ -1425,7 +1435,8 @@ void PreferencesDialog::accept(wxEvent&)
 	m_settings_layout_changed = false;
 	for (const std::string key : { "old_settings_layout_mode",
 								    "new_settings_layout_mode",
-								    "dlg_settings_layout_mode" })
+								    "dlg_settings_layout_mode",
+								    "single_preview_tab" })
 	{
 	    auto it = m_values.find(key);
 	    if (it != m_values.end() && app_config->get(key) != it->second) {
@@ -1525,6 +1536,11 @@ void PreferencesDialog::revert(wxEvent&)
 			m_optkey_to_optgroup[key]->set_value(OptionKeyIdx::scalar(key), app_config->get(key) == "none", true, false);
 			continue;
 		}
+		if (key == "tab_settings_layout_mode") {
+			m_rb_tab_settings_layout_mode->SetValue(app_config->get_bool(key));
+			m_settings_layout_changed = false;
+			continue;
+		}
 		if (key == "old_settings_layout_mode") {
 			m_rb_old_settings_layout_mode->SetValue(app_config->get_bool(key));
 			m_settings_layout_changed = false;
@@ -1576,9 +1592,19 @@ void PreferencesDialog::revert(wxEvent&)
         }
 		assert(false);
 	}
+	update_single_preview_tab_state();
 
 	clear_cache();
 	EndModal(wxID_CANCEL);
+}
+
+void PreferencesDialog::update_single_preview_tab_state()
+{
+	const auto group = m_optkey_to_optgroup.find("single_preview_tab");
+	if (m_rb_tab_settings_layout_mode == nullptr || group == m_optkey_to_optgroup.end() || !group->second)
+		return;
+	if (Field* field = group->second->get_field(OptionKeyIdx::scalar("single_preview_tab")))
+		field->toggle_widget_enable(m_rb_tab_settings_layout_mode->GetValue());
 }
 
 void PreferencesDialog::msw_rescale()
@@ -1778,11 +1804,12 @@ void PreferencesDialog::create_settings_mode_widget(wxWindow* tab, std::shared_p
 			m_values["old_settings_layout_mode"] = (id == 1) ? "1" : "0";
 			m_values["new_settings_layout_mode"] = (id == 2) ? "1" : "0";
 			m_values["dlg_settings_layout_mode"] = (id == 3) ? "1" : "0";
+			update_single_preview_tab_state();
 		});
 	};
 
 
-	add_radio(&m_rb_dlg_settings_layout_mode, ++id, app_config->get_bool("tab_settings_layout_mode"));
+	add_radio(&m_rb_tab_settings_layout_mode, ++id, app_config->get_bool("tab_settings_layout_mode"));
 	add_radio(&m_rb_old_settings_layout_mode, ++id, app_config->get_bool("old_settings_layout_mode"));
 	add_radio(&m_rb_new_settings_layout_mode, ++id, app_config->get_bool("new_settings_layout_mode"));
 	add_radio(&m_rb_dlg_settings_layout_mode, ++id, app_config->get_bool("dlg_settings_layout_mode"));

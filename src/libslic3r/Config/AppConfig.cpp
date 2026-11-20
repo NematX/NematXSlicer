@@ -253,6 +253,19 @@ void AppConfig::set_defaults()
         if (get("export_sources_full_pathnames").empty())
             set("export_sources_full_pathnames", "0");
 
+        // Store the layout that the main window uses without a choice, so that the preferences show it selected.
+        if (!get_bool("tab_settings_layout_mode") && !get_bool("old_settings_layout_mode") &&
+            !get_bool("new_settings_layout_mode") && !get_bool("dlg_settings_layout_mode"))
+#ifdef _WIN32
+            set("tab_settings_layout_mode", "1");
+#else
+            set("old_settings_layout_mode", "1");
+#endif
+
+        // The layout with the tab bar shows one preview tab, as the other layouts do.
+        if (get("single_preview_tab").empty())
+            set("single_preview_tab", "1");
+
 #ifdef _WIN32
         if (get("associate_3mf").empty())
             set("associate_3mf", "0");
