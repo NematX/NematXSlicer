@@ -42,6 +42,7 @@ A required plugin group connects an active value
 (different from its definition default) to a provider's declared config keys.
 */
 
+#include <cfloat>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>

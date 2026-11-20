@@ -16,6 +16,7 @@
 
 #include <array>
 #include <cassert>
+#include <cfloat>
 #include <cstdint>
 #include <ctime>
 #include <limits>
