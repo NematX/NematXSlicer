@@ -6,7 +6,7 @@ on:
       artifact_name:
         required: true
         type: string
-      msi_artifact_name:
+      installer_input_artifact_name:
         required: true
         type: string
       signed_artifact_name:
@@ -26,19 +26,25 @@ jobs:
     - name: Validate release tag
       shell: powershell
       run: |
-        if ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:GITHUB_REF_NAME -notmatch '^\d+(\.\d+){2,}(-beta)?$') {
+        if ($env:GITHUB_REF_TYPE -ne 'tag' -or $env:GITHUB_REF_NAME -cnotmatch '^[0-9]+(\.[0-9]+){2,}(-beta)?$') {
           throw "Invalid release tag '$env:GITHUB_REF_NAME'."
         }
+        $name = $env:GITHUB_REPOSITORY.Split('/')[1]
+        "RELEASE_BASENAME=${name}_$($env:GITHUB_REF_NAME)_win64_$(Get-Date -Format 'yyMMdd')" |
+          Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - uses: actions/checkout@v4
+      with:
+        persist-credentials: false
     - name: Download unsigned package
       uses: actions/download-artifact@v4
       with:
         name: ${{ inputs.artifact_name }}
         path: package
-    - name: Download unsigned MSI
+    - name: Download WiX inputs
       uses: actions/download-artifact@v4
       with:
-        name: ${{ inputs.msi_artifact_name }}
-        path: package
+        name: ${{ inputs.installer_input_artifact_name }}
+        path: installer-inputs
     - name: Install AzureSignTool
       shell: powershell
       run: |
@@ -50,26 +56,95 @@ jobs:
         client-id: ${{ vars.AZURE_CLIENT_ID }}
         tenant-id: ${{ vars.AZURE_TENANT_ID }}
         subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-    - name: Sign Windows executables and libraries
+    - name: Sign binaries, assemble MSI, and sign the installer
       shell: powershell
+      env:
+        AZURE_KEY_VAULT_URL: ${{ vars.AZURE_KEY_VAULT_URL }}
+        AZURE_KEY_VAULT_CERTIFICATE: ${{ vars.AZURE_KEY_VAULT_CERTIFICATE }}
+        WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
       run: |
-        $accessToken = az account get-access-token --scope 'https://vault.azure.net/.default' --query accessToken --output tsv
-        if ([string]::IsNullOrWhiteSpace($accessToken)) { throw 'Azure Key Vault access token was not returned.' }
-        Write-Output "::add-mask::$accessToken"
-        $filesToSign = Get-ChildItem package -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.msi' }
-        if ($filesToSign.Count -eq 0) { throw 'No Windows executables or libraries were found to sign.' }
-        AzureSignTool sign --azure-key-vault-url '${{ vars.AZURE_KEY_VAULT_URL }}' --azure-key-vault-certificate '${{ vars.AZURE_KEY_VAULT_CERTIFICATE }}' --azure-key-vault-accesstoken $accessToken --file-digest sha256 --timestamp-rfc3161 '${{ vars.WINDOWS_TIMESTAMP_URL }}' --timestamp-digest sha256 --description 'NematXSlicer' --description-url 'https://nematx.com' --verbose $filesToSign.FullName
-        if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed with exit code $LASTEXITCODE." }
-    - name: Verify Windows signatures
-      shell: powershell
-      run: |
+        $ErrorActionPreference = 'Stop'
         $signtool = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin') -Recurse -Filter signtool.exe -File | Where-Object { $_.FullName -like '*\x64\*' } | Sort-Object FullName | Select-Object -Last 1 -ExpandProperty FullName
-        if ([string]::IsNullOrWhiteSpace($signtool)) { throw 'signtool.exe was not found on the Windows runner.' }
-        $signedFiles = Get-ChildItem package -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.msi' }
-        & $signtool verify /pa /all /v $signedFiles.FullName
-        if ($LASTEXITCODE -ne 0) { throw "signtool verification failed with exit code $LASTEXITCODE." }
-    - name: Upload signed package
+        if (!$signtool) { throw 'signtool.exe was not found on the Windows runner.' }
+        $accessToken = az account get-access-token --scope 'https://vault.azure.net/.default' --query accessToken --output tsv
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($accessToken)) { throw 'Azure Key Vault access token was not returned.' }
+        Write-Output "::add-mask::$accessToken"
+
+        function Sign-AndVerify([string[]]$Paths) {
+          AzureSignTool sign --azure-key-vault-url $env:AZURE_KEY_VAULT_URL --azure-key-vault-certificate $env:AZURE_KEY_VAULT_CERTIFICATE --azure-key-vault-accesstoken $accessToken --file-digest sha256 --timestamp-rfc3161 $env:WINDOWS_TIMESTAMP_URL --timestamp-digest sha256 --description 'NematXSlicer' --description-url 'https://nematx.com' --verbose @Paths
+          if ($LASTEXITCODE -ne 0) { throw "AzureSignTool failed with exit code $LASTEXITCODE." }
+          & $signtool verify /pa /all /v @Paths
+          if ($LASTEXITCODE -ne 0) { throw "signtool verification failed with exit code $LASTEXITCODE." }
+        }
+
+        $binaries = @(Get-ChildItem package -Recurse -File -Force | Where-Object { $_.Extension -in '.exe', '.dll' })
+        if ($binaries.Count -eq 0) { throw 'No Windows executables or libraries were found to sign.' }
+        Write-Host 'Signing the EXE and DLL files before assembly.'
+        Sign-AndVerify $binaries.FullName
+
+        $releaseDir = (New-Item -ItemType Directory release-files).FullName
+        $msi = Join-Path $releaseDir "$env:RELEASE_BASENAME.msi"
+        Write-Host 'Assembling the MSI from the signed files.'
+        ./src/platform/msw/package_installer.ps1 -Package package -WixSource installer-inputs/winInstaller.wxs `
+          -InstallerVersion (Get-Content installer-inputs/InstallerVersion.txt) -OutputPath $msi
+
+        Write-Host 'Signing the final MSI.'
+        Sign-AndVerify $msi
+    - name: Create the portable ZIP and verify the MSI payload
+      shell: powershell
+      run: |
+        $ErrorActionPreference = 'Stop'
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        Rename-Item -LiteralPath package -NewName $env:RELEASE_BASENAME
+        $releaseDir = (Resolve-Path -LiteralPath release-files).Path
+        $zip = Join-Path $releaseDir "$env:RELEASE_BASENAME.zip"
+        $msi = Join-Path $releaseDir "$env:RELEASE_BASENAME.msi"
+        & "$env:ProgramFiles/7-Zip/7z.exe" a -tzip $zip $env:RELEASE_BASENAME
+        if ($LASTEXITCODE -ne 0) { throw "Creating the portable ZIP failed with exit code $LASTEXITCODE." }
+
+        $admin = Join-Path $env:RUNNER_TEMP 'verify-msi-payload'
+        $log = Join-Path $env:RUNNER_TEMP 'verify-msi-payload.log'
+        $extract = Start-Process -FilePath msiexec.exe -Wait -PassThru -ArgumentList @(
+          '/a', "`"$msi`"", '/qn', "TARGETDIR=`"$admin`"", '/L*v', "`"$log`"")
+        if ($extract.ExitCode -ne 0) {
+          if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 100 }
+          throw "MSI payload extraction failed with exit code $($extract.ExitCode)."
+        }
+        $installedExe = @(Get-ChildItem -LiteralPath $admin -Recurse -File -Filter nematxslicer.exe)
+        if ($installedExe.Count -ne 1) { throw 'Cannot locate the application root in the MSI payload.' }
+        $installedRoot = $installedExe[0].DirectoryName
+        $installed = @{}
+        foreach ($file in (Get-ChildItem -LiteralPath $installedRoot -Recurse -File -Force |
+          Where-Object { $_.Extension -in '.exe', '.dll' })) {
+          $relative = $file.FullName.Substring($installedRoot.Length + 1).Replace('\', '/')
+          $installed.Add($relative, (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)
+        }
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+          $root = "$env:RELEASE_BASENAME/"
+          foreach ($entry in $archive.Entries) {
+            $name = $entry.FullName
+            $extension = [System.IO.Path]::GetExtension($name)
+            if (!$name.StartsWith($root, [StringComparison]::Ordinal) -or $name.Contains('\') -or $extension -eq '.msi') {
+              throw "Unexpected portable ZIP entry: $name"
+            }
+            if ($extension -notin '.exe', '.dll') { continue }
+            $relative = $name.Substring($root.Length)
+            $stream = $entry.Open()
+            try { $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash }
+            finally { $stream.Dispose() }
+            if ($installed[$relative] -ne $hash) { throw "MSI and ZIP binaries differ: $relative" }
+            $installed.Remove($relative)
+          }
+          if ($installed.Count -ne 0) { throw "MSI has binaries missing from the ZIP: $($installed.Keys -join ', ')" }
+        } finally {
+          $archive.Dispose()
+        }
+    - name: Upload signed Windows release files
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.signed_artifact_name }}
-        path: package/
+        path: |
+          release-files/${{ env.RELEASE_BASENAME }}.msi
+          release-files/${{ env.RELEASE_BASENAME }}.zip
+        if-no-files-found: error

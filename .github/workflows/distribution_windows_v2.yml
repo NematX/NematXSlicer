@@ -43,12 +43,8 @@ jobs:
     if: github.ref_type == 'tag'
     uses: ./.github/workflows/build_windows.yml
     with:
-      create_unsigned_msi: true
-      date_version: false
       package_artifact_name: release_${{ github.event.repository.name }}-win64
-      msi_artifact_name: release_${{ github.event.repository.name }}-win64.msi
-      msi_file_name: release_${{ github.event.repository.name }}-win64.msi
-      release_suffix: ''
+      installer_input_artifact_name: release_${{ github.event.repository.name }}-win64-wix
   sign-release:
     if: github.ref_type == 'tag'
     needs: release-build
@@ -59,5 +55,5 @@ jobs:
     uses: ./.github/workflows/sign_windows.yml
     with:
       artifact_name: release_${{ github.event.repository.name }}-win64
-      msi_artifact_name: release_${{ github.event.repository.name }}-win64.msi
+      installer_input_artifact_name: release_${{ github.event.repository.name }}-win64-wix
       signed_artifact_name: signed_${{ github.event.repository.name }}-win64

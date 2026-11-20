@@ -1,7 +1,9 @@
 import os
 import sys
-from shutil import rmtree
+from shutil import copyfileobj, rmtree
+from tempfile import TemporaryFile
 from urllib.request import Request, urlopen, urlretrieve
+from urllib.parse import quote
 import json
 try:
 	import requests
@@ -33,15 +35,18 @@ parser = argparse.ArgumentParser(
 	description="Create release folders without overwriting existing ones."
 )
 
-parser.add_argument("branch_name", nargs="?", default="rc", help="Branch name")
+parser.add_argument("branch_name", nargs="?", default="rc", help="Branch name or signed release tag")
 parser.add_argument("prefix", nargs="?", default="rc", help="Prefix name")
-parser.add_argument("date", nargs="?", default="", help="Artifact compile date")
+parser.add_argument("date", nargs="?", default="", help="Artifact date (YYYY-MM-DD); for tags, check the latest run date")
 
 args = parser.parse_args()
 
 branch_name = args.branch_name
 prefix = args.prefix
 first_day = args.date;
+signed_windows = re.fullmatch(r"[0-9]+(?:\.[0-9]+){2,}(?:-beta)?", branch_name) is not None
+if prefix == "release" and not signed_windows:
+	parser.error("Use a version tag to collect signed Windows release files.")
 repo = get_cmake_var("version.inc", "SLIC3R_GITHUB")
 program_name = get_cmake_var("version.inc", "SLIC3R_APP_KEY")
 token = None
@@ -68,6 +73,53 @@ def get_version():
 		elems = tag.split("+");
 		tag = elems[0];
 	return version+tag;
+
+# Copy the two ready-to-publish files from the latest matching run for the current tag.
+# Never use an older run or a build artifact when the signed pair is unavailable.
+def collect_signed_windows(tag, output_dir, build_date):
+	api = f"https://api.github.com/repos/{repo}"
+	token = os.environ.get("GITHUB_TOKEN") or github_auth_token
+	headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+	def github_json(path, **params):
+		response = requests.get(api + path, headers=headers, params=params, timeout=30)
+		response.raise_for_status()
+		return response.json()
+
+	tag_sha = github_json("/commits/" + quote(f"refs/tags/{tag}", safe=""))["sha"]
+	runs = github_json("/actions/workflows/distribution_windows_v2.yml/runs",
+		branch=tag, head_sha=tag_sha, per_page=100)["workflow_runs"]
+	matching_runs = (run for run in runs if run["head_sha"] == tag_sha and run["head_branch"] == tag)
+	run = max(matching_runs, key=lambda candidate: (candidate["created_at"], candidate["id"]), default=None)
+	if run is None:
+		raise RuntimeError(f"No Windows distribution run for {tag} at {tag_sha}.")
+	if build_date and run["created_at"][:10] != build_date:
+		raise RuntimeError(f"Latest Windows distribution run {run['id']} was created on {run['created_at'][:10]}, not {build_date}.")
+	if run["status"] != "completed" or run["conclusion"] != "success":
+		raise RuntimeError(f"Windows distribution run {run['id']} has not succeeded ({run['conclusion'] or run['status']}).")
+	name = repo.rsplit("/", 1)[-1]
+	artifact_name = f"signed_{name}-win64"
+	artifacts = github_json(f"/actions/runs/{run['id']}/artifacts", name=artifact_name)["artifacts"]
+	matches = [artifact for artifact in artifacts if artifact["name"] == artifact_name and not artifact["expired"]]
+	if len(matches) != 1:
+		raise RuntimeError(f"Run {run['id']} does not have exactly one current {artifact_name} artifact.")
+
+	# The Actions download is a ZIP wrapper; the inner portable ZIP must stay byte-for-byte intact.
+	with requests.get(matches[0]["archive_download_url"], headers=headers, stream=True, timeout=120) as response:
+		response.raise_for_status()
+		with TemporaryFile(dir=output_dir) as download:
+			for chunk in response.iter_content(chunk_size=1024 * 1024):
+				download.write(chunk)
+			with zipfile.ZipFile(download) as archive:
+				names = archive.namelist()
+				pattern = re.escape(f"{name}_{tag}_win64_") + r"[0-9]{6}\.zip"
+				portable = next((file for file in names if re.fullmatch(pattern, file)), None)
+				if portable is None or sorted(names) != [portable[:-4] + ".msi", portable]:
+					raise RuntimeError(f"Run {run['id']} does not contain the signed Windows release pair.")
+				for file in names:
+					with archive.open(file) as source, open(os.path.join(output_dir, file), "xb") as destination:
+						copyfileobj(source, destination)
+	print(f"Collected signed Windows release files from run {run['id']}.")
 
 found_win = False; 
 found_win_msi = False; 
@@ -101,7 +153,7 @@ def handle_artifact(json_artifact):
 			print(f"End of {branch_name} artifacts (date too far away). Closing");
 			print("("+json_artifact["name"] + "  @ "+json_artifact["created_at"][:10]+")");
 			return False;
-		if json_artifact["name"] == prefix + "_win64" and not found_win:
+		if not signed_windows and json_artifact["name"] == prefix + "_win64" and not found_win:
 			found_win = True;
 			print("Found win64 artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -114,7 +166,7 @@ def handle_artifact(json_artifact):
 				ret = subprocess.check_output([path_7zip, "a", "-tzip", base_name+".zip", base_name]);
 			except:
 				print("Failed to zip the win directory, do it yourself");
-		if json_artifact["name"] ==  prefix + "_" +program_name + "-win64.msi" and not found_win_msi:
+		if not signed_windows and json_artifact["name"] ==  prefix + "_" +program_name + "-win64.msi" and not found_win_msi:
 			found_win_msi = True;
 			print("Found win64 msi artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -192,6 +244,9 @@ while os.path.isdir(release_path):
 	counter += 1;
 
 os.mkdir(release_path);
+if signed_windows:
+	collect_signed_windows(branch_name, release_path, args.date)
+	found_win = found_win_msi = True
 #urllib.urlretrieve ("https://api.github.com/repos/"+repo+"/actions/artifacts", release_path+"artifacts.json");
 need_more = True
 page = 1

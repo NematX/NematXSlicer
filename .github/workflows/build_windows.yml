@@ -27,6 +27,10 @@ on:
         default: ''
         required: false
         type: string
+      installer_input_artifact_name:
+        default: ''
+        required: false
+        type: string
       package_artifact_name:
         required: true
         type: string
@@ -213,55 +217,37 @@ jobs:
         name: ${{ inputs.package_artifact_name }}
         path: build/package/
         if-no-files-found: error
-    - name: Add WiX 3 to path
-      if: inputs.create_unsigned_msi
-      shell: powershell
-      run: |
-        if (!$env:WIX) { throw 'WiX 3 was not found on the Windows runner.' }
-        $bin = Join-Path $env:WIX 'bin'
-        foreach ($name in @('heat.exe', 'candle.exe', 'light.exe')) {
-          if (!(Test-Path (Join-Path $bin $name) -PathType Leaf)) { throw "Missing WiX tool: $name" }
-        }
-        $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-    - name: Prepare license file for MSI
-      if: inputs.create_unsigned_msi
-      shell: powershell
-      working-directory: ./build
-      run: |
-        $licenseContent = Get-Content ..\LICENSE -Raw
-        $rtfContent = "{\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}{\f0\fs20 " + $licenseContent.Replace('\', '\\').Replace("`n", "\par ") + "}}"
-        $rtfContent | Out-File -FilePath "package\LICENSE.rtf" -Encoding ASCII
-    - name: Harvest files for MSI
-      if: inputs.create_unsigned_msi
-      shell: cmd
-      working-directory: ./build
-      run: heat.exe dir package -dr INSTALLFOLDER -cg Package -gg -sreg -srd -var var.SourceDir -out files.wxs -sfrag
     - name: Generate installer version
-      if: inputs.create_unsigned_msi && inputs.date_version
+      if: inputs.create_unsigned_msi || inputs.installer_input_artifact_name != ''
       shell: powershell
+      env:
+        DATE_VERSION: ${{ inputs.date_version }}
       run: |
-        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_RC_VERSION_DOTS "(.*?)"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
-        $dateSuffix = Get-Date -Format 'yyMMdd'
-        $installerVersion = "$fullVersion$dateSuffix" -replace '\.[0-9]([+-].+)?', '.0'
-        if ([string]::IsNullOrWhiteSpace($installerVersion)) { throw 'Installer version could not be determined.' }
-        "InstallerVersion=$installerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-    - name: Generate release installer version
-      if: inputs.create_unsigned_msi && !inputs.date_version
-      shell: powershell
-      run: |
-        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_RC_VERSION_DOTS "(.*?)"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
-        $installerVersion = "$fullVersion" -replace '\.[0-9]([+-].+)?', '.0'
-        if ([string]::IsNullOrWhiteSpace($installerVersion)) { throw 'Installer version could not be determined.' }
-        "InstallerVersion=$installerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-    - name: Build MSI installer
+        $fullVersion = Select-String -Path version.inc -Pattern 'set\(SLIC3R_RC_VERSION_DOTS "(.*?)"\)' |
+          ForEach-Object { $_.Matches[0].Groups[1].Value }
+        if ([string]::IsNullOrWhiteSpace($fullVersion)) { throw 'Installer version could not be determined.' }
+        $dateSuffix = if ($env:DATE_VERSION -eq 'true') { Get-Date -Format 'yyMMdd' } else { '' }
+        ("$fullVersion$dateSuffix" -replace '\.[0-9]([+-].+)?', '.0') |
+          Set-Content -Path build/src/InstallerVersion.txt -Encoding ASCII
+    - name: Upload WiX inputs for signing
+      if: inputs.installer_input_artifact_name != ''
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.installer_input_artifact_name }}
+        path: |
+          build/src/winInstaller.wxs
+          build/src/InstallerVersion.txt
+        if-no-files-found: error
+    - name: Build unsigned MSI installer
       if: inputs.create_unsigned_msi
-      shell: cmd
-      working-directory: ./build
+      shell: powershell
+      env:
+        MSI_FILE_NAME: ${{ inputs.msi_file_name }}
+        RELEASE_SUFFIX: ${{ inputs.release_suffix }}
       run: |
-        set MSIFileName=${{ github.event.repository.name }}_%InstallerVersion%.msi
-        candle.exe -dSourceDir="package" -dInstallerVersion="%InstallerVersion%" -dReleaseSuffix="${{ inputs.release_suffix }}" src\winInstaller.wxs files.wxs
-        light.exe -b package -ext WixUIExtension winInstaller.wixobj files.wixobj -o %MSIFileName% -sw1076
-        copy %MSIFileName% "${{ inputs.msi_file_name }}"
+        ./src/platform/msw/package_installer.ps1 -Package build/package -WixSource build/src/winInstaller.wxs `
+          -InstallerVersion (Get-Content build/src/InstallerVersion.txt) -ReleaseSuffix "$env:RELEASE_SUFFIX" `
+          -OutputPath (Join-Path build $env:MSI_FILE_NAME)
     - name: Upload unsigned MSI artifact
       if: inputs.create_unsigned_msi
       uses: actions/upload-artifact@v4
