@@ -22,6 +22,7 @@ native configuration are not mutated.
 #include <memory>
 #include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_run_context.h"
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"

@@ -410,7 +410,7 @@ inline std::string get_time_dhm(float time_in_secs)
 
 } // namespace Slic3r
 
-#if WIN32
+#ifdef _WIN32
     #define SLIC3R_STDVEC_MEMSIZE(NAME, TYPE) NAME.capacity() * ((sizeof(TYPE) + __alignof(TYPE) - 1) / __alignof(TYPE)) * __alignof(TYPE)
     //FIXME this is an inprecise hack. Add the hash table size and possibly some estimate of the linked list at each of the used bin.
     #define SLIC3R_STDUNORDEREDSET_MEMSIZE(NAME, TYPE) NAME.size() * ((sizeof(TYPE) + __alignof(TYPE) - 1) / __alignof(TYPE)) * __alignof(TYPE)

@@ -6,6 +6,7 @@
 #define ARRANGE_ITEM_TRAITS_HPP
 
 #include <libslic3r/Point.hpp>
+#include <libslic3r/TypeTraits.hpp>
 
 namespace Slic3r { namespace arr2 {
 

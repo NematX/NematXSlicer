@@ -7,6 +7,7 @@
 #include <memory>
 
 #include <ankerl/unordered_dense.h>
+#include <boost/functional/hash.hpp>
 
 #include "BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "utils/ExtrusionLine.hpp"

@@ -14,6 +14,8 @@
 #include <initializer_list>
 #include <vector>
 
+#include "Point.hpp"
+
 namespace Slic3r {
 namespace Measure {
 

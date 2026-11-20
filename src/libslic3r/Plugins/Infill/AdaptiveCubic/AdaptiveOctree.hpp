@@ -20,6 +20,7 @@ the two pattern instances share geometry mechanics without sharing caches.
 #include <utility>
 #include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_geometry.h"
 #include "libslic3r/Api/plugin/c/slic3r_geometry_types.h"
 
 struct plugin_run_context;

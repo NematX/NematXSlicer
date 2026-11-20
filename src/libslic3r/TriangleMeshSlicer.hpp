@@ -10,6 +10,8 @@
 #include <functional>
 #include <vector>
 
+#include <admesh/stl.h>
+
 #include "ExPolygon.hpp"
 #include "Polygon.hpp"
 

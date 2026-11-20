@@ -22,6 +22,8 @@ extrusion trees.
 #include <utility>
 #include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
+#include "libslic3r/Api/plugin/c/slic3r_extrusions.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_run_context.h"
 

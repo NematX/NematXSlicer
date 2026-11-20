@@ -20,6 +20,7 @@
 #include "libslic3r/EmbossShape.hpp" // ExPolygonsWithIds
 #include "libslic3r/Point.hpp" // Transform3d
 #include "libslic3r/ObjectID.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/TextLines.hpp"

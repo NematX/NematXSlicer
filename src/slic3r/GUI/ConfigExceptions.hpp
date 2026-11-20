@@ -9,6 +9,9 @@
 #define slic3r_GUI_ConfigExceptions_hpp_
 
 #include <exception>
+
+#include "libslic3r/Exception.hpp"
+
 namespace Slic3r {
 
 class ConfigError : public Slic3r::RuntimeError { 

@@ -7,8 +7,11 @@
 #ifndef slic3r_MultiMaterialSegmentation_hpp_
 #define slic3r_MultiMaterialSegmentation_hpp_
 
+#include <functional>
 #include <utility>
 #include <vector>
+
+#include "Line.hpp"
 
 namespace Slic3r {
 

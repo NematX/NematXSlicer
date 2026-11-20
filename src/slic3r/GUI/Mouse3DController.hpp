@@ -106,7 +106,7 @@ class Mouse3DController
         std::deque<QueueItem> m_input_queue;
         mutable std::mutex	  m_input_queue_mutex;
 
-#ifdef WIN32
+#ifdef _WIN32
         // When the 3Dconnexion driver is running the system gets, by default, mouse wheel events when rotations around the X axis are detected.
         // We want to filter these out because we are getting the data directly from the device, bypassing the driver, and those mouse wheel events interfere
         // by triggering unwanted zoom in/out of the scene
@@ -115,7 +115,7 @@ class Mouse3DController
         // GLCanvas3D::on_mouse_wheel() through the call to the process_mouse_wheel() method
         // GLCanvas3D::on_idle() through the call to the apply() method
         unsigned int 		  m_mouse_wheel_counter { 0 };
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
     public:
         // Called by the background thread or by by Mouse3DHandlerMac.mm when a new event is received from 3DConnexion device.
@@ -123,11 +123,11 @@ class Mouse3DController
         void append_rotation(const Vec3f& rotation, size_t input_queue_max_size);
         void append_button(unsigned int id, size_t input_queue_max_size);
 
-#ifdef WIN32
+#ifdef _WIN32
         // Called by GLCanvas3D::on_mouse_wheel(wxMouseEvent& evt)
         // to filter out spurious mouse scroll events produced by the 3DConnexion driver on Windows.
         bool process_mouse_wheel();
-#endif /* WIN32 */
+#endif /* _WIN32 */
 
 #if ENABLE_3DCONNEXION_DEVICES_DEBUG_OUTPUT
         Vec3d               get_first_vector_of_type(unsigned int type) const {

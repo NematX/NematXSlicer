@@ -40,6 +40,7 @@
 #ifndef plugins_support_toolpath_branch_island_class_hpp_
 #define plugins_support_toolpath_branch_island_class_hpp_
 
+#include "libslic3r/Api/plugin/c/slic3r_extrusions.h"
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
 namespace slic3r_api::Support::Toolpath {

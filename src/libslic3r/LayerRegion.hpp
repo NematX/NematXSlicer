@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Config/ConfigOption.hpp"
 #include "DataTreeFwd.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"

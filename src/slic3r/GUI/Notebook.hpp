@@ -8,6 +8,8 @@
 #ifndef slic3r_Notebook_hpp_
 #define slic3r_Notebook_hpp_
 
+#include <cstdint>
+
 #include <wx/bookctrl.h>
 #include <wx/sizer.h>
 namespace Slic3r {

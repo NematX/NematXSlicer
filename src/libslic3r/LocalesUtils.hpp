@@ -8,6 +8,7 @@
 #define slic3r_LocalesUtils_hpp_
 
 #include <cassert>
+#include <cstdint>
 #include <iomanip>
 #include <string>
 #include <string_view>

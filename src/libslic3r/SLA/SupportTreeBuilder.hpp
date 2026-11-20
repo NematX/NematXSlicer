@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include <oneapi/tbb/spin_mutex.h>
+
 #include <libslic3r/SLA/SupportTree.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/MTUtils.hpp>

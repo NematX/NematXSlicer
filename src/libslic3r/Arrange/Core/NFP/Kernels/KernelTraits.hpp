@@ -6,6 +6,7 @@
 #define KERNELTRAITS_HPP
 
 #include "libslic3r/Arrange/Core/ArrangeItemTraits.hpp"
+#include "libslic3r/ContainerUtils.hpp"
 
 namespace Slic3r { namespace arr2 {
 

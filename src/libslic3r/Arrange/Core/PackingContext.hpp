@@ -6,6 +6,7 @@
 #define PACKINGCONTEXT_HPP
 
 #include "ArrangeItemTraits.hpp"
+#include "libslic3r/ContainerUtils.hpp"
 
 namespace Slic3r { namespace arr2 {
 

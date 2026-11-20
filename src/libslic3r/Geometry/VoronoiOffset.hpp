@@ -12,6 +12,7 @@
 
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Polygon.hpp"
 
 #include "Voronoi.hpp"
 

@@ -14,6 +14,8 @@
 // though C++20 format uses a different template pattern for position independent parameters.
 // This wrapper also manages implicit conversion from wxString to UTF8 and format_wxstr() variants are provided to format into wxString.
 
+#include <ostream>
+
 #include <wx/string.h>
 namespace Slic3r::internal::format {
 	// Wrapper around wxScopedCharBuffer to indicate that the content is UTF8 formatted.

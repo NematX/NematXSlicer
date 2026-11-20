@@ -19,6 +19,7 @@
 
 #include <libslic3r/ContainerUtils.hpp>
 #include <libslic3r/libslic3r.h>
+#include <libslic3r/TypeTraits.hpp>
 
 #include "Optimizer.hpp"
 

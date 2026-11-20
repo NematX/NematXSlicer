@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 
+#include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Format/SLAArchiveReader.hpp"
 
 #include "Job.hpp"

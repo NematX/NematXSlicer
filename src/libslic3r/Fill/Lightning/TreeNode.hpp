@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Polygon.hpp"
 
 //#define LIGHTNING_TREE_NODE_DEBUG_OUTPUT

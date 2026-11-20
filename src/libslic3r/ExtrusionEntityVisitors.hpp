@@ -13,6 +13,7 @@
 #include <sstream>
 #include <vector>
 
+#include "BoundingBox.hpp"
 #include "ExtrusionEntityCollection.hpp"
 
 /*

@@ -7,9 +7,14 @@
 
 #ifndef _
 #define _(s)	Slic3r::GUI::I18N::translate((s))
-#define _L(s)	Slic3r::GUI::I18N::translate((s))
-#define _u8L(s)     Slic3r::GUI::I18N::translate_utf8((s))
 #endif /* _ */
+// Separate guards: wxWidgets may already define _, and _L/_u8L must still exist.
+#ifndef _L
+#define _L(s)	Slic3r::GUI::I18N::translate((s))
+#endif /* _L */
+#ifndef _u8L
+#define _u8L(s)     Slic3r::GUI::I18N::translate_utf8((s))
+#endif /* _u8L */
 
 #ifndef _CTX
 #define _CTX(s, ctx)	  Slic3r::GUI::I18N::translate((s), (ctx))

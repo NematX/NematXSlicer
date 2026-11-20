@@ -17,6 +17,8 @@
 #include <wx/arrstr.h>
 #include <wx/string.h>
 
+#include "libslic3r/Config/PrintConfig.hpp"
+
 #include "PrintHost.hpp"
 namespace Slic3r {
 
