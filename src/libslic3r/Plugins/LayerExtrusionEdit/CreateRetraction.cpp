@@ -22,9 +22,9 @@ views. Parallel workers mutate only their own layer's process phases.
 
 The preview runs before any wipe is created. Straight travel keeps every gap
 direct. Advanced travel keeps gaps outside perimeter avoidance (ZonePlanner::eligible)
-direct, and routes the other gaps with its zone planner. Its layer entries stay direct
-unless avoid_crossing_layer_entry is routed; a routed entry is then judged by its
-target alone, as a start from outside the part.
+direct, and routes the other gaps with its zone planner. Its layer entries are routed
+unless avoid_crossing_layer_entry is straight; a routed entry is judged by its target
+alone, as a start from outside the part.
 A NoTravel detour of a direct gap is not previewed. Missing provenance, unknown
 travel providers and zone-planner gaps retain retraction; explicit requests,
 tool changes and configured layer changes are not suppressed.
@@ -1012,8 +1012,8 @@ void CreateRetraction::run_impl(const plugin_run_context *run_ctx) const
         std::strcmp(travel_id, "layer_extrusion_edit.travel.advanced") == 0;
     const bool auxiliary_avoidance = advanced_travel &&
         Config(print_get_default_region_config(ctx->print)).bool_or_default("avoid_crossing_perimeters", false);
-    const bool routed_entry = advanced_travel && print_config.has("avoid_crossing_layer_entry") &&
-        print_config.get("avoid_crossing_layer_entry").serialize() == "routed";
+    const bool routed_entry = advanced_travel && (!print_config.has("avoid_crossing_layer_entry") ||
+        print_config.get("avoid_crossing_layer_entry").serialize() != "straight");
     // Advanced travel keeps gaps outside its zone planner direct, as straight travel does.
     const auto straight_travel = [&](const BoundaryState &source, const BoundaryState &target, const bool layer_change) {
         if (default_travel) return true;

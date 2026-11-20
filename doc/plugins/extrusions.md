@@ -826,9 +826,9 @@ The advanced planner uses the regional check described above, but an endpoint
 without an object instance does not veto the other endpoint. When neither has
 an instance, the default region configuration's
 `avoid_crossing_perimeters` value governs eligibility (false if unavailable).
-The incoming layer-entry travel has no source extrusion. It stays straight unless
-the provider-owned setting `avoid_crossing_layer_entry` is `routed` (the default is
-`straight`). A routed entry is planned from a synthesized start. Each layer group
+The incoming layer-entry travel has no source extrusion. The provider-owned setting
+`avoid_crossing_layer_entry` routes it when `routed`, the default, and keeps it
+direct when `straight`. A routed entry is planned from a synthesized start. Each layer group
 records, before the host barrier, the last plan instance of a real object printed in
 it. The next layer looks for an island of that instance's normal layer at its own
 print Z that contains the entry point or lies within four nozzle diameters of it;

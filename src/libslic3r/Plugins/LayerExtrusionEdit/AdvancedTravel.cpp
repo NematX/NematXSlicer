@@ -75,8 +75,8 @@ contributors share an input cache owned by advanced travel for boundary geometry
 and routing settings; the compatibility planner, used only for regional eligibility,
 keeps its own cache, so a layer can be copied twice.
 The incoming layer-entry travel has no source extrusion. With the provider-owned
-setting avoid_crossing_layer_entry = straight (the default) it keeps the NoTravel path.
-With routed, the zone planner routes it from a synthesized start: setup_run records,
+setting avoid_crossing_layer_entry = straight it keeps the NoTravel path. With routed
+(the default), the zone planner routes it from a synthesized start: setup_run records,
 per layer group, the last plan instance of a real object printed there, and the next
 layer looks for an island of that instance's normal layer at its own print_z whose
 published perimeter slices (the areas island attractors are made of) contain the entry
@@ -337,7 +337,7 @@ void AdvancedTravel::inilialize_impl(storage_handle *) const
         "previous layer when its start lies in that island or within four nozzle diameters of it, otherwise from "
         "outside the part. Z still rises along the whole route.";
     def.enum_def.value_label_pairs = {values, 2};
-    def.default_serialized_value = "straight";
+    def.default_serialized_value = "routed";
     orchestrator_create_option_def(m_orchestrator, &def);
 }
 
@@ -419,7 +419,7 @@ void AdvancedTravel::run_impl(const plugin_run_context *run_ctx) const
     const Config region_defaults(print_get_default_region_config(ctx->print));
     const bool auxiliary_avoidance = region_defaults.bool_or_default("avoid_crossing_perimeters", false);
     // The zone planner reads planned travels: a routed layer entry may start in piece, the others are unchanged.
-    const bool routed_entry = config.has(k_layer_entry_key) && config.get(k_layer_entry_key).serialize() == "routed";
+    const bool routed_entry = !config.has(k_layer_entry_key) || config.get(k_layer_entry_key).serialize() != "straight";
     std::vector<PendingTravel> planned = chronology.travels;
     std::vector<bool> in_piece(planned.size(), false);
     if (routed_entry) {

@@ -1377,6 +1377,7 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
         "layer_extrusion_edit.travel"), advanced ? "layer_extrusion_edit.travel.advanced" : TRAVEL_PLUGIN);
     config.set_deserialize_strict({{"avoid_crossing_perimeters", "1"}, {"avoid_crossing_top", "1"},
         {"avoid_crossing_not_first_layer", "0"}, {"avoid_crossing_perimeters_max_detour", "0"},
+        {"avoid_crossing_layer_entry", "straight"},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"perimeters", "2"},
         {"top_solid_layers", "1"}, {"bottom_solid_layers", "1"}, {"skirts", "0"}, {"brim_width", "0"}});
     TriangleMesh mesh = make_cube(4., 4., 0.6);
