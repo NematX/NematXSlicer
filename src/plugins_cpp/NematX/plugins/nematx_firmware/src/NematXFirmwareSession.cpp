@@ -238,7 +238,8 @@ std::vector<ObjectMetadata> collect_object_metadata(const Print &print, const Co
 
         // Scale of each axis: the length of the matching column of the
         // object transformation (rotation and mirroring do not change it).
-        const double *m = object.transform().value;
+        const c_matrix4d transform = object.transform();
+        const double *m = transform.value;
         for (size_t axis = 0; axis < 3; ++axis)
             metadata.scale[axis] = std::sqrt(m[axis] * m[axis] + m[4 + axis] * m[4 + axis] + m[8 + axis] * m[8 + axis]);
 
