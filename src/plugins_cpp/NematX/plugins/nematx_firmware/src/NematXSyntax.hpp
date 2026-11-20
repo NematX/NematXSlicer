@@ -23,8 +23,9 @@
 // - with relative extrusion, G90/G91 appear inside each move:
 //   "G1 G90 X10 Y5 G91 A0.3": X/Y are absolute, the A distance is relative.
 
+#include <fast_float/fast_float.h>
+
 #include <cctype>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -302,13 +303,14 @@ inline bool is_number(std::string_view text)
 }
 
 // Convert a number already checked by is_number(). from_chars ignores the C
-// locale, so a decimal comma setting cannot change the result.
+// locale, so a decimal comma setting cannot change the result. fast_float
+// replaces std::from_chars, which macOS libc++ lacks for double.
 inline double to_double(std::string_view text)
 {
     if (!text.empty() && text.front() == '+')
         text.remove_prefix(1);
     double value = 0.0;
-    std::from_chars(text.data(), text.data() + text.size(), value);
+    fast_float::from_chars(text.data(), text.data() + text.size(), value);
     return value;
 }
 
