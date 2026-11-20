@@ -25,6 +25,7 @@
 
 #include <cereal/types/map.hpp>
 
+#include "ContainerUtils.hpp"
 #include "CustomGCode.hpp"
 #include "DataTreeFwd.hpp"
 #include "EmbossShape.hpp"

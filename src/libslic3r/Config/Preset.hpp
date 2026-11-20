@@ -17,6 +17,7 @@
 #include <boost/property_tree/ptree_fwd.hpp>
 
 #include "PrintConfig.hpp"
+#include "libslic3r/ContainerUtils.hpp"
 #include "libslic3r/Semver.hpp"
 
 /*
