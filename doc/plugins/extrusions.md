@@ -879,7 +879,10 @@ on a border.
    Attractor identities precede platter identities on stable ties. Platter pairs
    with different component indexes are discarded. When both endpoints share one
    `M_a` component but their chord leaves it, all platter
-   candidates are discarded. Estimates use `w * length` for inside attractor
+   candidates are discarded. They are also discarded when both endpoints attach to
+   that component and their chord leaves its `W_a`: a direct chord would otherwise
+   run in the band along the outline, such as a wall thinner than twice the
+   withdrawal, instead of on the ring. Estimates use `w * length` for inside attractor
    segments and outside length plus `w * inside length` for platter, bridge and
    connector segments, measured against all `M_a` components. Here `w` is
    `avoid_travel_island_weight` when island avoidance is active, otherwise zero.

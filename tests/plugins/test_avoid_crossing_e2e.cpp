@@ -247,14 +247,17 @@ Result no_travel_export(Print &print, const DynamicPrintConfig &config)
     REQUIRE(result.volume > 0.);
     for (const auto &route : result.travels) {
         if (route.size() <= 6) continue;
-        // A point within the 0.001 mm output resolution of the previous one publishes no move.
+        // As in the writer, a point whose rounded X and Y equal the last printed ones publishes no move.
+        const double resolution = std::pow(10., config.opt_int("gcode_precision_xyz"));
+        const auto printed = [resolution](const coord_t x, const coord_t y) {
+            return std::make_pair(std::llround(unscaled(x) * resolution), std::llround(unscaled(y) * resolution));
+        };
         std::vector<Point> moves;
-        Point last(route[0], route[1]);
+        std::pair<long long, long long> last = printed(route[0], route[1]);
         for (size_t p = 3; p < route.size(); p += 3) {
-            const Point point(route[p], route[p+1]);
-            if (std::abs(point.x() - last.x()) <= scale_i(0.001) && std::abs(point.y() - last.y()) <= scale_i(0.001))
-                continue;
-            moves.push_back(point);
+            const std::pair<long long, long long> point = printed(route[p], route[p+1]);
+            if (point == last) continue;
+            moves.emplace_back(route[p], route[p+1]);
             last = point;
         }
         bool found = false;

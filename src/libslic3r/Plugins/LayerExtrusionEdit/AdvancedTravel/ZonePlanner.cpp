@@ -32,7 +32,8 @@ Walls thinner than twice that inset can disappear from the check. Domains, detou
 the reference and the score still use the original obstacle geometry.
 Hypotheses share their selected W points between stable estimates and construction.
 Ordinary attractor attachments stay in M_a and ordinary platter attachments stay
-in M_p. The estimates treat exits and platter attachments as outside connectors;
+in M_p. Endpoints in one M_a component drop their platter attachments when their
+chord leaves that component, or leaves its W_a while both attach to it. The estimates treat exits and platter attachments as outside connectors;
 bridges, external connectors and the platter-only reference use W_p rings, whose
 obstacle-facing rings are Z4. Construction checks the route without exits against
 the inset of Z3, then adds the checked exits and retains exact endpoints. Validation measures
@@ -462,9 +463,18 @@ std::optional<ZonePlanner::Route> ZonePlanner::route(const PendingTravel &pendin
     };
     const std::optional<size_t> source_membership = physical_component(obstacles.components, source);
     const std::optional<size_t> target_membership = physical_component(obstacles.components, target);
+    const auto attached = [](const std::vector<Attachment> &candidates, const size_t component) {
+        return std::any_of(candidates.begin(), candidates.end(), [component](const Attachment &candidate) {
+            return candidate.type == DomainType::Attractor && candidate.component == component;
+        });
+    };
+    // A platter chord inside one component would cross it or run along its outline, outside the withdrawn ring.
     if (source_membership.has_value() && target_membership.has_value() &&
         source_membership == target_membership &&
-        outside_length({source, target}, {obstacles.components[*source_membership]}, m_context) > SCALED_EPSILON) {
+        (outside_length({source, target}, {obstacles.components[*source_membership]}, m_context) > SCALED_EPSILON ||
+         (attached(sources, *source_membership) && attached(targets, *source_membership) &&
+          outside_length({source, target}, {obstacles.withdrawn_components[*source_membership]}, m_context) >
+              SCALED_EPSILON))) {
         const auto remove_platter = [](std::vector<Attachment> &candidates) {
             candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
                 [](const Attachment &candidate) { return candidate.type == DomainType::Platter; }), candidates.end());

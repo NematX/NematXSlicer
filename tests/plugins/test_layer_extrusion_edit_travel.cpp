@@ -1362,7 +1362,8 @@ TEST_CASE("Advanced travel follows the connected attractor through a one-perimet
     CHECK(through_bridge);
 }
 
-// Keep layer entry straight; for same-attractor endpoints the option without a domain is admitted in M and cheaper than weighted links, while a later cross-component or top route detours.
+// Keep layer entry straight; a later same-attractor travel between band endpoints links them to the ring, and a later
+// cross-component or top route detours.
 TEST_CASE("Advanced zones keep layer entry straight while later travels avoid tops", "[plugins][travel][travel-zones]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1442,8 +1443,8 @@ TEST_CASE("Advanced zones keep layer entry straight while later travels avoid to
     CHECK(first.travel().point(0).x == entry.x());
     CHECK(first.travel().point(1).x == target.x());
     if (following_gap) {
-        const bool expected_detour = advanced && !same_attractor &&
-            ((contributors & 1) != 0 || (contributors & 2) != 0);
+        const bool expected_detour = advanced &&
+            ((contributors & 1) != 0 || (!same_attractor && (contributors & 2) != 0));
         CHECK((ordered_scope(*tool.extrusions[1].root).travel().point_count() > 2) ==
             expected_detour);
     }

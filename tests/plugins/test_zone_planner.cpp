@@ -1824,7 +1824,8 @@ TEST_CASE("Zone planner keeps interior points and leaves nearby free endpoints u
     travel::PendingTravel gap = pending(2., 5., 8., 5.);
     bool direct = true, inside = true, near = false, far = false;
     SECTION("Interior segment") {}
-    SECTION("Interior near the edge") { gap = pending(0.01, 0.01, 9.99, 0.01); }
+    // The chord runs along the outline, outside W_a, so both endpoints link to the ring.
+    SECTION("Interior near the edge") { gap = pending(0.01, 0.01, 9.99, 0.01); direct = false; }
     SECTION("Z-only with a nonempty domain") { gap = pending(2., 5., 2., 5.); gap.target.position.z = Slic3r::scale_i(0.2); }
     SECTION("Nearby free endpoint") { gap = pending(-0.1, 5., 8., 8.); inside = false; near = true; }
     SECTION("Both endpoints far use obstacle routing") {
@@ -2471,6 +2472,48 @@ TEST_CASE("Zone planner keeps the attractor route for a leaving same-component c
     for (const work::Polyline &part : slic3r_api::PluginCommon::clipper::diff_pl(
              owner.context.plugin_storage, {path}, {u})) outside += part.length();
     CHECK(outside <= Slic3r::SCALED_EPSILON);
+}
+
+// When both endpoints attach to one M_a component, a chord that stays in M_a but leaves W_a, along the outline,
+// links both endpoints to the ring; a chord inside W_a stays direct.
+TEST_CASE("Zone planner keeps a same-component chord off the outline band", "[plugins][zone-planner]")
+{
+    Owner owner;
+    bool band = true;
+    travel::PendingTravel gap;
+    SECTION("Chord along the outline") { gap = owner.in_part(pending(1., 0.2, 9., 0.2)); }
+    SECTION("Chord inside the ring") { band = false; gap = owner.in_part(pending(1., 5., 9., 5.)); }
+    const layer_handle *layer = gap.source.region_island.region(0).layer().handle();
+    const work::ExPolygon own = rectangle(0., 0., 10., 10.);
+    FixedZones contributor;
+    contributor.areas.push_back({zones::ZoneRole::Attractor, {own}, 0, SIZE_MAX, {}, layer});
+    contributor.areas.front().scope.printing_catalog_id = gap.source.printing_catalog_id;
+    zones::TravelZoneView view({std::cref(contributor)}, owner.input());
+    ac::CompatibilityPlanner compatibility(owner.print_view, owner.plan, &owner.context, 0, Slic3r::scale_i(0.6));
+    zones::ZonePlanner planner(compatibility, view, owner.settings(), true, &owner.context, owner.print_view,
+        owner.cache, owner.plan, 0, Slic3r::scale_i(0.6));
+    const std::vector<c_point> route = planner.path(0, gap);
+    CHECK(planner.domain_routes() == 1);
+    CHECK(planner.fallbacks() == 0);
+    CHECK(planner.last_decision().source_island);
+    CHECK(planner.last_decision().target_island);
+    if (!band) {
+        CHECK(route.size() == 2);
+        return;
+    }
+    const ac::Input &layer_input = owner.cache.get(owner.print_view,
+        gap.source.region_island.region(0).layer(), &owner.context);
+    const work::ExPolygons own_w = withdrawn_components({own}, 0.4,
+        coord_t(1.5 * double(layer_input.target->perimeter_spacing)), owner.storage);
+    const work::Point source(gap.source.position.x, gap.source.position.y);
+    const work::Point target(gap.target.position.x, gap.target.position.y);
+    REQUIRE_FALSE(own_w.front().contains(source, true));
+    REQUIRE_FALSE(own_w.front().contains(target, true));
+    REQUIRE(route.size() > 2);
+    CHECK(planner.last_decision().source_link);
+    CHECK(planner.last_decision().target_link);
+    CHECK(contains_exact_point(route, nearest_boundary_point(own_w.front(), source)));
+    CHECK(contains_exact_point(route, nearest_boundary_point(own_w.front(), target)));
 }
 
 // A blocked attractor connector is rejected instead of being counted as a domain route.
